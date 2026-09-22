@@ -1127,6 +1127,18 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "moveLineEndpoint(sec: number, para: number, ci: number, sx: number, sy: number, ex: number, ey: number)"
   },
   {
+    "method": "movePictureControl",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "fromPara",
+      "fromCi",
+      "toPara",
+      "toCharOffset"
+    ],
+    "signature": "movePictureControl(sec: number, fromPara: number, fromCi: number, toPara: number, toCharOffset: number,)"
+  },
+  {
     "method": "moveTableOffset",
     "kind": "document",
     "parameters": [
@@ -1265,6 +1277,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "charOffset"
     ],
     "signature": "pasteTableCellsTransposedAsTable(sec: number, para: number, charOffset: number,)"
+  },
+  {
+    "method": "promoteOleEquation",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "para",
+      "ci"
+    ],
+    "signature": "promoteOleEquation(sec: number, para: number, ci: number)"
   },
   {
     "method": "reflowLinesegs",

@@ -454,10 +454,10 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.evaluate(() => window.sidebarPreview.cloud.setLink('ready'));
   await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
   await page.waitForFunction(() => [...document.querySelectorAll('.ag-threads-item')]
-    .some((node) => node.checkVisibility() && node.querySelector('.ag-thread-mode')?.textContent === 'Cloud'));
+    .some((node) => node.checkVisibility() && node.querySelector('.ag-thread-mode')?.getAttribute('aria-label') === 'Cloud'));
   assert.equal(await page.evaluate(() => {
     const item = [...document.querySelectorAll('.ag-threads-item')].find((node) => node.checkVisibility()
-      && node.querySelector('.ag-thread-mode')?.textContent === 'Cloud');
+      && node.querySelector('.ag-thread-mode')?.getAttribute('aria-label') === 'Cloud');
     item?.click();
     return Boolean(item);
   }), true);
@@ -474,7 +474,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
   await page.screenshot({ path: resolve(artifacts, 'parallel-chat-list.png') });
   await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')]
-    .find((node) => node.checkVisibility() && node.querySelector('.ag-thread-mode')?.textContent === 'Local').click());
+    .find((node) => node.checkVisibility() && node.querySelector('.ag-thread-mode')?.getAttribute('aria-label') === 'Local').click());
   await page.waitForFunction(() => !document.querySelector('.ag-input').disabled
     && window.sidebarPreview.workspace.mode() === 'local');
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.getScope().threadId), localThreadId);
@@ -486,7 +486,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 3);
   await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
   await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')]
-    .find((node) => node.checkVisibility() && node.querySelector('.ag-thread-mode')?.textContent === 'Cloud').click());
+    .find((node) => node.checkVisibility() && node.querySelector('.ag-thread-mode')?.getAttribute('aria-label') === 'Cloud').click());
   await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'running'
     && !document.querySelector('.ag-input').disabled);
   // Reopen after the old server is gone but its replacement transfer failed.

@@ -18,6 +18,68 @@ use super::font_lookup::{
 };
 use super::renderer::{colorref_to_skia, typeface_for_style, TypefaceCatalog};
 
+const HANCOM_PUA_FALLBACK_FAMILIES: &[&str] = &[
+    "HCR Batang Ext-B",
+    "HCR Batang ExtB",
+    "함초롬바탕 확장B",
+    "HCR Batang Ext",
+    "함초롬바탕 확장",
+    "HCR Batang",
+    "함초롬바탕",
+];
+
+/// 한컴 사각 숫자: 단일 1~9, 또는 테두리 포함 십의 자리와 오른쪽 일의 자리.
+/// 일반 Unicode나 다른 PUA 영역은 변환하지 않는다.
+fn hancom_boxed_number(chars: &[char]) -> Option<String> {
+    match chars {
+        [ch] if (0xF02B1..=0xF02B9).contains(&(*ch as u32)) => {
+            Some((*ch as u32 - 0xF02B0).to_string())
+        }
+        [left, right]
+            if (0xF02BA..=0xF02C2).contains(&(*left as u32))
+                && (0xF02C3..=0xF02CC).contains(&(*right as u32)) =>
+        {
+            Some(format!(
+                "{}{}",
+                *left as u32 - 0xF02B9,
+                *right as u32 - 0xF02C3
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// 문서/한컴 폰트에 전용 글리프가 없으면 숫자와 사각형으로 표시한다.
+/// 임의 시스템 PUA 폴백은 같은 코드의 Nerd Font 그림문자를 선택할 수 있다.
+fn draw_hancom_boxed_number(
+    canvas: &Canvas,
+    font: &Font,
+    number: &str,
+    origin: (f32, f32),
+    font_size: f32,
+    text_paint: &Paint,
+) {
+    let box_size = font_size * 0.72;
+    let top = origin.1 - font_size * 0.76;
+    let mut border_paint = text_paint.clone();
+    border_paint.set_style(paint::Style::Stroke);
+    border_paint.set_stroke_width((font_size * 0.04).max(0.6));
+    canvas.draw_rect(
+        Rect::from_xywh(origin.0, top, box_size, box_size),
+        &border_paint,
+    );
+    let (width, bounds) = font.measure_str(number, Some(text_paint));
+    canvas.draw_str(
+        number,
+        (
+            origin.0 + (box_size - width) / 2.0,
+            top + box_size / 2.0 - (bounds.top + bounds.bottom) / 2.0,
+        ),
+        font,
+        text_paint,
+    );
+}
+
 const SANS_CJK_FALLBACK_FAMILIES: &[&str] = &[
     "Noto Sans KR",
     "Noto Sans CJK KR",
@@ -187,7 +249,6 @@ impl SkiaTextReplay<'_> {
              style: &crate::renderer::TextStyle,
              baseline: f64,
              rotation: f64,
-             is_vertical: bool,
              char_overlap: Option<&crate::renderer::composer::CharOverlapInfo>| {
                 if text.is_empty() && style.tab_leaders.is_empty() {
                     return;
@@ -262,12 +323,37 @@ impl SkiaTextReplay<'_> {
                             push(&mut chain, &mut seen, tf);
                         }
                     }
+                    // 전용 PUA 폰트는 기존 본문 후보 뒤에 추가한다. custom 폰트여도
+                    // 시스템의 문서 지정 서체보다 앞서 본문 전체를 바꾸지 않는다.
+                    for family in HANCOM_PUA_FALLBACK_FAMILIES {
+                        let typeface =
+                            typeface_for_style(self.custom_typefaces, family, font_style)
+                                .or_else(|| {
+                                    match_system_family_style(
+                                        self.font_mgr,
+                                        self.system_families,
+                                        family,
+                                        font_style,
+                                    )
+                                })
+                                .or_else(|| {
+                                    typeface_for_style(self.bundled_typefaces, family, font_style)
+                                });
+                        if let Some(tf) = typeface {
+                            push(&mut chain, &mut seen, tf);
+                        }
+                    }
                     if let Some(tf) = legacy_typeface_for_style(self.font_mgr, font_style) {
                         push(&mut chain, &mut seen, tf);
                     }
                     chain
                 };
                 let primary_typeface = typeface_chain.first().cloned();
+                let has_explicit_glyph = |ch: char| {
+                    typeface_chain
+                        .iter()
+                        .any(|tf| tf.unichar_to_glyph(ch as i32) != 0)
+                };
                 let font_for_text = |sample: &str, size: f32| -> Option<Font> {
                     let visible_char = sample.chars().find(|ch| !ch.is_whitespace());
                     if let Some(ch) = visible_char {
@@ -305,11 +391,9 @@ impl SkiaTextReplay<'_> {
                 } else {
                     bbox.y + bbox.height
                 };
-                let effective_rotation = if is_vertical {
-                    rotation + 90.0
-                } else {
-                    rotation
-                };
+                // 세로쓰기 레이아웃이 한글 0도, 영문 눕힘 90도를 이미 결정한다.
+                // is_vertical은 문단부호 배치용이며 글자 회전을 추가하지 않는다.
+                let effective_rotation = rotation;
                 if effective_rotation != 0.0 {
                     canvas.save();
                     canvas.rotate(
@@ -331,6 +415,28 @@ impl SkiaTextReplay<'_> {
                             canvas.restore();
                         }
                         return;
+                    }
+
+                    if overlap.border_type == 0 && chars.iter().any(|&ch| !has_explicit_glyph(ch)) {
+                        if let Some(number) = hancom_boxed_number(&chars) {
+                            if let Some(font) = font_for_text(&number, font_size * 0.5) {
+                                let mut text_paint = Paint::default();
+                                text_paint.set_anti_alias(true);
+                                text_paint.set_color(colorref_to_skia(style.color, 1.0));
+                                draw_hancom_boxed_number(
+                                    canvas,
+                                    &font,
+                                    &number,
+                                    (bbox.x as f32, y as f32),
+                                    font_size,
+                                    &text_paint,
+                                );
+                            }
+                            if effective_rotation != 0.0 {
+                                canvas.restore();
+                            }
+                            return;
+                        }
                     }
 
                     let size_ratio = if overlap.inner_char_size > 0 {
@@ -592,6 +698,31 @@ impl SkiaTextReplay<'_> {
                         }) {
                             continue;
                         }
+                        if let Some(ch) = cluster.chars().next().filter(|ch| {
+                            (0xF02B1..=0xF02B9).contains(&(*ch as u32))
+                                && !has_explicit_glyph(*ch)
+                                && cluster.chars().count() == 1
+                        }) {
+                            let number = hancom_boxed_number(&[ch]).unwrap();
+                            if let Some(font) = font_for_text(&number, font_size * 0.5) {
+                                let char_x = bbox.x as f32
+                                    + char_positions.get(*char_idx).copied().unwrap_or(0.0) as f32
+                                    + dx;
+                                canvas.save();
+                                canvas.translate((char_x, y as f32 + dy));
+                                canvas.scale((ratio, 1.0));
+                                draw_hancom_boxed_number(
+                                    canvas,
+                                    &font,
+                                    &number,
+                                    (0.0, 0.0),
+                                    font_size,
+                                    &text_paint,
+                                );
+                                canvas.restore();
+                            }
+                            continue;
+                        }
                         if is_middle_dot(cluster) {
                             let advance = cluster_advance(*char_idx, cluster);
                             let cx = bbox.x as f32
@@ -640,14 +771,6 @@ impl SkiaTextReplay<'_> {
                         style.shadow_offset_y as f32,
                     );
                 }
-                if style.outline_type > 0 {
-                    draw_text_pass(
-                        colorref_to_skia(style.color, 1.0),
-                        (font_size * 0.08).max(0.8),
-                        0.0,
-                        0.0,
-                    );
-                }
                 if style.emboss {
                     draw_text_pass(Color::WHITE, 0.0, -1.0, -1.0);
                     draw_text_pass(Color::from_argb(255, 96, 96, 96), 0.0, 1.0, 1.0);
@@ -655,7 +778,24 @@ impl SkiaTextReplay<'_> {
                     draw_text_pass(Color::from_argb(255, 96, 96, 96), 0.0, -1.0, -1.0);
                     draw_text_pass(Color::WHITE, 0.0, 1.0, 1.0);
                 }
-                draw_text_pass(colorref_to_skia(style.color, 1.0), 0.0, 0.0, 0.0);
+                if style.outline_type > 0 && !style.emboss && !style.engrave {
+                    // Canvas2D 효과와 동일하게 내부는 흰색, 외곽은 글자색으로 그린다.
+                    // 이후 일반 fill을 덧그리면 외곽선 글자가 다시 검게 채워진다.
+                    let bold_width = if style.bold {
+                        (font_size * 0.04).clamp(0.25, 1.4)
+                    } else {
+                        0.0
+                    };
+                    draw_text_pass(Color::WHITE, 0.0, 0.0, 0.0);
+                    draw_text_pass(
+                        colorref_to_skia(style.color, 1.0),
+                        (font_size / 25.0).max(0.5) + bold_width,
+                        0.0,
+                        0.0,
+                    );
+                } else {
+                    draw_text_pass(colorref_to_skia(style.color, 1.0), 0.0, 0.0, 0.0);
+                }
 
                 if !matches!(style.underline, UnderlineType::None) && text_width > 0.0 {
                     let color = if style.underline_color != 0 {
@@ -874,15 +1014,7 @@ impl SkiaTextReplay<'_> {
             }
         };
 
-        draw_text(
-            text,
-            bbox,
-            style,
-            baseline,
-            rotation,
-            is_vertical,
-            char_overlap,
-        );
+        draw_text(text, bbox, style, baseline, rotation, char_overlap);
         draw_text_marks(
             text,
             bbox,
@@ -900,6 +1032,34 @@ impl SkiaTextReplay<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hancom_boxed_numbers_decode_only_their_digit_components() {
+        for digit in 1..=9 {
+            assert_eq!(
+                hancom_boxed_number(&[char::from_u32(0xF02B0 + digit).unwrap()]),
+                Some(digit.to_string())
+            );
+        }
+        for (ones, expected) in [
+            ('\u{F02C3}', "10"),
+            ('\u{F02C4}', "11"),
+            ('\u{F02C5}', "12"),
+        ] {
+            assert_eq!(
+                hancom_boxed_number(&['\u{F02BA}', ones]),
+                Some(expected.into())
+            );
+        }
+        for chars in [
+            vec!['1'],
+            vec!['\u{F02BA}'],
+            vec!['\u{F02C3}'],
+            vec!['\u{F02BA}', '0'],
+        ] {
+            assert_eq!(hancom_boxed_number(&chars), None);
+        }
+    }
 
     #[test]
     fn legacy_myeongjo_batang_and_gungseo_families_prefer_serif_cjk_fallbacks() {

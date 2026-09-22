@@ -649,6 +649,7 @@ fn parse_auto_number(ctrl_data: &[u8]) -> Control {
             3 => AutoNumberType::Picture,
             4 => AutoNumberType::Table,
             5 => AutoNumberType::Equation,
+            6 => AutoNumberType::TotalPage,
             _ => AutoNumberType::Page,
         };
         an.format = ((attr >> 4) & 0xFF) as u8; // bit 4~11: 번호 모양 (표 134)
@@ -675,6 +676,7 @@ fn parse_new_number(ctrl_data: &[u8]) -> Control {
             3 => AutoNumberType::Picture,
             4 => AutoNumberType::Table,
             5 => AutoNumberType::Equation,
+            6 => AutoNumberType::TotalPage,
             _ => AutoNumberType::Page,
         };
         nn.number = r.read_u16().unwrap_or(0);

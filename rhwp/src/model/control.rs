@@ -153,6 +153,8 @@ pub enum AutoNumberType {
     Picture,
     Table,
     Equation,
+    /// 문서 전체 쪽수. 페이지별 증가 카운터가 아니다.
+    TotalPage,
 }
 
 /// 새 번호 지정 ('nwno' 컨트롤)

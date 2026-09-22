@@ -24,6 +24,7 @@ test('the server owns one generic account-session module behind the Rau backend 
   const provider = await readSource('pi-manager.mjs');
 
   assert.match(server, /const accountSession = createAccountSession\(\{/);
+  assert.match(server, /const accountSession = createAccountSession\(\{[\s\S]+creditsClient: createRauCreditsClient\(\)/);
   assert.match(account, /function createRauAccountBackendAdapter\([\s\S]+creditsClient\.createAccountDeviceSessionV2/);
   assert.doesNotMatch(account, /export function createRauAccountBackendAdapter/);
   assert.match(account, /ACCOUNT_SESSION_SECRET_ID = 'rhwp\.account\.session-token'/);

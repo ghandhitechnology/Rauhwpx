@@ -1,13 +1,14 @@
 import type {
   CatalogRow,
   HarnessSkillRow,
+  ProductSkillIcon,
   SkillCommitChange,
   SkillCommitOutcome,
   SkillHarnessId,
   SkillEditorDocument,
 } from '../../agent/types.ts';
 import { createIcon } from './icons.ts';
-import { skillGlyphForSkill } from './skill-presentation.ts';
+import { PRODUCT_SKILL_ICONS, skillGlyphForSkill } from './skill-presentation.ts';
 import { createNewSkillEditor, createSkillEditor } from './skill-editor.ts';
 
 export interface SkillsShelf {
@@ -24,6 +25,7 @@ type ShelfMode = 'catalog' | 'harness';
 
 type PendingChange =
   | { action: 'create'; name: string }
+  | { action: 'icon'; name: string; icon: ProductSkillIcon }
   | { action: 'enable'; name: string }
   | { action: 'delete'; name: string }
   | { action: 'restore'; name: string }
@@ -74,6 +76,8 @@ export function createSkillsShelf(options: {
   const editors = new Map<string, HTMLElement>();
   let newEditor: HTMLElement | null = null;
   let createResolve: ((outcome: SkillCommitOutcome) => void) | null = null;
+  let activeIconPicker: HTMLElement | null = null;
+  let activeIconPickerClose: (() => void) | null = null;
 
   search.addEventListener('input', () => render());
   modeButton.addEventListener('click', () => {
@@ -195,6 +199,8 @@ export function createSkillsShelf(options: {
 
   function renderCatalog(previousPositions?: Map<string, DOMRect>): void {
     const before = previousPositions ?? capturePositions();
+    activeIconPickerClose?.();
+    activeIconPicker = null;
     list.replaceChildren();
     const needle = query();
     const visible = sortByStoredOrder(rows).filter((row) => !needle || `${row.name} ${row.description}`.toLowerCase().includes(needle));
@@ -212,6 +218,7 @@ export function createSkillsShelf(options: {
     else for (const skill of visible) list.appendChild(renderCatalogRow(skill));
     const create = el('button', 'ag-skill-new', '새 스킬 만들기') as HTMLButtonElement;
     create.type = 'button';
+    create.hidden = editors.size > 0 || Boolean(newEditor);
     create.setAttribute('aria-label', '새 스킬 만들기');
     create.addEventListener('click', openNewEditor);
     list.appendChild(create);
@@ -252,6 +259,12 @@ export function createSkillsShelf(options: {
   function closeNewEditor(): void {
     newEditor?.remove();
     newEditor = null;
+    syncCreateButtonVisibility();
+  }
+
+  function syncCreateButtonVisibility(): void {
+    const create = list.querySelector<HTMLButtonElement>('.ag-skill-new');
+    if (create) create.hidden = editors.size > 0 || Boolean(newEditor);
   }
 
   function openNewEditor(): void {
@@ -290,6 +303,24 @@ export function createSkillsShelf(options: {
     copy.setAttribute('aria-expanded', 'false');
     const copyIcon = el('span', 'ag-skill-kind-icon');
     copyIcon.appendChild(createIcon(skillGlyphForSkill(skill)));
+    if (skill.kind === 'skill' && skill.origin === 'user' && skill.editable === true) {
+      copyIcon.classList.add('ag-skill-icon-button');
+      copyIcon.setAttribute('role', 'button');
+      copyIcon.setAttribute('tabindex', '0');
+      copyIcon.setAttribute('aria-label', `${skill.name} 아이콘 선택`);
+      copyIcon.setAttribute('aria-haspopup', 'dialog');
+      copyIcon.setAttribute('aria-expanded', 'false');
+      const open = (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openIconPicker(skill, item, copyIcon);
+      };
+      copyIcon.addEventListener('click', open);
+      copyIcon.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        open(event);
+      });
+    }
     const copyText = el('span', 'ag-skill-copy-text');
     copyText.append(
       el('strong', 'ag-skill-item-name', skill.name),
@@ -319,11 +350,13 @@ export function createSkillsShelf(options: {
           edit.type = 'button';
           edit.setAttribute('aria-label', `${skill.name} 편집`);
           edit.addEventListener('click', () => {
+            activeIconPickerClose?.();
             const existing = editors.get(skill.name);
             if (existing) { existing.querySelector('textarea')?.focus(); return; }
             const close = () => {
               editors.get(skill.name)?.remove();
               editors.delete(skill.name);
+              syncCreateButtonVisibility();
               edit.focus();
             };
             const editor = createSkillEditor({
@@ -343,6 +376,7 @@ export function createSkillsShelf(options: {
             });
             editors.set(skill.name, editor.root);
             item.appendChild(editor.root);
+            syncCreateButtonVisibility();
           });
           actions.appendChild(edit);
         }
@@ -362,6 +396,74 @@ export function createSkillsShelf(options: {
     const editor = editors.get(skill.name);
     if (editor) item.appendChild(editor);
     return item;
+  }
+
+  function openIconPicker(skill: Extract<CatalogRow, { kind: 'skill' }>, item: HTMLElement, anchor: HTMLElement): void {
+    if (activeIconPicker && item.contains(activeIconPicker)) {
+      activeIconPickerClose?.();
+      return;
+    }
+    activeIconPickerClose?.();
+    if (item.querySelector('.ag-skill-icon-picker')) {
+      activeIconPicker = null;
+      return;
+    }
+    const picker = el('div', 'ag-skill-icon-picker') as HTMLDivElement;
+    picker.setAttribute('role', 'dialog');
+    picker.setAttribute('aria-label', `${skill.name} 아이콘 선택`);
+    const grid = el('div', 'ag-skill-icon-picker-grid');
+    const selectedIcon = skillGlyphForSkill(skill);
+    for (const icon of PRODUCT_SKILL_ICONS) {
+      const option = el('button', 'ag-skill-icon-option') as HTMLButtonElement;
+      option.type = 'button';
+      option.dataset.skillIcon = icon.value;
+      option.title = icon.label;
+      option.setAttribute('aria-label', icon.label);
+      option.setAttribute('aria-pressed', selectedIcon === icon.value ? 'true' : 'false');
+      option.appendChild(createIcon(icon.value));
+      option.addEventListener('click', (event) => {
+        event.stopPropagation();
+        activeIconPickerClose?.();
+        pending = { action: 'icon', name: skill.name, icon: icon.value };
+        options.onCommit({ action: 'icon', name: skill.name, icon: icon.value, base: skill.digest });
+      });
+      grid.appendChild(option);
+    }
+    picker.append(grid);
+    item.appendChild(picker);
+    activeIconPicker = picker;
+    anchor.setAttribute('aria-expanded', 'true');
+    requestAnimationFrame(() => {
+      if (activeIconPicker !== picker) return;
+      const first = picker.querySelector<HTMLButtonElement>(`[aria-pressed="true"]`)
+        ?? picker.querySelector<HTMLButtonElement>('button');
+      first?.focus();
+    });
+    let closeOnEscape: ((event: KeyboardEvent) => void) | null = null;
+    const close = () => {
+      if (activeIconPicker !== picker) return;
+      activeIconPicker = null;
+      picker.remove();
+      anchor.setAttribute('aria-expanded', 'false');
+      if (closeOnEscape) window.removeEventListener('keydown', closeOnEscape, true);
+      window.removeEventListener('pointerdown', closeOnPointerDown, true);
+      activeIconPickerClose = null;
+    };
+    closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || activeIconPicker !== picker) return;
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+      anchor.focus();
+    };
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && (picker.contains(target) || anchor.contains(target))) return;
+      close();
+    };
+    activeIconPickerClose = close;
+    window.addEventListener('keydown', closeOnEscape, true);
+    window.addEventListener('pointerdown', closeOnPointerDown, true);
   }
 
   function renderDragHandle(item: HTMLElement, name: string): HTMLButtonElement {
@@ -535,6 +637,8 @@ export function createSkillsShelf(options: {
         }
         break;
       }
+      case 'icon':
+        break;
       case 'import':
         if (!outcome.ok && outcome.code === 'LOCAL_EDITS' && outcome.digest) {
           replaceDigests.set(`${current.harness}:${current.name}`, outcome.digest);

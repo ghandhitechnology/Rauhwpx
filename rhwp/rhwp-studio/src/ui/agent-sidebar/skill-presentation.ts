@@ -1,6 +1,23 @@
 import type { ProductSkillIcon } from '../../agent/types.ts';
 
-export type SkillGlyph = 'skillEdit' | 'skillBot' | 'skillSystem';
+export type SkillGlyph = ProductSkillIcon;
+
+export const PRODUCT_SKILL_ICONS: readonly { value: ProductSkillIcon; label: string }[] = [
+  { value: 'pencil', label: '작성' },
+  { value: 'bot', label: '자동화' },
+  { value: 'system', label: '설정' },
+  { value: 'sparkles', label: '아이디어' },
+  { value: 'book', label: '문서' },
+  { value: 'target', label: '목표' },
+  { value: 'chart', label: '분석' },
+  { value: 'lightbulb', label: '힌트' },
+  { value: 'calendar', label: '일정' },
+  { value: 'code', label: '코드' },
+  { value: 'check', label: '완료' },
+  { value: 'heart', label: '즐겨찾기' },
+  { value: 'bolt', label: '빠른 작업' },
+  { value: 'shield', label: '검토' },
+];
 
 /**
  * Product skill의 주된 결과를 아이콘으로 구분한다. 요약처럼 요청에 따라
@@ -30,9 +47,7 @@ export function defaultSkillIconForName(name: string): ProductSkillIcon {
 }
 
 export function skillGlyphForIcon(icon: ProductSkillIcon): SkillGlyph {
-  if (icon === 'pencil') return 'skillEdit';
-  if (icon === 'bot') return 'skillBot';
-  return 'skillSystem';
+  return icon;
 }
 
 export function skillGlyphForSkill(skill: { name: string; icon?: ProductSkillIcon | null }): SkillGlyph {

@@ -2931,6 +2931,28 @@ mod tests {
     }
 
     #[test]
+    fn legacy_bottom_crop_excludes_lower_bitmap_rows_without_img_dim() {
+        let mut node = ImageNode::new(
+            1,
+            Some(split_png(16, 16, [255, 0, 0, 255], [0, 0, 255, 255], true)),
+        );
+        node.crop = Some((0, 0, 1200, 600));
+        let bbox = BoundingBox::new(0.0, 0.0, 16.0, 8.0);
+        let tree = PageLayerTree::new(
+            16.0,
+            8.0,
+            LayerNode::leaf(bbox, None, vec![PaintOp::image(bbox, node, None)]),
+        );
+        let output = SkiaLayerRenderer::new()
+            .render_raster_with_options(&tree, RasterRenderOptions::default())
+            .expect("render legacy bottom crop");
+        let image = decode_rgba(&output.bytes);
+        let lower = *image.get_pixel(8, 6);
+        assert_channel(lower, 0, 180, 255);
+        assert_channel(lower, 2, 0, 48);
+    }
+
+    #[test]
     fn renders_tiled_images_using_original_size() {
         let mut node = ImageNode::new(
             1,
@@ -3016,6 +3038,146 @@ mod tests {
         let image = decode_rgba(&output.bytes);
 
         assert_eq!(count_ink(&image), 0);
+    }
+
+    #[test]
+    fn hancom_boxed_numbers_render_without_private_use_fonts() {
+        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("ttfs/opensource/NotoSansKR-Regular.ttf");
+        let mut renderer = SkiaLayerRenderer::new().with_font_paths(&[font_path]);
+        // 한컴 전용 글리프와 임의 시스템 PUA 폴백이 없는 환경으로 고정한다.
+        renderer.font_mgr = FontMgr::empty();
+        renderer.system_families.clear();
+        for number in 1..=12 {
+            let text = if number <= 9 {
+                char::from_u32(0xF02B0 + number).unwrap().to_string()
+            } else {
+                format!(
+                    "\u{F02BA}{}",
+                    char::from_u32(0xF02C3 + number - 10).unwrap()
+                )
+            };
+            let run = TextRunNode {
+                text,
+                style: TextStyle {
+                    font_family: "Noto Sans KR".into(),
+                    font_size: 24.0,
+                    color: 0,
+                    ..Default::default()
+                },
+                char_shape_id: None,
+                para_shape_id: None,
+                section_index: None,
+                para_index: None,
+                char_start: None,
+                cell_context: None,
+                is_para_end: false,
+                is_line_break_end: false,
+                rotation: 0.0,
+                is_vertical: false,
+                char_overlap: (number >= 10).then_some(CharOverlapInfo {
+                    border_type: 0,
+                    inner_char_size: -3,
+                }),
+                border_fill_id: 0,
+                baseline: 24.0,
+                field_marker: Default::default(),
+                display_text: None,
+            };
+            let tree = PageLayerTree::new(
+                64.0,
+                64.0,
+                LayerNode::leaf(
+                    BoundingBox::new(0.0, 0.0, 64.0, 64.0),
+                    None,
+                    vec![PaintOp::text_run(
+                        BoundingBox::new(16.0, 16.0, 24.0, 24.0),
+                        run,
+                    )],
+                ),
+            );
+            let output = renderer
+                .render_raster_with_options(&tree, RasterRenderOptions::default())
+                .expect("사각 숫자 렌더링");
+            let image = decode_rgba(&output.bytes);
+            for (x, y) in [(24, 22), (16, 30), (33, 30), (24, 39)] {
+                assert!(
+                    image.get_pixel(x, y)[0] < 160,
+                    "숫자 {number}의 사각 테두리 누락"
+                );
+            }
+            assert!(
+                image::imageops::crop_imm(&image, 19, 25, 12, 11)
+                    .to_image()
+                    .pixels()
+                    .any(|pixel| pixel[0] < 160),
+                "숫자 {number}의 내부 숫자 누락"
+            );
+        }
+    }
+
+    #[test]
+    fn vertical_text_preserves_layout_glyph_rotation() {
+        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("ttfs/opensource/NotoSansKR-Regular.ttf");
+        let renderer = SkiaLayerRenderer::new().with_font_paths(&[font_path]);
+        let render = |text: &str, rotation: f64, is_vertical: bool| {
+            let run = TextRunNode {
+                text: text.to_string(),
+                style: TextStyle {
+                    font_family: "Noto Sans KR".to_string(),
+                    font_size: 24.0,
+                    color: 0,
+                    ..Default::default()
+                },
+                char_shape_id: None,
+                para_shape_id: None,
+                section_index: None,
+                para_index: None,
+                char_start: None,
+                cell_context: None,
+                is_para_end: false,
+                is_line_break_end: false,
+                rotation,
+                is_vertical,
+                char_overlap: None,
+                border_fill_id: 0,
+                baseline: 24.0,
+                field_marker: Default::default(),
+                display_text: None,
+            };
+            let tree = PageLayerTree::new(
+                80.0,
+                80.0,
+                LayerNode::leaf(
+                    BoundingBox::new(0.0, 0.0, 80.0, 80.0),
+                    None,
+                    vec![PaintOp::text_run(
+                        BoundingBox::new(24.0, 24.0, 32.0, 32.0),
+                        run,
+                    )],
+                ),
+            );
+            let output = renderer
+                .render_raster_with_options(&tree, RasterRenderOptions::default())
+                .expect("세로쓰기 글자 렌더링");
+            decode_rgba(&output.bytes)
+        };
+
+        // 한글과 영문 세움은 직립, 영문 눕힘은 레이아웃의 90도 회전을 한 번만 적용.
+        for (text, rotation) in [("한", 0.0), ("F", 0.0), ("F", 90.0)] {
+            let expected = render(text, rotation, false);
+            assert!(count_ink(&expected) > 0, "글자가 실제로 그려져야 한다");
+            let actual = render(text, rotation, true);
+            assert!(
+                actual == expected,
+                "세로쓰기 여부가 {text:?}의 {rotation}도 회전을 바꾸면 안 된다"
+            );
+            assert!(
+                actual != render(text, rotation + 90.0, false),
+                "회귀 검사는 추가 90도 회전을 구별해야 한다"
+            );
+        }
     }
 
     #[test]
@@ -3286,6 +3448,74 @@ mod tests {
         let image = decode_rgba(&output.bytes);
 
         assert!(count_ink(&image) > 0);
+    }
+
+    #[test]
+    fn outlined_text_keeps_white_glyph_interiors() {
+        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("ttfs/opensource/NotoSansKR-Regular.ttf");
+        let renderer = SkiaLayerRenderer::new().with_font_paths(&[font_path]);
+        let render = |outline_type| {
+            let run = TextRunNode {
+                text: "H".into(),
+                style: TextStyle {
+                    font_family: "Noto Sans KR".into(),
+                    font_size: 64.0,
+                    outline_type,
+                    color: 0,
+                    ..Default::default()
+                },
+                char_shape_id: None,
+                para_shape_id: None,
+                section_index: None,
+                para_index: None,
+                char_start: None,
+                cell_context: None,
+                is_para_end: false,
+                is_line_break_end: false,
+                rotation: 0.0,
+                is_vertical: false,
+                char_overlap: None,
+                border_fill_id: 0,
+                baseline: 64.0,
+                field_marker: Default::default(),
+                display_text: None,
+            };
+            let tree = PageLayerTree::new(
+                96.0,
+                96.0,
+                LayerNode::leaf(
+                    BoundingBox::new(0.0, 0.0, 96.0, 96.0),
+                    None,
+                    vec![PaintOp::text_run(
+                        BoundingBox::new(8.0, 8.0, 72.0, 72.0),
+                        run,
+                    )],
+                ),
+            );
+            let output = renderer
+                .render_raster_with_options(&tree, RasterRenderOptions::default())
+                .expect("외곽선 글자 렌더링");
+            decode_rgba(&output.bytes)
+        };
+        let solid = render(0);
+        let outlined = render(1);
+        let mut cleared_interior = 0;
+        for y in 1..95 {
+            for x in 1..95 {
+                let inside_solid = [(x, y), (x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                    .iter()
+                    .all(|&(px, py)| solid.get_pixel(px, py)[0] < 40);
+                if inside_solid && outlined.get_pixel(x, y)[0] > 230 {
+                    cleared_interior += 1;
+                }
+            }
+        }
+        assert!(
+            cleared_interior > 20,
+            "외곽선 안쪽을 일반 fill로 다시 채우면 안 된다"
+        );
+        assert!(count_ink(&outlined) > 20, "글자 외곽선은 보여야 한다");
     }
 
     #[test]

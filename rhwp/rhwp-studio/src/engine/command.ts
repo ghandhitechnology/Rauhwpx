@@ -2199,6 +2199,61 @@ export class MovePictureCommand implements EditCommand {
   }
 }
 
+/**
+ * 인라인(글자처럼 취급) 그림 컨트롤을 같은 구역 본문 문단의 새 캐럿 위치로 이동한다.
+ *
+ * 되돌리기는 마지막 위치에서 원본 (fromPpi, originCharOffset) 자리로의 역이동이다.
+ * 왕복 이동이 원본 컨트롤 인덱스를 복원한다는 계약(rhwp/tests/move_inline_picture.rs
+ * round-trip)에 따라 undo 후 fromCi 가 되살아나므로 execute() 는 redo 로 재실행된다.
+ * originCharOffset 은 드래그 시작 시 소스 그림의 논리(캐럿) 위치 — hitTest 가
+ * 인라인 그림 좌측 절반에서 find_logical_control_positions 값을 돌려주므로 그것으로 캡처한다.
+ */
+export class MoveInlinePictureCommand implements EditCommand {
+  readonly type = 'moveInlinePicture';
+  readonly timestamp: number;
+  /** 마지막 execute/undo 가 컨트롤을 놓은 위치 (redo/undo 재적용 대상). */
+  private appliedPara: number | null = null;
+  private appliedCi: number | null = null;
+
+  constructor(
+    private sec: number,
+    private fromPpi: number,
+    private fromCi: number,
+    private toPpi: number,
+    private toCharOffset: number,
+    private originCharOffset: number,
+    timestamp?: number,
+  ) {
+    this.timestamp = timestamp ?? Date.now();
+  }
+
+  /** 이동 확정 후 새 개체 선택을 만들 때 쓰는 최종 컨트롤 위치. */
+  get appliedParaIndex(): number | null { return this.appliedPara; }
+  get appliedControlIndex(): number | null { return this.appliedCi; }
+
+  execute(wasm: WasmBridge): DocumentPosition {
+    const r = wasm.movePictureControl(this.sec, this.fromPpi, this.fromCi, this.toPpi, this.toCharOffset);
+    if (!r.ok) throw new Error('인라인 그림 이동 실패');
+    this.appliedPara = r.paraIdx;
+    this.appliedCi = r.controlIdx;
+    return { sectionIndex: this.sec, paragraphIndex: r.paraIdx, charOffset: 0 };
+  }
+
+  undo(wasm: WasmBridge): DocumentPosition {
+    const ci = this.appliedCi ?? this.fromCi;
+    const r = wasm.movePictureControl(this.sec, this.toPpi, ci, this.fromPpi, this.originCharOffset);
+    if (!r.ok) throw new Error('인라인 그림 이동 되돌리기 실패');
+    this.appliedPara = r.paraIdx;
+    this.appliedCi = r.controlIdx;
+    return { sectionIndex: this.sec, paragraphIndex: r.paraIdx, charOffset: 0 };
+  }
+
+  /** 구조적 이동은 연속 병합하지 않는다 — 한 번의 드래그가 하나의 기록. */
+  mergeWith(): EditCommand | null {
+    return null;
+  }
+}
+
 export class MoveShapeCommand implements EditCommand {
   readonly type = 'moveShape';
   readonly timestamp: number;

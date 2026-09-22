@@ -1,7 +1,7 @@
 /** input-handler picture/shape methods — extracted from InputHandler class */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { MovePictureCommand, MoveShapeCommand, ResizeObjectCommand } from './command';
+import { MovePictureCommand, MoveShapeCommand, MoveInlinePictureCommand, ResizeObjectCommand } from './command';
 import type { HeaderFooterObjectRef, ObjectResizeTarget } from './command';
 import { PictureResizeJournal } from './picture-resize-journal';
 import { computeArrowResize, MIN_SIZE_HWP, type ArrowKey } from './picture-resize';
@@ -1108,39 +1108,102 @@ export function finishPictureMoveDrag(this: any, e: MouseEvent): void {
   if (this.pictureMoveState) {
     updatePictureMoveDrag.call(this, e);
     const state = this.pictureMoveState;
-    const { totalDeltaH, totalDeltaV, multiRefs } = state;
-    if (totalDeltaH !== 0 || totalDeltaV !== 0) {
-      const targets = multiRefs || [{ ...state.ref, origHorzOffset: state.origHorzOffset, origVertOffset: state.origVertOffset }];
-      try {
-        for (const r of targets) {
-          setObjectProperties.call(this, r, {
-            horzOffset: r.origHorzOffset + totalDeltaH,
-            vertOffset: r.origVertOffset + totalDeltaV,
-          });
-        }
-        try { this.wasm.updateConnectorsInSection(targets[0].sec); } catch { /* ignore */ }
-        this.eventBus.emit('document-changed');
-        for (const r of targets) {
-          const CmdClass = (r.type === 'shape' || r.type === 'line' || r.type === 'group' || r.type === 'ole') ? MoveShapeCommand : MovePictureCommand;
-          this.executeOperation({
-            kind: 'record',
-            command: new CmdClass(
-              r.sec, r.ppi, r.ci,
-              totalDeltaH, totalDeltaV,
-              r.origHorzOffset, r.origVertOffset,
-              r.cellPath,
-              r.headerFooter,
-            ),
-            meta: { domain: 'object', refresh: 'none', dirtyScope: 'object' },
-          });
-        }
-      } catch (err) {
-        console.warn('[InputHandler] 개체 이동 확정 실패:', err);
-      }
+    if (state.inlineTac) {
+      finishInlinePictureMoveDrag.call(this, state);
+    } else {
+      finishFloatingPictureMoveDrag.call(this, state);
     }
   }
   cleanupPictureMoveDrag.call(this);
   this.renderPictureObjectSelection();
+}
+
+/** 인라인(tac) 그림 이동 드래그 확정 — 드롭 지점을 캐럿 위치로 바꿔 컨트롤을 이동한다. */
+function finishInlinePictureMoveDrag(this: any, state: NonNullable<any>): void {
+  const { totalDeltaH, totalDeltaV } = state;
+  // 드래그 정이동 없으면 기록하지 않는다 (커서만 복구).
+  if (totalDeltaH === 0 && totalDeltaV === 0) return;
+
+  let hit: import('@/core/types').HitTestResult;
+  try {
+    hit = this.wasm.hitTest(state.pageIndex, state.lastPageX, state.lastPageY);
+  } catch (err) {
+    console.warn('[InputHandler] 인라인 그림 드롭 지점 판정 실패:', err);
+    return;
+  }
+  // 드롭 대상 가드: 같은 구역 본문 문단의 유효 캐럿 위치만 받는다 (셀/글상자·머리글·바닥글 제외).
+  const valid = hit
+    && hit.sectionIndex === state.ref.sec
+    && typeof hit.paragraphIndex === 'number'
+    && hit.paragraphIndex >= 0
+    && hit.paragraphIndex < 0xFFFFFF00
+    && hit.parentParaIndex === undefined
+    && !hit.cellPath
+    && !hit.isTextBox
+    && Number.isFinite(hit.charOffset);
+  if (!valid) {
+    console.warn('[InputHandler] 인라인 그림 드롭 지점이 본문이 아니어서 이동하지 않았습니다');
+    return;
+  }
+  // 같은 문단 + 같은 논리 위치로의 드롭은 이동이 아니다 (wasm moved:false 와 동일 의미).
+  if (hit.paragraphIndex === state.ref.ppi && hit.charOffset === state.originCharOffset) return;
+
+  const command = new MoveInlinePictureCommand(
+    state.ref.sec, state.ref.ppi, state.ref.ci,
+    hit.paragraphIndex, hit.charOffset, state.originCharOffset ?? 0,
+  );
+  try {
+    this.executeOperation({
+      kind: 'command',
+      command,
+      meta: { domain: 'object', refresh: 'full', dirtyScope: 'object' },
+    });
+  } catch (err) {
+    console.warn('[InputHandler] 인라인 그림 이동 확정 실패:', err);
+    return;
+  }
+  // 개체 이동 뒤 새 자리의 그림을 다시 개체 선택한다 (커서 moveTo 로 개체 선택이 풀린다).
+  const movedCi = command.appliedControlIndex ?? state.ref.ci;
+  this.cursor.enterPictureObjectSelectionRef({
+    sec: state.ref.sec,
+    ppi: command.appliedParaIndex ?? hit.paragraphIndex,
+    ci: movedCi,
+    type: 'image',
+  });
+}
+
+/** 어울림(floating) 그림 이동 드래그 확정 — 기존 offset 덮어쓰기 경로. */
+function finishFloatingPictureMoveDrag(this: any, state: NonNullable<any>): void {
+  const { totalDeltaH, totalDeltaV, multiRefs } = state;
+  if (totalDeltaH !== 0 || totalDeltaV !== 0) {
+    const targets = multiRefs || [{ ...state.ref, origHorzOffset: state.origHorzOffset, origVertOffset: state.origVertOffset }];
+    try {
+      for (const r of targets) {
+        setObjectProperties.call(this, r, {
+          horzOffset: r.origHorzOffset + totalDeltaH,
+          vertOffset: r.origVertOffset + totalDeltaV,
+        });
+      }
+      try { this.wasm.updateConnectorsInSection(targets[0].sec); } catch { /* ignore */ }
+      this.eventBus.emit('document-changed');
+      for (const r of targets) {
+        const CmdClass = (r.type === 'shape' || r.type === 'line' || r.type === 'group' || r.type === 'ole') ? MoveShapeCommand : MovePictureCommand;
+        this.executeOperation({
+          kind: 'record',
+          command: new CmdClass(
+            r.sec, r.ppi, r.ci,
+            totalDeltaH, totalDeltaV,
+            r.origHorzOffset, r.origVertOffset,
+            r.cellPath,
+            r.headerFooter,
+          ),
+          meta: { domain: 'object', refresh: 'none', dirtyScope: 'object' },
+        });
+      }
+    } catch (err) {
+      console.warn('[InputHandler] 개체 이동 확정 실패:', err);
+    }
+  }
 }
 
 // ─── 회전 드래그 ─────────────────────────────────

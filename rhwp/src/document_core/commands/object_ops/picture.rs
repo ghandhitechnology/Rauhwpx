@@ -1221,65 +1221,7 @@ impl DocumentCore {
             ));
         }
 
-        // 컨트롤이 차지하는 갭의 시작 위치를 찾아 char_offsets 조정
-        let text_chars: Vec<char> = para.text.chars().collect();
-        let mut ci = 0usize;
-        let mut prev_end: u32 = 0;
-        let mut gap_start: Option<u32> = None;
-        'outer: for i in 0..text_chars.len() {
-            let offset = if i < para.char_offsets.len() {
-                para.char_offsets[i]
-            } else {
-                prev_end
-            };
-            while prev_end + 8 <= offset && ci < para.controls.len() {
-                if ci == control_idx {
-                    gap_start = Some(prev_end);
-                    break 'outer;
-                }
-                ci += 1;
-                prev_end += 8;
-            }
-            let char_size: u32 = if text_chars[i] == '\t' {
-                8
-            } else if text_chars[i].len_utf16() == 2 {
-                2
-            } else {
-                1
-            };
-            prev_end = offset + char_size;
-        }
-        if gap_start.is_none() {
-            while ci < para.controls.len() {
-                if ci == control_idx {
-                    gap_start = Some(prev_end);
-                    break;
-                }
-                ci += 1;
-                prev_end += 8;
-            }
-        }
-
-        // char_offsets 조정
-        if let Some(gs) = gap_start {
-            let threshold = gs + 8;
-            for offset in para.char_offsets.iter_mut() {
-                if *offset >= threshold {
-                    *offset -= 8;
-                }
-            }
-        }
-
-        // 컨트롤 및 ctrl_data_record 제거
-        para.controls.remove(control_idx);
-        if control_idx < para.ctrl_data_records.len() {
-            para.ctrl_data_records.remove(control_idx);
-        }
-
-        // char_count 갱신
-        if para.char_count >= 8 {
-            para.char_count -= 8;
-        }
+        Self::remove_inline_control_and_shift(para, control_idx);
 
         // line_segs 재계산: 그림 높이가 반영된 line_segs를 텍스트 기반으로 리셋
         Self::reflow_paragraph_line_segs_after_control_delete(para, &self.styles, self.dpi);
@@ -1294,6 +1236,196 @@ impl DocumentCore {
             ctrl: control_idx,
         });
         Ok("{\"ok\":true}".to_string())
+    }
+    /// 글자처럼 취급(tac=true) 그림 컨트롤을 같은 구역 내 새 캐럿 위치로 이동한다.
+    ///
+    /// 어울림(tac=false) 그림은 위치 이동이 개체 오프셋 변경이므로 본 명령의
+    /// 대상이 아니다. 삭제(delete_picture_control_native 의 삭제 절반) → 재삽입
+    /// (insert_equation_native 의 인라인 삽입 패턴)으로 처리하며, 재조판/
+    /// 페이지네이션은 이동 완료 후 한 번만 수행한다.
+    ///
+    /// 같은 문단 이동 시 대상 오프셋은 원본 컨트롤 제거(1글자)를 반영한 문단
+    /// 논리 공간으로 보정한다. 계산된 삽입 슬롯이 원본 슬롯과 같으면 상태를
+    /// 변경하지 않고 moved=false 로 종료한다.
+    ///
+    /// 반환: JSON `{"ok":true,"paraIdx":N,"controlIdx":N,"moved":bool}`
+    pub fn move_picture_control_native(
+        &mut self,
+        section_idx: usize,
+        from_para_idx: usize,
+        from_control_idx: usize,
+        to_para_idx: usize,
+        to_char_offset: usize,
+    ) -> Result<String, HwpError> {
+        if section_idx >= self.document.sections.len() {
+            return Err(HwpError::RenderError(format!(
+                "구역 인덱스 {} 범위 초과",
+                section_idx
+            )));
+        }
+        let same_para = from_para_idx == to_para_idx;
+        let (pic, target_offset, insert_idx) = {
+            let section = &mut self.document.sections[section_idx];
+            if from_para_idx >= section.paragraphs.len() {
+                return Err(HwpError::RenderError(format!(
+                    "원본 문단 인덱스 {} 범위 초과",
+                    from_para_idx
+                )));
+            }
+            if to_para_idx >= section.paragraphs.len() {
+                return Err(HwpError::RenderError(format!(
+                    "대상 문단 인덱스 {} 범위 초과",
+                    to_para_idx
+                )));
+            }
+            let para = &mut section.paragraphs[from_para_idx];
+            if from_control_idx >= para.controls.len() {
+                return Err(HwpError::RenderError(format!(
+                    "컨트롤 인덱스 {} 범위 초과",
+                    from_control_idx
+                )));
+            }
+            let pic = match &para.controls[from_control_idx] {
+                Control::Picture(p) => {
+                    if !p.common.treat_as_char {
+                        return Err(HwpError::RenderError(
+                            "글자처럼 취급 그림만 이동할 수 있습니다".to_string(),
+                        ));
+                    }
+                    (**p).clone()
+                }
+                _ => {
+                    return Err(HwpError::RenderError(
+                        "지정된 컨트롤이 그림이 아닙니다".to_string(),
+                    ));
+                }
+            };
+            let src_logical = crate::document_core::helpers::find_logical_control_positions(para)
+                .get(from_control_idx)
+                .copied()
+                .unwrap_or(0);
+            // 삭제 후 상태의 컨트롤 text position 예측 (제거 항목 제외).
+            let mut positions = crate::document_core::helpers::find_control_text_positions(para);
+            positions.remove(from_control_idx);
+            // insert_equation_native 규약: text position 이 대상 오프셋보다 큰
+            // 첫 컨트롤 앞에 삽입. 같은 문단이면 원본 컨트롤 1글자 제거를 반영한
+            // 문단 논리 공간으로 보정한다.
+            let target_offset = if same_para && to_char_offset > src_logical {
+                to_char_offset - 1
+            } else {
+                to_char_offset
+            };
+            let insert_idx = positions
+                .iter()
+                .position(|&pos| pos > target_offset)
+                .unwrap_or(positions.len());
+            // 자기 자리로의 이동(같은 슬롯 + 같은 갭 위치 복원)은 상태 변경 없이
+            // 종료한다. 남은 컨트롤이 없으면 insert_idx 가 항상 0 으로 수렴하므로
+            // 슬롯 비교만으로는 부족하고, 갭 위치(스트림 삽입 지점) 비교가 필요하다.
+            let no_move = if same_para {
+                let gs = Self::find_inline_control_gap_start(para, from_control_idx);
+                let text_len_chars = para.text.chars().count();
+                let safe = target_offset.min(text_len_chars);
+                let t_pre: u32 = if safe < para.char_offsets.len() {
+                    para.char_offsets[safe]
+                } else {
+                    let last_idx = para.char_offsets.len().saturating_sub(1);
+                    let last_w = para
+                        .text
+                        .chars()
+                        .nth(last_idx)
+                        .map(|c| if (c as u32) > 0xFFFF { 2 } else { 1 })
+                        .unwrap_or(1);
+                    para.char_offsets.last().map_or(0, |&off| off + last_w)
+                };
+                // 갭 제거 시 당겨진 오프셋을 반영한 삭제 후 스트림 삽입 지점.
+                let t = if t_pre >= gs + 8 { t_pre - 8 } else { t_pre };
+                insert_idx == from_control_idx && t == gs
+            } else {
+                false
+            };
+            if no_move {
+                return Ok(crate::document_core::helpers::json_ok_with(&format!(
+                    "\"paraIdx\":{},\"controlIdx\":{},\"moved\":false",
+                    to_para_idx, from_control_idx
+                )));
+            }
+            (pic, target_offset, insert_idx)
+        };
+
+        // 1) 원본 문단에서 갭 시프트 삭제 (재조판·재구성은 이동 완료 후 한 번).
+        let section = &mut self.document.sections[section_idx];
+        section.raw_stream = None;
+        {
+            let para = &mut section.paragraphs[from_para_idx];
+            Self::remove_inline_control_and_shift(para, from_control_idx);
+            Self::reflow_paragraph_line_segs_after_control_delete(para, &self.styles, self.dpi);
+        }
+
+        // 2) 대상 문단 삽입 (insert_equation_native 패턴).
+        let new_ctrl_idx = {
+            let para = &mut section.paragraphs[to_para_idx];
+            let insert_idx = if same_para {
+                insert_idx
+            } else {
+                let positions = crate::document_core::helpers::find_control_text_positions(para);
+                positions
+                    .iter()
+                    .position(|&pos| pos > target_offset)
+                    .unwrap_or(para.controls.len())
+            };
+            // HWPX 로드 문서는 ctrl_data_records 가 controls 보다 짧을 수 있다
+            // (비동기 상태) — insert 전 길이를 맞춘다.
+            if para.ctrl_data_records.len() < para.controls.len() {
+                para.ctrl_data_records
+                    .resize_with(para.controls.len(), || None);
+            }
+            para.controls
+                .insert(insert_idx, Control::Picture(Box::new(pic)));
+            para.ctrl_data_records.insert(insert_idx, None);
+            para.shift_for_inline_control_insert(target_offset);
+            para.char_count += 8;
+            para.control_mask |= 0x00000800;
+            para.has_para_text = true;
+            insert_idx
+        };
+
+        // 대상 문단 리플로우 (insert_equation_native 폭 계산과 동일).
+        {
+            use crate::renderer::composer::reflow_line_segs;
+            use crate::renderer::hwpunit_to_px;
+            let page_def = &section.section_def.page_def;
+            let text_width =
+                page_def.width as i32 - page_def.margin_left as i32 - page_def.margin_right as i32;
+            let available_width = hwpunit_to_px(text_width, self.dpi);
+            let para_style = self
+                .styles
+                .para_styles
+                .get(section.paragraphs[to_para_idx].para_shape_id as usize);
+            let margin_left = para_style.map(|s| s.margin_left).unwrap_or(0.0);
+            let margin_right = para_style.map(|s| s.margin_right).unwrap_or(0.0);
+            let final_width = (available_width - margin_left - margin_right).max(0.0);
+            reflow_line_segs(
+                &mut section.paragraphs[to_para_idx],
+                final_width,
+                &self.styles,
+                self.dpi,
+            );
+        }
+
+        self.recompose_section(section_idx);
+        self.paginate_if_needed();
+        self.invalidate_page_tree_cache();
+
+        self.event_log.push(DocumentEvent::PictureMoved {
+            section: section_idx,
+            para: to_para_idx,
+            ctrl: new_ctrl_idx,
+        });
+        Ok(crate::document_core::helpers::json_ok_with(&format!(
+            "\"paraIdx\":{},\"controlIdx\":{},\"moved\":true",
+            to_para_idx, new_ctrl_idx
+        )))
     }
     /// [Task #2230] 임베디드 BinData 등록 (콘텐츠 + 메타데이터) — 반환값은
     /// bin_data_id(위치, 1-based 순번).

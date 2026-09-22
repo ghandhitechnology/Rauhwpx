@@ -112,7 +112,21 @@ import type {
 } from './types.ts';
 
 function isProductSkillIcon(value: unknown): value is ProductSkillIcon | null {
-  return value === null || value === 'pencil' || value === 'bot' || value === 'system';
+  return value === null
+    || value === 'pencil'
+    || value === 'bot'
+    || value === 'system'
+    || value === 'sparkles'
+    || value === 'book'
+    || value === 'target'
+    || value === 'chart'
+    || value === 'lightbulb'
+    || value === 'calendar'
+    || value === 'code'
+    || value === 'check'
+    || value === 'heart'
+    || value === 'bolt'
+    || value === 'shield';
 }
 
 function isSkillHarnessId(value: unknown): value is SkillHarnessId {

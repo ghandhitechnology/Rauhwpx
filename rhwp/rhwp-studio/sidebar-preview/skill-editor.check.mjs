@@ -46,11 +46,27 @@ try {
   const readonlyRow = await page.$('[data-skill-name="imported-style-guide"]');
   assert(readonlyRow, 'Read-only imported fixture exists.');
   assert.equal(await readonlyRow.$('.ag-skill-edit'), null, 'Imported skills never expose edit.');
+  const iconTrigger = `[data-skill-name="${name}"] .ag-skill-icon-button`;
+  await page.click(iconTrigger);
+  await page.waitForSelector('.ag-skill-icon-picker');
+  assert.equal(await page.$$eval('.ag-skill-icon-option svg path', (paths) =>
+    paths.every((path) => Boolean(path.getAttribute('d')) && path.getBBox().width > 0)), true,
+    'Every selectable icon renders a nonempty path.');
+  assert.equal(await page.$eval('.ag-skill-icon-picker', (picker) =>
+    picker.scrollWidth <= picker.clientWidth), true, 'Icon grid fits inside its popup.');
+  await (await page.$('.ag-root')).screenshot({ path: resolve(artifacts, 'skill-icon-popup.png') });
+  await page.click(iconTrigger);
+  assert.equal(await page.$('.ag-skill-icon-picker'), null, 'Clicking the same icon closes its popup.');
+  await page.click(iconTrigger);
+  await page.click('.ag-skills-search');
+  assert.equal(await page.$('.ag-skill-icon-picker'), null, 'Clicking outside closes the popup.');
+  await page.click(iconTrigger);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.$('.ag-skill-icon-picker'), null, 'Escape closes the popup.');
   await page.click('.ag-skill-new');
   await page.waitForSelector('.ag-skill-new-editor');
+  assert.equal(await page.$eval('.ag-skill-new', (button) => getComputedStyle(button).display === 'none'), true, 'Create button hides while creating.');
   await page.$eval('.ag-root', (root) => root.classList.add('ag-fullscreen'));
-  assert.equal(await page.$eval('.ag-skill-editor-artifact', (node) => getComputedStyle(node).display), 'flex',
-    'Fullscreen creation keeps the Markdown artifact visible.');
   await page.$eval('.ag-root', (root) => root.classList.remove('ag-fullscreen'));
   const fill = async (selector, value) => page.$eval(selector, (node, next) => {
     node.value = next;
@@ -59,9 +75,7 @@ try {
   await fill('.ag-skill-editor-name', 'outline-to-actions');
   await fill('.ag-skill-editor-description', '회의 내용을 실행 항목으로 정리합니다.');
   await fill('.ag-skill-new-editor .ag-skill-editor-input', '# 실행 항목\n\n핵심 결정과 담당자를 표로 정리합니다.');
-  const artifact = await page.$eval('.ag-skill-editor-artifact code', (node) => node.textContent);
-  assert.match(artifact, /name: outline-to-actions/);
-  assert.match(artifact, /핵심 결정과 담당자를 표로 정리합니다/);
+  assert.equal(await page.$('.ag-skill-editor-artifact'), null, 'New skill editor has no artifact preview.');
   await page.click('.ag-skill-new-editor .ag-skill-editor-save');
   await page.waitForSelector('[data-skill-name="outline-to-actions"]');
   assert.equal(await page.$('.ag-skill-new-editor'), null, 'Saved new skill closes its editor.');
@@ -73,8 +87,10 @@ try {
     });
   };
 
+  assert.equal(await page.$eval('.ag-skill-new', (button) => getComputedStyle(button).display !== 'none'), true, 'Create button returns after cancel.');
   await reopen();
   await page.waitForSelector('textarea.ag-skill-editor-input');
+  assert.equal(await page.$eval('.ag-skill-new', (button) => getComputedStyle(button).display === 'none'), true, 'Create button hides while editing.');
   const editor = await page.$('textarea.ag-skill-editor-input');
   const original = await editor.evaluate((node) => node.value);
   await editor.focus();

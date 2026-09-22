@@ -162,7 +162,7 @@ try {
     await page.evaluate(() => window.sidebarPreview.cloud.setLink('failed'));
     assert.deepEqual(await page.$$eval('.ag-cd-task-status', nodes => nodes.map(node => node.textContent)), initialStatuses,
       'viewing connection loss must not change saved task states');
-    await page.click('.ag-cd-settings-toggle');
+    if (await page.$eval('.ag-cd-config', node => node.hidden)) await page.click('.ag-cd-settings-toggle');
     assert.equal(await page.$eval('.ag-cd-config', node => node.hidden), false);
     await page.click('.ag-cloud-settings-action');
     await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
@@ -170,7 +170,7 @@ try {
     await page.evaluate(() => window.sidebarPreview.cloud.blockReconnect(true));
     await page.click('.ag-cd-reconnect');
     await page.waitForSelector('.ag-cd-content .ag-cloud-link-progress:not([hidden])');
-    assert.equal(await page.$eval('.ag-cd-content [role="progressbar"]', node => node.hasAttribute('aria-valuenow')), false);
+    assert.equal(await page.$eval('.ag-cd-content .ag-cloud-link-progress [role="progressbar"]', node => node.hasAttribute('aria-valuenow')), false);
     assert.match(await page.$eval('.ag-cd-content .ag-cloud-link-progress-eta', node => node.textContent), /경과$/);
     await page.evaluate(() => window.sidebarPreview.cloud.blockReconnect(false));
     await page.waitForFunction(() => !document.querySelector('.ag-cd-refresh').disabled);
@@ -544,9 +544,7 @@ try {
       await page.waitForSelector('.ag-settings-quota-fill[data-health="low"]', { visible: true });
       assert.match(await page.$eval('.ag-settings-balance-card[data-provider="openrouter"] .ag-settings-balance-amount', (el) => el.textContent), /\$18\.50/);
       assert.equal(await page.$eval('.ag-settings-balance-card[data-provider="openrouter"] [role="meter"]', (el) => el.getAttribute('aria-valuenow')), '92.5');
-      assert.equal(await page.$$eval('.ag-settings-balance-card[data-provider="grok"] [role="meter"]', (els) => els.length), 0);
-      assert.equal(await page.$$eval('.ag-settings-balance-card[data-provider="opencode"] .ag-settings-balance-amount', (els) => els.length), 0);
-      assert.match(await page.$eval('.ag-settings-balance-card[data-provider="opencode"]', (el) => el.textContent), /잔액 정보를 사용할 수 없어요/);
+      assert.deepEqual(await page.$$eval('.ag-settings-balance-card', (cards) => cards.map((card) => card.dataset.provider)), ['openrouter']);
       assert.equal(await page.$eval('.ag-settings-quota-card[data-provider="codex"] [role="meter"]', (el) => el.getAttribute('aria-valuenow')), '8');
       assert.equal(await page.$eval('.ag-settings-usage-disclosure', el => el.open), false);
       await page.click('.ag-settings-usage-disclosure > summary');
@@ -578,7 +576,7 @@ try {
           .querySelector('.ag-account-session-row')
           .innerText.includes('로그인되지 않음'),
       );
-      await page.click('.ag-account-session-row button');
+      await clickText('.ag-account-session-row button', '로그인');
       await page.waitForFunction(
         () => window.sidebarPreview.snapshot().account === 'signed-in',
       );
@@ -588,7 +586,7 @@ try {
           .innerText.includes('designer@example.test'),
       );
       await screenshot('connections');
-      await page.click('.ag-account-session-row button');
+      await clickText('.ag-account-session-row button', '로그아웃');
       await page.waitForFunction(
         () => window.sidebarPreview.snapshot().account === 'signed-out',
       );

@@ -444,6 +444,36 @@ fn issue3216_page_auto_number_does_not_expand_manual_page_field_model_text() {
     );
 }
 
+#[test]
+fn total_page_auto_number_uses_final_pagination_without_changing_model_text() {
+    use crate::model::control::{AutoNumber, AutoNumberType};
+
+    let para = Paragraph {
+        text: "\u{0015}".to_string(),
+        char_offsets: vec![0],
+        char_count: 8,
+        controls: vec![Control::AutoNumber(AutoNumber {
+            number_type: AutoNumberType::TotalPage,
+            number: 8,
+            ..Default::default()
+        })],
+        ..Default::default()
+    };
+    let engine = LayoutEngine::with_default_dpi();
+    for total in [8, 19] {
+        engine.set_total_pages(total);
+        let mut composed = compose_paragraph(&para);
+        engine.substitute_page_auto_numbers_in_composed(&para, &mut composed, 3);
+        let runs: Vec<_> = composed.lines.iter().flat_map(|line| &line.runs).collect();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "\u{0015}");
+        assert_eq!(
+            runs[0].display_text.as_deref(),
+            Some(total.to_string().as_str())
+        );
+    }
+}
+
 fn issue2817_textless_picture_host(vert_rel_to: VertRelTo, text_wrap: TextWrap) -> Paragraph {
     let mut picture = crate::model::image::Picture::default();
     picture.common.treat_as_char = false;

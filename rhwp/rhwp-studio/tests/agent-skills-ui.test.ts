@@ -27,8 +27,9 @@ test('skill shelf lists, imports, edits, and creates product skills', () => {
   assert.match(shelf, /'새 스킬 만들기'/);
   assert.match(shelf, /createNewSkillEditor/);
   assert.match(shelf, /action: 'create'/);
-  assert.match(css, /\.ag-skill-editor-artifact/);
+  assert.match(css, /\.ag-skill-editor \{/);
   assert.match(css, /\.ag-fullscreen \.ag-skill-new-editor/);
+  assert.doesNotMatch(css, /\.ag-skill-editor-artifact/);
   assert.match(shelf, /aria-label', '사용'/);
   assert.match(shelf, /action: 'import'/);
   assert.match(shelf, /mode: 'adopt'/);

@@ -527,16 +527,13 @@ test('기본 제공자 선택은 라이브 프로바이더만 저장한다', () 
   assert.match(settings, /const PLAN_AGENTS: readonly PlanAgent\[\] = \['claude', 'codex'\]/);
 });
 
-test('grok · cursor · opencode 사용량도 세션 · 오늘 · 주간 토큰으로 보인다', () => {
-  assert.match(settings, /const API_USAGE_AGENTS: readonly AgentName\[\] = \['grok', 'cursor', 'opencode'\]/);
-  assert.match(settings, /function renderApiUsage\(\): void/);
-  assert.match(settings, /renderPiUsage\(\);\s*\n\s*renderApiUsage\(\);/);
-  assert.match(settings, /formatUsageWindow\('Session', providerUsage\.session\)/);
+test('Claude · Codex · Pi 사용량은 세션 · 오늘 · 주간 토큰으로 보인다', () => {
+  assert.doesNotMatch(settings, /API_USAGE_AGENTS|function renderApiUsage/);
+  assert.match(settings, /function renderPiUsage\(\): void/);
+  assert.match(settings, /quotaCards\.render\(usage\);\s*\n\s*renderPiUsage\(\);\s*\n\s*for \(const agent of PLAN_AGENTS\)/);
+  assert.match(settings, /formatUsageWindow\('Session', providerUsage\?\.session \?\? null\)/);
   assert.match(settings, /ui\.models\.replaceChildren\(\.\.\.buildModelRows\(providerUsage, agent\)\)/);
-  // 요금제 셀렉트는 붙지 않는다 — API 사용량 한 가지뿐이다.
   assert.doesNotMatch(settings, /USAGE_PLANS\[agent\]\s*\?\?/);
-  // 설정을 마쳤거나 기록이 있을 때만 자리를 차지한다.
-  assert.match(settings, /ui\.root\.hidden = turns === 0/);
   assert.match(settingsCss, /\.ag-settings-usage-block\[hidden\]/);
 });
 
@@ -570,12 +567,10 @@ test('설정 목록은 Claude 가 맨 앞이고 공통 테두리를 갖는다', 
 
 test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대를 함께 보여 준다', () => {
   assert.match(settings, /setupAccountTitle = el\('h3', 'ag-agent-setup-section-title', '로그인된 계정'\)/);
-  assert.match(settings, /setupAccountEmail\.textContent = status\?\.account/);
-  assert.match(settings, /계정 이메일을 확인할 수 없습니다/);
-  assert.doesNotMatch(settings, /연결된 키 \*\*\*\*/);
+  assert.match(settings, /accountStatus\?\.account\?\.email \?\? '로그인됨'/);
   assert.match(settings, /체험 크레딧을 다 썼어요\. 다른 모델을 연결해 주세요\./);
-  // 잔량 막대는 사용량 갱신마다 다시 그린다.
-  assert.match(settings, /renderUsage\(\): void \{\s*\n\s*quotaCards.render\(usage\);\s*\n\s*renderRauUsage\(\);\s*\n\s*renderRauAccount\(\);/);
+  assert.doesNotMatch(settings, /연결된 키 \*\*\*\*/);
+  assert.match(settings, /renderUsage\(\): void \{\s*\n\s*quotaCards.render\(usage\);\s*\n\s*renderPiUsage\(\);/);
   assert.match(settingsCss, /\.ag-agent-setup-account \{[\s\S]*?border-radius: 12px/);
   assert.match(settingsCss, /\.ag-agent-setup-account-meter \.ag-settings-meter-track \{[\s\S]*?height: 8px/);
 });

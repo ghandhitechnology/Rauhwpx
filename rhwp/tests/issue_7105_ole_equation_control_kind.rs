@@ -162,6 +162,46 @@ fn issue_7105_reported_kind_routes_to_a_command_the_core_accepts() {
 }
 
 #[test]
+fn issue_7105_legacy_ole_equation_promotes_to_editable_native_equation_and_survives_hwp_save() {
+    let mut core = DocumentCore::from_bytes(&hwpx_with_body_level_ole_equation()).expect("open");
+    let (sec, para, ctrl) = body_ole(&controls(&core)).expect("ole 로 알린 본문 수식 개체");
+
+    let promoted: serde_json::Value = serde_json::from_str(
+        &core
+            .promote_ole_equation_native(sec, para, ctrl)
+            .expect("promote"),
+    )
+    .expect("promote json");
+    assert_eq!(promoted["ok"], true);
+    assert_eq!(promoted["paraIdx"], para);
+    assert_eq!(promoted["controlIdx"], ctrl);
+    assert!(
+        matches!(
+            core.document().sections[sec].paragraphs[para].controls[ctrl],
+            rhwp::model::control::Control::Equation(_)
+        ),
+        "같은 슬롯이 native 수식이어야 한다"
+    );
+
+    core.set_equation_properties_native(sec, para, ctrl, None, None, r#"{"script":"a over b"}"#)
+        .expect("edit script");
+
+    let saved = core.export_hwp_native().expect("export hwp");
+    let reopened = DocumentCore::from_bytes(&saved).expect("reopen");
+    let props: serde_json::Value = serde_json::from_str(
+        &reopened
+            .get_equation_properties_native(sec, para, ctrl, None, None)
+            .expect("props"),
+    )
+    .expect("props json");
+    assert_eq!(
+        props["script"].as_str(),
+        Some("a over b"),
+        "HWP 저장 뒤에도 편집한 스크립트가 남아야 한다: {props}"
+    );
+}
+
+#[test]
 fn issue_7105_native_equation_is_still_reported_as_equation() {
     let mut core = DocumentCore::from_bytes(&read_repo(NATIVE_EQ_SAMPLE)).expect("open");
     let native = controls(&core)
