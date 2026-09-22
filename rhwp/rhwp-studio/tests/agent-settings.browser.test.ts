@@ -59,15 +59,15 @@ test('bridge matches rapid settings replies, reconnects, failures and queued fol
       await followup;
       acknowledge(latest); // duplicate acknowledgement must not replay the message
       const messages = frames.filter((frame) => frame.type === 'chat-user-message');
-      bridge.startChat('cursor', 'auto', '');
-      const cursor = frames.at(-1);
-      acknowledge(cursor, { effort: null });
+      bridge.startChat('pi', 'auto', '');
+      const previous = frames.at(-1);
+      acknowledge(previous, { effort: null });
       const clearedEffort = bridge.selectedEffort;
       bridge.startChat('claude', 'sonnet', 'high');
       const rejected = frames.at(-1);
       const failedFollowup = bridge.sendUserMessage('Must not run under the old provider');
       bridge.handleMessage({ type: 'chat-error', requestId: rejected.requestId, code: 'AUTH_REQUIRED', message: 'Connect Claude',
-        session: { agent: 'cursor', model: 'auto', effort: null, threadId: 'test-thread', documentId: 'test-document' } });
+        session: { agent: 'pi', model: 'auto', effort: null, threadId: 'test-thread', documentId: 'test-document' } });
       await failedFollowup;
       const rollback = { agent: bridge.activeAgent, effort: bridge.selectedEffort, pending: bridge.pendingChatStart };
       bridge.startChat('codex', 'gpt-5.6-luna', 'low');
@@ -102,7 +102,7 @@ test('bridge matches rapid settings replies, reconnects, failures and queued fol
     assert.equal(results.messages.length, 1);
     assert.equal(results.messages[0].text, 'Use the latest settings');
     assert.equal(results.clearedEffort, null);
-    assert.deepEqual(results.rollback, { agent: 'cursor', effort: null, pending: null });
+    assert.deepEqual(results.rollback, { agent: 'pi', effort: null, pending: null });
     assert.equal(results.retryAgent, 'codex');
     assert.equal(results.retryCount, 1);
     assert.equal(results.rejectedMessages, 0);

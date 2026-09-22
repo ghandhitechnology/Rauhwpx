@@ -141,7 +141,7 @@ test('SkillRegistry creates, disables, reads, and recoverably deletes user skill
   const resource = await registry.readResource('my-skill');
   assert.match(resource.content, /name: my-skill/);
   assert.equal(resource.digest, enabled.digest);
-  assert.deepEqual(resource.files, ['SKILL.md', 'scripts/check.js']);
+  assert.deepEqual(resource.files, ['.rhwp-origin.json', 'SKILL.md', 'scripts/check.js']);
   assert.throws(() => registry.parseChange({
     action: 'write',
     name: 'my-skill',
@@ -520,4 +520,51 @@ test('Claude sandbox startup errors are surfaced without leaking the hub token',
   assert.match(message, /sandbox unavailable/);
   assert.doesNotMatch(message, /for token/);
   assert.match(message, /\[redacted\]/);
+});
+
+
+test('inline skill editing preserves metadata and rejects stale saves and read-only skills', async (t) => {
+  const { registry, userRoot } = await tempRegistry(t, {
+    bundled: { bundled: { 'SKILL.md': MARKDOWN('bundled') } },
+    user: { legacy: { 'SKILL.md': MARKDOWN('legacy') } },
+  });
+  const created = await change(registry, {
+    action: 'create', name: 'editable', description: 'Keep this description.',
+    body: 'Original instructions.', icon: 'book',
+  });
+  assert.equal(created.ok, true);
+  const before = await registry.readEditor('editable');
+  assert.equal(before.body, 'Original instructions.');
+  const saved = await registry.saveEditor('editable', 'Updated instructions.', before.digest);
+  assert.equal(saved.ok, true);
+  assert.equal((await registry.readEditor('editable')).body, 'Updated instructions.');
+  const markdown = await fs.readFile(path.join(userRoot, 'editable', 'SKILL.md'), 'utf8');
+  assert.deepEqual(projectSkillMarkdown(markdown), {
+    name: 'editable', description: 'Keep this description.', icon: 'book',
+  });
+  const stale = await registry.saveEditor('editable', 'Stale overwrite.', before.digest);
+  assert.equal(stale.ok, false);
+  assert.equal(stale.code, 'STALE');
+  assert.equal((await registry.readEditor('editable')).body, 'Updated instructions.');
+  for (const name of ['bundled', 'legacy']) {
+    await assert.rejects(() => registry.readEditor(name), { code: 'SKILL_NOT_EDITABLE' });
+    assert.equal((await registry.saveEditor(name, 'Forbidden overwrite.', before.digest)).ok, false);
+  }
+});
+
+test('changing a skill icon preserves its body and checks the current digest', async (t) => {
+  const { registry } = await tempRegistry(t);
+  const created = await change(registry, {
+    action: 'create', name: 'icon-skill', description: 'An icon test.', body: 'Keep these instructions.',
+  });
+  const changed = await change(registry, {
+    action: 'icon', name: 'icon-skill', icon: 'shield', base: created.digest,
+  });
+  assert.equal(changed.ok, true);
+  assert.equal((await registry.catalog()).rows.find((row) => row.name === 'icon-skill').icon, 'shield');
+  assert.equal((await registry.readEditor('icon-skill')).body, 'Keep these instructions.');
+  const stale = await change(registry, {
+    action: 'icon', name: 'icon-skill', icon: 'heart', base: created.digest,
+  });
+  assert.equal(stale.code, 'STALE');
 });

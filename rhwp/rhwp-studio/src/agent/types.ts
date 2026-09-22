@@ -508,9 +508,11 @@ export interface UsageSummary {
   providers: Record<AgentName, ProviderUsage>;
   cliproxy?: CliproxyStatus;
   limits?: { claude: ProviderQuota; codex: ProviderQuota };
-  balances?: Partial<Record<'openrouter', RemoteBalance>>;
+  balances?: Partial<Record<'openrouter' | 'grok' | 'opencode', RemoteBalance>>;
   /** pi(OpenRouter) 가 설정돼 있을 때만 온다. */
   openrouter?: OpenRouterCredits;
+  /** Legacy account balance retained for migration reads only. */
+  rau?: OpenRouterCredits;
 }
 
 /** pi 사용자가 OpenRouter 카탈로그에서 고른 모델 하나 (최대 3개). */
