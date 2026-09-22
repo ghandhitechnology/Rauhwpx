@@ -576,7 +576,7 @@ try {
           .querySelector('.ag-account-session-row')
           .innerText.includes('로그인되지 않음'),
       );
-      await page.click('.ag-account-session-row button');
+      await clickText('.ag-account-session-row button', '로그인');
       await page.waitForFunction(
         () => window.sidebarPreview.snapshot().account === 'signed-in',
       );
@@ -586,7 +586,7 @@ try {
           .innerText.includes('designer@example.test'),
       );
       await screenshot('connections');
-      await page.click('.ag-account-session-row button');
+      await clickText('.ag-account-session-row button', '로그아웃');
       await page.waitForFunction(
         () => window.sidebarPreview.snapshot().account === 'signed-out',
       );
