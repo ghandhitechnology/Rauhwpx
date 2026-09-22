@@ -13,7 +13,7 @@ import { createMockCloud } from './mock-cloud.ts';
 import { listThreads, getThread, waitForThreadsPersistence } from '../agent/threads.ts';
 import { createCloudWorkspace } from '../ui/cloud-workspace.ts';
 import { createWorkspaceController } from '../cloud/workspace.ts';
-import { isSettingsDestination } from '../ui/agent-sidebar/settings-contract.ts';
+import { normalizeSettingsDestination } from '../ui/agent-sidebar/settings-contract.ts';
 import { mountAuditNavigator } from './audit-scenarios.ts';
 import { mountAuditDialogs } from './audit-dialogs.ts';
 import { applyAuditState } from './audit-state.ts';
@@ -151,7 +151,7 @@ services.value = params.get('services') === 'setup' ? 'setup' : 'ready';
 services.addEventListener('change', () => {
   mock.bridge.interrupt();
   mock.setServices(services.value === 'ready');
-  eventBus.emit('settings:open', { destination: 'connections' });
+  eventBus.emit('settings:open', { destination: 'ai' });
 });
 const theme = document.querySelector<HTMLSelectElement>('#theme')!;
 if (['light', 'dark', 'system'].includes(params.get('theme') ?? ''))
@@ -217,7 +217,7 @@ document.addEventListener(
 if (params.get('controls') === '0')
   document.querySelector('#preview-controls')!.setAttribute('hidden', '');
 if (params.get('page') === 'settings')
-  eventBus.emit('settings:open', { destination: isSettingsDestination(params.get('destination')) ? params.get('destination')! : 'editing' });
+  eventBus.emit('settings:open', { destination: normalizeSettingsDestination(params.get('destination')) ?? 'editing' });
 if (params.get('fullscreen') === '1')
   sidebar.root.querySelector('.ag-settings-page')?.dispatchEvent(new CustomEvent('ag-settings-expand-request', { bubbles: true }));
 if (params.get('page') === 'versions') sidebar.openVersions();

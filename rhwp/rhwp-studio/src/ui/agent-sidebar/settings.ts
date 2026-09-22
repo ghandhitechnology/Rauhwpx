@@ -27,7 +27,7 @@ import { createProviderQuota } from './provider-quota.ts';
 import { createEditingSettings } from './settings-editing.ts';
 import { userSettings } from '../../core/user-settings.ts';
 import {
-  isSettingsDestination,
+  normalizeSettingsDestination,
   type DirtyExitChoice,
   type EditorSettingsRuntime,
   type SettingsDestination,
@@ -321,6 +321,10 @@ export interface SettingsPanelDeps {
   }) => void;
   cloudSettings?: HTMLElement;
   refreshCloudSettings?: () => void;
+  /** 설정 안에 스킬 선반을 붙인다. */
+  skillsSettings?: HTMLElement;
+  /** 스킬 탭에 들어갈 때 최신 목록을 요청한다. */
+  refreshSkills?: () => void;
 }
 
 export interface SettingsPanel {
@@ -352,6 +356,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     onAgentSetupAbandoned,
     cloudSettings,
     refreshCloudSettings,
+    skillsSettings,
+    refreshSkills,
   } = deps;
 
   let disposed = false;
@@ -380,9 +386,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let lastDestination: SettingsDestination = 'editing';
   try {
     const storedDestination = sessionStorage.getItem('rhwp-settings-destination');
-    if (isSettingsDestination(storedDestination)) {
-      currentDestination = storedDestination;
-      lastDestination = storedDestination;
+    const normalized = normalizeSettingsDestination(storedDestination);
+    if (normalized) {
+      currentDestination = normalized;
+      lastDestination = normalized;
     }
   } catch {
     // 세션 저장소가 없어도 기본 목적지로 계속 진행한다.
@@ -467,8 +474,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const navButtons = new Map<SettingsDestination, HTMLButtonElement>();
   const destinations: ReadonlyArray<{ id: SettingsDestination; label: string }> = [
     { id: 'editing', label: '편집' },
-    { id: 'ai', label: 'AI 설정' },
-    { id: 'connections', label: 'AI 연결' },
+    { id: 'ai', label: 'AI' },
+    { id: 'skills', label: '스킬' },
     { id: 'cloud', label: 'Cloud 작업' },
   ];
   for (const destination of destinations) {
@@ -1355,7 +1362,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   const connectionContent = el('div', 'ag-settings-destination-content');
   connectionContent.append(accountSection.root, connection.root, quotaSection.root, browserbaseSection.root, usageSection.root);
-  panes.get('connections')?.appendChild(connectionContent);
+  aiContent.prepend(connectionContent);
+  if (skillsSettings) {
+    const skillsContent = el('div', 'ag-settings-destination-content ag-settings-skills-content');
+    skillsContent.appendChild(skillsSettings);
+    panes.get('skills')?.appendChild(skillsContent);
+  }
   if (cloudSettings) panes.get('cloud')?.appendChild(cloudSettings);
 
   aiApply.addEventListener('click', () => void applyAiDraft());
@@ -1409,7 +1421,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         return editingSettings.isDirty();
       case 'ai':
         return isAiDirty();
-      case 'connections':
+      case 'skills':
       case 'cloud':
         return false;
       default: {
@@ -1451,6 +1463,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }
     renderDestinationState();
     syncUsagePolling();
+    if (destination === 'skills') refreshSkills?.();
     panes.get(destination)?.scrollTo({ top: 0 });
   }
 
@@ -1614,7 +1627,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         case 'ai':
           cancelAiDraft();
           return true;
-        case 'connections':
+        case 'skills':
         case 'cloud':
           return true;
         default: {
@@ -1628,7 +1641,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         return editingSettings.apply();
       case 'ai':
         return applyAiDraft();
-      case 'connections':
+      case 'skills':
       case 'cloud':
         return true;
       default: {
@@ -3147,7 +3160,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   function syncUsagePolling(): void {
     if (usagePoll) clearInterval(usagePoll);
     usagePoll = null;
-    if (!settingsOpen || currentDestination !== 'connections' || document.hidden || disposed) return;
+    if (!settingsOpen || currentDestination !== 'ai' || document.hidden || disposed) return;
     void refreshUsage();
     usagePoll = setInterval(() => void refreshUsage(), 60_000);
   }

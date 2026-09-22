@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 
 export async function checkSetupTerminal(page, origin) {
   for (const width of [320, 640]) {
-    await page.goto(`${origin}/?page=settings&destination=connections&surface=provider-setup&provider=claude&services=setup&width=${width}&theme=${width === 320 ? 'light' : 'dark'}`, { waitUntil: 'networkidle0' });
+    await page.goto(`${origin}/?page=settings&destination=ai&surface=provider-setup&provider=claude&services=setup&width=${width}&theme=${width === 320 ? 'light' : 'dark'}`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.ag-agent-setup-overlay.ag-open');
     // Fixture install leaves the provider unconfigured for the login step.
     await page.evaluate(async () => { await window.sidebarPreview.bridge.installAgent('claude'); });

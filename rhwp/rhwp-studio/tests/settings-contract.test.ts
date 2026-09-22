@@ -5,6 +5,7 @@ import {
   cloneEditorDraft,
   editorDraftEquals,
   isSettingsDestination,
+  normalizeSettingsDestination,
   normalizeEditorDraft,
 } from '../src/ui/agent-sidebar/settings-contract.ts';
 import { normalizeAppSettings } from '../src/core/user-settings.ts';
@@ -48,9 +49,11 @@ test('초안 정규화는 표시 범위와 조판 부호 불변식을 지킨다'
   assert.equal(normalized.view.showControlCodes, true);
 });
 
-test('설정 목적지는 편집·AI·연결·Cloud만 받고 그 외 값은 버린다', () => {
+test('설정 목적지는 편집·AI·스킬·Cloud만 받고 그 외 값은 버린다', () => {
   assert.equal(isSettingsDestination('product'), false);
   assert.equal(isSettingsDestination('editing'), true);
+  assert.equal(isSettingsDestination('skills'), true);
   assert.equal(isSettingsDestination('cloud'), true);
   assert.equal(isSettingsDestination('about'), false);
+  assert.equal(normalizeSettingsDestination('connections'), 'ai');
 });

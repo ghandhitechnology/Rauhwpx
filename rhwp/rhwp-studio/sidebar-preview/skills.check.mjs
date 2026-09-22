@@ -62,9 +62,10 @@ try {
       const input = document.querySelector('.ag-input');
       return input && !input.disabled;
     });
-    await page.click('.ag-skills-btn');
-    await page.waitForSelector('.ag-root.ag-skills-open');
-    await page.waitForSelector('.ag-skills-list');
+    await page.click('.ag-settings-btn');
+    await page.waitForSelector('.ag-root.ag-settings-open');
+    await page.click('.ag-settings-nav-button[data-destination="skills"]');
+    await page.waitForSelector('#ag-settings-pane-skills .ag-skills-list');
     await page.waitForFunction(() => document.querySelectorAll('.ag-skills-list [data-skill-name]').length >= 3);
   }
 
@@ -103,8 +104,10 @@ try {
   assert.deepEqual(storedDraggedOrder, draggedNames, 'Pointer reorder persists the catalog order.');
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForFunction(() => window.sidebarPreview);
-  await page.$eval('.ag-skills-btn', (button) => button.click());
-  await page.waitForSelector('.ag-root.ag-skills-open');
+  await page.click('.ag-settings-btn');
+  await page.waitForSelector('.ag-root.ag-settings-open');
+  await page.click('.ag-settings-nav-button[data-destination="skills"]');
+  await page.waitForSelector('#ag-settings-pane-skills .ag-skills-list');
   await page.waitForFunction((expected) => JSON.stringify([...document.querySelectorAll('.ag-skills-list [data-skill-name]')].map((node) => node.getAttribute('data-skill-name'))) === JSON.stringify(expected), {}, draggedNames);
 
   // Keyboard reorder persists the same order as pointer drag. Escape cancels an in-flight drag.
@@ -153,6 +156,18 @@ try {
     const button = row?.querySelector('.ag-skill-copy');
     return button?.getAttribute('aria-expanded') === 'true' && row?.classList.contains('ag-skill-expanded');
   }, {}, copyName);
+  const secondCopy = await page.$$('.ag-skills-list .ag-skill-copy').then((copies) => copies[1]);
+  assert(secondCopy, 'A second skill is available for single-expansion coverage.');
+  const secondName = await secondCopy.evaluate((node) => node.closest('[data-skill-name]')?.getAttribute('data-skill-name'));
+  assert(secondName);
+  await secondCopy.click();
+  await page.waitForFunction((names) => {
+    const [first, second] = names;
+    const firstRow = document.querySelector(`[data-skill-name="${CSS.escape(first)}"]`);
+    const secondRow = document.querySelector(`[data-skill-name="${CSS.escape(second)}"]`);
+    return firstRow?.classList.contains('ag-skill-expanded') === false
+      && secondRow?.classList.contains('ag-skill-expanded') === true;
+  }, {}, [copyName, secondName]);
 
   // Toggle keeps its row mounted while the async commit updates aria-pressed.
   const toggle = await page.$('.ag-skills-list .ag-skill-toggle');
@@ -200,8 +215,10 @@ try {
   await page.setViewport({ width: 280, height: 900, deviceScaleFactor: 1 });
   await page.goto(`${origin}/?controls=0&theme=light&width=280`, { waitUntil: 'networkidle0' });
   await page.waitForFunction(() => window.sidebarPreview);
-  await page.$eval('.ag-skills-btn', (button) => button.click());
-  await page.waitForSelector('.ag-root.ag-skills-open');
+  await page.click('.ag-settings-btn');
+  await page.waitForSelector('.ag-root.ag-settings-open');
+  await page.click('.ag-settings-nav-button[data-destination="skills"]');
+  await page.waitForSelector('#ag-settings-pane-skills .ag-skills-list');
   await page.$eval('.ag-skills-toolbar .ag-skill-text', (button) => button.click());
   await page.waitForSelector('.ag-skills-import-panel:not([hidden])');
   const layout = await page.$eval('.ag-root', (node) => ({

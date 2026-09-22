@@ -463,8 +463,10 @@ try {
       );
     }
     await page.keyboard.press('Escape');
-    await page.click('.ag-skills-btn');
-    await page.waitForSelector('.ag-root.ag-skills-open');
+    await page.click('.ag-settings-btn');
+    await page.waitForSelector('.ag-root.ag-settings-open');
+    await page.click('.ag-settings-nav-button[data-destination="skills"]');
+    await page.waitForSelector('#ag-settings-pane-skills .ag-skills-list');
     await page.type('.ag-skills-search', 'proofread');
     await page.waitForFunction(
       () => {
@@ -530,7 +532,7 @@ try {
     'Settings, fake account login/logout, templates, and writing style',
     async () => {
       await open('page=settings');
-      await clickText('.ag-settings-nav-button', 'AI 연결');
+      await clickText('.ag-settings-nav-button', 'AI');
       await page.waitForSelector('.ag-settings-quota-fill[data-health="low"]', { visible: true });
       assert.match(await page.$eval('.ag-settings-balance-card[data-provider="openrouter"] .ag-settings-balance-amount', (el) => el.textContent), /\$18\.50/);
       assert.equal(await page.$eval('.ag-settings-balance-card[data-provider="openrouter"] [role="meter"]', (el) => el.getAttribute('aria-valuenow')), '92.5');
@@ -562,7 +564,7 @@ try {
       assert.equal(await page.$eval('[data-action="refresh-usage"]', (el) => el.disabled), true);
       await page.waitForFunction(() => !document.querySelector('[data-action="refresh-usage"]').disabled);
       await screenshot('settings');
-      await clickText('.ag-settings-nav-button', 'AI 연결');
+      await clickText('.ag-settings-nav-button', 'AI');
       await page.waitForFunction(() =>
         document
           .querySelector('.ag-account-session-row')
@@ -582,7 +584,7 @@ try {
       await page.waitForFunction(
         () => window.sidebarPreview.snapshot().account === 'signed-out',
       );
-      await clickText('.ag-settings-nav-button', 'AI 설정');
+      await clickText('.ag-settings-nav-button', 'AI');
       await page.waitForSelector('.ag-template-row', { visible: true });
       await screenshot('ai-settings');
       await page.evaluate(async () => {
@@ -636,19 +638,19 @@ try {
   );
   await step('Provider quota failure and exhausted reset credit', async () => {
     await open('page=settings&quota=pro');
-    await clickText('.ag-settings-nav-button', 'AI 연결');
+    await clickText('.ag-settings-nav-button', 'AI');
     await page.waitForSelector('.ag-settings-quota-card[data-provider="codex"]');
     assert.equal(await page.$$eval('.ag-settings-quota-card[data-provider="codex"] [role="meter"]', (meters) => meters.length), 1);
     assert.doesNotMatch(await page.$eval('.ag-settings-quota-card[data-provider="codex"]', (el) => el.textContent), /5시간/);
     assert.match(await page.$eval('.ag-settings-quota-card[data-provider="claude"]', (el) => el.textContent), /5시간/);
     await open('page=settings&quota=error');
-    await clickText('.ag-settings-nav-button', 'AI 연결');
+    await clickText('.ag-settings-nav-button', 'AI');
     await page.waitForSelector('.ag-settings-quota-card[data-state="error"]');
     assert.match(await page.$eval('.ag-provider-quotas', (el) => el.textContent), /제공자가 응답하지 않아요/);
     assert.equal(await page.$eval('.ag-settings-quota-card[data-provider="codex"] [role="meter"]', (el) => el.hasAttribute('aria-valuenow')), false);
     assert.equal(await page.$('[data-action="request-reset"]'), null);
     await open('page=settings&quota=refresh-error');
-    await clickText('.ag-settings-nav-button', 'AI 연결');
+    await clickText('.ag-settings-nav-button', 'AI');
     await page.waitForFunction(() => !document.querySelector('[data-action="refresh-usage"]').disabled);
     await page.click('[data-action="refresh-usage"]');
     await page.waitForFunction(() => document.querySelector('.ag-settings-body').textContent.includes('연결이 일시적으로 끊겼어요.'));
@@ -656,14 +658,14 @@ try {
     await page.waitForFunction(() => !document.querySelector('[data-action="refresh-usage"]').disabled);
     assert.equal(await page.$eval('.ag-settings-body', (el) => el.textContent.includes('연결이 일시적으로 끊겼어요.')), false);
     await open('page=settings&quota=empty');
-    await clickText('.ag-settings-nav-button', 'AI 연결');
+    await clickText('.ag-settings-nav-button', 'AI');
     await page.waitForSelector('[data-action="request-reset"]');
     assert.equal(await page.$eval('[data-action="request-reset"]', (el) => el.disabled), true);
     await page.evaluate(() => localStorage.setItem('rhwp-codex-pending-reset', JSON.stringify({
       key: 'reset-interrupted-request-123456', account: 'preview-codex',
     })));
     await open('page=settings&quota=empty');
-    await clickText('.ag-settings-nav-button', 'AI 연결');
+    await clickText('.ag-settings-nav-button', 'AI');
     await page.waitForSelector('[data-action="confirm-reset"]');
     assert.equal(await page.$eval('[data-action="confirm-reset"]', (el) => el.disabled), false,
       'An interrupted reset can be checked again after reload even with zero credits');
@@ -675,7 +677,7 @@ try {
     'Unconfigured provider installation and local OAuth placeholder',
     async () => {
       await open('services=setup&page=settings');
-      await clickText('.ag-settings-nav-button', 'AI 연결');
+      await clickText('.ag-settings-nav-button', 'AI');
       const codexRow = '.ag-settings-provider-row[data-agent="codex"]';
       await page.click(`${codexRow} summary`);
       assert.equal(await page.$eval(codexRow, el => el.open), true);

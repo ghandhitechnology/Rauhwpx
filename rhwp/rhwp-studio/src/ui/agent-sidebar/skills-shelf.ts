@@ -63,6 +63,7 @@ export function createSkillsShelf(options: {
   let dragOriginalNames: string[] = [];
   const orderStorageKey = 'rhwp-skill-order';
   const replaceDigests = new Map<string, string>();
+  let reflowFrame: number | null = null;
 
   search.addEventListener('input', () => render());
   modeButton.addEventListener('click', () => {
@@ -116,6 +117,14 @@ export function createSkillsShelf(options: {
     }
   }
 
+  function writeStoredOrder(order: string[]): void {
+    try {
+      localStorage.setItem(orderStorageKey, JSON.stringify(order));
+    } catch {
+      // Storage can be unavailable in private or restricted browsing contexts.
+    }
+  }
+
   function sortByStoredOrder(next: CatalogRow[]): CatalogRow[] {
     const order = storedOrder();
     if (order.length === 0) return next;
@@ -128,15 +137,22 @@ export function createSkillsShelf(options: {
   }
 
   function rememberOrder(): void {
-    const names = [...list.querySelectorAll<HTMLElement>('[data-skill-name]')]
+    const visibleNames = [...list.querySelectorAll<HTMLElement>('[data-skill-name]')]
       .map((item) => item.dataset.skillName)
       .filter((name): name is string => Boolean(name));
-    if (names.length > 0) localStorage.setItem(orderStorageKey, JSON.stringify(names));
+    if (visibleNames.length === 0) return;
+    const visible = new Set(visibleNames);
+    const allNames = sortByStoredOrder(rows).map((row) => row.name);
+    let visibleIndex = 0;
+    const names = allNames.map((name) => visible.has(name) ? visibleNames[visibleIndex++] : name);
+    writeStoredOrder(names);
   }
 
   function animateReflow(before: Map<string, DOMRect>): void {
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    requestAnimationFrame(() => {
+    if (reflowFrame !== null) cancelAnimationFrame(reflowFrame);
+    reflowFrame = requestAnimationFrame(() => {
+      reflowFrame = null;
       for (const item of list.querySelectorAll<HTMLElement>('[data-skill-name]')) {
         const name = item.dataset.skillName;
         const old = name ? before.get(name) : undefined;
@@ -174,16 +190,34 @@ export function createSkillsShelf(options: {
     }
     for (const skill of visible) list.appendChild(renderCatalogRow(skill));
     animateReflow(before);
+    if (importedName && visible.some((skill) => skill.name === importedName)) {
+      const name = importedName;
+      importedName = null;
+      const row = list.querySelector<HTMLElement>(`[data-skill-name="${CSS.escape(name)}"]`);
+      if (row) {
+        if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          row.animate(
+            [
+              { opacity: 0, transform: 'translateY(-8px) scale(0.98)' },
+              { opacity: 1, transform: 'translateY(0) scale(1)' },
+            ],
+            { duration: 420, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' },
+          );
+        }
+        row.classList.add('ag-skill-imported');
+        requestAnimationFrame(() => row.classList.add('ag-skill-import-settled'));
+      }
+    }
     if (focusName && visible.some((skill) => skill.name === focusName)) {
       const name = focusName;
-      const row = [...list.querySelectorAll<HTMLElement>('[data-skill-name]')]
-        .find((candidate) => candidate.dataset.skillName === name);
-      row?.querySelector<HTMLButtonElement>('.ag-skill-copy')?.focus();
+      const focusCopy = () => list
+        .querySelector<HTMLElement>(`[data-skill-name="${CSS.escape(name)}"]`)
+        ?.querySelector<HTMLButtonElement>('.ag-skill-copy');
+      focusCopy()?.focus();
       requestAnimationFrame(() => {
-        const nextRow = [...list.querySelectorAll<HTMLElement>('[data-skill-name]')]
-          .find((candidate) => candidate.dataset.skillName === name);
-        nextRow?.querySelector<HTMLButtonElement>('.ag-skill-copy')?.focus();
+        if (focusName !== name) return;
         focusName = null;
+        focusCopy()?.focus();
       });
     }
   }
@@ -205,8 +239,17 @@ export function createSkillsShelf(options: {
     );
     copy.append(copyIcon, copyText);
     copy.addEventListener('click', () => {
+      const before = capturePositions();
       const expanded = item.classList.toggle('ag-skill-expanded');
+      if (expanded) {
+        for (const other of list.querySelectorAll<HTMLElement>('.ag-skill-item.ag-skill-expanded')) {
+          if (other === item) continue;
+          other.classList.remove('ag-skill-expanded');
+          other.querySelector<HTMLButtonElement>('.ag-skill-copy')?.setAttribute('aria-expanded', 'false');
+        }
+      }
       copy.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      animateReflow(before);
     });
     const actions = el('div', 'ag-skill-item-actions');
     switch (skill.kind) {
@@ -226,15 +269,6 @@ export function createSkillsShelf(options: {
     }
     actions.appendChild(renderDragHandle(item, skill.name));
     item.append(copy, actions);
-    if (importedName === skill.name) {
-      item.classList.add('ag-skill-imported');
-      importedName = null;
-      copy.focus();
-      requestAnimationFrame(() => {
-        item.classList.add('ag-skill-import-settled');
-        copy.focus();
-      });
-    }
     return item;
   }
 
@@ -249,9 +283,11 @@ export function createSkillsShelf(options: {
       event.preventDefault();
       const sibling = event.key === 'ArrowUp' ? item.previousElementSibling : item.nextElementSibling;
       if (!(sibling instanceof HTMLElement) || !sibling.dataset.skillName) return;
+      const before = capturePositions();
       if (event.key === 'ArrowUp') list.insertBefore(item, sibling);
       else list.insertBefore(sibling, item);
       rememberOrder();
+      animateReflow(before);
       item.classList.add('ag-skill-drag-settled');
       window.setTimeout(() => item.classList.remove('ag-skill-drag-settled'), 420);
       handle.focus();
@@ -275,15 +311,24 @@ export function createSkillsShelf(options: {
       const next = item.nextElementSibling as HTMLElement | null;
       const previous = item.previousElementSibling as HTMLElement | null;
       const itemRect = item.getBoundingClientRect();
-      if (moveEvent.clientY > startY + 8 && next && moveEvent.clientY >= itemRect.bottom - 8) {
+      const before = capturePositions();
+      let moved = false;
+      if (next?.dataset.skillName && moveEvent.clientY >= itemRect.bottom - 8) {
         list.insertBefore(next, item);
-      } else if (moveEvent.clientY < startY - 8 && previous && moveEvent.clientY <= itemRect.top + 8) {
+        moved = true;
+      } else if (previous?.dataset.skillName && moveEvent.clientY <= itemRect.top + 8) {
         list.insertBefore(item, previous);
+        moved = true;
       }
+      if (moved) animateReflow(before);
     };
+    let ended = false;
     const end = () => {
+      if (ended) return;
+      ended = true;
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
       window.removeEventListener('keydown', cancel);
       item.classList.remove('ag-skill-dragging');
       root.classList.remove('ag-skills-dragging');
@@ -306,7 +351,8 @@ export function createSkillsShelf(options: {
     };
     window.addEventListener('pointermove', move);
     try { item.setPointerCapture(event.pointerId); } catch { /* Pointer capture is unavailable in some test drivers. */ }
-    window.addEventListener('pointerup', end, { once: true });
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
     window.addEventListener('keydown', cancel);
   }
 
@@ -316,8 +362,11 @@ export function createSkillsShelf(options: {
     toggle.setAttribute('aria-label', '사용');
     toggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
     toggle.addEventListener('click', () => {
+      const nextEnabled = toggle.getAttribute('aria-pressed') !== 'true';
+      toggle.setAttribute('aria-pressed', nextEnabled ? 'true' : 'false');
+      toggle.closest<HTMLElement>('[data-skill-name]')?.classList.toggle('ag-skill-disabled', !nextEnabled);
       pending = { action: 'enable', name };
-      options.onCommit({ action: 'enable', name, enabled: !enabled });
+      options.onCommit({ action: 'enable', name, enabled: nextEnabled });
     });
     return toggle;
   }
@@ -376,10 +425,10 @@ export function createSkillsShelf(options: {
           replaceDigests.delete(`${current.harness}:${current.name}`);
           importedName = current.name;
           focusName = current.name;
-          localStorage.setItem(orderStorageKey, JSON.stringify([
+          writeStoredOrder([
             current.name,
             ...storedOrder().filter((name) => name !== current.name),
-          ]));
+          ]);
           showCatalog();
         }
         break;
@@ -413,7 +462,10 @@ export function createSkillsShelf(options: {
       const previousNames = [...list.querySelectorAll<HTMLElement>('[data-skill-name]')]
         .map((item) => item.dataset.skillName)
         .filter((name): name is string => Boolean(name));
-      const nextNames = sortByStoredOrder(next).map((item) => item.name);
+      const needle = query();
+      const nextNames = sortByStoredOrder(next)
+        .filter((item) => !needle || `${item.name} ${item.description}`.toLowerCase().includes(needle))
+        .map((item) => item.name);
       rows = next;
       if (mode === 'catalog') {
         if (previousNames.length === nextNames.length && previousNames.every((name, index) => name === nextNames[index])) {
@@ -423,6 +475,7 @@ export function createSkillsShelf(options: {
             if (toggle) {
               toggle.setAttribute('aria-pressed', row.enabled ? 'true' : 'false');
               toggle.disabled = row.kind !== 'skill';
+              item?.classList.toggle('ag-skill-disabled', !row.enabled);
             }
           }
         } else render();

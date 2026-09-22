@@ -64,12 +64,16 @@ export async function applyAuditState(preview: SidebarPreview, params: URLSearch
   }
   const surface = params.get('surface');
   const surfaces: Record<string, string> = {
-    skills: '.ag-skills-btn', references: '.ag-references-btn', threads: '.ag-header .ag-threads-btn',
+    skills: '.ag-settings-nav-button[data-destination="skills"]', references: '.ag-references-btn', threads: '.ag-header .ag-threads-btn',
     'provider-picker': '[aria-label="프로바이더 선택"]', 'model-picker': '[aria-label="모델 선택"]',
     'effort-picker': '[aria-label="추론 강도 선택"]', permissions: '.ag-permission-btn',
     'provider-setup': `.ag-settings-provider-row[data-agent="${['rau', 'claude', 'pi', 'grok', 'cursor', 'opencode'].includes(params.get('provider') ?? '') ? params.get('provider') : 'codex'}"] button`,
     'cloud-options': '.ag-header [data-workspace-mode="cloud"]', 'cloud-setup': '.ag-header [data-workspace-mode="cloud"]',
   };
+  if (surface === 'skills') {
+    await click('.ag-settings-btn');
+    await until(() => document.querySelector('.ag-root.ag-settings-open'), 'settings page');
+  }
   if (surface === 'provider-setup') {
     const rowSelector = surfaces[surface]!.replace(/ button$/, '');
     const row = await until(() => document.querySelector<HTMLDetailsElement>(rowSelector), 'provider connection');
