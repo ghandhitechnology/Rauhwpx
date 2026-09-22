@@ -57,19 +57,21 @@ struct BlockTableRowScan {
 ///
 /// 행과 셀별 절대 unit cut, rowspan block cut 여부, continuation 여부를 owned state로
 /// 묶어 fragment budget 경계에서 그대로 보존한다.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct TableContinuationCursor {
     row: usize,
     start_cut: Vec<usize>,
     start_cut_is_block: bool,
     is_continuation: bool,
     fragments_emitted: usize,
+    remaining_row_height: Option<f64>,
 }
 
 impl TableContinuationCursor {
     fn skip_consumed_row(&mut self) {
         self.row = self.row.saturating_add(1);
         self.start_cut.clear();
+        self.remaining_row_height = None;
         self.start_cut_is_block = false;
         self.is_continuation = true;
     }
@@ -97,6 +99,7 @@ impl TableContinuationCursor {
     fn finish(&mut self, row_count: usize, emitted_fragment: bool) {
         self.row = row_count;
         self.start_cut.clear();
+        self.remaining_row_height = None;
         self.start_cut_is_block = false;
         if emitted_fragment {
             self.fragments_emitted = self.fragments_emitted.saturating_add(1);
@@ -238,6 +241,7 @@ impl BlockTableContinuationContext {
 #[derive(Clone, Copy)]
 struct BlockRowScanVars {
     cursor_row: usize,
+    allocated_start_row_height: Option<f64>,
     row_count: usize,
     cs: f64,
     can_intra_split: bool,
@@ -3606,6 +3610,17 @@ impl TypesetEngine {
                     .unwrap_or(0);
                 // [#1956] 전체 폭 밴드 가드 — 옆 공간이 없으면 arming 하지 않는다.
                 let col_w_hu = st.layout.column_width_hu();
+                let following_band = if anchor_sw > 0 && (anchor_sw - col_w_hu).abs() < 3000 {
+                    crate::renderer::float_placement::following_fixed_picture_wrap_band(
+                        para,
+                        paragraphs.get(para_idx + 1),
+                        page_def,
+                        col_w_hu,
+                    )
+                } else {
+                    None
+                };
+                let (anchor_cs, anchor_sw) = following_band.unwrap_or((anchor_cs, anchor_sw));
                 let band_full_width = anchor_sw > 0 && (anchor_sw - col_w_hu).abs() < 3000;
                 if (anchor_cs > 0 || anchor_sw > 0) && !band_full_width {
                     st.wrap_around_cs = anchor_cs;
@@ -3664,7 +3679,7 @@ impl TypesetEngine {
                     // col_area-full-width layout 정합 (line_seg cs=0/sw=실제 wrap zone 인코딩
                     // 으로 한컴 정합 이미 유지). hwp3-sample5.hwp 의 page 8/27/48 (Task #722
                     // 본질 영역) 은 image_mr > 0 으로 가드 통과 → 정합 유지.
-                    if !is_caption_style && image_margin_right_hu > 0 {
+                    if following_band.is_none() && !is_caption_style && image_margin_right_hu > 0 {
                         st.current_column_wrap_anchors.insert(
                             para_idx,
                             crate::renderer::pagination::WrapAnchorRef {
@@ -10556,6 +10571,7 @@ impl TypesetEngine {
                         start_cut,
                         end_cut,
                         is_block_split,
+                        allocated_row_heights,
                     } => lookup_local(*para_index).map(|l| PageItem::PartialTable {
                         para_index: l + 1,
                         control_index: *control_index,
@@ -10565,6 +10581,7 @@ impl TypesetEngine {
                         start_cut: start_cut.clone(),
                         end_cut: end_cut.clone(),
                         is_block_split: *is_block_split,
+                        allocated_row_heights: allocated_row_heights.clone(),
                     }),
                     PageItem::Shape {
                         para_index,
@@ -15740,6 +15757,7 @@ impl TypesetEngine {
     ) -> BlockTableRowScan {
         let BlockRowScanVars {
             cursor_row,
+            allocated_start_row_height,
             row_count,
             cs,
             can_intra_split,
@@ -16175,7 +16193,9 @@ impl TypesetEngine {
                 // 연속분 cursor_row — 시작 컷 적용. row_cut_content_height 가
                 // 셀별 (content+pad) 행 max 를 반환(분할 행이므로 cell.height
                 // 강제 없음).
-                layout_engine.row_cut_content_height(table, r, row_start_cut, &[], styles)
+                layout_engine
+                    .row_cut_content_height(table, r, row_start_cut, &[], styles)
+                    .max(allocated_start_row_height.unwrap_or(0.0))
             };
             // 온전한 행 후보에는 rowspan 잔여 내용도 예약한다. 아래에서 실제
             // end_cut을 선택하면 row_cut_content_height로 분할 높이를 다시 측정하고,
@@ -18145,6 +18165,7 @@ impl TypesetEngine {
                     start_cut,
                     BlockRowScanVars {
                         cursor_row,
+                        allocated_start_row_height: continuation.remaining_row_height,
                         row_count,
                         cs,
                         can_intra_split,
@@ -18239,6 +18260,7 @@ impl TypesetEngine {
                             start_cut,
                             BlockRowScanVars {
                                 cursor_row,
+                                allocated_start_row_height: continuation.remaining_row_height,
                                 row_count,
                                 cs,
                                 can_intra_split,
@@ -18283,6 +18305,39 @@ impl TypesetEngine {
                             if end_row <= cursor_row {
                                 end_row = cursor_row + 1;
                             }
+                        }
+                    }
+                }
+            }
+
+            let mut allocated_row_heights = Vec::new();
+            if let Some(height) = continuation.remaining_row_height {
+                if end_row > cursor_row + 1 || split_end_cut.is_empty() {
+                    allocated_row_heights.push((cursor_row, height));
+                }
+            }
+            let mut next_remaining_row_height = None;
+            if !start_cut_is_block && split_block_start.is_none() && !split_end_cut.is_empty() {
+                let row = end_row.saturating_sub(1);
+                if row != cursor_row || start_cut.is_empty() {
+                    if let Some(declared) = layout_engine.saved_row_height_at_page_reset(
+                        table, row, &split_end_cut, styles,
+                    ) {
+                        let content_height = layout_engine.row_cut_content_height(
+                            table, row, &[], &split_end_cut, styles,
+                        );
+                        let preceding_height = consumed - content_height;
+                        let allocated = (avail_for_rows - preceding_height).max(content_height).min(declared);
+                        let residual = declared - allocated;
+                        let remaining_content = layout_engine.row_cut_content_height(
+                            table, row, &split_end_cut, &[], styles,
+                        );
+                        // 하나의 저장 페이지 재설정만 있는 행에서, 다음 쪽에 남은
+                        // 선언 높이와 내용이 모두 들어가는 경우에만 물리적 밴드를 보존한다.
+                        if residual >= remaining_content && residual <= base_available {
+                            consumed = preceding_height + allocated;
+                            allocated_row_heights.push((row, allocated));
+                            next_remaining_row_height = Some(residual);
                         }
                     }
                 }
@@ -18359,6 +18414,7 @@ impl TypesetEngine {
                         start_cut: continuation.start_cut.clone(),
                         end_cut: Vec::new(),
                         is_block_split: start_cut_is_block,
+                        allocated_row_heights,
                     });
                     // 마지막 fragment: spacing_after만 포함 (Paginator engine.rs:1051 동일)
                     // host line advance/positive offset은 원 anchor 조각의 계약이며,
@@ -18415,6 +18471,7 @@ impl TypesetEngine {
                 end_cut: split_end_cut.clone(),
                 // [Task #1025] 이번 분할이 블록 분할이거나 start_cut 이 이미 블록 인덱스.
                 is_block_split: split_block_start.is_some() || start_cut_is_block,
+                allocated_row_heights,
             });
             // [#2238] 중간 fragment 가시높이 부기 — used_height(flush 시 current_height)
             // 표시용. advance 직후 current_height 가 리셋되므로 흐름/기하 불변.
@@ -18436,6 +18493,7 @@ impl TypesetEngine {
                 Vec::new()
             };
             continuation.advance(end_row, split_block_start, next_cut, split_end_limit > 0.0);
+            continuation.remaining_row_height = next_remaining_row_height;
             TableContinuationIteration::Emitted
         });
     }
@@ -20254,6 +20312,7 @@ mod tests {
                 start_cut: Vec::new(),
                 end_cut: Vec::new(),
                 is_block_split: false,
+                allocated_row_heights: Vec::new(),
             }]),
             page_with_items(vec![PageItem::PartialTable {
                 para_index: 7,
@@ -20264,6 +20323,7 @@ mod tests {
                 start_cut: Vec::new(),
                 end_cut: Vec::new(),
                 is_block_split: false,
+                allocated_row_heights: Vec::new(),
             }]),
         ];
 

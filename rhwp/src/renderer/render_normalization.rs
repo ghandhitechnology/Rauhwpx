@@ -143,7 +143,10 @@ impl RenderNormalizationOverlay {
                     nested_path.target_control_index = Some(control_index);
 
                     let source_width = nested.common.width;
+                    // noAdjust 표는 저장된 열 너비를 유지한다. 부모 셀로 늘리면
+                    // inner-table-01의 고정 폭 요구사항 표가 오른쪽 테두리를 넘는다.
                     if !nested.common.treat_as_char
+                        && (nested.attr | nested.raw_table_record_attr) & 0x08 == 0
                         && source_width > 0
                         && u64::from(source_width) < u64::from(cell.width)
                     {
@@ -268,6 +271,26 @@ mod tests {
             }],
             target_control_index: Some(0),
         }
+    }
+
+    #[test]
+    fn fixed_nested_table_keeps_its_authored_width() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/inner-table-01.hwp"),
+        )
+        .expect("fixture");
+        let doc = crate::wasm_api::HwpDocument::from_bytes(&bytes).expect("parse");
+        let document = doc.document();
+        let Control::Table(owner) = &document.sections[0].paragraphs[0].controls[2] else {
+            panic!("owner table");
+        };
+        let Control::Table(nested) = &owner.cells[13].paragraphs[4].controls[0] else {
+            panic!("nested table");
+        };
+        let overlay = RenderNormalizationOverlay::from_document(document);
+        assert_eq!(nested.common.width, 36_382);
+        assert_eq!(owner.cells[13].width, 38_811);
+        assert_eq!(overlay.nested_table_width_scale(nested), 1.0);
     }
 
     #[test]

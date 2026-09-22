@@ -226,6 +226,7 @@ mod tests {
             start_cut: Vec::new(),
             end_cut: Vec::new(),
             is_block_split: false,
+            allocated_row_heights: Vec::new(),
         }]);
         assert_eq!(a.assign(&p1), 1);
 
@@ -239,6 +240,7 @@ mod tests {
             start_cut: Vec::new(),
             end_cut: Vec::new(),
             is_block_split: false,
+            allocated_row_heights: Vec::new(),
         }]);
         assert_eq!(a.assign(&p2), 2);
     }

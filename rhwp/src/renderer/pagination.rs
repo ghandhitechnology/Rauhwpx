@@ -382,6 +382,9 @@ pub enum PageItem {
         /// (`advance_row_block_cut`). false 이면 단일 행 `row_span==1` col 인덱스
         /// (`advance_row_cut`, 기존). page-larger 셀 내부 분할에서만 true.
         is_block_split: bool,
+        /// 저장 행 높이를 보존하는 분할의 실제 배정 높이 (행 인덱스, px).
+        /// 빈 목록이면 기존 콘텐츠 컷 측정을 사용한다.
+        allocated_row_heights: Vec<(usize, f64)>,
     },
     /// 그리기 개체
     Shape {
@@ -559,6 +562,7 @@ impl PageItem {
                 start_cut,
                 end_cut,
                 is_block_split,
+                allocated_row_heights,
             } => PageItem::PartialTable {
                 para_index: adjust(*para_index),
                 control_index: *control_index,
@@ -568,6 +572,7 @@ impl PageItem {
                 start_cut: start_cut.clone(),
                 end_cut: end_cut.clone(),
                 is_block_split: *is_block_split,
+                allocated_row_heights: allocated_row_heights.clone(),
             },
             PageItem::Shape {
                 para_index,

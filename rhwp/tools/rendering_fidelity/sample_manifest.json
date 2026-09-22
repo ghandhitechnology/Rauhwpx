@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "documents": [
+    {
+      "id": "table-hwp-table-test",
+      "source": "samples/hwp_table_test.hwp",
+      "official_pdf": "table-hwp-table-test.pdf",
+      "historical_pdf": "pdf/hwp_table_test-2022.pdf",
+      "features": [
+        "table",
+        "grid",
+        "cell-formatting"
+      ]
+    },
+    {
+      "id": "table-simple-004",
+      "source": "samples/table-004.hwp",
+      "official_pdf": "table-004.pdf",
+      "historical_pdf": "pdf/table-004-2022.pdf",
+      "features": [
+        "table",
+        "basic-layout",
+        "borders"
+      ]
+    },
+    {
+      "id": "table-complex",
+      "source": "samples/table-complex.hwp",
+      "official_pdf": "table-complex.pdf",
+      "historical_pdf": "pdf/table-complex-2022.pdf",
+      "features": [
+        "table",
+        "nested-content",
+        "merged-cells",
+        "pagination"
+      ]
+    },
+    {
+      "id": "table-in-textbox",
+      "source": "samples/table-in-tbox.hwp",
+      "official_pdf": "table-in-textbox.pdf",
+      "historical_pdf": "pdf/table-in-tbox-2022.pdf",
+      "features": [
+        "table",
+        "textbox",
+        "nested-control"
+      ]
+    },
+    {
+      "id": "table-nested",
+      "source": "samples/inner-table-01.hwp",
+      "official_pdf": "table-nested.pdf",
+      "historical_pdf": "pdf/inner-table-01-2022.pdf",
+      "features": [
+        "table",
+        "nested-table"
+      ]
+    },
+    {
+      "id": "table-vertical-position",
+      "source": "samples/table-vpos-01.hwp",
+      "official_pdf": "table-vertical-position.pdf",
+      "historical_pdf": "pdf/table-vpos-01-2022.pdf",
+      "features": [
+        "table",
+        "vertical-position",
+        "anchoring"
+      ]
+    },
+    {
+      "id": "table-row-split",
+      "source": "samples/issue1770_rowsplit_tolerance.hwpx",
+      "official_pdf": "table-row-split.pdf",
+      "historical_pdf": "pdf/issue1770_rowsplit_tolerance-2024.pdf",
+      "features": [
+        "table",
+        "row-split",
+        "pagination",
+        "hwpx"
+      ]
+    },
+    {
+      "id": "table-text-anchor-wrap",
+      "source": "samples/table_text_anchor_wrap.hwpx",
+      "official_pdf": "table-text-anchor-wrap.pdf",
+      "historical_pdf": "pdf/table_text_anchor_wrap-2024.pdf",
+      "features": [
+        "table",
+        "text-anchor",
+        "wrapping",
+        "hwpx"
+      ]
+    },
+    {
+      "id": "picture-crop",
+      "source": "samples/pic-crop-01.hwp",
+      "official_pdf": "picture-crop.pdf",
+      "historical_pdf": "pdf/pic-crop-01-2022.pdf",
+      "features": [
+        "picture",
+        "crop"
+      ]
+    },
+    {
+      "id": "picture-basic-02",
+      "source": "samples/pic2.hwp",
+      "official_pdf": "picture-basic-02.pdf",
+      "historical_pdf": "pdf/pic2-2022.pdf",
+      "features": [
+        "picture",
+        "basic-layout",
+        "transform"
+      ]
+    },
+    {
+      "id": "picture-exam-science",
+      "source": "samples/exam_science.hwp",
+      "official_pdf": "picture-exam-science.pdf",
+      "historical_pdf": "pdf/exam_science-2022.pdf",
+      "features": [
+        "picture",
+        "science-exam",
+        "image-text",
+        "production-document"
+      ]
+    },
+    {
+      "id": "picture-cell-stack",
+      "source": "samples/issue2004_cell_image_stack.hwp",
+      "official_pdf": "picture-cell-stack.pdf",
+      "historical_pdf": "pdf/issue2004_cell_image_stack-2022.pdf",
+      "features": [
+        "picture",
+        "table-cell",
+        "stacking",
+        "pagination"
+      ]
+    },
+    {
+      "id": "picture-area-limited",
+      "source": "samples/ta-pic-001-r-쪽영역안제한.hwp",
+      "official_pdf": "picture-area-limited.pdf",
+      "historical_pdf": "pdf/ta-pic-001-r-쪽영역안제한-2024.pdf",
+      "features": [
+        "picture",
+        "rotation",
+        "page-area-constraint"
+      ]
+    },
+    {
+      "id": "picture-header-02",
+      "source": "samples/pic-in-head-02.hwp",
+      "official_pdf": "picture-header-02.pdf",
+      "historical_pdf": "pdf/pic-in-head-02-2022.pdf",
+      "features": [
+        "picture",
+        "header",
+        "layout-variant"
+      ]
+    },
+    {
+      "id": "layered-draw-group",
+      "source": "samples/draw-group.hwp",
+      "official_pdf": "layered-draw-group.pdf",
+      "historical_pdf": "pdf/draw-group-2022.pdf",
+      "features": [
+        "layered",
+        "group",
+        "drawing"
+      ]
+    },
+    {
+      "id": "layered-mixed-shapes",
+      "source": "samples/mix-shape-01.hwp",
+      "official_pdf": "layered-mixed-shapes.pdf",
+      "historical_pdf": "pdf/mix-shape-01-2022.pdf",
+      "features": [
+        "layered",
+        "mixed-shapes",
+        "z-order"
+      ]
+    },
+    {
+      "id": "layered-coanchored-tables",
+      "source": "samples/issue1510_coanchored_float_tables.hwp",
+      "official_pdf": "layered-coanchored-tables.pdf",
+      "historical_pdf": "pdf/issue1510_coanchored_float_tables-hwp-2024.pdf",
+      "features": [
+        "layered",
+        "coanchored",
+        "floating-table",
+        "z-order"
+      ]
+    },
+    {
+      "id": "english-exam",
+      "source": "samples/exam_eng.hwp",
+      "official_pdf": "english-exam.pdf",
+      "historical_pdf": "pdf/exam_eng-2022.pdf",
+      "features": [
+        "english",
+        "columns",
+        "images"
+      ]
+    },
+    {
+      "id": "english-basic",
+      "source": "samples/basic/english.hwp",
+      "official_pdf": "english-basic.pdf",
+      "historical_pdf": "pdf/basic/english-2022.pdf",
+      "features": [
+        "english",
+        "spacing"
+      ]
+    },
+    {
+      "id": "text-alignment",
+      "source": "samples/text-align-2.hwp",
+      "official_pdf": "text-alignment.pdf",
+      "historical_pdf": "pdf/text-align-2-2022.pdf",
+      "features": [
+        "alignment",
+        "lines"
+      ]
+    }
+  ]
+}

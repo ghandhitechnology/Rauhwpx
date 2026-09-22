@@ -3201,7 +3201,7 @@ impl LayoutEngine {
         self.substitute_hf_field_markers(&mut comp, page_number);
         if para.controls.iter().any(|ctrl| {
             matches!(ctrl, Control::AutoNumber(an)
-                if an.number_type == crate::model::control::AutoNumberType::Page)
+                if matches!(an.number_type, crate::model::control::AutoNumberType::Page | crate::model::control::AutoNumberType::TotalPage))
         }) {
             self.substitute_page_auto_numbers_in_composed(para, &mut comp, page_number);
         }
@@ -3298,17 +3298,23 @@ impl LayoutEngine {
             return;
         }
 
-        let page_str = page_number.to_string();
-
         let mut positions = self.page_auto_number_placeholder_positions(para);
-        positions.sort_unstable();
-        positions.dedup();
-        for pos in positions.into_iter().rev() {
-            Self::replace_composed_char_with_display(comp, pos, &page_str);
+        positions.sort_unstable_by_key(|(pos, _)| *pos);
+        positions.dedup_by_key(|(pos, _)| *pos);
+        for (pos, number_type) in positions.into_iter().rev() {
+            let value = if number_type == crate::model::control::AutoNumberType::TotalPage {
+                self.total_pages.get()
+            } else {
+                page_number
+            };
+            Self::replace_composed_char_with_display(comp, pos, &value.to_string());
         }
     }
 
-    fn page_auto_number_placeholder_positions(&self, para: &Paragraph) -> Vec<usize> {
+    fn page_auto_number_placeholder_positions(
+        &self,
+        para: &Paragraph,
+    ) -> Vec<(usize, crate::model::control::AutoNumberType)> {
         let ctrl_positions = crate::document_core::helpers::find_control_text_positions(para);
         let text_chars: Vec<char> = para.text.chars().collect();
         let mut positions = Vec::new();
@@ -3318,7 +3324,7 @@ impl LayoutEngine {
             if !matches!(
                 ctrl,
                 Control::AutoNumber(an)
-                    if an.number_type == crate::model::control::AutoNumberType::Page
+                    if matches!(an.number_type, crate::model::control::AutoNumberType::Page | crate::model::control::AutoNumberType::TotalPage)
             ) {
                 continue;
             }
@@ -3335,7 +3341,10 @@ impl LayoutEngine {
             });
 
             if let Some(pos) = pos {
-                positions.push(pos);
+                let Control::AutoNumber(an) = ctrl else {
+                    unreachable!()
+                };
+                positions.push((pos, an.number_type));
                 search_from = pos.saturating_add(1);
             }
         }
@@ -6935,6 +6944,7 @@ impl LayoutEngine {
                 start_cut,
                 end_cut,
                 is_block_split,
+                allocated_row_heights,
             } => {
                 y_offset = self.layout_partial_table_item(
                     tree,
@@ -6948,6 +6958,7 @@ impl LayoutEngine {
                     start_cut,
                     end_cut,
                     *is_block_split,
+                    allocated_row_heights,
                     &ctx,
                     y_offset,
                 );
@@ -8447,6 +8458,7 @@ impl LayoutEngine {
         start_cut: &[usize],
         end_cut: &[usize],
         is_block_split: bool,
+        allocated_row_heights: &[(usize, f64)],
         ctx: &ColumnItemCtx,
         mut y_offset: f64,
     ) -> f64 {
@@ -8650,6 +8662,7 @@ impl LayoutEngine {
             pt_mt,
             false,
             native_cellbreak_fragment_spacing_hu,
+            allocated_row_heights,
         );
         if render_deferred_rowbreak_host_text_after {
             if let Some(para) = paragraphs.get(para_index) {

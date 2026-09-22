@@ -974,6 +974,17 @@ impl Paginator {
                 // [#1956] 표와 동일한 전체 폭 밴드 가드 — 옆 공간이 없는 그림은
                 // 후속 문단을 옆으로 흘릴 수 없다.
                 let col_w_hu = st.layout.column_width_hu();
+                let following_band = if anchor_sw > 0 && (anchor_sw - col_w_hu).abs() < 3000 {
+                    crate::renderer::float_placement::following_fixed_picture_wrap_band(
+                        para,
+                        paragraphs.get(para_idx + 1),
+                        page_def,
+                        col_w_hu,
+                    )
+                } else {
+                    None
+                };
+                let (anchor_cs, anchor_sw) = following_band.unwrap_or((anchor_cs, anchor_sw));
                 let band_full_width = anchor_sw > 0 && (anchor_sw - col_w_hu).abs() < 3000;
                 if (anchor_cs > 0 || anchor_sw > 0) && !band_full_width {
                     wrap_around_cs = anchor_cs;
@@ -2879,6 +2890,7 @@ impl Paginator {
                         start_cut: Vec::new(),
                         end_cut: Vec::new(),
                         is_block_split: false,
+                        allocated_row_heights: Vec::new(),
                     });
                     // 마지막 부분 표: spacing_after도 포함 (레이아웃과 일치)
                     let mp = measured.get_measured_paragraph(para_idx);
@@ -2898,6 +2910,7 @@ impl Paginator {
                 start_cut: Vec::new(),
                 end_cut: Vec::new(),
                 is_block_split: false,
+                allocated_row_heights: Vec::new(),
             });
             st.advance_column_or_new_page();
 
