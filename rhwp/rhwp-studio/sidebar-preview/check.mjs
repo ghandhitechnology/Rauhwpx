@@ -536,9 +536,7 @@ try {
       await page.waitForSelector('.ag-settings-quota-fill[data-health="low"]', { visible: true });
       assert.match(await page.$eval('.ag-settings-balance-card[data-provider="openrouter"] .ag-settings-balance-amount', (el) => el.textContent), /\$18\.50/);
       assert.equal(await page.$eval('.ag-settings-balance-card[data-provider="openrouter"] [role="meter"]', (el) => el.getAttribute('aria-valuenow')), '92.5');
-      assert.equal(await page.$$eval('.ag-settings-balance-card[data-provider="grok"] [role="meter"]', (els) => els.length), 0);
-      assert.equal(await page.$$eval('.ag-settings-balance-card[data-provider="opencode"] .ag-settings-balance-amount', (els) => els.length), 0);
-      assert.match(await page.$eval('.ag-settings-balance-card[data-provider="opencode"]', (el) => el.textContent), /잔액 정보를 사용할 수 없어요/);
+      assert.deepEqual(await page.$$eval('.ag-settings-balance-card', (cards) => cards.map((card) => card.dataset.provider)), ['openrouter']);
       assert.equal(await page.$eval('.ag-settings-quota-card[data-provider="codex"] [role="meter"]', (el) => el.getAttribute('aria-valuenow')), '8');
       assert.equal(await page.$eval('.ag-settings-usage-disclosure', el => el.open), false);
       await page.click('.ag-settings-usage-disclosure > summary');
