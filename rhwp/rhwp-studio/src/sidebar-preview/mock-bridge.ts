@@ -934,7 +934,42 @@ export function createMockBridge(report: (message: string) => void) {
     },
     commitSkill: (change) =>
       request((requestId) => {
-        if (change.action === 'enable') {
+        let outcome: T.SkillCommitOutcome = {
+          ok: true,
+          name: change.name,
+          digest: 'a'.repeat(64),
+          unchanged: false,
+          notice: null,
+        };
+        if (change.action === 'create') {
+          const exists = data.skills.rows.some((item) => item.name === change.name);
+          if (exists) {
+            outcome = {
+              ok: false,
+              code: 'exists',
+              message: '같은 이름의 스킬이 이미 있습니다.',
+              digest: data.skills.rows.find((item) => item.name === change.name)?.digest ?? null,
+            };
+          } else {
+            const digest = `${change.name}:${change.description}:${change.body}`
+              .split('')
+              .reduce((hash, char) => ((hash * 31 + char.charCodeAt(0)) >>> 0), 2166136261)
+              .toString(16)
+              .padStart(64, '0');
+            data.skills.rows.unshift({
+              kind: 'skill',
+              name: change.name,
+              description: change.description,
+              origin: 'user',
+              icon: 'pencil',
+              enabled: true,
+              digest,
+              editable: true,
+            });
+            skillBodies.set(change.name, change.body);
+            outcome = { ok: true, name: change.name, digest, unchanged: false, notice: null };
+          }
+        } else if (change.action === 'enable') {
           const row = data.skills.rows.find(
             (item) => item.name === change.name && item.kind === 'skill',
           );
@@ -965,18 +1000,8 @@ export function createMockBridge(report: (message: string) => void) {
             });
           }
         }
-        emit({
-          type: 'skill-commit-result',
-          requestId,
-          outcome: {
-            ok: true,
-            name: change.name,
-            digest: 'a'.repeat(64),
-            unchanged: false,
-            notice: null,
-          },
-        });
-        skillsChanged();
+        emit({ type: 'skill-commit-result', requestId, outcome });
+        if (outcome.ok) skillsChanged();
       }),
     requestWritingStyleStatus: () =>
       request((requestId) =>

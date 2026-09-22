@@ -46,6 +46,25 @@ try {
   const readonlyRow = await page.$('[data-skill-name="imported-style-guide"]');
   assert(readonlyRow, 'Read-only imported fixture exists.');
   assert.equal(await readonlyRow.$('.ag-skill-edit'), null, 'Imported skills never expose edit.');
+  await page.click('.ag-skill-new');
+  await page.waitForSelector('.ag-skill-new-editor');
+  await page.$eval('.ag-root', (root) => root.classList.add('ag-fullscreen'));
+  assert.equal(await page.$eval('.ag-skill-editor-artifact', (node) => getComputedStyle(node).display), 'flex',
+    'Fullscreen creation keeps the Markdown artifact visible.');
+  await page.$eval('.ag-root', (root) => root.classList.remove('ag-fullscreen'));
+  const fill = async (selector, value) => page.$eval(selector, (node, next) => {
+    node.value = next;
+    node.dispatchEvent(new Event('input', { bubbles: true }));
+  }, value);
+  await fill('.ag-skill-editor-name', 'outline-to-actions');
+  await fill('.ag-skill-editor-description', '회의 내용을 실행 항목으로 정리합니다.');
+  await fill('.ag-skill-new-editor .ag-skill-editor-input', '# 실행 항목\n\n핵심 결정과 담당자를 표로 정리합니다.');
+  const artifact = await page.$eval('.ag-skill-editor-artifact code', (node) => node.textContent);
+  assert.match(artifact, /name: outline-to-actions/);
+  assert.match(artifact, /핵심 결정과 담당자를 표로 정리합니다/);
+  await page.click('.ag-skill-new-editor .ag-skill-editor-save');
+  await page.waitForSelector('[data-skill-name="outline-to-actions"]');
+  assert.equal(await page.$('.ag-skill-new-editor'), null, 'Saved new skill closes its editor.');
   const reopen = async () => {
     await page.click(`[data-skill-name="${name}"] .ag-skill-edit`);
     await page.waitForFunction(() => {

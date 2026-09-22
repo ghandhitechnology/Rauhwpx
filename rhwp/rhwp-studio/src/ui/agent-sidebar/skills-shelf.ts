@@ -8,7 +8,7 @@ import type {
 } from '../../agent/types.ts';
 import { createIcon } from './icons.ts';
 import { skillGlyphForSkill } from './skill-presentation.ts';
-import { createSkillEditor } from './skill-editor.ts';
+import { createNewSkillEditor, createSkillEditor } from './skill-editor.ts';
 
 export interface SkillsShelf {
   root: HTMLElement;
@@ -23,6 +23,7 @@ export interface SkillsShelf {
 type ShelfMode = 'catalog' | 'harness';
 
 type PendingChange =
+  | { action: 'create'; name: string }
   | { action: 'enable'; name: string }
   | { action: 'delete'; name: string }
   | { action: 'restore'; name: string }
@@ -71,6 +72,8 @@ export function createSkillsShelf(options: {
   let reflowFrame: number | null = null;
   const reflowAnimations = new Set<Animation>();
   const editors = new Map<string, HTMLElement>();
+  let newEditor: HTMLElement | null = null;
+  let createResolve: ((outcome: SkillCommitOutcome) => void) | null = null;
 
   search.addEventListener('input', () => render());
   modeButton.addEventListener('click', () => {
@@ -205,11 +208,14 @@ export function createSkillsShelf(options: {
       });
       list.appendChild(undo);
     }
-    if (visible.length === 0) {
-      list.appendChild(el('div', 'ag-skills-empty', '없음'));
-      return;
-    }
-    for (const skill of visible) list.appendChild(renderCatalogRow(skill));
+    if (visible.length === 0) list.appendChild(el('div', 'ag-skills-empty', '없음'));
+    else for (const skill of visible) list.appendChild(renderCatalogRow(skill));
+    const create = el('button', 'ag-skill-new', '새 스킬 만들기') as HTMLButtonElement;
+    create.type = 'button';
+    create.setAttribute('aria-label', '새 스킬 만들기');
+    create.addEventListener('click', openNewEditor);
+    list.appendChild(create);
+    if (newEditor) list.appendChild(newEditor);
     animateReflow(before);
     if (importedName && visible.some((skill) => skill.name === importedName)) {
       const name = importedName;
@@ -241,6 +247,37 @@ export function createSkillsShelf(options: {
         focusCopy()?.focus();
       });
     }
+  }
+
+  function closeNewEditor(): void {
+    newEditor?.remove();
+    newEditor = null;
+  }
+
+  function openNewEditor(): void {
+    if (newEditor) {
+      newEditor.querySelector<HTMLInputElement>('.ag-skill-editor-name')?.focus();
+      return;
+    }
+    const editor = createNewSkillEditor({
+      commit(name, description, body) {
+        return new Promise((resolve) => {
+          createResolve = resolve;
+          pending = { action: 'create', name };
+          options.onCommit({ action: 'create', name, description, body });
+        });
+      },
+      close: closeNewEditor,
+      saved(outcome) {
+        const name = outcome.name;
+        closeNewEditor();
+        focusName = name;
+        options.refresh();
+      },
+    });
+    newEditor = editor.root;
+    render();
+    editor.root.querySelector<HTMLInputElement>('.ag-skill-editor-name')?.focus();
   }
 
   function renderCatalogRow(skill: CatalogRow): HTMLElement {
@@ -406,6 +443,7 @@ export function createSkillsShelf(options: {
     const cancel = (cancelEvent: KeyboardEvent) => {
       if (cancelEvent.key !== 'Escape' || !draggingName) return;
       cancelEvent.preventDefault();
+      cancelEvent.stopPropagation();
       const byName = new Map([...list.querySelectorAll<HTMLElement>('[data-skill-name]')]
         .map((candidate) => [candidate.dataset.skillName, candidate] as const));
       for (const name of dragOriginalNames) {
@@ -483,6 +521,20 @@ export function createSkillsShelf(options: {
     pending = null;
     if (!current) return;
     switch (current.action) {
+      case 'create': {
+        createResolve?.(outcome);
+        createResolve = null;
+        if (outcome.ok) {
+          importedName = current.name;
+          focusName = current.name;
+          writeStoredOrder([
+            current.name,
+            ...storedOrder().filter((name) => name !== current.name),
+          ]);
+          closeNewEditor();
+        }
+        break;
+      }
       case 'import':
         if (!outcome.ok && outcome.code === 'LOCAL_EDITS' && outcome.digest) {
           replaceDigests.set(`${current.harness}:${current.name}`, outcome.digest);
