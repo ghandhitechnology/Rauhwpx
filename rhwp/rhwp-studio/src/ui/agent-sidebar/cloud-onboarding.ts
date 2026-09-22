@@ -9,6 +9,8 @@ import type {
 } from '../../cloud/types.ts';
 import { labelForEffort, labelForModel } from '../../agent/models.ts';
 import { inferCloudLink } from '../../cloud/link.ts';
+import { isCloudSupportedAgent } from '../../cloud/cloud-start.ts';
+import cloudPixelUrl from './cloud-pixel.svg';
 import {
   appServerProvider,
   createCloudSetupState,
@@ -156,7 +158,12 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   const settingsTitle = el('h3', 'ag-settings-section-title', 'Cloud 서버');
   const settingsCard = el('div', 'ag-cloud-settings-card');
   const settingsIcon = el('span', 'ag-cloud-settings-icon');
-  settingsIcon.appendChild(createIcon('cloud'));
+  const pixelCloud = document.createElement('img');
+  pixelCloud.className = 'ag-cloud-settings-pixel';
+  pixelCloud.src = cloudPixelUrl;
+  pixelCloud.alt = '';
+  pixelCloud.setAttribute('aria-hidden', 'true');
+  settingsIcon.appendChild(pixelCloud);
   const settingsCopy = el('div', 'ag-cloud-settings-copy');
   const settingsStatus = el('strong', 'ag-cloud-settings-status');
   const settingsDetail = el('span', 'ag-cloud-settings-detail');
@@ -616,7 +623,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     const operation = beginOperation();
     setState({ kind: 'sandbox-provisioning', draft, intent, startedAt: Date.now() }, 'Raucloud를 준비하고 있습니다.');
     try {
-      const selectedProvider = transferIntent?.selection.agent ?? deps.getTransferSelection?.().agent;
+      const candidate = transferIntent?.selection.agent ?? deps.getTransferSelection?.().agent;
+      const selectedProvider = candidate && isCloudSupportedAgent(candidate) ? candidate : undefined;
       const next = await deps.controller.spawnSandbox(providerId, selectedProvider);
       if (!operationIsCurrent(operation)) return;
       const ready = snapshotSandbox(next);
