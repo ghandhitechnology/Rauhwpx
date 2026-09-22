@@ -65,7 +65,6 @@ function readiness(overrides = {}) {
   return {
     pi: { ready: true, model: 'opencode/deepseek-v4-flash-free' },
     codex: { ready: true, model: 'gpt-5.6-luna' },
-    grok: { ready: true, model: 'grok-4.6' },
     claude: { ready: true, model: 'haiku' },
     ...overrides,
   };
@@ -126,16 +125,12 @@ test('generated titles must be one plain line of at most 72 characters', () => {
   assert.equal(cleanCheckpointTitle(''), null);
 });
 
-test('CLI output parsing accepts the final Codex, Claude, and Grok message shapes', () => {
+test('CLI output parsing accepts the final Codex and Claude message shapes', () => {
   assert.equal(extractCheckpointTitleText([
     JSON.stringify({ type: 'thread.started', thread_id: 't' }),
     JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '표 정리' } }),
   ].join('\n')), '표 정리');
   assert.equal(extractCheckpointTitleText(JSON.stringify({ type: 'result', result: '문단 정리' })), '문단 정리');
-  assert.equal(extractCheckpointTitleText(JSON.stringify({
-    type: 'assistant',
-    message: { content: [{ type: 'text', text: '서식 정리' }] },
-  })), '서식 정리');
 });
 
 test('providers run in fixed order, skip unavailable routes, and cascade on failures', async () => {
@@ -145,12 +140,11 @@ test('providers run in fixed order, skip unavailable routes, and cascade on fail
     runProvider: async ({ provider, model, prompt }) => {
       calls.push({ provider, model, prompt });
       if (provider === 'codex') throw new Error('codex unavailable');
-      if (provider === 'grok') return 'bad\nresponse';
       return '문서 구조와 일정 정리';
     },
   });
 
-  assert.deepEqual(calls.map((call) => call.provider), ['codex', 'grok', 'claude']);
+  assert.deepEqual(calls.map((call) => call.provider), ['codex', 'claude']);
   assert.deepEqual(result, {
     commitId: 'commit-1',
     titleRevision: 3,
@@ -194,15 +188,6 @@ test('CLI specs use explicit arrays, fixed low-effort models, and no tools', () 
   assert.ok(codex.argv.includes('shell_tool'));
   assert.ok(codex.argv.includes('unified_exec'));
 
-  const grok = buildCheckpointTitleCliSpec('grok', {
-    promptFilePath: '/private/title/prompt.txt',
-    sessionId: 'grok-session',
-  });
-  assert.deepEqual(grok.argv.slice(0, 2), ['--prompt-file', '/private/title/prompt.txt']);
-  assert.ok(grok.argv.includes('grok-4.6'));
-  assert.ok(grok.argv.includes('low'));
-  assert.ok(grok.argv.includes('--no-subagents'));
-
   const claude = buildCheckpointTitleCliSpec('claude');
   assert.ok(claude.argv.includes('haiku'));
   assert.ok(claude.argv.includes('low'));
@@ -228,7 +213,6 @@ test('a successful drained CLI close keeps its title and retains its unproven wo
   const result = generateCheckpointTitle(request(), {
     readiness: readiness({
       pi: { ready: false, model: '' },
-      grok: { ready: false, model: '' },
       claude: { ready: false, model: '' },
     }),
     spawnProcess(command, argv, options) {

@@ -391,46 +391,6 @@ test('a standalone implementation command follows the same Plan approval transit
   assert.equal(implementing.phase, 'implementing');
 });
 
-test('a correlated root provider event authorizes MCP even when its socket call arrives first', { timeout: 40_000 }, async (t) => {
-  const {
-    port,
-    cursorLegacyReadyPath,
-    cursorQuestionReleasePath,
-  } = await startHub(t, { fakeCursor: true, gateCursorQuestion: true });
-  const sessionId = 'question-correlated-root';
-  const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=${sessionId}&instance=page-1`);
-  t.after(() => closeClient(studio));
-  await studio.next((frame) => frame.type === 'welcome');
-  await startRunningChat(studio, 'cursor');
-  // ACP fallback takes longer on Windows because the failed native process
-  // must be reaped first. The fixture stops after claiming the legacy turn.
-  await waitForPath(cursorLegacyReadyPath);
-
-  const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=cursor&role=chat`);
-  t.after(() => closeClient(mcp));
-  sendFrame(mcp, {
-    type: 'tool-call', id: 9, tool: 'ask_user_question', args: questionArgs(), workflow: 'direct',
-  });
-  // WebSocket message order plus this response proves the server handled id 9
-  // and entered its scope wait before the provider can publish the matching
-  // event. The unknown tool changes no session state.
-  sendFrame(mcp, { type: 'tool-call', id: 10, tool: 'ordering_barrier', args: {} });
-  const barrier = await mcp.next((frame) => frame.type === 'tool-result' && frame.id === 10);
-  assert.equal(barrier.ok, false);
-  assert.equal(barrier.error.code, 'UNKNOWN_TOOL');
-  writeFileSync(cursorQuestionReleasePath, '');
-  const requested = await studio.next((frame) => frame.type === 'user-question-requested');
-  sendFrame(studio, {
-    type: 'user-question-answer',
-    interactionId: requested.interaction.interactionId,
-    responseId: 'correlated-root-answer',
-    answers: { format: { selectedOptionIds: ['option-1'] } },
-  });
-  const result = await mcp.next((frame) => frame.type === 'tool-result' && frame.id === 9);
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.result.answers.format.selected, ['Brief']);
-});
-
 test('direct MCP questions survive Studio reload and settle atomically', { timeout: 40_000 }, async (t) => {
   const { port, stderr } = await startHub(t, { fakePi: true });
   const studioUrl = `ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=question-session`;
@@ -579,14 +539,14 @@ test('provider MCP writes are bound to one exact running turn', { timeout: 40_00
   );
 });
 
-test('URL agent and role spoofing cannot bypass root question correlation', { timeout: 40_000 }, async (t) => {
-  const { port } = await startHub(t, { fakeCursor: true, emitCursorQuestion: false });
+test('URL provider and parent-task spoofing cannot bypass root question correlation', { timeout: 40_000 }, async (t) => {
+  const { port } = await startHub(t, { fakePi: true });
   const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=question-loss&instance=page-1`);
   t.after(() => closeClient(studio));
   await studio.next((frame) => frame.type === 'welcome');
-  await startRunningChat(studio, 'cursor');
+  await startRunningChat(studio, 'pi');
 
-  const subagent = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=cursor&role=chat`);
+  const subagent = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=pi&role=chat`);
   sendFrame(subagent, {
     type: 'tool-call', id: 20, tool: 'ask_user_question', args: questionArgs(),
     workflow: 'direct', parentTaskId: 'child-task',
@@ -597,18 +557,9 @@ test('URL agent and role spoofing cannot bypass root question correlation', { ti
   await closeClient(subagent);
 
   assert.equal(
-    await rejectedUpgrade(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=pi&role=chat`),
+    await rejectedUpgrade(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=claude&role=chat`),
     401,
   );
-
-  const unknownRoot = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=cursor&role=chat`);
-  sendFrame(unknownRoot, {
-    type: 'tool-call', id: 21, tool: 'ask_user_question', args: questionArgs(), workflow: 'direct',
-  });
-  const unknown = await unknownRoot.next((frame) => frame.type === 'tool-result' && frame.id === 21);
-  assert.equal(unknown.ok, false);
-  assert.equal(unknown.error.code, 'CALLER_SCOPE_UNKNOWN');
-  await closeClient(unknownRoot);
 });
 
 test('a legitimate Pi root question expires on disconnect or a missing Studio', { timeout: 40_000 }, async (t) => {

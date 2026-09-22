@@ -29,13 +29,8 @@ test('hub launches the copy-layout worker as a real isolated provider session', 
   assert.match(server, /copy-layout-providers/);
   assert.match(server, /prepareCodexHome\(codexHome/);
   assert.match(server, /prepareClaudeHome\(isolatedHome/);
-  assert.match(server, /prepareGrokHome\(grokHome/);
-  assert.match(server, /prepareCursorHome\(cursorHome/);
-  assert.doesNotMatch(launch, /prepareOpenCodeHome\(/);
-  assert.match(launch, /openCodeAuthPath: \(\) => sourceOpenCodeAuthPath/);
-  assert.match(launch, /openCodeProviderEnv: \(\) => cliSetup\.envFor\('opencode'\)/);
-  assert.match(launch, /openCodeBin: cliSetupStatus\.opencode\?\.installed \? cliSetup\.binPath\('opencode'\) : 'opencode'/);
-  assert.match(server, /\['opencode', \(\) => flushOpenCodeCredentialMirror\(homes\.isolatedHome\)\]/);
+  assert.match(launch, /piBin: piManager\.piBin/);
+  assert.match(launch, /piRoot: piManager\.rootDir/);
   assert.match(mcp, /url\.searchParams\.set\('role', AGENT_ROLE\)/);
   assert.match(mcp, /url\.searchParams\.set\('workerJobId', COPY_LAYOUT_JOB_ID\)/);
   assert.match(piExtension, /RHWP_AGENT_ROLE/);
