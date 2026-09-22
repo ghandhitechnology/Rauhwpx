@@ -376,8 +376,20 @@ export const insertCommands: CommandDef[] = [
     execute(services) {
       const ih = services.getInputHandler();
       if (!ih) return;
-      const ref = ih.getSelectedPictureRef();
-      if (!ref || ref.type !== 'equation') return;
+      let ref = ih.getSelectedPictureRef();
+      if (!ref || (ref.type !== 'equation' && ref.type !== 'ole')) return;
+      if (ref.type === 'ole') {
+        if ((ref.cellPath?.length ?? 0) > 0 || ref.headerFooter) return;
+        const oleRef = ref;
+        let promoted: { ok: boolean; paraIdx: number; controlIdx: number } | undefined;
+        recordObjectMutation(ih, 'promoteOleEquation', (wasm) => {
+          promoted = wasm.promoteOleEquation(oleRef.sec, oleRef.ppi, oleRef.ci);
+          if (!promoted?.ok) throw new Error('[insert:equation-edit] 레거시 OLE 수식 전환 실패');
+        });
+        if (!promoted) return;
+        ih.selectPictureObject(oleRef.sec, promoted.paraIdx, promoted.controlIdx, 'equation');
+        ref = { ...oleRef, ppi: promoted.paraIdx, ci: promoted.controlIdx, type: 'equation' };
+      }
       if (!equationEditorDialog) {
         equationEditorDialog = new EquationEditorDialog(services.wasm, services.eventBus, services);
       }

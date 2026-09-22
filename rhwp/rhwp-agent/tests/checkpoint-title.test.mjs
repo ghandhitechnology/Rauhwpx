@@ -242,7 +242,6 @@ test('CLI title starts hub-owned cleanup at a terminal payload while its leader 
   const result = generateCheckpointTitle(request(), {
     readiness: readiness({
       pi: { ready: false, model: '' },
-      grok: { ready: false, model: '' },
       claude: { ready: false, model: '' },
     }),
     spawnProcess() { return proc; },
@@ -313,7 +312,6 @@ test('a timed-out CLI attempt terminates its owned process tree', async () => {
   const result = await generateCheckpointTitle(request(), {
     readiness: readiness({
       pi: { ready: false, model: '' },
-      grok: { ready: false, model: '' },
       claude: { ready: false, model: '' },
     }),
     providerTimeoutMs: 15,
@@ -359,7 +357,6 @@ test('external cancellation terminates an active CLI attempt', async () => {
   const pending = generateCheckpointTitle(request(), {
     readiness: readiness({
       pi: { ready: false, model: '' },
-      grok: { ready: false, model: '' },
       claude: { ready: false, model: '' },
     }),
     signal: controller.signal,
@@ -386,7 +383,6 @@ test('workspace setup stops at the overall deadline and disposes a late result',
   const pending = generateCheckpointTitle(request(), {
     readiness: readiness({
       pi: { ready: false, model: '' },
-      grok: { ready: false, model: '' },
       claude: { ready: false, model: '' },
     }),
     overallTimeoutMs: 10,
@@ -419,7 +415,6 @@ test('external cancellation bounds workspace setup and disposes a late result', 
   const pending = generateCheckpointTitle(request(), {
     readiness: readiness({
       pi: { ready: false, model: '' },
-      grok: { ready: false, model: '' },
       claude: { ready: false, model: '' },
     }),
     signal: controller.signal,
@@ -449,7 +444,6 @@ test('CLI workspace remains until a terminated child closes', async () => {
   const pending = generateCheckpointTitle(request(), {
     readiness: readiness({
       pi: { ready: false, model: '' },
-      grok: { ready: false, model: '' },
       claude: { ready: false, model: '' },
     }),
     providerTimeoutMs: 60,
@@ -483,7 +477,6 @@ test('oversized CLI output keeps its workspace until the child closes', async ()
   const pending = generateCheckpointTitle(request(), {
     readiness: readiness({
       pi: { ready: false, model: '' },
-      grok: { ready: false, model: '' },
       claude: { ready: false, model: '' },
     }),
     providerTimeoutMs: 500,
@@ -518,7 +511,6 @@ test('checkpoint workspace stays live until held-pipe tree cleanup is proven', a
   const pending = generateCheckpointTitle(request(), {
     readiness: readiness({
       pi: { ready: false, model: '' },
-      grok: { ready: false, model: '' },
       claude: { ready: false, model: '' },
     }),
     providerTimeoutMs: 500,

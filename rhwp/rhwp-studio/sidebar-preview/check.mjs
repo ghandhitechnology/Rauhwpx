@@ -162,7 +162,7 @@ try {
     await page.evaluate(() => window.sidebarPreview.cloud.setLink('failed'));
     assert.deepEqual(await page.$$eval('.ag-cd-task-status', nodes => nodes.map(node => node.textContent)), initialStatuses,
       'viewing connection loss must not change saved task states');
-    await page.click('.ag-cd-settings-toggle');
+    if (await page.$eval('.ag-cd-config', node => node.hidden)) await page.click('.ag-cd-settings-toggle');
     assert.equal(await page.$eval('.ag-cd-config', node => node.hidden), false);
     await page.click('.ag-cloud-settings-action');
     await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
@@ -170,7 +170,7 @@ try {
     await page.evaluate(() => window.sidebarPreview.cloud.blockReconnect(true));
     await page.click('.ag-cd-reconnect');
     await page.waitForSelector('.ag-cd-content .ag-cloud-link-progress:not([hidden])');
-    assert.equal(await page.$eval('.ag-cd-content [role="progressbar"]', node => node.hasAttribute('aria-valuenow')), false);
+    assert.equal(await page.$eval('.ag-cd-content .ag-cloud-link-progress [role="progressbar"]', node => node.hasAttribute('aria-valuenow')), false);
     assert.match(await page.$eval('.ag-cd-content .ag-cloud-link-progress-eta', node => node.textContent), /경과$/);
     await page.evaluate(() => window.sidebarPreview.cloud.blockReconnect(false));
     await page.waitForFunction(() => !document.querySelector('.ag-cd-refresh').disabled);
@@ -221,6 +221,14 @@ try {
     await page.waitForFunction(() => window.sidebarPreview.workspace.cloudBinding()?.sessionId === 'dashboard-session-2');
     assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.getScope().documentId), 'dashboard-doc-2');
     assert.match(await page.$eval('.ag-messages', node => node.textContent), /팀 회의록/);
+    await clickText('button', '변경 검토');
+    await page.waitForFunction(() => window.sidebarPreview.versions.getState().branches
+      .some(branch => branch.name === 'Cloud · 팀 회의록 · 1턴'));
+    await page.click('[aria-label="버전"]');
+    await page.waitForSelector('.ag-root.ag-versions-open');
+    await clickText('.ag-versions-tab', '브랜치');
+    assert.equal(await page.$$eval('.ag-versions-ref-row', rows =>
+      rows.some(row => row.textContent.includes('Cloud · 팀 회의록 · 1턴'))), true);
   });
   await step('Cloud pause/edit continues the same task and persists follow-up drafts', async () => {
     await open('cloud=1&reset=1');

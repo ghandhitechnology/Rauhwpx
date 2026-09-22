@@ -139,85 +139,11 @@ function prepareFakePi(root) {
   writeFakeCliBin(binDir, 'pi', ALIVE_PI_FIXTURE_SOURCE);
 }
 
-async function startHub(t, {
-  fakeCursor = false,
-  fakePi = false,
-  gateCursorQuestion = false,
-  emitCursorQuestion = true,
-} = {}) {
+async function startHub(t, { fakePi = false } = {}) {
   const workRoot = mkdtempSync(path.join(os.tmpdir(), 'rhwp-hub-user-question-'));
   const piRoot = path.join(workRoot, 'pi');
-  const cursorLegacyReadyPath = path.join(workRoot, 'cursor-legacy-ready');
-  const cursorQuestionReleasePath = path.join(workRoot, 'cursor-question-release');
   if (fakePi) prepareFakePi(piRoot);
-  let testPath = process.env.PATH;
-  if (fakeCursor) {
-    const binDir = path.join(workRoot, 'bin');
-    mkdirSync(binDir, { recursive: true });
-    const init = {
-      type: 'system', subtype: 'init',
-      session_id: 'cursor-fallback-question', model: 'mock-cursor', permissionMode: 'default',
-    };
-    const call = {
-      type: 'tool_call', subtype: 'started', call_id: 'cursor-question-call',
-      tool_call: { mcpToolCall: { args: {
-        name: 'mcp__rhwp__ask_user_question',
-        args: questionArgs(),
-        toolCallId: '', providerIdentifier: '', toolName: 'ask_user_question',
-        smartModeApprovalOnly: false, skipApproval: false, serverIdentifier: '',
-      } } },
-    };
-    writeFakeCliBin(binDir, 'cursor-agent', [
-      "const fs = require('node:fs');",
-      "if (process.argv.includes('--version')) { console.log('2026.08.11-e2e'); process.exit(0); }",
-      "if (process.argv.includes('status')) { console.log('Not logged in'); process.exit(1); }",
-      // Refuse ACP over JSON-RPC while staying alive so Windows can taskkill a
-      // live leader before legacy fallback. process.exit(1) loses tree identity.
-      "if (process.argv.includes('acp')) {",
-      "  process.stderr.write('ACP unavailable in fixture\\n');",
-      "  let buf = '';",
-      "  process.stdin.setEncoding('utf8');",
-      "  process.stdin.on('data', (chunk) => {",
-      "    buf += chunk;",
-      '    let idx;',
-      "    while ((idx = buf.indexOf('\\n')) !== -1) {",
-      '      const line = buf.slice(0, idx);',
-      '      buf = buf.slice(idx + 1);',
-      '      let msg;',
-      '      try { msg = JSON.parse(line); } catch { continue; }',
-      '      if (msg && msg.id !== undefined) {',
-      '        process.stdout.write(JSON.stringify({',
-      "          jsonrpc: '2.0', id: msg.id,",
-      "          error: { code: -32000, message: 'ACP unavailable in fixture' },",
-      "        }) + '\\n');",
-      '      }',
-      '    }',
-      '  });',
-      '  setInterval(() => {}, 1000);',
-      '  return;',
-      '}',
-      `process.stdout.write(${JSON.stringify(`${JSON.stringify(init)}\n`)});`,
-      `fs.writeFileSync(${JSON.stringify(cursorLegacyReadyPath)}, '');`,
-      ...(emitCursorQuestion && gateCursorQuestion
-        ? [
-          'const releaseWait = new Int32Array(new SharedArrayBuffer(4));',
-          // Windows must first fail the ACP launch and reap that process tree.
-          // Keep the fixture gate inside the test's 40-second outer deadline
-          // without racing the valid fallback path on slower hosted runners.
-          'const releaseDeadline = Date.now() + 30000;',
-          `while (!fs.existsSync(${JSON.stringify(cursorQuestionReleasePath)})) {`,
-          "  if (Date.now() >= releaseDeadline) { console.error('timed out waiting for question release'); process.exit(2); }",
-          '  Atomics.wait(releaseWait, 0, 0, 20);',
-          '}',
-        ]
-        : []),
-      ...(emitCursorQuestion
-        ? [`process.stdout.write(${JSON.stringify(`${JSON.stringify(call)}\n`)});`]
-        : []),
-      'setInterval(() => {}, 1000);',
-    ].join('\n'));
-    testPath = `${binDir}${path.delimiter}${testPath}`;
-  }
+  const testPath = process.env.PATH;
   const child = spawn(process.execPath, ['server.mjs'], {
     cwd: new URL('..', import.meta.url),
     env: {
@@ -245,8 +171,6 @@ async function startHub(t, {
   return {
     port: ready.port,
     stderr: () => stderr,
-    cursorLegacyReadyPath,
-    cursorQuestionReleasePath,
   };
 }
 
@@ -557,7 +481,7 @@ test('URL provider and parent-task spoofing cannot bypass root question correlat
   await closeClient(subagent);
 
   assert.equal(
-    await rejectedUpgrade(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=claude&role=chat`),
+    await rejectedUpgrade(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=codex&role=chat`),
     401,
   );
 });

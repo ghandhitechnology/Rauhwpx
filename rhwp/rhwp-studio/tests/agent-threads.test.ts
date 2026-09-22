@@ -458,7 +458,7 @@ test('persisted Pi chats remain available after reload', () => {
   assert.equal(getThread('pi-thread')?.agent, 'pi');
 });
 
-test('persisted Rau chats keep the provider on the thread and messages', () => {
+test('persisted Rau chats are dropped because rau is not a live agent', () => {
   mem.clear();
   storage.setItem('rhwp-agent-threads', JSON.stringify([{
     id: 'rau-thread',
@@ -471,12 +471,10 @@ test('persisted Rau chats keep the provider on the thread and messages', () => {
     effort: 'medium',
     messages: [{ role: 'assistant', text: '체험 답변', agent: 'rau' }],
   }]));
-  const restored = getThread('rau-thread');
-  assert.equal(restored?.agent, 'rau');
-  assert.equal(restored?.messages[0]?.agent, 'rau');
+  assert.equal(getThread('rau-thread'), null);
 });
 
-test('persisted OpenCode chats keep their provider-qualified model', () => {
+test('persisted OpenCode chats are dropped because opencode is not a live agent', () => {
   mem.clear();
   storage.setItem('rhwp-agent-threads', JSON.stringify([{
     id: 'opencode-thread',
@@ -489,10 +487,7 @@ test('persisted OpenCode chats keep their provider-qualified model', () => {
     effort: '',
     messages: [{ role: 'assistant', text: 'OpenCode 답변', agent: 'opencode' }],
   }]));
-  const restored = getThread('opencode-thread');
-  assert.equal(restored?.agent, 'opencode');
-  assert.equal(restored?.model, 'anthropic/claude-sonnet-4-5');
-  assert.equal(restored?.messages[0]?.agent, 'opencode');
+  assert.equal(getThread('opencode-thread'), null);
 });
 
 test('legacy threads default to the standard service tier', () => {

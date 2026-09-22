@@ -331,6 +331,40 @@ pub fn raw_contents_is_emf(data: &[u8]) -> bool {
     contents_emf_payload(data).is_some()
 }
 
+/// [#5725] `Contents` 가 한글 수식 편집기 봉투면 수식 스크립트를 꺼낸다.
+///
+/// 봉투 구조 (2921145 `BinData/ole1.ole` 실측):
+/// - offset 0..32: 시그니처 `Hwp 5.0 Equation Editor(HwpEq5x)` (정확히 32바이트)
+/// - offset 52: u32 LE 버전 (실측 5)
+/// - offset 68: u32 LE 스크립트 바이트 길이
+/// - offset 72: UTF-16LE 수식 스크립트
+///
+/// 이 OLE 들의 `\x02OlePres000` 은 전부 28바이트 스텁(헤더만)이라 미리보기
+/// 폴백으로는 그릴 것이 없다 — 스크립트가 유일한 출처다.
+pub fn parse_equation_contents_script(data: &[u8]) -> Option<String> {
+    const SIG: &[u8] = b"Hwp 5.0 Equation Editor(HwpEq5x)";
+    if data.len() < 72 || !data.starts_with(SIG) {
+        return None;
+    }
+    let len = u32::from_le_bytes([data[68], data[69], data[70], data[71]]) as usize;
+    let end = 72usize.checked_add(len)?;
+    if len == 0 || !len.is_multiple_of(2) || end > data.len() {
+        return None;
+    }
+    let units: Vec<u16> = data[72..end]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let script = String::from_utf16_lossy(&units)
+        .trim_end_matches('\0')
+        .to_string();
+    if script.trim().is_empty() {
+        None
+    } else {
+        Some(script)
+    }
+}
+
 /// OLE Presentation Stream 헤더를 스킵하고 내부 EMF/메타파일 바이트를 반환한다.
 ///
 /// OLE Presentation Stream 대략 구조 (MS-OLEDS):
@@ -503,6 +537,39 @@ mod tests {
     fn test_parse_empty_bytes() {
         assert!(parse_ole_container(&[]).is_none());
         assert!(parse_ole_container(&[0u8; 4]).is_none());
+    }
+
+    fn equation_contents_envelope(sig: &[u8], script: &str, len: Option<u32>) -> Vec<u8> {
+        let script_bytes: Vec<u8> = script
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        let mut data = vec![0u8; 72];
+        data[..sig.len()].copy_from_slice(sig);
+        data[68..72].copy_from_slice(&len.unwrap_or(script_bytes.len() as u32).to_le_bytes());
+        data.extend_from_slice(&script_bytes);
+        data
+    }
+
+    #[test]
+    fn parse_equation_contents_script_reads_utf16le_after_envelope() {
+        const SIG: &[u8] = b"Hwp 5.0 Equation Editor(HwpEq5x)";
+        let data = equation_contents_envelope(SIG, "a over b", None);
+        assert_eq!(
+            parse_equation_contents_script(&data).as_deref(),
+            Some("a over b")
+        );
+        assert!(parse_equation_contents_script(b"not an equation envelope").is_none());
+        let prefix_only = equation_contents_envelope(b"Hwp 5.0 Equation Editor", "a over b", None);
+        assert!(
+            parse_equation_contents_script(&prefix_only).is_none(),
+            "prefix without (HwpEq5x) is not a hwpeq5x envelope"
+        );
+        let wrap_len = equation_contents_envelope(SIG, "a over b", Some(0xFFFF_FFFE));
+        assert!(
+            parse_equation_contents_script(&wrap_len).is_none(),
+            "script length that overflows 72+len must not slice"
+        );
     }
 
     #[test]

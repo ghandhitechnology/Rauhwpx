@@ -1303,13 +1303,14 @@ export class DocumentVersionController implements VersionManagerController {
       signal: AbortSignal,
     ): Promise<MaterializedMergeResult> => {
       const hydratedResolutions = await this.#hydrateMergeAssetResolutions(mergeResolutions);
-      const output = await this.#mergeWorker.materializeDocument(
+          const output = await this.#mergeWorker.materializeDocument(
         baseBytes,
         current.blob.bytes,
         incoming.blob.bytes,
         hydratedResolutions,
         {
           review: true,
+          softBudgetMs: 60_000,
           manifests: {
             base: baseManifests.length === 1 ? baseManifests[0] : { entries: [] },
             current: currentManifest,

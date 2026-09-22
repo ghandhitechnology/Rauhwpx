@@ -1267,6 +1267,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "pasteTableCellsTransposedAsTable(sec: number, para: number, charOffset: number,)"
   },
   {
+    "method": "promoteOleEquation",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "para",
+      "ci"
+    ],
+    "signature": "promoteOleEquation(sec: number, para: number, ci: number)"
+  },
+  {
     "method": "reflowLinesegs",
     "kind": "document",
     "parameters": [],

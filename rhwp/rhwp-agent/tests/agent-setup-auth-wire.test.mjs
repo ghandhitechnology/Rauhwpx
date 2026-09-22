@@ -33,11 +33,12 @@ test('the auth progress frame forwards both the login URL and the device code', 
   assert.match(frame, /authRunId: run\.runId|sendAuthRunFrame\(authRun/);
 });
 
-/** 원격 사용자는 허브 기기의 localhost 콜백에 접근할 수 없다. */
+/** Codex OAuth uses the CLI login command and has no localhost callback fallback. */
 test('codex OAuth never falls back to the localhost callback login', async () => {
   const source = await readSource('cli-setup-manager.mjs');
   assert.match(source, /agent === 'codex' \? \['login', '--device-auth'\] : \['login'\]/);
   assert.doesNotMatch(source, /platform === 'win32'[^;]+\['login', '--device-auth'\]/);
+  assert.doesNotMatch(source, /localhost.*callback|callback.*localhost/i);
 });
 
 /** 데스크톱 앱 밖(개발·브라우저)에서도 API 키 로그인은 성공해야 한다. */
@@ -88,6 +89,8 @@ test('OAuth callback and post-auth work share one exact credential commit bounda
   assert.match(handler, /authRuns\.finish\(authRun\)[\s\S]+authRun\.credentialsCommitted = true/);
   assert.match(handler, /const progress = \(entry\) => \{\s*if \(!isLiveAuthRun\(\)\) return/);
   assert.match(source, /accountSession\.completeLogin\([^;]+signal: abort\.signal,[^;]+onCommitted: commitAuthRun/s);
+  assert.match(handler, /piManager\.setApiKey\([^;]+signal: abort\.signal,[^;]+onCommitted: commitAuthRun/s);
+  assert.match(handler, /cliSetup\.authenticate\([^;]+signal: abort\.signal,[^;]+onCommitted: commitAuthRun/s);
   assert.ok(handler.indexOf('onCommitted: commitAuthRun') < handler.indexOf('providerHealth.check(true)'));
 
   const callbackStart = source.indexOf("url.pathname === '/oauth/openrouter/callback'");

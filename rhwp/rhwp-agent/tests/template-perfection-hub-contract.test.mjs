@@ -31,6 +31,7 @@ test('hub launches the copy-layout worker as a real isolated provider session', 
   assert.match(server, /prepareClaudeHome\(isolatedHome/);
   assert.match(launch, /piBin: piManager\.piBin/);
   assert.match(launch, /piRoot: piManager\.rootDir/);
+  assert.doesNotMatch(server, /prepareGrokHome|prepareCursorHome|prepareOpenCodeHome|openCodeAuthPath|flushOpenCodeCredentialMirror/);
   assert.match(mcp, /url\.searchParams\.set\('role', AGENT_ROLE\)/);
   assert.match(mcp, /url\.searchParams\.set\('workerJobId', COPY_LAYOUT_JOB_ID\)/);
   assert.match(piExtension, /RHWP_AGENT_ROLE/);

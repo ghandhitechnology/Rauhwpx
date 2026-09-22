@@ -46,7 +46,7 @@ function fixture(t, { signedIn = false, onFrame = null } = {}) {
   const push = (frame) => frames.push(frame);
   const context = vm.createContext({
     AbortController, crypto, authRuns, accountSession,
-    KNOWN_AGENTS: new Set(['rau', 'pi']), CLI_SETUP_AGENTS: [],
+    KNOWN_AGENTS: new Set(['claude', 'codex', 'pi']), CLI_SETUP_AGENTS: ['claude', 'codex'],
     hubPort: 12345, PROTOCOL_VERSION: 1,
     agentAuthCancelled: (message = 'Cancelled') => Object.assign(new Error(message), { code: 'AGENT_AUTH_CANCELLED' }),
     boundedAgentAuthCode: (code) => String(code).trim(),
@@ -61,9 +61,6 @@ function fixture(t, { signedIn = false, onFrame = null } = {}) {
     sendAgentSetupError: (_record, _sock, _id, _agent, error) => push({ type: 'agent-setup-error', code: error.code, message: error.message }),
     broadcastAccountStatus: async () => push({ type: 'account-status', status }),
     broadcastFreshAgentSetupStatuses: async () => push({ type: 'agent-setup-status' }),
-    rauCredits: { createDeviceSessionV2: async () => ({ id: 'legacy-provider-login', codeVerifier: 'verifier', loginUrl: 'https://example.test/legacy' }) },
-    rauManager: { cancelSetup: async () => {}, status: async () => ({ installed: true, authenticated: true }) },
-    rauStatus: { installed: true, authenticated: true },
     piManager: { status: async () => ({}) }, piStatus: {},
     refreshOpenRouterCredits: async () => {}, usageSnapshot: () => ({}), log: () => {},
   });
@@ -111,4 +108,17 @@ test('account entrypoint commits the account using its manual callback', async (
   assert.equal(f.calls.complete[0].proof.code, 'manual-code');
   assert.equal(f.authRuns.get('account'), null);
   assert.ok(f.frames.some((frame) => frame.type === 'account-status' && frame.status.signedIn));
+  assert.ok(f.frames.some((frame) => frame.type === 'agent-setup-status'));
+});
+
+test('a second account login is rejected while one is in progress', async (t) => {
+  const f = fixture(t);
+  f.send({ type: 'account-login', requestId: 'request-1' });
+  await flush();
+  assert.equal(f.calls.start.length, 1, JSON.stringify(f.frames));
+  f.send({ type: 'account-login', requestId: 'request-2' });
+  await flush();
+  assert.equal(f.calls.start.length, 1);
+  assert.ok(f.frames.some((frame) => /BUSY/.test(frame.code ?? '')), JSON.stringify(f.frames));
+  assert.ok(f.authRuns.get('account'), 'Original login remains usable');
 });

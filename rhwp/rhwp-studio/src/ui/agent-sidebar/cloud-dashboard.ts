@@ -59,19 +59,29 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   const chatList = el('ul', 'ag-cd-chat-list');
   chatList.setAttribute('aria-label', 'Cloud 작업');
   const configuration = el('div', 'ag-cd-config');
-  configuration.hidden = true;
-  const quota = el('p', 'ag-cd-muted');
+  configuration.hidden = false;
+  const usage = el('div', 'ag-cd-usage');
+  const usageHead = el('div', 'ag-cd-usage-head');
+  const usageLabel = el('strong', 'ag-cd-usage-label', '오늘 사용량');
+  const usageValue = el('span', 'ag-cd-usage-value');
+  const usageTrack = el('div', 'ag-cd-usage-track');
+  const usageFill = el('span', 'ag-cd-usage-fill');
+  usageTrack.setAttribute('role', 'progressbar');
+  usageTrack.setAttribute('aria-valuemin', '0');
+  usageTrack.setAttribute('aria-valuemax', '100');
+  usageHead.append(usageLabel, usageValue);
+  usageTrack.append(usageFill);
+  usage.append(usageHead, usageTrack);
   const login = button('로그인', 'ag-cd-login');
   const reconnect = button('다시 연결', 'ag-cd-reconnect');
-  configuration.append(quota, login, reconnect, deps.configuration);
-  settings.addEventListener('click', () => {
-    configuration.hidden = !configuration.hidden;
-    settings.setAttribute('aria-expanded', String(!configuration.hidden));
-  });
+  configuration.append(login, reconnect, deps.configuration);
+  const statusCard = deps.configuration.querySelector<HTMLElement>('.ag-cloud-settings-card');
+  (statusCard ?? configuration).append(usage);
+  settings.hidden = true;
   setup.addEventListener('click', () => deps.configure(setup));
-  toolbar.append(setup, refresh, settings);
-  header.append(el('h2', 'ag-cd-title', 'Cloud'), toolbar);
-  content.append(header, feedback, reconnectProgress.element, chatList, configuration);
+  toolbar.append(setup, settings, refresh);
+  header.append(toolbar);
+  content.append(header, feedback, reconnectProgress.element, configuration, chatList);
   element.append(content);
   function error(message: string) {
     feedback.textContent = message;
@@ -175,8 +185,17 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     login.hidden = snapshot.account?.signedIn === true || !deps.loginAccount;
     login.disabled = pending;
     const allowance = snapshot.account?.signedIn ? snapshot.account.quota : null;
-    quota.hidden = !allowance;
-    quota.textContent = allowance ? `오늘 남은 시간 ${Math.max(0, Math.floor(allowance.remainingMs / 60_000))}분` : '';
+    if (!allowance || allowance.dailyLimitMs <= 0) {
+      usage.hidden = true;
+    } else {
+      const usedMinutes = Math.max(0, Math.floor(allowance.usedMs / 60_000));
+      const limitMinutes = Math.max(0, Math.floor(allowance.dailyLimitMs / 60_000));
+      const percent = Math.min(100, Math.max(0, allowance.usedMs / allowance.dailyLimitMs * 100));
+      usage.hidden = false;
+      usageValue.textContent = `${usedMinutes}분 / ${limitMinutes}분`;
+      usageTrack.setAttribute('aria-valuenow', String(Math.round(percent)));
+      usageFill.style.width = `${percent}%`;
+    }
     renderSessions();
   }
   const refreshTimer = window.setInterval(() => {
