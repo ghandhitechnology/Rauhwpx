@@ -4233,7 +4233,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function invocableSkill(name: string): CatalogRow | undefined {
-    return skillCatalog.rows.find((row) => row.name === name && row.enabled && row.kind !== 'broken');
+    return skillCatalog.rows.find((row) => row.name === name && row.enabled);
   }
 
   function setComposerSkill(skill: CatalogRow | null, remainder?: string): void {
@@ -4331,7 +4331,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       { value: '/skills', label: '/skills', detail: '스킬 라이브러리 열기', local: 'skills' },
     ];
     const product = skillCatalog.rows
-      .filter((skill) => skill.enabled && skill.kind !== 'broken')
+      .filter((skill) => skill.enabled)
       .map((skill) => ({
         value: `/${skill.name}`,
         label: `/${skill.name}`,
