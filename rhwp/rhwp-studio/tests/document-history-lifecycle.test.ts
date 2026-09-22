@@ -13,12 +13,8 @@ test('document replacement and close wait for the current version operation queu
   assert.match(controller, /#operation = Promise\.resolve\(\)/);
   assert.match(
     controller,
-    /async whenIdle\(\): Promise<void> \{[\s\S]*?this\.#queueApprovalCheckpoint\(\);[\s\S]*?pending = this\.#operation;[\s\S]*?await pending;[\s\S]*?while \(pending !== this\.#operation\)/,
-    'the idle observer must queue deferred approval work and include work added while settling',
-  );
-  assert.match(
-    controller,
-    /#queueApprovalCheckpoint\(\): void \{[\s\S]*?clearTimeout\(this\.#pendingApprovalTimer\)[\s\S]*?void this\.#enqueue\(/,
+    /async whenIdle\(\): Promise<void> \{[\s\S]*?pending = this\.#operation;[\s\S]*?await pending;[\s\S]*?while \(pending !== this\.#operation\)/,
+    'the idle observer includes work added while settling',
   );
   assert.match(main, /let versionControllerRef: DocumentVersionController \| null = null/);
   assert.match(main, /versionControllerRef = versionController/);

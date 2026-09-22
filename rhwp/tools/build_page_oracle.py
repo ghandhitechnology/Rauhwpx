@@ -5,7 +5,7 @@ render_page_gate.py fixture 호환 TSV(rel<TAB>hangul_pages)를 산출한다. 92
 방지하고, 페이지네이션 엔진 개선을 대규모로 측정하기 위한 견고한 기준선.
 
 사용:
-    python tools/build_page_oracle.py --root C:/Users/planet/hwpdocs --sample 600 --seed 1658 \
+    python tools/build_page_oracle.py --root /path/to/hwpdocs --sample 600 --seed 1658 \
         -o tests/fixtures/render_page_oracle_1658.tsv
 
 요구: Windows + 한컴오피스 + pyhwpx.
@@ -22,7 +22,7 @@ from pathlib import Path
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", type=Path, default=Path("C:/Users/planet/hwpdocs"))
+    ap.add_argument("--root", type=Path, required=True, help="Document corpus directory")
     ap.add_argument("--sample", type=int, default=600)
     ap.add_argument("--seed", type=int, default=1658)
     ap.add_argument("--restart-every", type=int, default=300)

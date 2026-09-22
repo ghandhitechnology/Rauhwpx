@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_ROOT='/Library/Application Support/Rauhwpx Cloud'
+ENV_FILE="${INSTALL_ROOT}/cloud.env"
+[[ -r ${ENV_FILE} ]] || exit 0
+set -a
+source "${ENV_FILE}"
+set +a
+
+NODE=$(command -v node)
+CHANNEL=${RAUHWpx_CHANNEL:-stable}
+CURRENT_VERSION=$(${NODE} -p "require('${INSTALL_ROOT}/current/package.json').version")
+RELEASES_JSON=$(curl --fail --location --silent --show-error \
+  'https://api.github.com/repos/ghandhitechnology/Rauhwpx/releases?per_page=30')
+UPDATE=$(${NODE} -e '
+  const releases=JSON.parse(process.argv[1]);
+  const current=process.argv[2], channel=process.argv[3], name="rauhwpx-cloud-linux-arm64.tar.gz";
+  const release=releases.find((item)=>!item.draft&&item.prerelease===(channel==="prerelease")&&item.assets?.some((asset)=>asset.name===name));
+  const asset=release?.assets.find((item)=>item.name===name);
+  const version=String(release?.tag_name||"").replace(/^v/,"");
+  if(!asset||!version||version.localeCompare(current,undefined,{numeric:true,sensitivity:"base"})<=0)process.exit(1);
+  process.stdout.write(JSON.stringify({url:asset.browser_download_url,version}));
+' "${RELEASES_JSON}" "${CURRENT_VERSION}" "${CHANNEL}") || exit 0
+UPDATE_URL=$(${NODE} -e 'process.stdout.write(JSON.parse(process.argv[1]).url)' "${UPDATE}")
+
+exec env \
+  RAUHWpx_CHANNEL="${CHANNEL}" \
+  RAUHWpx_SERVICE_USER="${RAUHWpx_SERVICE_USER}" \
+  RAUHWpx_RELEASE_URL="${UPDATE_URL}" \
+  "${INSTALL_ROOT}/current/install/install-macos.sh"

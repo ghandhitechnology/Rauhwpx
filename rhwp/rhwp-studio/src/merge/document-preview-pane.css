@@ -39,13 +39,13 @@
   min-height: 0;
   overflow: auto;
   padding: 8px;
-  background: #d4d7dc;
+  background: var(--doc-workspace, #d4d7dc);
 }
 .document-preview-pane .merge-preview-canvas {
   display: block;
   margin: 0 auto;
-  background: #fff;
-  box-shadow: 0 1px 5px #0003;
+  background: var(--doc-paper, #fff);
+  box-shadow: 0 1px 5px var(--doc-shadow, #0003);
 }
 .document-preview-pane .merge-preview-marker {
   position: absolute;

@@ -532,13 +532,9 @@ fn count_shape(shape: &ShapeObject, counts: &mut HwpStructureCounts, losses: &mu
 }
 
 impl DocumentCore {
-    /// [Task #741 후속] 외부 file path 그림 영역 의 binary 영역 영역 base_dir 영역 영역 자동 load.
-    ///
-    /// HWP3 파일 영역 image 영역 영역 영역 영역 절대 경로 (예: "D:\\Work\\...\\rdb02.gif") 영역
-    /// 저장 영역. 본 환경 영역 영역 영역 path 영역 영역 access 부재 영역 영역 영역, basename
-    /// 영역 영역 추출 → `base_dir` 영역 영역 영역 file 영역 load → renderer 영역 영역 표시.
-    ///
-    /// 반환: load 영역 image 영역.
+    /// `base_dir`에서 파일명이 일치하는 외부 그림을 읽고 페이지 캐시를 갱신한다.
+    /// 원본 절대 경로를 사용할 수 없는 HWP3 문서도 같은 폴더의 그림을 표시할 수 있다.
+    /// 반환값은 읽어 들인 그림 수다.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn populate_external_images_from_dir(&mut self, base_dir: &std::path::Path) -> usize {
         let loaded = self.document.populate_external_images_from_dir(base_dir);
@@ -550,6 +546,18 @@ impl DocumentCore {
 
     pub fn from_bytes(data: &[u8]) -> Result<DocumentCore, HwpError> {
         Self::from_bytes_with_policy(data, crate::parser::limits::InputPolicy::Untrusted)
+    }
+
+    /// Choose metrics before import-time reconstruction of missing line data.
+    pub fn from_bytes_with_font_metrics(
+        data: &[u8],
+        font_metrics: crate::model::provenance::FontMetricsPolicy,
+    ) -> Result<DocumentCore, HwpError> {
+        Self::from_bytes_with_policies(
+            data,
+            crate::parser::limits::InputPolicy::Untrusted,
+            font_metrics,
+        )
     }
 
     /// Open one exact local file approved for this attempt by a native picker.
@@ -566,10 +574,19 @@ impl DocumentCore {
         data: &[u8],
         policy: crate::parser::limits::InputPolicy,
     ) -> Result<DocumentCore, HwpError> {
+        Self::from_bytes_with_policies(data, policy, Default::default())
+    }
+
+    pub(crate) fn from_bytes_with_policies(
+        data: &[u8],
+        policy: crate::parser::limits::InputPolicy,
+        font_metrics: crate::model::provenance::FontMetricsPolicy,
+    ) -> Result<DocumentCore, HwpError> {
         let source_format = crate::parser::detect_format(data);
         let parsed = crate::parser::parse_document_with_metadata_policy(data, policy)
             .map_err(|e| HwpError::InvalidFile(e.to_string()))?;
         let mut document = parsed.document;
+        document.doc_info.font_metrics_policy = font_metrics;
         let hml_metadata = parsed.hml_metadata;
 
         // [#2279 실험 전용] 본문 저장 lineseg 전면 무시 → fresh 재계산.
@@ -683,6 +700,8 @@ impl DocumentCore {
             overflow_links_cache: RefCell::new(HashMap::new()),
             snapshot_store: Vec::new(),
             next_snapshot_id: 0,
+            picture_transform_store: Vec::new(),
+            next_picture_transform_id: 0,
             hidden_header_footer: std::collections::HashSet::new(),
             file_name: String::new(),
             active_field: None,
@@ -713,7 +732,11 @@ impl DocumentCore {
         data: &[u8],
         policy: crate::parser::limits::InputPolicy,
     ) -> Result<String, HwpError> {
-        let mut replacement = DocumentCore::from_bytes_with_policy(data, policy)?;
+        let mut replacement = DocumentCore::from_bytes_with_policies(
+            data,
+            policy,
+            self.document.doc_info.font_metrics_policy,
+        )?;
         replacement.convert_to_editable_native()?;
 
         self.document = replacement.document;
@@ -2084,8 +2107,7 @@ impl DocumentCore {
         &self.document
     }
 
-    /// [Task #741 후속] 문서의 IR mutable 참조를 반환한다.
-    /// WASM 영역 영역 외부 image inject 영역 의 영역 영역 영역.
+    /// 문서 IR의 가변 참조를 반환한다. WASM 외부 그림 주입에서도 사용한다.
     pub fn document_mut(&mut self) -> &mut Document {
         &mut self.document
     }
@@ -2102,6 +2124,20 @@ impl DocumentCore {
             .collect();
         self.mark_all_sections_dirty();
         self.paginate();
+    }
+
+    /// 본문 여러 줄 삽입을 중간 페이지네이션 없이 처리할 수 있는 구역인지 확인한다.
+    /// 다단의 줄 폭 수렴은 편집 중 페이지네이션 결과를 사용하므로 초기 설정뿐 아니라
+    /// 구역 중간에 등장하는 모든 단 정의를 확인한다.
+    pub fn can_batch_body_text_native(&self, section_idx: usize) -> bool {
+        self.document.sections.get(section_idx).is_some_and(|section| {
+            section.paragraphs.iter().all(|paragraph| {
+                paragraph.controls.iter().all(|control| match control {
+                    Control::ColumnDef(columns) => columns.column_count == 1,
+                    _ => true,
+                })
+            })
+        })
     }
 
     /// Batch 모드를 시작한다. 이후 Command 호출 시 paginate()를 건너뛴다.
@@ -2131,8 +2167,8 @@ impl DocumentCore {
             sections: _,
             preview,
             bin_data_content,
-            extra_streams,
-            hwpx_aux_entries,
+            extra_streams: _,
+            hwpx_aux_entries: _,
             is_hwp3_variant,
             is_hwpx_variant,
             provenance,
@@ -2142,10 +2178,20 @@ impl DocumentCore {
             doc_properties: doc_properties.clone(),
             doc_info: doc_info.clone(),
             sections: Vec::new(),
-            preview: preview.clone(),
+            preview: preview
+                .as_ref()
+                .map(|preview| crate::model::document::Preview {
+                    text: preview.text.clone(),
+                    image: preview.image.as_ref().map(|image| {
+                        crate::model::document::PreviewImage {
+                            format: image.format,
+                            data: Vec::new(),
+                        }
+                    }),
+                }),
             bin_data_content: bin_data_content.clone(),
-            extra_streams: extra_streams.clone(),
-            hwpx_aux_entries: hwpx_aux_entries.clone(),
+            extra_streams: Vec::new(),
+            hwpx_aux_entries: Vec::new(),
             is_hwp3_variant: *is_hwp3_variant,
             is_hwpx_variant: *is_hwpx_variant,
             provenance: provenance.clone(),
@@ -2156,7 +2202,22 @@ impl DocumentCore {
         Section {
             section_def: section.section_def.clone(),
             paragraphs: Vec::new(),
-            raw_stream: section.raw_stream.clone(),
+            raw_stream: None,
+            // 봉인은 세션 메타라 문단 셸과 같이 복원한다. raw_stream 은 아래
+            // SnapshotSection.raw_stream 이 따로 들고, 복원 때 합친다.
+            raw_provenance: section.raw_provenance,
+        }
+    }
+
+    // 가변 Document API는 원시 바이트도 수정할 수 있으므로 revision이나 포인터만으로
+    // 재사용하면 안 된다. 바이트 비교 비용은 남지만 동일한 값은 할당 없이 공유한다.
+    fn share_snapshot_payload<T: Clone + PartialEq>(
+        value: &T,
+        baseline: Option<&Arc<T>>,
+    ) -> Arc<T> {
+        match baseline {
+            Some(previous) if previous.as_ref() == value => Arc::clone(previous),
+            _ => Arc::new(value.clone()),
         }
     }
 
@@ -2210,12 +2271,39 @@ impl DocumentCore {
                     revision,
                     paragraph_sequence_revision,
                     section_shell: Self::clone_section_shell(section),
+                    raw_stream: section.raw_stream.as_ref().map(|bytes| {
+                        Self::share_snapshot_payload(
+                            bytes,
+                            baseline
+                                .and_then(|snapshot| snapshot.sections.get(section_idx))
+                                .and_then(|section| section.raw_stream.as_ref()),
+                        )
+                    }),
                     paragraphs,
                 }
             })
             .collect();
         DocumentSnapshot {
             document_shell: Self::clone_document_shell(&self.document),
+            extra_streams: Self::share_snapshot_payload(
+                &self.document.extra_streams,
+                baseline.map(|snapshot| &snapshot.extra_streams),
+            ),
+            hwpx_aux_entries: Self::share_snapshot_payload(
+                &self.document.hwpx_aux_entries,
+                baseline.map(|snapshot| &snapshot.hwpx_aux_entries),
+            ),
+            preview_image: self
+                .document
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.image.as_ref())
+                .map(|image| {
+                    Self::share_snapshot_payload(
+                        &image.data,
+                        baseline.and_then(|snapshot| snapshot.preview_image.as_ref()),
+                    )
+                }),
             sections,
         }
     }
@@ -2253,6 +2341,17 @@ impl DocumentCore {
             .map(|(_, snapshot)| Arc::clone(snapshot))
             .ok_or_else(|| HwpError::RenderError(format!("스냅샷 {} 없음", source_id)))?;
         Ok(self.store_snapshot(snapshot))
+    }
+
+    /// Select session font metrics without rewriting stored document properties.
+    pub fn set_font_metrics_policy_native(
+        &mut self,
+        policy: crate::model::provenance::FontMetricsPolicy,
+    ) {
+        if self.document.doc_info.font_metrics_policy != policy {
+            self.document.doc_info.font_metrics_policy = policy;
+            self.refresh_layout_native();
+        }
     }
 
     /// 현재 Document IR은 건드리지 않고, 그로부터 파생된 모든 조판 캐시를 다시 만든다.
@@ -2375,14 +2474,30 @@ impl DocumentCore {
             .collect();
         let mut current_sections = std::mem::take(&mut self.document.sections);
         let mut restored = snapshot.document_shell.clone();
+        restored.extra_streams = snapshot.extra_streams.as_ref().clone();
+        restored.hwpx_aux_entries = snapshot.hwpx_aux_entries.as_ref().clone();
+        if let Some(image) = restored
+            .preview
+            .as_mut()
+            .and_then(|preview| preview.image.as_mut())
+        {
+            image.data = snapshot
+                .preview_image
+                .as_ref()
+                .expect("snapshot preview image")
+                .as_ref()
+                .clone();
+        }
+        restored.doc_info.font_metrics_policy = self.document.doc_info.font_metrics_policy;
         restored.sections.reserve(snapshot.sections.len());
         for (section_idx, snapshot_section) in snapshot.sections.iter().enumerate() {
             if same_section_count && current_revisions[section_idx] == snapshot_section.revision {
-                restored
-                    .sections
-                    .push(std::mem::take(&mut current_sections[section_idx]));
+                let mut section = std::mem::take(&mut current_sections[section_idx]);
+                section.raw_stream = snapshot_section.raw_stream.as_deref().cloned();
+                restored.sections.push(section);
             } else {
                 let mut section = snapshot_section.section_shell.clone();
+                section.raw_stream = snapshot_section.raw_stream.as_deref().cloned();
                 let can_move_unchanged_paragraphs = same_section_count
                     && current_paragraph_sequence_revisions[section_idx]
                         == snapshot_section.paragraph_sequence_revision
@@ -2424,6 +2539,27 @@ impl DocumentCore {
         if same_section_count {
             self.styles = resolve_styles(&self.document.doc_info, self.dpi);
             for &section_idx in &changed_sections {
+                // Snapshot tables are usually clean, but the cached measurements
+                // belong to the document we just replaced. Recomposition alone
+                // does not invalidate those table entries. Keep unaffected
+                // paragraphs reusable while remeasuring every restored owner.
+                let changed = selectively_changed_paragraphs[section_idx].as_ref();
+                for (paragraph_idx, para) in self.document.sections[section_idx]
+                    .paragraphs
+                    .iter_mut()
+                    .enumerate()
+                {
+                    if changed.is_some_and(|indices| {
+                        !indices.is_empty() && !indices.contains(&paragraph_idx)
+                    }) {
+                        continue;
+                    }
+                    for control in &mut para.controls {
+                        if let Control::Table(table) = control {
+                            table.dirty = true;
+                        }
+                    }
+                }
                 match &selectively_changed_paragraphs[section_idx] {
                     Some(paragraphs) if !paragraphs.is_empty() => {
                         for &paragraph_idx in paragraphs {
@@ -2798,6 +2934,75 @@ mod replace_content_tests {
     const HWP: &[u8] = include_bytes!("../../../saved/blank2010.hwp");
     const HWPX: &[u8] = include_bytes!("../../../saved/blank_hwpx.hwpx");
 
+    #[test]
+    fn missing_cell_lines_use_selected_font_metrics_during_import_and_replacement() {
+        use crate::model::provenance::FontMetricsPolicy;
+        const SOURCE: &[u8] = include_bytes!(
+            "../../../tests/fixtures/editing_parity/mac-hancom-12.30.0/cell-mixed-text/source.hwpx"
+        );
+        let mut document = crate::parser::hwpx::parse_hwpx(SOURCE).unwrap();
+        document
+            .hwpx_aux_entries
+            .retain(|(path, _)| path != crate::model::document::HWP5_ORIGIN_HWPX_MARKER_PATH);
+        let table = document.sections[0].paragraphs[0]
+            .controls
+            .iter_mut()
+            .find_map(|control| {
+                if let Control::Table(table) = control {
+                    Some(table)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        table.cells[0].paragraphs[0].line_segs.clear();
+        let bytes = crate::serializer::hwpx::serialize_hwpx(&document).unwrap();
+        let starts = |core: &DocumentCore| -> Vec<u32> {
+            let table = core.document.sections[0].paragraphs[0]
+                .controls
+                .iter()
+                .find_map(|control| {
+                    if let Control::Table(table) = control {
+                        Some(table)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            table.cells[0].paragraphs[0]
+                .line_segs
+                .iter()
+                .map(|line| line.text_start)
+                .collect()
+        };
+        let selected =
+            DocumentCore::from_bytes_with_font_metrics(&bytes, FontMetricsPolicy::HcrDeclared)
+                .unwrap();
+        let mut late = DocumentCore::from_bytes(&bytes).unwrap();
+        assert_ne!(
+            starts(&selected),
+            starts(&late),
+            "fixture must distinguish the two fonts' wrapping"
+        );
+        let wrong_starts = starts(&late);
+        late.set_font_metrics_policy_native(FontMetricsPolicy::HcrDeclared);
+        assert_eq!(
+            starts(&late),
+            wrong_starts,
+            "setting metrics after reconstruction cannot repair its stored breaks"
+        );
+        late.replace_content_from_bytes_native(&bytes).unwrap();
+        assert_eq!(
+            starts(&late),
+            starts(&selected),
+            "replacement must select metrics before reconstruction too"
+        );
+        assert_eq!(
+            late.get_page_text_layout_native(0).unwrap(),
+            selected.get_page_text_layout_native(0).unwrap()
+        );
+    }
+
     fn serialized_document(core: &DocumentCore) -> Vec<u8> {
         core.export_hwp_native().expect("document should serialize")
     }
@@ -2835,6 +3040,149 @@ mod replace_content_tests {
         core.restore_snapshot_native(shared_id)
             .expect("discarding one ID must not invalidate the shared ID");
         assert_eq!(serialized_document(&core), original);
+    }
+
+    fn add_snapshot_payloads(core: &mut DocumentCore, size: usize) {
+        use crate::model::document::{Preview, PreviewImage, PreviewImageFormat};
+        core.document.extra_streams = vec![("/Opaque".into(), vec![1; size])];
+        core.document.hwpx_aux_entries = vec![("custom/opaque.bin".into(), vec![2; size])];
+        core.document.preview = Some(Preview {
+            image: Some(PreviewImage {
+                format: PreviewImageFormat::Png,
+                data: vec![3; size],
+            }),
+            text: Some("preview".into()),
+        });
+        core.document.sections[0].raw_stream = Some(vec![4; size]);
+    }
+
+    #[test]
+    fn snapshots_share_opaque_payload_allocations() {
+        let mut core = DocumentCore::from_bytes(HML).unwrap();
+        add_snapshot_payloads(&mut core, 1024 * 1024);
+        // 다른 구역을 편집하면 원본 스트림이 남은 구역도 매번 캡처된다.
+        core.document
+            .sections
+            .push(core.document.sections[0].clone());
+        core.document.sections[1].raw_stream = None;
+        core.refresh_layout_native();
+        let mut capture_elapsed = std::time::Duration::ZERO;
+        for _ in 0..20 {
+            core.insert_text_native(1, 0, 0, "X").unwrap();
+            let started = std::time::Instant::now();
+            core.save_snapshot_native();
+            capture_elapsed += started.elapsed();
+        }
+        let first = &core.snapshot_store[0].1;
+        for (_, snapshot) in &core.snapshot_store {
+            assert!(Arc::ptr_eq(&first.extra_streams, &snapshot.extra_streams));
+            assert!(Arc::ptr_eq(
+                &first.hwpx_aux_entries,
+                &snapshot.hwpx_aux_entries
+            ));
+            assert!(Arc::ptr_eq(
+                first.preview_image.as_ref().unwrap(),
+                snapshot.preview_image.as_ref().unwrap()
+            ));
+            assert!(Arc::ptr_eq(
+                first.sections[0].raw_stream.as_ref().unwrap(),
+                snapshot.sections[0].raw_stream.as_ref().unwrap()
+            ));
+            assert!(snapshot.document_shell.extra_streams.is_empty());
+            assert!(snapshot.document_shell.hwpx_aux_entries.is_empty());
+            assert!(snapshot
+                .document_shell
+                .preview
+                .as_ref()
+                .unwrap()
+                .image
+                .as_ref()
+                .unwrap()
+                .data
+                .is_empty());
+            assert!(snapshot.sections[0].section_shell.raw_stream.is_none());
+        }
+        eprintln!("snapshot opaque payloads: 20 captures, 4 MiB unique bytes vs 80 MiB deep copies; capture {:?}", capture_elapsed);
+    }
+
+    #[test]
+    fn snapshot_opaque_payloads_preserve_untracked_mutations_and_restore_isolation() {
+        let mut core = DocumentCore::from_bytes(HML).unwrap();
+        add_snapshot_payloads(&mut core, 8);
+        let before = core.save_snapshot_native();
+        {
+            let doc = core.document_mut();
+            doc.extra_streams[0].1[0] = 11;
+            doc.hwpx_aux_entries[0].1[0] = 12;
+            doc.preview.as_mut().unwrap().image.as_mut().unwrap().data[0] = 13;
+            doc.sections[0].raw_stream.as_mut().unwrap()[0] = 14;
+        }
+        let after = core.save_snapshot_native();
+        let a = Arc::clone(&core.snapshot_store[0].1);
+        let b = Arc::clone(&core.snapshot_store[1].1);
+        assert!(!Arc::ptr_eq(&a.extra_streams, &b.extra_streams));
+        assert!(!Arc::ptr_eq(&a.hwpx_aux_entries, &b.hwpx_aux_entries));
+        assert!(!Arc::ptr_eq(
+            a.preview_image.as_ref().unwrap(),
+            b.preview_image.as_ref().unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            a.sections[0].raw_stream.as_ref().unwrap(),
+            b.sections[0].raw_stream.as_ref().unwrap()
+        ));
+        for (id, delta) in [(before, 0), (after, 10), (before, 0)] {
+            core.restore_snapshot_native(id).unwrap();
+            let doc = core.document();
+            assert_eq!(doc.extra_streams[0].1[0], 1 + delta);
+            assert_eq!(doc.hwpx_aux_entries[0].1[0], 2 + delta);
+            assert_eq!(
+                doc.preview.as_ref().unwrap().image.as_ref().unwrap().data[0],
+                3 + delta
+            );
+            assert_eq!(doc.sections[0].raw_stream.as_ref().unwrap()[0], 4 + delta);
+        }
+        core.document_mut().extra_streams[0].1[0] = 21;
+        let edited = core.save_snapshot_native();
+        assert_eq!(a.extra_streams[0].1[0], 1);
+        assert_eq!(b.extra_streams[0].1[0], 11);
+        core.restore_snapshot_native(after).unwrap();
+        assert_eq!(core.document.extra_streams[0].1[0], 11);
+        core.restore_snapshot_native(edited).unwrap();
+        assert_eq!(core.document.extra_streams[0].1[0], 21);
+        core.document_mut().sections[0].raw_stream = None;
+        let without_raw = core.save_snapshot_native();
+        core.restore_snapshot_native(before).unwrap();
+        assert_eq!(core.document.sections[0].raw_stream.as_ref().unwrap()[0], 4);
+        core.restore_snapshot_native(without_raw).unwrap();
+        assert!(core.document.sections[0].raw_stream.is_none());
+    }
+
+    #[test]
+    fn snapshot_opaque_payload_presence_and_serialization_survive_undo_redo() {
+        let mut core = DocumentCore::from_bytes(HML).unwrap();
+        let absent = core.save_snapshot_native();
+        add_snapshot_payloads(&mut core, 8);
+        // 임의의 바이트는 유효한 HWP 구역 레코드가 아니므로 저장 검증에서는 제외한다.
+        core.document.sections[0].raw_stream = None;
+        let present = core.save_snapshot_native();
+        let expected_hwp = core.export_hwp_native().unwrap();
+        let expected_hwpx = core.export_hwpx_native().unwrap();
+        core.document_mut().extra_streams.clear();
+        core.document_mut().hwpx_aux_entries.clear();
+        core.document_mut().preview.as_mut().unwrap().image = None;
+        let removed = core.save_snapshot_native();
+        core.restore_snapshot_native(present).unwrap();
+        assert_eq!(core.export_hwp_native().unwrap(), expected_hwp);
+        assert_eq!(core.export_hwpx_native().unwrap(), expected_hwpx);
+        core.restore_snapshot_native(removed).unwrap();
+        assert!(core.document.extra_streams.is_empty());
+        assert!(core.document.hwpx_aux_entries.is_empty());
+        assert!(core.document.preview.as_ref().unwrap().image.is_none());
+        core.restore_snapshot_native(absent).unwrap();
+        assert!(core.document.extra_streams.is_empty());
+        assert!(core.document.hwpx_aux_entries.is_empty());
+        core.restore_snapshot_native(present).unwrap();
+        assert_eq!(core.export_hwp_native().unwrap(), expected_hwp);
     }
 
     #[test]

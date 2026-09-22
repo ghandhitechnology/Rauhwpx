@@ -1,6 +1,8 @@
 import { WasmBridge, type PreparedWasmDocument } from '@/core/wasm-bridge';
+import { installDocumentTitle } from '@/ui/document-title';
 import { FALLBACK_DOCUMENT_FILE_NAME } from '@/core/document-names';
 import type { DocumentInfo } from '@/core/types';
+import { browserOriginSyncDigest, browserOriginPublishedRevision, setBrowserOriginSyncDigest } from '@/cloud/browser-cloud';
 import { EventBus } from '@/core/event-bus';
 import { assertRemoteDocumentBytes } from '@/core/document-signature';
 import { consumeExactLocalFileRead } from '@/core/local-file-grant';
@@ -27,8 +29,16 @@ import { withCanvasKitSurfaceBlockers } from '@/core/canvaskit-document-prefligh
 import { loadExtensionViewerSettings, type ExtensionViewerSettings } from '@/core/extension-settings';
 import { CommandRegistry } from '@/command/registry';
 import { CommandDispatcher } from '@/command/dispatcher';
+import { defaultShortcuts, matchShortcut } from '@/command/shortcut-map';
+import { allowsDocumentShortcut, isEditorInput, ownsTextInput } from '@/command/shortcut-target';
 import type { EditorContext, CommandServices, EditorEditMode } from '@/command/types';
-import { confirmSaveBeforeReplacingDocument, fileCommands, runLibraryMove } from '@/command/commands/file';
+import {
+  confirmSaveBeforeReplacingDocument,
+  fileCommands,
+  runLibraryMove,
+  saveCurrentDocument,
+} from '@/command/commands/file';
+import { exportDocumentForFormat } from '@/command/save-document-format';
 import { editCommands, openClassicDocumentHistory } from '@/command/commands/edit';
 import {
   setBasicToolboxExpanded,
@@ -54,7 +64,7 @@ import { CommandPalette } from '@/ui/command-palette';
 import { showHmlImportWarning } from '@/ui/hml-import-warning';
 import { showLocalFontsModalIfNeeded } from '@/ui/local-fonts-modal';
 import { showToast } from '@/ui/toast';
-import { resolveDocumentPreflight, type DocumentPreflightIdentity, type OpenDocumentBytesEvent, type VerifiedDocumentGrant } from '@/recent/document-preflight';
+import { documentSourceDigest, resolveDocumentPreflight, type DocumentPreflightIdentity, type OpenDocumentBytesEvent, type VerifiedDocumentGrant } from '@/recent/document-preflight';
 import { addRecentDoc, listRecentDocs } from '@/recent/recent-store';
 import { showDropConfirmDialog } from '@/ui/drop-confirm-dialog';
 import { initRhwpDev } from '@/core/rhwp-dev';
@@ -105,20 +115,24 @@ import {
   getNativeFileHandleVerifiedDocumentId,
   getRendererSessionContext,
   installDesktopCloseHandling,
+  installDesktopCloudEditDraftSaveHandling,
   installDesktopFileHandling,
   installDesktopGeneratedDocumentHandling,
   installDesktopPlainTextPasteHandling,
+  installDesktopEditCommandHandling,
   installDesktopWindowChrome,
   installWebAppShell,
   isLegacyPortableHistoryFolderHandle,
   pickDesktopNativeOpenFile,
   pickDesktopNativeSaveFile,
+  persistDesktopCloudEditDraft,
   releaseDesktopDocument,
   releaseReplacedNativeFileHandle,
   rememberNativeDocument,
   reserveDesktopDocument,
 } from '@/desktop-integration';
-import { initAgentBridge, type AgentBridge } from './agent/bridge.ts';
+import { initAgentBridge, type AgentBridge, type ChatHistoryEntry } from './agent/bridge.ts';
+import type { AgentName } from './agent/types.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
 import { showEditingSettingsFallback } from './ui/agent-sidebar/settings-editing-fallback.ts';
 import { AGENT_LABEL } from './ui/agent-sidebar/providers.ts';
@@ -132,7 +146,20 @@ import {
   openPortableHistoryBundle,
 } from './versioning/index.ts';
 import type { AgentEditingLease } from './agent/types.ts';
+import { agentLeaseBlocksUserEditing } from './agent/editing-lease.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
+import type {
+  CloudCheckpointPayload,
+  CloudDocumentPayload,
+  CloudDownloadResult,
+  CloudResultResolution,
+  CloudTakeoverPayload,
+} from './cloud/types.ts';
+import {
+  captureCloudOriginSha256,
+  checkpointMatchesActiveDocument,
+  persistCheckpointToBrowserOrigin,
+} from './cloud/checkpoint-origin.ts';
 import {
   contextualEditingToolbarMode,
   contextualObjectCommandEnabled,
@@ -147,10 +174,48 @@ import {
 } from '@/core/object-address';
 
 const wasm = new WasmBridge();
+installDocumentTitle(wasm);
 const eventBus = new EventBus();
 const documentState = new DocumentDirtyState(eventBus);
 documentState.installBeforeUnload(window);
 const rendererSessionContextPromise = getRendererSessionContext();
+let disposeAgentSidebar = (): void => {};
+let cloudEditDraftIdentity: import('@/desktop-integration').CloudEditDraftIdentity | null = null;
+let cloudEditDraftSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function persistCloudEditDraft(requestId?: string): Promise<void> {
+  if (!cloudEditDraftIdentity || wasm.pageCount < 1) return;
+  inputHandler?.finalizeCompositionBeforeCursorMove();
+  const sourceFormat = wasm.getSourceFormat();
+  if (sourceFormat !== 'hwp' && sourceFormat !== 'hwpx') {
+    throw new Error('Cloud edit drafts require HWP or HWPX');
+  }
+  await persistDesktopCloudEditDraft({
+    ...cloudEditDraftIdentity,
+    bytes: exportDocumentForFormat(wasm, sourceFormat),
+    fileName: wasm.fileName,
+    ...(requestId ? { requestId } : {}),
+  });
+}
+
+function scheduleCloudEditDraftSave(): void {
+  if (!cloudEditDraftIdentity) return;
+  if (cloudEditDraftSaveTimer) clearTimeout(cloudEditDraftSaveTimer);
+  cloudEditDraftSaveTimer = setTimeout(() => {
+    cloudEditDraftSaveTimer = null;
+    void persistCloudEditDraft().catch((error) => {
+      console.warn('[cloud-edit] draft persistence failed:', error);
+    });
+  }, 900);
+}
+
+const disposeCloudEditDraftSaveHandling = installDesktopCloudEditDraftSaveHandling(async (requestId) => {
+  if (cloudEditDraftSaveTimer) {
+    clearTimeout(cloudEditDraftSaveTimer);
+    cloudEditDraftSaveTimer = null;
+  }
+  await persistCloudEditDraft(requestId);
+});
 const autosaveManager = new AutosaveManager({
   exportBytes: () => wasm.exportHwp(),
   schedule: autosaveScheduleFromUserSettings(),
@@ -163,7 +228,11 @@ void rendererSessionContextPromise.then((context) => {
 });
 autosaveManager.connect(eventBus);
 window.addEventListener('pagehide', (event) => {
-  if (!event.persisted) autosaveManager.dispose();
+  if (!event.persisted) {
+    disposeCloudEditDraftSaveHandling();
+    disposeAgentSidebar();
+    autosaveManager.dispose();
+  }
 });
 initThemeSync((effective, mode) => {
   eventBus.emit('theme-changed', { mode, effective });
@@ -214,6 +283,8 @@ let rendererSession: RendererSession | null = null;
 let editMode: EditorEditMode = 'normal';
 let documentReadOnly = new URLSearchParams(window.location.search).get('templatePreview') === '1';
 let agentEditingLease: AgentEditingLease = { active: false, agent: 'codex' };
+let previewDocumentReadOnly = documentReadOnly;
+let cloudAuthorityTransitionCount = 0;
 let rendererRuntimeRequest: EmbedRendererRuntimeRequestV1 | null = null;
 let renderBackendFallbackReason: RenderBackendFallbackReason | null = null;
 let rendererInitializationError: string | null = null;
@@ -264,9 +335,9 @@ function getContext(): EditorContext {
     canGroupSelectedObjects: canGroupTopLevelBodyObjects(selectedObjects),
     canUngroupSelectedObject: canUngroupTopLevelBodyObject(selectedObject),
     inField: inputHandler?.isInField() ?? false,
-    isEditable: !documentReadOnly && !agentEditingLease.active && (!isFormMode || canEditFormField),
+    isEditable: !documentReadOnly && !agentUserEditingLocked() && (!isFormMode || canEditFormField),
     readOnly: documentReadOnly,
-    userEditingLocked: agentEditingLease.active,
+    userEditingLocked: agentUserEditingLocked(),
     editMode,
     isFormMode,
     canEditFormField,
@@ -293,10 +364,37 @@ function setEditMode(mode: EditorEditMode): void {
 }
 
 function setDocumentReadOnly(readOnly: boolean): void {
-  documentReadOnly = readOnly;
-  document.documentElement.dataset.documentReadOnly = readOnly ? 'true' : 'false';
-  inputHandler?.setReadOnly(readOnly);
-  toolbar?.setEnabled(wasm.pageCount > 0 && !readOnly && !agentEditingLease.active);
+  previewDocumentReadOnly = readOnly;
+  syncDocumentReadOnly();
+}
+
+function setCloudDocumentLease(cloudOwned: boolean): void {
+  document.documentElement.dataset.cloudLease = cloudOwned ? 'cloud' : 'local';
+  syncDocumentReadOnly();
+}
+
+function beginCloudAuthorityTransition(): { release(): void } {
+  cloudAuthorityTransitionCount += 1;
+  document.documentElement.dataset.cloudAuthorityTransition = 'true';
+  syncDocumentReadOnly();
+  let released = false;
+  return {
+    release() {
+      if (released) return;
+      released = true;
+      cloudAuthorityTransitionCount = Math.max(0, cloudAuthorityTransitionCount - 1);
+      document.documentElement.dataset.cloudAuthorityTransition = cloudAuthorityTransitionCount > 0 ? 'true' : 'false';
+      syncDocumentReadOnly();
+    },
+  };
+}
+
+function syncDocumentReadOnly(): void {
+  documentReadOnly = previewDocumentReadOnly
+    || cloudAuthorityTransitionCount > 0;
+  document.documentElement.dataset.documentReadOnly = documentReadOnly ? 'true' : 'false';
+  inputHandler?.setReadOnly(documentReadOnly);
+  toolbar?.setEnabled(wasm.pageCount > 0 && !documentReadOnly && !agentUserEditingLocked());
   eventBus.emit('command-state-changed');
 }
 
@@ -315,13 +413,405 @@ function setAgentEditingLease(lease: AgentEditingLease): void {
     statusLabel.textContent = `${AGENT_LABEL[lease.agent]}가 문서를 편집 중이에요`;
     if (lease.waitingForUser) statusLabel.textContent = `${AGENT_LABEL[lease.agent]}가 답변을 기다리고 있어요`;
   }
-  inputHandler?.setUserEditingLocked(lease.active);
-  toolbar?.setEnabled(wasm.pageCount > 0 && !documentReadOnly && !lease.active);
+  inputHandler?.setUserEditingLocked(agentUserEditingLocked());
+  toolbar?.setEnabled(wasm.pageCount > 0 && !documentReadOnly && !agentUserEditingLocked());
   eventBus.emit('command-state-changed');
+}
+
+function bytesToSha256(bytes: Uint8Array): Promise<string> {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return crypto.subtle.digest('SHA-256', copy.buffer).then((digest) =>
+    [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join(''));
+}
+
+async function prepareCloudTransferDocument(startId: string, restart?: { document: CloudDocumentPayload; sourceStartId?: string }) {
+  if (!wasm.hasLoadedDocument()) return null;
+  if (wasm.isNewDocument) return null;
+  if (restart) {
+    // Older sessions may have no local history. They can still recover and
+    // download copies, but must not invent an ancestor from current local edits.
+    if (!restart.sourceStartId) return restart.document;
+    if (!versionControllerRef) throw new Error('문서 버전 기록을 준비하는 중입니다.');
+    const bytes = await versionControllerRef.prepareCloudBranch(
+      startId, restart.document.bytes, restart.document.fileName, restart.sourceStartId,
+    );
+    return { ...restart.document, bytes, sha256: await bytesToSha256(bytes) };
+  }
+  const sourceFormat = wasm.getSourceFormat();
+  if (sourceFormat !== 'hwp' && sourceFormat !== 'hwpx' && sourceFormat !== 'hml') {
+    throw new Error(`클라우드에서 지원하지 않는 문서 형식입니다: ${sourceFormat}`);
+  }
+  const format = sourceFormat;
+  let bytes = exportDocumentForFormat(wasm, format);
+  if (!versionControllerRef) throw new Error('문서 버전 기록을 준비하는 중입니다.');
+  bytes = await versionControllerRef.prepareCloudBranch(startId, bytes, wasm.fileName);
+  // The Cloud snapshot may include unsaved edits. Keep the current saved origin
+  // digest separate so later publication can still detect external file changes.
+  const originSha256 = await captureCloudOriginSha256({
+    handle: wasm.currentFileHandle,
+    loadedDigest: wasm.documentDigest,
+    sourceDigest: documentSourceDigest,
+    digest: bytesToSha256,
+  });
+  return {
+    bytes,
+    fileName: wasm.fileName,
+    sha256: await bytesToSha256(bytes),
+    ...(originSha256 !== undefined ? { originSha256 } : {}),
+  };
+}
+
+/**
+ * Worker-only browser control surface for the cloud document runtime.
+ *
+ * The dedicated worker build must enable this at compile time. It then still
+ * requires loopback origin, an explicit query flag, and a per-session 256-bit
+ * bootstrap secret. Normal web and desktop builds therefore expose nothing.
+ */
+let cloudDocumentPublishingEnabled = false;
+
+function agentUserEditingLocked(): boolean {
+  return agentLeaseBlocksUserEditing(agentEditingLease, cloudDocumentPublishingEnabled);
+}
+
+function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): boolean {
+  const cloudBuild = (import.meta as ImportMeta & { env?: Record<string, string | undefined> })
+    .env?.['VITE_RHWP_CLOUD_RUNTIME'] === '1';
+  const loopback = window.location.hostname === '127.0.0.1'
+    || window.location.hostname === 'localhost'
+    || window.location.hostname === '[::1]'
+    || window.location.hostname === '::1';
+  const params = new URLSearchParams(window.location.search);
+  const bootstrap = params.get('bootstrap') ?? '';
+  if (!cloudBuild || !loopback || params.get('cloudRuntime') !== '1' || bootstrap.length < 43) return false;
+  cloudDocumentPublishingEnabled = true;
+
+  let eventSequence = 0;
+  let exportedBytes: Uint8Array | null = null;
+  let exportedFormat: 'hwp' | 'hwpx' | 'hml' | null = null;
+  const events: Array<{ seq: number; event: unknown }> = [];
+  const requireSecret = (candidate: unknown): void => {
+    if (typeof candidate !== 'string' || candidate !== bootstrap) {
+      throw new Error('Cloud runtime bootstrap authentication failed');
+    }
+  };
+  const runtimeUrl = (raw: unknown): URL => {
+    const url = new URL(String(raw ?? ''), window.location.origin);
+    if (url.origin !== window.location.origin
+      || !url.pathname.startsWith('/_runtime/resource/')
+      || url.searchParams.get('bootstrap') !== bootstrap) {
+      throw new Error('Cloud runtime resource URL is outside the authenticated loopback origin');
+    }
+    return url;
+  };
+  const fetchRuntimeFile = async (raw: unknown, name: unknown, mimeType: unknown): Promise<File> => {
+    const response = await fetch(runtimeUrl(raw), { cache: 'no-store', credentials: 'omit' });
+    if (!response.ok) throw new Error(`Cloud runtime resource fetch failed (${response.status})`);
+    return new File([await response.blob()], String(name ?? 'resource.bin').slice(0, 255), {
+      type: typeof mimeType === 'string' && mimeType ? mimeType : 'application/octet-stream',
+    });
+  };
+
+  agentBridge.onEvent((event) => {
+    events.push({ seq: ++eventSequence, event: structuredClone(event) });
+    if (events.length > 2_000) events.splice(0, events.length - 2_000);
+  });
+
+  let documentRevision = 0;
+  eventBus.on('document-mutated', () => { documentRevision += 1; });
+  eventBus.on('document-changed', () => { documentRevision += 1; });
+  const api = Object.freeze({
+    status(secret: unknown) {
+      requireSecret(secret);
+      return {
+        connection: agentBridge.getConnectionState(),
+        activeAgent: agentBridge.getActiveAgent(),
+        turnRunning: agentBridge.isTurnRunning(),
+        documentLoaded: wasm.hasLoadedDocument(),
+        documentRevision,
+        latestEventSeq: eventSequence,
+      };
+    },
+    async loadDocument(secret: unknown, input: { url?: unknown; name?: unknown; mimeType?: unknown }) {
+      requireSecret(secret);
+      const file = await fetchRuntimeFile(input?.url, input?.name, input?.mimeType);
+      if (!/\.(?:hwp|hwpx|hml)$/i.test(file.name)) throw new Error('Cloud runtime document format is unsupported');
+      if (!(await loadFile(file, { skipUnsavedGuard: true, suppressDialogs: true }))) {
+        throw new Error('Cloud runtime could not load the document');
+      }
+      return {
+        fileName: wasm.fileName,
+        sourceFormat: wasm.getSourceFormat(),
+        pageCount: wasm.pageCount,
+        sectionCount: wasm.getSectionCount(),
+        digest: wasm.documentDigest,
+      };
+    },
+    async uploadReference(secret: unknown, input: {
+      url?: unknown;
+      name?: unknown;
+      mimeType?: unknown;
+      scopeId?: unknown;
+    }) {
+      requireSecret(secret);
+      const scopeId = String(input?.scopeId ?? '');
+      if (!scopeId || scopeId.length > 256) throw new Error('Cloud runtime reference scope is invalid');
+      const file = await fetchRuntimeFile(input?.url, input?.name, input?.mimeType);
+      return agentBridge.uploadReference('chat', scopeId, file);
+    },
+    startChat(secret: unknown, input: {
+      agent?: AgentName;
+      model?: unknown;
+      effort?: unknown;
+      workflow?: unknown;
+      permissionProfile?: unknown;
+      threadId?: unknown;
+      documentId?: unknown;
+      documentName?: unknown;
+      history?: ChatHistoryEntry[];
+    }) {
+      requireSecret(secret);
+      const agent = input?.agent;
+      if (agent !== 'claude' && agent !== 'codex' && agent !== 'pi') throw new Error('Cloud runtime provider is unsupported');
+      const threadId = String(input?.threadId ?? '');
+      if (!threadId || threadId.length > 256) throw new Error('Cloud runtime thread id is invalid');
+      const workflow = input?.workflow === 'plan' || input?.workflow === 'question' ? input.workflow : 'direct';
+      if (input?.permissionProfile !== 'unrestricted') {
+        throw new Error('Cloud runtime requires the unrestricted permission profile');
+      }
+      agentBridge.startChat(
+        agent,
+        String(input?.model ?? ''),
+        String(input?.effort ?? ''),
+        true,
+        'unrestricted',
+        workflow,
+        threadId,
+        typeof input?.documentId === 'string' && input.documentId ? input.documentId : null,
+        typeof input?.documentName === 'string' && input.documentName ? input.documentName : wasm.fileName,
+        Array.isArray(input?.history) ? input.history : [],
+      );
+      return { started: true };
+    },
+    async sendUserMessage(secret: unknown, text: unknown) {
+      requireSecret(secret);
+      const prompt = String(text ?? '').trim();
+      if (!prompt || prompt.length > 64 * 1024) throw new Error('Cloud runtime prompt is invalid');
+      return { messageId: await agentBridge.sendUserMessage(prompt) };
+    },
+    approvePlan(secret: unknown, planId: unknown) {
+      requireSecret(secret);
+      const id = String(planId ?? '');
+      if (!id || id.length > 256) throw new Error('Cloud runtime plan id is invalid');
+      agentBridge.approvePlan(id);
+      return { approved: true };
+    },
+    requestPlanChanges(secret: unknown, planId: unknown, feedback: unknown) {
+      requireSecret(secret);
+      const id = String(planId ?? '');
+      const text = String(feedback ?? '').trim();
+      if (!id || id.length > 256 || !text || text.length > 64 * 1024) {
+        throw new Error('Cloud runtime plan feedback is invalid');
+      }
+      agentBridge.requestPlanChanges(id, text);
+      return { requested: true };
+    },
+    setWorkflow(secret: unknown, workflow: unknown) {
+      requireSecret(secret);
+      if (workflow !== 'direct' && workflow !== 'plan' && workflow !== 'question') throw new Error('Cloud runtime workflow is invalid');
+      agentBridge.setWorkflow(workflow);
+      return { workflow };
+    },
+    interruptIfIdle(secret: unknown, lastObservedSequence: unknown) {
+      requireSecret(secret);
+      // No await between checking the event cursor, checking live tool requests,
+      // and fencing the provider turn. Events received after the worker's last
+      // drain must be handled before it can interrupt at a safe boundary.
+      if (!Number.isSafeInteger(lastObservedSequence) || lastObservedSequence !== eventSequence) {
+        return { interrupted: false };
+      }
+      return { interrupted: agentBridge.interruptIfIdle() };
+    },
+    drainEvents(secret: unknown, afterSequence: unknown) {
+      requireSecret(secret);
+      const after = Number.isSafeInteger(Number(afterSequence)) ? Number(afterSequence) : 0;
+      return events.filter((entry) => entry.seq > after).slice(0, 250);
+    },
+    async prepareExport(secret: unknown, format: unknown) {
+      requireSecret(secret);
+      if (format !== 'hwp' && format !== 'hwpx' && format !== 'hml') {
+        throw new Error('Cloud runtime export format is unsupported');
+      }
+      exportedFormat = format;
+      exportedBytes = exportDocumentForFormat(wasm, format);
+      const exportedRevision = documentRevision;
+      return {
+        format,
+        size: exportedBytes.byteLength,
+        fileName: wasm.fileName,
+        sha256: await bytesToSha256(exportedBytes),
+        documentRevision: exportedRevision,
+      };
+    },
+    readExportChunk(secret: unknown, offset: unknown, length: unknown) {
+      requireSecret(secret);
+      if (!exportedBytes || !exportedFormat) throw new Error('Cloud runtime export is not prepared');
+      const start = Number(offset);
+      const size = Number(length);
+      if (!Number.isSafeInteger(start) || start < 0 || start > exportedBytes.byteLength
+        || !Number.isSafeInteger(size) || size < 1 || size > 1024 * 1024) {
+        throw new Error('Cloud runtime export chunk is invalid');
+      }
+      const chunk = exportedBytes.subarray(start, Math.min(exportedBytes.byteLength, start + size));
+      let binary = '';
+      for (let index = 0; index < chunk.length; index += 0x8000) {
+        binary += String.fromCharCode(...chunk.subarray(index, index + 0x8000));
+      }
+      return { offset: start, size: chunk.length, dataBase64: btoa(binary) };
+    },
+    stop(secret: unknown) {
+      requireSecret(secret);
+      agentBridge.stopChat();
+      exportedBytes = null;
+      exportedFormat = null;
+      return { stopped: true };
+    },
+  });
+  Object.defineProperty(window, 'rauhwpxCloudRuntime', {
+    value: api,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  document.documentElement.dataset.cloudDocumentRuntime = 'true';
+  return true;
+}
+
+async function applyCloudResult(result: CloudDownloadResult, resolution: CloudResultResolution): Promise<{
+  documentId: string;
+  fileName: string;
+} | null> {
+  if (resolution.action !== 'replace') {
+    if (resolution.action === 'keep-both') {
+      const copy = resolution.preservedCopyName ?? result.preservedCopyName ?? resolution.path ?? result.fileName;
+      const reason = resolution.conflict === 'external-change' ? '원본 변경을 감지해 ' : '';
+      showToast({ message: `${reason}두 파일을 모두 보관했습니다: 원본, ${copy}`, durationMs: 4500 });
+      return null;
+    }
+    showToast({ message: '클라우드 결과를 버렸습니다.', durationMs: 3000 });
+    return null;
+  }
+  const requestId = `cloud-result-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  const opened = new Promise<void>((resolve, reject) => {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const off = eventBus.on('open-document-bytes:done', (payload) => {
+      const outcome = payload as { requestId?: string; ok: boolean; error?: string };
+      if (outcome.requestId !== requestId) return;
+      off();
+      if (timeout) clearTimeout(timeout);
+      if (outcome.ok) resolve();
+      else reject(new Error(outcome.error || '클라우드 결과 열기가 취소되었습니다.'));
+    });
+    timeout = setTimeout(() => {
+      off();
+      reject(new Error('클라우드 결과 열기 시간이 초과되었습니다.'));
+    }, 90_000);
+  });
+  eventBus.emit('open-document-bytes', {
+    bytes: resolution.bytes ?? result.bytes,
+    fileName: result.fileName,
+    fileHandle: null,
+    requestId,
+    skipUnsavedGuard: true,
+  });
+  try {
+    await opened;
+    if (!activeDocumentId) throw new Error('Cloud 결과에 로컬 문서 ID를 할당하지 못했습니다.');
+    showToast({ message: `${result.fileName}에 클라우드 결과를 반영했습니다.`, durationMs: 3500 });
+    return { documentId: activeDocumentId, fileName: result.fileName };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    showToast({ message: `클라우드 결과를 열지 못했습니다: ${message}`, durationMs: 4500 });
+    throw error;
+  }
+}
+
+async function applyCloudTakeover(takeover: CloudTakeoverPayload): Promise<{
+  documentId: string;
+  fileName: string;
+} | null> {
+  if (!takeover.document) {
+    showToast({ message: '클라우드 작업을 중단하고 이 기기로 편집 권한을 가져왔습니다.', durationMs: 3500 });
+    return null;
+  }
+  const requestId = `cloud-takeover-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  const opened = new Promise<void>((resolve, reject) => {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const off = eventBus.on('open-document-bytes:done', (payload) => {
+      const result = payload as { requestId?: string; ok: boolean; error?: string };
+      if (result.requestId !== requestId) return;
+      off();
+      if (timeout) clearTimeout(timeout);
+      if (result.ok) resolve();
+      else reject(new Error(result.error || '클라우드 체크포인트 열기가 취소되었습니다.'));
+    });
+    timeout = setTimeout(() => {
+      off();
+      reject(new Error('클라우드 체크포인트 열기 시간이 초과되었습니다.'));
+    }, 90_000);
+  });
+  eventBus.emit('open-document-bytes', {
+    bytes: takeover.document.bytes,
+    fileName: takeover.document.fileName,
+    fileHandle: null,
+    requestId,
+    skipUnsavedGuard: true,
+  });
+  await opened;
+  if (!activeDocumentId) throw new Error('클라우드 체크포인트에 로컬 문서 ID를 할당하지 못했습니다.');
+  showToast({
+    message: `${takeover.document.fileName}의 최신 클라우드 체크포인트를 열었습니다.`,
+    durationMs: 4000,
+  });
+  return { documentId: activeDocumentId, fileName: takeover.document.fileName };
+}
+
+async function publishCloudCheckpoint(checkpoint: CloudCheckpointPayload): Promise<void> {
+  let outcome = checkpoint.publication;
+  if (!outcome) {
+    if (!activeDocumentId || wasm.pageCount === 0
+      || !checkpointMatchesActiveDocument(checkpoint, activeDocumentId)) {
+      throw new Error('원본 문서를 연 기기에서 Cloud 버전을 반영해 주세요.');
+    }
+    const lastPublishedRevision = browserOriginPublishedRevision(checkpoint.sessionId);
+    if (lastPublishedRevision !== null && checkpoint.revision <= lastPublishedRevision) return;
+    const saved = await persistCheckpointToBrowserOrigin({
+      handle: wasm.currentFileHandle,
+      bytes: checkpoint.bytes,
+      sha256: checkpoint.sha256,
+      expectedSha256: browserOriginSyncDigest(checkpoint.sessionId) ?? checkpoint.expectedOriginSha256 ?? null,
+      digest: bytesToSha256,
+    });
+    if (saved === 'permission-denied') {
+      throw new Error('원본 파일의 쓰기 권한을 허용한 뒤 다시 반영해 주세요.');
+    }
+    outcome = saved;
+    if (outcome === 'unchanged' || outcome === 'written') {
+      setBrowserOriginSyncDigest(checkpoint.sessionId, checkpoint.sha256, checkpoint.revision);
+    }
+  }
+  const message = outcome === 'conflict'
+    ? '원본이 다른 곳에서 변경되었습니다. Cloud 버전은 별도 사본으로 보관했습니다.'
+    : outcome === 'archive-only'
+      ? 'Cloud 버전을 보관했습니다. 원본 파일을 열어 반영해 주세요.'
+      : 'Cloud 버전을 원본에 반영했습니다.';
+  showToast({ message, durationMs: 4000 });
 }
 
 /** 렌더러 초기화 후에 생성되는 에이전트 브리지 — 저장 가드가 대기 편집을 조회한다. */
 let agentBridgeRef: AgentBridge | null = null;
+let awaitPendingCloudTransferForClose: () => Promise<void> = () => Promise.resolve();
 let versionControllerRef: DocumentVersionController | null = null;
 let agentSidebarReady = false;
 
@@ -366,6 +856,12 @@ const commandServices: CommandServices = {
 };
 
 installDesktopCloseHandling(async () => {
+  try {
+    await awaitPendingCloudTransferForClose();
+    if (cloudEditDraftIdentity) await persistCloudEditDraft();
+  } catch {
+    return false;
+  }
   const allowClose = await canReplaceCurrentDocument();
   if (allowClose) documentState.permitNextUnload();
   return allowClose;
@@ -600,7 +1096,7 @@ async function initialize(): Promise<void> {
     );
     inputHandler.setEditMode(editMode);
     inputHandler.setReadOnly(documentReadOnly);
-    inputHandler.setUserEditingLocked(agentEditingLease.active);
+    inputHandler.setUserEditingLocked(agentUserEditingLocked());
 
     toolbar = new Toolbar(document.getElementById('style-bar')!, wasm, eventBus, dispatcher);
     toolbar.setEnabled(false);
@@ -695,9 +1191,21 @@ async function initialize(): Promise<void> {
           if (!(error instanceof DocumentOwnedElsewhereError)) showLoadError(error);
         });
     });
-    installDesktopGeneratedDocumentHandling(({ bytes, fileName, readOnly }) => {
+    installDesktopGeneratedDocumentHandling(({ bytes, fileName, readOnly, cloudEditDraft }) => {
+      cloudEditDraftIdentity = cloudEditDraft ?? null;
       if (readOnly) setDocumentReadOnly(true);
       eventBus.emit('open-document-bytes', { bytes, fileName });
+    });
+    installDesktopEditCommandHandling((command) => {
+      const target = document.activeElement;
+      if (ownsTextInput(target) && !isEditorInput(target)) {
+        document.execCommand(command === 'select-all' ? 'selectAll' : command);
+        return;
+      }
+      if (!allowsDocumentShortcut(target) || !inputHandler?.isActive()) return;
+      inputHandler.finalizeCompositionBeforeCursorMove();
+      inputHandler.focus();
+      dispatcher.dispatch(`edit:${command}`);
     });
     installDesktopPlainTextPasteHandling((text) => {
       inputHandler?.performPlainTextPaste(text);
@@ -737,6 +1245,7 @@ async function initialize(): Promise<void> {
     // 선택(opt-in) 기능이므로 여기서 실패해도 렌더러 초기화를 실패로 만들지 않는다.
     try {
       const agentBridge = initAgentBridge({
+        canPublishCloudDocument: () => cloudDocumentPublishingEnabled,
         wasm,
         eventBus,
         inputHandler,
@@ -746,6 +1255,7 @@ async function initialize(): Promise<void> {
       });
       agentBridgeRef = agentBridge;
       agentBridge.onEditingLeaseChange(setAgentEditingLease);
+      const cloudRuntime = installCloudDocumentRuntimeApi(agentBridge);
       const versionController = new DocumentVersionController({
         wasm,
         eventBus,
@@ -753,40 +1263,70 @@ async function initialize(): Promise<void> {
         getInputHandler: () => inputHandler,
         getDocumentId: () => activeDocumentId,
         agentBridge,
+        autoEnable: () => !cloudRuntime && userSettings.getUseHancomGit(),
       });
       versionControllerRef = versionController;
-      const agentSidebar = initAgentSidebar({
-        bridge: agentBridge,
-        eventBus,
-        editorSettingsRuntime: {
-          preview: applyEditorSettingsPreview,
-          committed: commitEditorSettingsRuntime,
-        },
-        versionController,
-        openClassicVersionControl: () => openClassicDocumentHistory(commandServices),
-        getDocumentContext: () => {
-          const documentName = wasm.pageCount > 0 ? wasm.fileName : null;
-          let selectionLabel: string | null = null;
-          if (inputHandler?.getSelectedPictureRef()) {
-            selectionLabel = '개체 선택됨';
-          } else if (inputHandler?.hasSelection()) {
-            selectionLabel = '텍스트 선택됨';
-          }
-          return { documentId: activeDocumentId, documentName, selectionLabel };
-        },
-        moveToLibraryDocument: (target) => {
-          void runLibraryMove(commandServices, target, () => activeDocumentId);
-        },
-      });
-      agentSidebarReady = true;
-      initInlinePrompt({
-        wasm,
-        eventBus,
-        inputHandler,
-        canvasView,
-        bridge: agentBridge,
-        submit: agentSidebar.sendInlinePrompt,
-      });
+      // The outer client owns the conversation. A worker needs the bridge and editor,
+      // but must not open another composer or start a default-provider chat.
+      if (!cloudRuntime) {
+        const agentSidebar = initAgentSidebar({
+          bridge: agentBridge,
+          eventBus,
+          editorSettingsRuntime: {
+            preview: applyEditorSettingsPreview,
+            committed: commitEditorSettingsRuntime,
+          },
+          versionController,
+          openClassicVersionControl: () => openClassicDocumentHistory(commandServices),
+          getDocumentContext: () => {
+            const documentName = wasm.pageCount > 0 ? wasm.fileName : null;
+            let selectionLabel: string | null = null;
+            if (inputHandler?.getSelectedPictureRef()) {
+              selectionLabel = '개체 선택됨';
+            } else if (inputHandler?.hasSelection()) {
+              selectionLabel = '텍스트 선택됨';
+            }
+            return {
+              documentId: activeDocumentId,
+              documentName,
+              selectionLabel,
+              isDirty: documentState.isDirty(),
+              isNewDocument: wasm.isNewDocument,
+              sourceFormat: wasm.getSourceFormat(),
+            };
+          },
+          moveToLibraryDocument: async (target) => {
+            await runLibraryMove(commandServices, target, () => activeDocumentId);
+          },
+          prepareCloudTransfer: prepareCloudTransferDocument,
+          beginCloudAuthorityTransition,
+          prepareCloudTakeover: () => confirmSaveBeforeReplacingDocument(commandServices),
+          setCloudDocumentLease,
+          applyCloudResult,
+          publishCloudCheckpoint,
+          isCloudCheckpointMerged: (checkpoint) => versionController.isCloudCheckpointMerged(checkpoint),
+          mergeCloudCheckpoint: async (startId, checkpoint) => {
+            const applied = await versionController.mergeCloudCheckpoint(startId, checkpoint);
+            if (applied) await versionController.refresh();
+            return applied;
+          },
+          applyCloudTakeover,
+        });
+        disposeAgentSidebar = () => {
+          agentSidebar.dispose();
+          disposeAgentSidebar = () => {};
+        };
+        awaitPendingCloudTransferForClose = agentSidebar.awaitPendingCloudTransferForClose;
+        agentSidebarReady = true;
+        initInlinePrompt({
+          wasm,
+          eventBus,
+          inputHandler,
+          canvasView,
+          bridge: agentBridge,
+          submit: agentSidebar.sendInlinePrompt,
+        });
+      }
       if (import.meta.env.DEV) {
         (window as any).__agentBridge = agentBridge;
         (window as any).__versionController = versionController;
@@ -809,30 +1349,16 @@ async function initialize(): Promise<void> {
  */
 function setupGlobalShortcuts(): void {
   document.addEventListener('keydown', (e) => {
-    // input/textarea 등 편집 가능 요소 내부에서는 무시
-    const target = e.target as HTMLElement;
-    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
-    // InputHandler가 활성 상태이면 자체 처리에 맡김
-    if (inputHandler?.isActive()) return;
-
-    const ctrlOrMeta = e.ctrlKey || e.metaKey;
-
-    // Alt+N / Alt+ㅜ → 새 문서 (문서 미로드 상태에서도 동작)
-    if (e.altKey && !ctrlOrMeta && !e.shiftKey) {
-      if (e.key === 'n' || e.key === 'N' || e.key === 'ㅜ') {
-        e.preventDefault();
-        dispatcher.dispatch('file:new-doc');
-        return;
-      }
-    }
-    // Ctrl/Cmd+O → 열기 (문서 미로드 상태에서도 동작)
-    if (ctrlOrMeta && !e.altKey && !e.shiftKey) {
-      if (e.key === 'o' || e.key === 'O' || e.key === 'ㅐ') {
-        e.preventDefault();
-        dispatcher.dispatch('file:open');
-        return;
-      }
-    }
+    const target = e.target instanceof Element ? e.target : null;
+    if (e.defaultPrevented || e.isComposing || !allowsDocumentShortcut(target)) return;
+    // 문서 입력은 모드별 처리가 있으므로 같은 키를 두 번 실행하지 않는다.
+    if (isEditorInput(target) && inputHandler?.isActive()) return;
+    const commandId = matchShortcut(e, defaultShortcuts);
+    if (!commandId) return;
+    if (!inputHandler?.isActive() && !['file:new-doc', 'file:open'].includes(commandId)) return;
+    e.preventDefault();
+    if (inputHandler?.isActive()) inputHandler.focus();
+    dispatcher.dispatch(commandId);
   }, false);
 }
 
@@ -1019,20 +1545,6 @@ function setupZoomControls(): void {
       vm.setZoom(1.0);
     }
   });
-
-  document.addEventListener('keydown', (e) => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    if (e.key === '=' || e.key === '+') {
-      e.preventDefault();
-      vm.smoothZoomBy(0.1);
-    } else if (e.key === '-') {
-      e.preventDefault();
-      vm.smoothZoomBy(-0.1);
-    } else if (e.key === '0') {
-      e.preventDefault();
-      vm.setZoom(1.0);
-    }
-  });
 }
 
 let totalSections = 1;
@@ -1066,6 +1578,7 @@ function setupEventListeners(): void {
 
   eventBus.on('document-changed', (reason) => {
     documentState.markDirty(typeof reason === 'string' ? reason : 'document-changed');
+    scheduleCloudEditDraftSave();
   });
 
   eventBus.on('renderer-selection-changed', (payload) => {
@@ -1305,7 +1818,7 @@ async function initializeDocument(
     await canvasView?.loadDocument();
     prepareCanvasKitLocalFonts(docInfo.fontsUsed);
     await updateLoadProgress(90, '도구 모음 준비 중...');
-    toolbar?.setEnabled(!documentReadOnly && !agentEditingLease.active);
+    toolbar?.setEnabled(!documentReadOnly && !agentUserEditingLocked());
     toolbar?.initFontDropdown(docInfo.fontsUsed);
     toolbar?.initStyleDropdown();
     await updateLoadProgress(94, '문서 검증 및 글꼴 확인 중...');
@@ -1348,6 +1861,12 @@ async function initializeDocument(
 
     // #2527: 자동 보정을 하지 않으므로 로드 직후 문서는 항상 clean.
     documentState.markClean('document-initialized');
+    try {
+      await versionControllerRef?.documentLoaded();
+    } catch (error) {
+      console.warn('[Hancom Git] Could not initialize document history', error);
+      showToast({ message: '문서는 열렸지만 버전 기록을 준비하지 못했습니다.', durationMs: 4500 });
+    }
   } catch (error) {
     console.error('[initDoc] 오류:', error);
     if (window.innerWidth < 768) alert(`초기화 오류: ${error}`);
@@ -1399,6 +1918,7 @@ async function loadFile(
   options: {
     skipUnsavedGuard?: boolean;
     fileHandle?: FileSystemFileHandleLike | null;
+    suppressDialogs?: boolean;
     /** Drag payloads retain a save handle but never receive the exact-picker parser grant. */
     untrustedSource?: boolean;
   } = {},
@@ -1418,6 +1938,7 @@ async function loadFile(
       fileName: selected.name,
       fileHandle: options.fileHandle ?? null,
       skipUnsavedGuard: true,
+      suppressDialogs: options.suppressDialogs,
     });
   } catch (error) {
     await options.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
@@ -1559,6 +2080,7 @@ async function loadBytes(
   await releaseReplacedNativeFileHandle(previousFileHandle, fileHandle)
     .catch((error) => console.warn('[desktop] 교체된 네이티브 파일 핸들 해제 실패:', error));
   prepareCanvasRendererDocument();
+  eventBus.emit('document-swapped');
   await updateLoadProgress(45, '자동 저장 준비 중...');
   forgetConvertedHmlSaveHandle(fileHandle);
   wasm.currentFileHandle = fileHandle;
@@ -1746,6 +2268,10 @@ async function createNewDocument(): Promise<void> {
 }
 
 async function canReplaceCurrentDocument(skipUnsavedGuard?: boolean): Promise<boolean> {
+  if (cloudAuthorityTransitionCount > 0 && skipUnsavedGuard !== true) {
+    showToast({ message: 'Cloud 전송과 문서 권한 전환이 끝난 뒤 문서를 바꿀 수 있습니다.', durationMs: 2600 });
+    return false;
+  }
   if (agentEditingLease.active) {
     showToast({ message: '에이전트가 편집을 마친 뒤 문서를 바꿀 수 있습니다.', durationMs: 2600 });
     return false;
@@ -1822,6 +2348,7 @@ async function openDocumentBytes(data: OpenDocumentBytesEvent) {
     }
     await loadBytes(data.bytes, data.fileName, data.fileHandle, performance.now(), {
       grant: data.grant,
+      suppressDialogs: data.suppressDialogs,
     });
     return true;
   } catch (error) {

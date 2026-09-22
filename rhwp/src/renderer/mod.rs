@@ -23,6 +23,7 @@ pub(crate) mod form_caption;
 pub mod height_cursor;
 pub mod height_measurer;
 pub mod html;
+pub mod hyperlinks;
 pub(crate) mod image_header;
 pub mod image_resolver;
 pub mod layer_renderer;
@@ -44,6 +45,7 @@ pub mod svg;
 pub mod svg_fragment;
 pub mod svg_layer;
 pub mod typeset;
+mod text_replay_policy;
 #[cfg(target_arch = "wasm32")]
 pub mod web_canvas;
 
@@ -119,6 +121,8 @@ pub(crate) fn clamp_tab_leader_end_x(
 /// 텍스트 렌더링 스타일
 #[derive(Debug, Clone, Serialize)]
 pub struct TextStyle {
+    /// Font substitution policy shared by wrapping and glyph positioning.
+    pub font_metrics_policy: crate::model::provenance::FontMetricsPolicy,
     /// 글꼴 이름
     pub font_family: String,
     /// 글꼴 크기 (px)
@@ -170,9 +174,8 @@ pub struct TextStyle {
     pub extra_word_spacing: f64,
     /// 배분/나눔 정렬용: 글자당 추가 간격 (px)
     pub extra_char_spacing: f64,
-    /// Task #352: dash leader (3+ 연속 '-') 시퀀스의 글자당 추가 간격 (px).
-    /// PDF 와 같이 라인 슬랙을 dash leader 가 흡수하도록 하여, 공백 분배
-    /// 부담을 줄이고 자연스러운 단어 간격을 유지한다. 0 이면 미적용.
+    /// Legacy compatibility spacing retained in serialized styles.
+    /// Literal hyphens are ordinary text; real leaders use `tab_leaders`.
     pub extra_dash_advance: f64,
     /// 외곽선 종류 (0=없음, 1~6=종류)
     pub outline_type: u8,
@@ -241,6 +244,7 @@ impl TextStyle {
 impl Default for TextStyle {
     fn default() -> Self {
         Self {
+            font_metrics_policy: Default::default(),
             font_family: String::new(),
             font_size: 0.0,
             color: 0,
@@ -387,7 +391,9 @@ pub enum StrokeDash {
     #[default]
     Solid,
     Dash,
+    LongDash,
     Dot,
+    Circle,
     DashDot,
     DashDotDot,
 }
@@ -925,6 +931,41 @@ pub(crate) fn tac_object_stack_line_metrics(
 #[inline]
 pub fn hwpunit_to_px(hwpunit: i32, dpi: f64) -> f64 {
     hwpunit as f64 * dpi / HWPUNIT_PER_INCH
+}
+
+pub(crate) const MIN_TAC_OBJECT_HEIGHT_PX: f64 = 8.0;
+const TAC_OWNER_HEIGHT_UNDER_PX: f64 = 4.0;
+const TAC_OWNER_HEIGHT_OVER_PX: f64 = 8.0;
+
+pub(crate) fn tac_object_flow_height_px(
+    ctrl: &crate::model::control::Control,
+    dpi: f64,
+) -> Option<f64> {
+    tac_object_flow_height_hu(ctrl).map(|height_hu| hwpunit_to_px(height_hu, dpi))
+}
+
+#[inline]
+pub(crate) fn tac_object_flow_height_hu(ctrl: &crate::model::control::Control) -> Option<i32> {
+    match ctrl {
+        Control::Picture(pic) if pic.common.treat_as_char => Some(pic.common.height as i32),
+        Control::Shape(shape) if shape.common().treat_as_char => Some(shape.common().height as i32),
+        _ => None,
+    }
+}
+
+pub(crate) fn line_owning_tac_object_height_px(
+    para: &crate::model::paragraph::Paragraph,
+    raw_line_height: f64,
+    dpi: f64,
+) -> Option<f64> {
+    para.controls
+        .iter()
+        .filter_map(|ctrl| tac_object_flow_height_px(ctrl, dpi))
+        .find(|height| {
+            *height > MIN_TAC_OBJECT_HEIGHT_PX
+                && raw_line_height + TAC_OWNER_HEIGHT_UNDER_PX >= *height
+                && raw_line_height <= *height + TAC_OWNER_HEIGHT_OVER_PX
+        })
 }
 
 /// 픽셀을 HWPUNIT으로 변환

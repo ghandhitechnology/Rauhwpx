@@ -111,8 +111,8 @@ def main() -> int:
     ap.add_argument("src", type=Path)
     ap.add_argument("--pdf", type=Path, default=None, help="기존 한글 PDF(없으면 pyhwpx 생성)")
     ap.add_argument("--compare", action="store_true", help="rhwp render 와 줄 pitch 대조")
-    ap.add_argument("--exe", default="C:/Users/planet/rhwp/target/release/rhwp.exe"
-                    if sys.platform == "win32" else "target/release/rhwp")
+    ap.add_argument("--exe", default=str(Path(__file__).resolve().parents[1] / "target" / "release"
+                    / ("rhwp.exe" if sys.platform == "win32" else "rhwp")))
     ap.add_argument("-o", "--out", type=Path, default=None)
     a = ap.parse_args()
 

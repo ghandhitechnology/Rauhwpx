@@ -6,7 +6,6 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS } from '../../rau-credits/catalog.mjs';
 import { replaceFileAtomically } from '../harness-update.mjs';
 import {
   createPiManager,
@@ -16,7 +15,6 @@ import {
   PI_MODEL_NAME_MAX_CHARS,
   PI_SECRET_ID,
   PI_SETTINGS_MAX_BYTES,
-  RAU_SECRET_ID,
 } from '../pi-manager.mjs';
 import { createMemorySecretStore } from '../secret-store.mjs';
 
@@ -420,6 +418,65 @@ test('concurrent installs share a single npm run', async () => {
   assert.deepEqual(a, b);
   assert.equal(a.version, '0.84.3');
   assert.ok(second.includes('done'), '뒤늦게 붙은 호출도 진행 상황을 받는다');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Windows Pi npm install exposes node for native postinstall under Electron', async () => {
+  const rootDir = await tmpRoot();
+  const prefixDir = path.join(rootDir, 'prefix');
+  const electron = path.join(rootDir, 'Rauhwpx.exe');
+  const { spawns, spawnProcess } = fakeSpawner(installer(prefixDir));
+  const manager = createPiManager({
+    rootDir,
+    spawnProcess,
+    platform: 'win32',
+    nodeCommand: electron,
+    baseEnv: { PATH: 'C:\\Windows\\System32' },
+    openRouter: fakeOpenRouter(),
+    fetchImpl: offlineFetch,
+  });
+
+  const status = await manager.install();
+  assert.equal(status.installed, true);
+  assert.equal(spawns[0].command, electron);
+  assert.equal(spawns[0].options.env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(spawns[0].options.env.npm_node_execpath, electron);
+  assert.equal(spawns[0].options.env.PATH.startsWith(path.join(rootDir, 'node-host')), true);
+  assert.equal(
+    await fs.readFile(path.join(rootDir, 'node-host', 'node.cmd'), 'utf8').then((body) => body.includes('Rauhwpx.exe')),
+    true,
+  );
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Windows Pi cancel during node-host setup does not start npm', async () => {
+  const rootDir = await tmpRoot();
+  let releaseWrite;
+  const writeStarted = Promise.withResolvers();
+  const writeBlocked = new Promise((resolve) => { releaseWrite = resolve; });
+  const { spawns, spawnProcess } = fakeSpawner();
+  const manager = createPiManager({
+    rootDir,
+    spawnProcess,
+    platform: 'win32',
+    nodeCommand: path.join(rootDir, 'Rauhwpx.exe'),
+    baseEnv: { PATH: 'C:\\Windows\\System32' },
+    openRouter: fakeOpenRouter(),
+    fetchImpl: offlineFetch,
+    writeNodeHostFile: async () => {
+      writeStarted.resolve();
+      await writeBlocked;
+    },
+  });
+
+  const installing = manager.install();
+  await writeStarted.promise;
+  assert.equal(await manager.cancelSetup(), false);
+  releaseWrite();
+  await assert.rejects(installing, { code: 'PI_INSTALL_FAILED' });
+  assert.equal(spawns.length, 0);
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });
@@ -1350,98 +1407,6 @@ test('syncAssets rewrites settings.json without an install', async () => {
     (await readJson(path.join(rootDir, 'agent', 'settings.json'))).extensions,
     [manager.extensionPath, manager.subagentExtensionPath],
   );
-
-  await fs.rm(rootDir, { recursive: true, force: true });
-});
-
-test('Rau profile shares the Pi prefix but keeps a separate secret and locked catalog', async () => {
-  const prefixDir = await tmpRoot();
-  const piRoot = await tmpRoot();
-  const rauRoot = await tmpRoot();
-  const secretStore = createMemorySecretStore();
-  const pi = createPiManager({
-    rootDir: piRoot,
-    prefixDir,
-    openRouter: fakeOpenRouter(),
-    secretStore,
-    secretId: PI_SECRET_ID,
-  });
-  const rau = createPiManager({
-    rootDir: rauRoot,
-    prefixDir,
-    openRouter: fakeOpenRouter(),
-    secretStore,
-    secretId: RAU_SECRET_ID,
-    lockedModels: RAU_LOCKED_MODELS,
-    skipLegacyKey: true,
-  });
-
-  await pi.setApiKey('sk-or-v1-pi-key-aaaa');
-  const rauStatus = await rau.setApiKey('sk-or-v1-rau-key-bbbb', { account: 'andy@example.com' });
-  assert.equal(await secretStore.get(PI_SECRET_ID), 'sk-or-v1-pi-key-aaaa');
-  assert.equal(await secretStore.get(RAU_SECRET_ID), 'sk-or-v1-rau-key-bbbb');
-  assert.equal(pi.apiKey(), 'sk-or-v1-pi-key-aaaa');
-  assert.equal(rau.apiKey(), 'sk-or-v1-rau-key-bbbb');
-  assert.equal(rauStatus.setupComplete, true);
-  assert.equal(rauStatus.defaultModelId, RAU_DEFAULT_MODEL_ID);
-  assert.equal(rauStatus.models.length, 4);
-  assert.equal((await pi.status()).setupComplete, false);
-  await assert.rejects(() => rau.setModels([{ id: RAU_DEFAULT_MODEL_ID }]), (error) => {
-    assert.equal(error.code, 'PI_MODELS_LOCKED');
-    return true;
-  });
-  await rau.clearApiKey();
-  assert.equal(await secretStore.get(RAU_SECRET_ID), null);
-  assert.equal(await secretStore.get(PI_SECRET_ID), 'sk-or-v1-pi-key-aaaa');
-  assert.equal((await rau.status()).setupComplete, false);
-  assert.equal((await rau.status()).account, null);
-  assert.equal(pi.apiKey(), 'sk-or-v1-pi-key-aaaa');
-
-  await fs.rm(prefixDir, { recursive: true, force: true });
-  await fs.rm(piRoot, { recursive: true, force: true });
-  await fs.rm(rauRoot, { recursive: true, force: true });
-});
-
-test('Rau ignores retired proxy credentials after upgrading to direct OpenRouter access', async () => {
-  const rootDir = await tmpRoot();
-  const secretStore = createMemorySecretStore();
-  const retiredProxyToken = `rau_v1_${'a'.repeat(43)}`;
-  await secretStore.set(RAU_SECRET_ID, retiredProxyToken);
-  await fs.writeFile(path.join(rootDir, 'config.json'), `${JSON.stringify({
-    version: 1,
-    keyTail: retiredProxyToken.slice(-4),
-    account: 'andy@example.com',
-    models: RAU_LOCKED_MODELS,
-    defaultModelId: RAU_DEFAULT_MODEL_ID,
-    setupComplete: true,
-  })}\n`);
-
-  const manager = createPiManager({
-    rootDir,
-    openRouter: fakeOpenRouter(),
-    secretStore,
-    secretId: RAU_SECRET_ID,
-    lockedModels: RAU_LOCKED_MODELS,
-    skipLegacyKey: true,
-  });
-
-  const status = await manager.status();
-  assert.equal(status.keyConfigured, false);
-  assert.equal(status.setupComplete, false);
-  assert.equal(status.keyTail, null);
-  assert.equal(manager.apiKey(), null);
-  assert.match(status.error, /다시 완료/);
-  assert.equal(await secretStore.get(RAU_SECRET_ID), retiredProxyToken);
-
-  await manager.syncAssets();
-  const models = await readJson(path.join(rootDir, 'agent', 'models.json'));
-  assert.equal(models.providers.openrouter.baseUrl, 'https://openrouter.ai/api/v1');
-  assert.equal(models.providers.openrouter.apiKey, undefined);
-
-  const recovered = await manager.setApiKey('sk-or-v1-reconnected', { account: 'andy@example.com' });
-  assert.equal(recovered.setupComplete, true);
-  assert.equal(recovered.error, null);
-  assert.equal(await secretStore.get(RAU_SECRET_ID), 'sk-or-v1-reconnected');
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });

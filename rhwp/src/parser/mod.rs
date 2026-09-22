@@ -439,6 +439,17 @@ fn parse_hwp_with_cfb(
         normalize_variant_paragraph_vpos(&mut doc);
     }
 
+    if let Some(idx) = doc
+        .extra_streams
+        .iter()
+        .position(|(p, _)| p == crate::model::hyperlink_format::HWP_STREAM)
+    {
+        let (_, bytes) = doc.extra_streams.remove(idx);
+        if bytes.len() <= 16 * 1024 * 1024 {
+            crate::model::hyperlink_format::decode(&mut doc, &bytes);
+        }
+    }
+
     Ok(doc)
 }
 
@@ -584,6 +595,7 @@ fn parse_sections_strict(
             Ok(mut section) => {
                 // 원본 BodyText 스트림 보존 (라운드트립용)
                 section.raw_stream = Some(section_data);
+                section.raw_provenance = Some(());
                 sections.push(section);
             }
             Err(e) => {
@@ -593,6 +605,8 @@ fn parse_sections_strict(
             }
         }
     }
+
+    body_text::link_orphan_field_ends_across_sections(&mut sections);
 
     Ok(sections)
 }
@@ -668,6 +682,7 @@ fn parse_hwp_with_lenient(lenient: cfb_reader::LenientCfbReader) -> Result<Docum
         match body_text::parse_body_text_section(&section_data) {
             Ok(mut section) => {
                 section.raw_stream = Some(section_data);
+                section.raw_provenance = Some(());
                 sections.push(section);
             }
             Err(e) => {
@@ -676,6 +691,8 @@ fn parse_hwp_with_lenient(lenient: cfb_reader::LenientCfbReader) -> Result<Docum
             }
         }
     }
+
+    body_text::link_orphan_field_ends_across_sections(&mut sections);
 
     // BinData 로드 시도
     let bin_data_content = load_bin_data_content_lenient(
@@ -738,6 +755,17 @@ fn parse_hwp_with_lenient(lenient: cfb_reader::LenientCfbReader) -> Result<Docum
         normalize_variant_paragraph_vpos(&mut doc);
     }
 
+    if let Some(idx) = doc
+        .extra_streams
+        .iter()
+        .position(|(p, _)| p == crate::model::hyperlink_format::HWP_STREAM)
+    {
+        let (_, bytes) = doc.extra_streams.remove(idx);
+        if bytes.len() <= 16 * 1024 * 1024 {
+            crate::model::hyperlink_format::decode(&mut doc, &bytes);
+        }
+    }
+
     Ok(doc)
 }
 
@@ -774,7 +802,7 @@ fn load_bin_data_content_lenient(
             BinDataCompression::NoCompress => false,
         };
 
-        match lenient.read_stream_limited(&storage_name, member_limit) {
+        match lenient.read_stream_limited(&format!("/BinData/{storage_name}"), member_limit) {
             Ok(data) => {
                 let mut decompressed =
                     match decode_hwp_bin_data_stream(data, stream_compressed, member_limit) {

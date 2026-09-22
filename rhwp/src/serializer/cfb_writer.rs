@@ -515,12 +515,13 @@ fn serialize_hwp_with_limits(
 ) -> Result<Vec<u8>, SerializeError> {
     let compressed = doc.header.compressed;
     let preview = supplement_preview(doc);
+    let extra_streams = crate::model::hyperlink_format::extra_streams_for_hwp(doc);
     let metadata = validate_stream_metadata(
         doc.sections.len(),
         &doc.doc_info.bin_data_list,
         &doc.bin_data_content,
         &preview,
-        &doc.extra_streams,
+        &extra_streams,
         compressed,
     )?;
     let mut expanded = ExpandedWriteBudget::new(limits.max_expanded_bytes);
@@ -625,7 +626,7 @@ fn serialize_hwp_with_limits(
     append_extra_streams(
         &mut streams,
         &mut expanded,
-        &doc.extra_streams,
+        &extra_streams,
         limits.max_structural_member_bytes,
     )?;
 

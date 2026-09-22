@@ -26,6 +26,7 @@ import {
   type EngineEditOperation,
 } from './engine-edit.ts';
 import { inferExportFormat } from '../command/save-target.ts';
+import { fatalEquationDiagnostics, parseEquationPreview, type EquationPreview } from '../core/equation-preview.ts';
 
 export interface AgentToolExecutorDeps {
   wasm: WasmBridge;
@@ -36,6 +37,7 @@ export interface AgentToolExecutorDeps {
   loadTemplateBytes?: (template: DocumentTemplate) => Promise<Uint8Array>;
   getDocumentSourcePath?: () => Promise<string | null>;
   isReadOnly?: () => boolean;
+  canPublishCloudDocument?: () => boolean;
 }
 
 const DOC_NOT_LOADED_MESSAGE = '문서가 로드되지 않았습니다';
@@ -56,6 +58,7 @@ const PENDING_NOTE = 'staged now as live preview; when the turn ends it is auto-
 
 /** Every Studio tool that can create or stage a document mutation. */
 export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
+  'publish_cloud_document',
   'apply_edits',
   'insert_text',
   'delete_range',
@@ -205,33 +208,6 @@ function pxToMm(px: number): number {
  * 구버전(스테일 pkg)은 SVG 문자열을 그대로 반환한다 → 파싱 실패/svg 키 부재 시
  * raw 를 SVG 로 간주한다 (메트릭 없음, warnings 빈 배열).
  */
-interface EquationPreview {
-  svg: string;
-  widthPx?: number;
-  heightPx?: number;
-  baselinePx?: number;
-  warnings: string[];
-}
-
-function parseEquationPreview(raw: string): EquationPreview {
-  try {
-    const parsed = JSON.parse(raw) as Partial<EquationPreview> | null;
-    if (parsed && typeof parsed.svg === 'string') {
-      return {
-        svg: parsed.svg,
-        ...(typeof parsed.widthPx === 'number' ? { widthPx: parsed.widthPx } : {}),
-        ...(typeof parsed.heightPx === 'number' ? { heightPx: parsed.heightPx } : {}),
-        ...(typeof parsed.baselinePx === 'number' ? { baselinePx: parsed.baselinePx } : {}),
-        warnings: Array.isArray(parsed.warnings)
-          ? parsed.warnings.filter((w): w is string => typeof w === 'string')
-          : [],
-      };
-    }
-  } catch { /* 파싱 실패 = 구버전 wasm — raw 문자열 자체가 SVG */ }
-  // JSON 이지만 svg 키가 없으면 구버전(bare SVG) 응답으로 간주한다
-  return { svg: raw, warnings: [] };
-}
-
 /** PNG 바이트 → base64 (브라우저/Node 공용) */
 function bytesToBase64(bytes: Uint8Array): string {
   let bin = '';
@@ -396,7 +372,7 @@ export class AgentToolExecutor {
           'This published template preview is read-only and cannot accept document-write tools.',
         );
       }
-      const requestedMode: TurnWriteMode = !isDocumentWriteTool(tool)
+      const requestedMode: TurnWriteMode = !isDocumentWriteTool(tool) || tool === 'publish_cloud_document'
         ? 'none'
         : RAW_ENGINE_WRITE_TOOLS.has(tool) ? 'raw' : 'semantic';
       if (requestedMode !== 'none'
@@ -444,6 +420,16 @@ export class AgentToolExecutor {
       case 'get_fields': return this.getFields();
       case 'get_document_info': return this.getDocumentInfo();
       case 'materialize_document_snapshot': return this.materializeDocumentSnapshot();
+      case 'publish_cloud_document': {
+        this.requireDocLoaded();
+        if (!this.deps.canPublishCloudDocument?.()) {
+          throw new AgentToolError('CLOUD_RUNTIME_REQUIRED', 'Document publication is available only inside a Cloud conversation.');
+        }
+        if (capability?.permissionProfile === 'safe') {
+          throw new AgentToolError('SAFE_MODE_PUBLISH', 'Cloud publication requires the unrestricted permission profile.');
+        }
+        return { revision: this.revision, requested: true, publishAfterSuccessfulTurn: true };
+      }
       case 'find_text': return this.findText(args);
       case 'render_page': return this.renderPage(args);
       case 'get_para_format': return this.getParaFormat(args);
@@ -3472,6 +3458,7 @@ export class AgentToolExecutor {
       ...(preview.heightPx !== undefined ? { heightMm: pxToMm(preview.heightPx) } : {}),
       ...(preview.baselinePx !== undefined ? { baselineMm: pxToMm(preview.baselinePx) } : {}),
       warnings: preview.warnings,
+      diagnostics: preview.diagnostics,
       note: PENDING_NOTE,
     };
   }
@@ -3530,6 +3517,10 @@ export class AgentToolExecutor {
     }
     if (!preview.svg.includes('<svg')) {
       throw new AgentToolError('INVALID_SCRIPT', 'equation script rendered no output — check HWP equation syntax (over, sqrt {}, int _{a} ^{b}, PMATRIX{a & b # c & d}, …)');
+    }
+    const fatal = fatalEquationDiagnostics(preview);
+    if (fatal.length > 0) {
+      throw new AgentToolError('INVALID_SCRIPT', fatal.map(diagnostic => diagnostic.message).join('; '));
     }
     return { script, fontSizeHu, fontSizePt: pt, colorRef, preview };
   }

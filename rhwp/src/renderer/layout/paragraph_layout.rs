@@ -394,8 +394,12 @@ fn line_equation_metrics_px(
             continue;
         }
 
-        let metrics =
-            crate::renderer::equation::intrinsic_metrics_px(&eq.script, eq.font_size, dpi);
+        let metrics = crate::renderer::equation::intrinsic_metrics_px_with_font(
+            &eq.script,
+            eq.font_size,
+            dpi,
+            &eq.font_name,
+        );
         let stored_height = hwpunit_to_px(eq.common.height as i32, dpi);
         let extra = (stored_height - metrics.height).max(0.0);
         let top_leading = extra / 2.0;
@@ -956,6 +960,130 @@ struct LineWidthEst {
     /// 추정에 포함된 tac 개체 폭 합
     included_tac_width: f64,
 }
+/// A control-only line and its following text line can have the same text
+/// index: the object consumes HWP control units, but no text characters.
+/// Keep that object's width and paint position on the reserved empty line.
+pub(super) fn empty_tac_host_before_text(
+    comp: &ComposedParagraph,
+    position: usize,
+) -> Option<usize> {
+    comp.lines.windows(2).position(|pair| {
+        pair[0].char_start == position
+            && pair[0].runs.is_empty()
+            && pair[1].char_start == position
+            && !pair[1].runs.is_empty()
+    })
+}
+
+const CTRL_CHAR_CODE_UNITS: u32 = 8;
+
+/// 인라인 컨트롤의 원본 UTF-16 시작 위치. 가시 문자 인덱스가 아니라 저장 스트림이다.
+fn control_utf16_positions(para: &Paragraph) -> Vec<u32> {
+    if para.text.is_empty()
+        && para.char_offsets.is_empty()
+        && para.char_count >= (para.controls.len() as u32).saturating_mul(CTRL_CHAR_CODE_UNITS)
+    {
+        return (0..para.controls.len())
+            .map(|i| i as u32 * CTRL_CHAR_CODE_UNITS)
+            .collect();
+    }
+    let text_positions = para.control_text_positions();
+    let text_chars = para.text.chars().collect::<Vec<_>>();
+    let text_end = para
+        .char_offsets
+        .last()
+        .zip(text_chars.last())
+        .map(|(offset, ch)| *offset + ch.len_utf16() as u32)
+        .unwrap_or_else(|| text_chars.iter().map(|ch| ch.len_utf16() as u32).sum());
+    let mut raw_positions = vec![text_end; text_positions.len()];
+
+    let mut group_start = 0;
+    while group_start < text_positions.len() {
+        let text_position = text_positions[group_start];
+        let mut group_end = group_start + 1;
+        while text_positions.get(group_end) == Some(&text_position) {
+            group_end += 1;
+        }
+
+        let count = (group_end - group_start) as u32;
+        let first_raw = para
+            .char_offsets
+            .get(text_position)
+            .copied()
+            .map(|offset| {
+                let previous_end = text_position
+                    .checked_sub(1)
+                    .and_then(|i| para.char_offsets.get(i).zip(text_chars.get(i)))
+                    .map_or(0, |(start, ch)| *start + ch.len_utf16() as u32);
+                if count == 1
+                    && text_chars.get(text_position) == Some(&'\u{FFFC}')
+                    && offset.saturating_sub(previous_end) < CTRL_CHAR_CODE_UNITS
+                {
+                    offset
+                } else {
+                    offset.saturating_sub(count * CTRL_CHAR_CODE_UNITS)
+                }
+            })
+            .unwrap_or(text_end);
+        for (ordinal, raw_position) in raw_positions[group_start..group_end].iter_mut().enumerate()
+        {
+            *raw_position = first_raw + ordinal as u32 * CTRL_CHAR_CODE_UNITS;
+        }
+        group_start = group_end;
+    }
+
+    raw_positions
+}
+
+/// [#6706 / #7150] 줄 끝 개체와 다음 줄 첫 글자는 같은 가시 위치로 투영될 수 있다.
+/// 원본 줄 구성이 유지되고 그 충돌이 있을 때만 저장 UTF-16 줄로 소유를 복원한다.
+fn stored_tac_line_assignment(
+    para: &Paragraph,
+    comp: &ComposedParagraph,
+) -> Option<Vec<(usize, usize)>> {
+    if para.char_offsets.is_empty()
+        || comp.lines.len() != para.line_segs.len()
+        || comp.lines.len() < 2
+        || comp
+            .lines
+            .iter()
+            .zip(&para.line_segs)
+            .enumerate()
+            .any(|(i, (line, seg))| {
+                seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0
+                    || line.line_height != seg.line_height
+                    || line.segment_width != seg.segment_width
+                    || line.char_start
+                        != para
+                            .char_offsets
+                            .partition_point(|&offset| offset < seg.text_start)
+            })
+    {
+        return None;
+    }
+    let raw = control_utf16_positions(para);
+    let assignments: Vec<(usize, usize)> = comp
+        .tac_controls
+        .iter()
+        .map(|(_, _, ci)| {
+            let start = *raw.get(*ci)?;
+            let owner =
+                (0..para.line_segs.len()).rfind(|&i| para.line_segs[i].text_start <= start)?;
+            Some((*ci, owner))
+        })
+        .collect::<Option<_>>()?;
+    let collapsed_boundary =
+        comp.tac_controls
+            .iter()
+            .zip(&assignments)
+            .any(|((pos, _, _), (_, owner))| {
+                comp.lines
+                    .get(owner + 1)
+                    .is_some_and(|next| *pos >= next.char_start)
+            });
+    collapsed_boundary.then_some(assignments)
+}
+
 fn tac_offsets_for_line(
     comp: &ComposedParagraph,
     tac_offsets_px: &[(usize, f64, usize)],
@@ -969,7 +1097,10 @@ fn tac_offsets_for_line(
     tac_offsets_px
         .iter()
         .copied()
-        .filter(|(pos, _, _)| char_pos_in_line(*pos, start, end))
+        .filter(|(pos, _, _)| match empty_tac_host_before_text(comp, *pos) {
+            Some(host) => host == line_idx,
+            None => char_pos_in_line(*pos, start, end),
+        })
         .collect()
 }
 
@@ -1378,7 +1509,7 @@ pub(crate) fn right_tab_block_width(
 }
 
 /// [Task #2067] 정렬(양쪽/배분/나눔)·오버플로우·셀 underflow 에 따른 여분 간격 계산.
-/// 반환 = (extra_word_sp, extra_char_sp, extra_dash_sp). Task #352 dash leader 분배 포함.
+/// 반환 = (extra_word_sp, extra_char_sp, extra_dash_sp).
 #[allow(clippy::too_many_arguments)]
 fn compute_line_extra_spacing(
     comp_line: &ComposedLine,
@@ -1419,29 +1550,6 @@ fn compute_line_extra_spacing(
         0.0
     };
 
-    // Task #352: 라인 내 dash leader (3+ 연속 '-') 글자 수 카운트.
-    // visible_count 까지의 chars 에서만 카운트 (후행 공백 제외).
-    let count_dash_leaders = |chars: &[char]| -> usize {
-        let mut count = 0;
-        let n = chars.len();
-        let mut i = 0;
-        while i < n {
-            if chars[i] == '-' {
-                let mut j = i;
-                while j < n && chars[j] == '-' {
-                    j += 1;
-                }
-                let run_len = j - i;
-                if run_len >= 3 {
-                    count += run_len;
-                }
-                i = j;
-            } else {
-                i += 1;
-            }
-        }
-        count
-    };
     if needs_justify {
         // 양쪽 정렬: 후행 공백 제외한 내부 공백에 분배
         let all_chars: Vec<char> = comp_line.runs.iter().flat_map(|r| r.text.chars()).collect();
@@ -1451,22 +1559,27 @@ fn compute_line_extra_spacing(
             .iter()
             .filter(|c| **c == ' ')
             .count();
-        let leader_dashes = count_dash_leaders(&all_chars[..visible_count]);
-        if interior_spaces > 0 {
-            // 후행 공백 폭 계산
-            let trailing_width = if trailing_spaces > 0 {
-                if let Some(last_run) = comp_line.runs.last() {
-                    let mut ts =
-                        resolved_to_text_style(styles, last_run.char_style_id, last_run.lang_index);
+        // A selection can leave trailing spaces in several font/style runs.
+        // Measure each in its own style, including for a single visible word.
+        let measure_trailing_spaces = |extra_word: f64, extra_char: f64| -> f64 {
+            let mut width = 0.0;
+            for run in comp_line.runs.iter().rev() {
+                let count = run.text.chars().rev().take_while(|ch| *ch == ' ').count();
+                if count > 0 {
+                    let mut ts = resolved_to_text_style(styles, run.char_style_id, run.lang_index);
                     ts.default_tab_width = tab_width;
-                    let trailing_str: String = " ".repeat(trailing_spaces);
-                    estimate_text_width(&trailing_str, &ts)
-                } else {
-                    0.0
+                    ts.extra_word_spacing = extra_word;
+                    ts.extra_char_spacing = extra_char;
+                    width += estimate_text_width(&" ".repeat(count), &ts);
                 }
-            } else {
-                0.0
-            };
+                if count < run.text.chars().count() {
+                    break;
+                }
+            }
+            width
+        };
+        if interior_spaces > 0 {
+            let trailing_width = measure_trailing_spaces(0.0, 0.0);
             let split_ink_overhang = if alignment == Alignment::Split {
                 trailing_glyph_ink_overhang()
             } else {
@@ -1474,12 +1587,7 @@ fn compute_line_extra_spacing(
             };
             let effective_used = total_text_width - trailing_width + split_ink_overhang;
             let slack = available_width - effective_used;
-            if leader_dashes > 0 && slack > 0.0 {
-                // Task #352: 라인에 dash leader 가 있고 슬랙이 양수면
-                // dash 가 흡수 (PDF elastic leader 동작 모방). 공백·일반
-                // 글자 자연 폭 유지.
-                (0.0, 0.0, slack / leader_dashes as f64)
-            } else if suppress_cell_overflow_spacing && slack < 0.0 {
+            if suppress_cell_overflow_spacing && slack < 0.0 {
                 // 셀 내부 폭이 글자 자연 폭보다 작아도 한컴처럼 글자를 압축하지 않는다.
                 // 줄바꿈은 LINE_SEG/리플로우가 결정하고, 그린 글자는 셀 경계에서만 클리핑한다.
                 (0.0, 0.0, 0.0)
@@ -1518,20 +1626,7 @@ fn compute_line_extra_spacing(
                             ts.extra_char_spacing = ecs;
                             measured += estimate_text_width(&r.text, &ts);
                         }
-                        if trailing_spaces > 0 {
-                            if let Some(last_run) = comp_line.runs.last() {
-                                let mut ts = resolved_to_text_style(
-                                    styles,
-                                    last_run.char_style_id,
-                                    last_run.lang_index,
-                                );
-                                ts.default_tab_width = tab_width;
-                                ts.extra_word_spacing = ews;
-                                ts.extra_char_spacing = ecs;
-                                measured -= estimate_text_width(&" ".repeat(trailing_spaces), &ts);
-                            }
-                        }
-                        measured
+                        measured - measure_trailing_spaces(ews, ecs)
                     };
                     for _ in 0..3 {
                         let delta = available_width - measure_with(ecs);
@@ -1546,17 +1641,20 @@ fn compute_line_extra_spacing(
                 };
                 (ews, ecs, 0.0)
             }
-        } else if total_char_count > 1 {
-            // 양쪽 정렬이지만 공백 없음 (일본어/숫자 등):
-            let slack = available_width - total_text_width;
-            if leader_dashes > 0 && slack > 0.0 {
-                (0.0, 0.0, slack / leader_dashes as f64)
-            } else if suppress_cell_overflow_spacing && slack < 0.0 {
+        } else if total_char_count.saturating_sub(trailing_spaces) > 1 {
+            // A wrapped word may still have a trailing space. It must neither
+            // consume visible line width nor receive a share of justification.
+            // Keep inline-object width in the budget, but distribute only over
+            // the characters that are painted, in both body and cell paragraphs.
+            let visible_char_count = total_char_count - trailing_spaces;
+            let visible_width = total_text_width - measure_trailing_spaces(0.0, 0.0);
+            let slack = available_width - visible_width;
+            if suppress_cell_overflow_spacing && slack < 0.0 {
                 // 셀의 좁은 내부 폭은 줄바꿈 기준일 뿐, 숫자/문자를 수평 압축하지 않는다.
                 (0.0, 0.0, 0.0)
             } else {
-                let raw = slack / total_char_count as f64;
-                let avg_char_w = total_text_width / total_char_count as f64;
+                let raw = slack / visible_char_count as f64;
+                let avg_char_w = visible_width / visible_char_count as f64;
                 let min_sp = -avg_char_w * 0.5;
                 (0.0, raw.max(min_sp), 0.0)
             }
@@ -1646,14 +1744,11 @@ fn compute_line_extra_spacing(
 fn needs_word_distribution(
     alignment: Alignment,
     is_last_line_of_para: bool,
-    distribute_justify_last_line: bool,
     has_forced_break: bool,
 ) -> bool {
     match alignment {
         Alignment::Split => !has_forced_break,
-        Alignment::Justify => {
-            (!is_last_line_of_para || distribute_justify_last_line) && !has_forced_break
-        }
+        Alignment::Justify => !is_last_line_of_para && !has_forced_break,
         _ => false,
     }
 }
@@ -1982,6 +2077,22 @@ impl LayoutEngine {
                 12.0
             }
         };
+        let stored_line_baseline_at = |char_idx: usize| -> Option<f64> {
+            if para.line_segs.len() < 2 {
+                return None;
+            }
+            let pos = *para.char_offsets.get(char_idx)?;
+            let idx = (0..para.line_segs.len()).rev().find(|&i| {
+                para.line_segs
+                    .get(i)
+                    .is_some_and(|seg| seg.text_start <= pos)
+            })?;
+            let seg = para.line_segs.get(idx)?;
+            Some(ensure_min_baseline(
+                hwpunit_to_px(seg.baseline_distance, self.dpi),
+                para_max_font_size,
+            ))
+        };
         let baseline_dist = if let Some(ls) = para.line_segs.first() {
             ensure_min_baseline(
                 hwpunit_to_px(ls.baseline_distance, self.dpi),
@@ -2105,11 +2216,13 @@ impl LayoutEngine {
                                 let run_ts =
                                     resolved_to_text_style(styles, current_cs_id, first_lang);
                                 let run_width = estimate_text_width(&run_text, &run_ts);
-                                let run_bbox_h = if wrapped_below_table {
-                                    text_line_baseline
-                                } else {
-                                    baseline_dist
-                                };
+                                let run_bbox_h = stored_line_baseline_at(line_run_start).unwrap_or(
+                                    if wrapped_below_table {
+                                        text_line_baseline
+                                    } else {
+                                        baseline_dist
+                                    },
+                                );
                                 let run_id = tree.next_id();
                                 let run_node = RenderNode::new(
                                     run_id,
@@ -2156,11 +2269,12 @@ impl LayoutEngine {
                                 ..Default::default()
                             };
                             let sup_w = estimate_text_width(&fn_text, &sup_ts);
-                            let run_bbox_h = if wrapped_below_table {
-                                text_line_baseline
-                            } else {
-                                baseline_dist
-                            };
+                            let run_bbox_h =
+                                stored_line_baseline_at(ch_idx).unwrap_or(if wrapped_below_table {
+                                    text_line_baseline
+                                } else {
+                                    baseline_dist
+                                });
                             let marker_id = tree.next_id();
                             let marker_node = RenderNode::new(
                                 marker_id,
@@ -2208,12 +2322,13 @@ impl LayoutEngine {
                         };
                         let cs_changed = cs_id != current_cs_id;
 
-                        // 줄바꿈된 텍스트의 BoundingBox 높이: 표 줄 vs 텍스트 줄
-                        let run_bbox_h = if wrapped_below_table {
-                            text_line_baseline
-                        } else {
-                            baseline_dist
-                        };
+                        let run_bbox_h = stored_line_baseline_at(line_run_start).unwrap_or(
+                            if wrapped_below_table {
+                                text_line_baseline
+                            } else {
+                                baseline_dist
+                            },
+                        );
 
                         if (cs_changed || need_wrap) && ch_idx > line_run_start {
                             // 누적된 run 출력
@@ -2277,12 +2392,12 @@ impl LayoutEngine {
                         inline_x += ch_w;
                     }
 
-                    // 남은 run의 BoundingBox 높이
-                    let remaining_bbox_h = if wrapped_below_table {
-                        text_line_baseline
-                    } else {
-                        baseline_dist
-                    };
+                    let remaining_bbox_h =
+                        stored_line_baseline_at(line_run_start).unwrap_or(if wrapped_below_table {
+                            text_line_baseline
+                        } else {
+                            baseline_dist
+                        });
 
                     // 남은 run 출력
                     if line_run_start < *e {
@@ -2957,15 +3072,20 @@ impl LayoutEngine {
                     let tokens = crate::renderer::equation::tokenizer::tokenize(&eq.script);
                     let ast = crate::renderer::equation::parser::EqParser::new(tokens).parse();
                     let font_size_px = hwpunit_to_px(eq.font_size as i32, self.dpi);
-                    let layout_box =
-                        crate::renderer::equation::layout::EqLayout::new(font_size_px).layout(&ast);
+                    let layout_box = crate::renderer::equation::layout::EqLayout::with_font(
+                        font_size_px,
+                        &eq.font_name,
+                    )
+                    .layout(&ast);
                     let color_str =
                         crate::renderer::equation::svg_render::eq_color_to_svg(eq.color);
-                    let svg_content = crate::renderer::equation::svg_render::render_equation_svg(
-                        &layout_box,
-                        &color_str,
-                        font_size_px,
-                    );
+                    let svg_content =
+                        crate::renderer::equation::svg_render::render_equation_svg_with_font(
+                            &layout_box,
+                            &color_str,
+                            font_size_px,
+                            Some(&eq.font_name),
+                        );
                     let hwp_eq_h = hwpunit_to_px(eq.common.height as i32, self.dpi);
                     let eq_h = hwp_eq_h.max(layout_box.height);
                     let tac_row = tac_row_for(tac_k).min(row_inline_x.len() - 1);
@@ -2995,6 +3115,7 @@ impl LayoutEngine {
                             color_str,
                             color: eq.color,
                             font_size: font_size_px,
+                            font_name: eq.font_name.clone(),
                             section_index: note_ref
                                 .as_ref()
                                 .map(|r| r.section_index)
@@ -3009,6 +3130,7 @@ impl LayoutEngine {
                             } else {
                                 Some(tac_ci)
                             },
+                            inner_control_index: cell_ctx.as_ref().map(|_| tac_ci),
                             cell_index: eq_cell_idx,
                             cell_para_index: eq_cell_para_idx,
                             note_ref,
@@ -3226,7 +3348,10 @@ impl LayoutEngine {
         let keep_continuation_spacing_before =
             self.keep_continuation_column_top_spacing_before.get();
         if start_line == 0 && spacing_before > 0.0 {
-            if !is_column_top || keep_continuation_spacing_before {
+            if !is_column_top
+                || keep_continuation_spacing_before
+                || (cell_ctx.is_some() && self.preserve_first_cell_spacing_before())
+            {
                 y += spacing_before;
             } else if para_index == 0 && !suppress_column_top_vpos_fallback {
                 let vpos0_px = para
@@ -3267,7 +3392,14 @@ impl LayoutEngine {
                 .and_then(|p| p.line_segs.first())
                 .map(|ls| hwpunit_to_px(ls.vertical_pos, self.dpi))
                 .unwrap_or(0.0);
-            if vpos0_px > 0.0 {
+            // [편집 세션] Enter로 자란 자리차지 표의 post-text가 typeset에서 다음
+            // 쪽으로 재배정된 경우, 저장 vpos는 앞 쪽 하단 좌표라 무효다 — 절대
+            // 가산하면 새 쪽에서도 쪽 하단에 그려져 문구·로고가 잘린다(셀 끝
+            // Enter 재현). 단 절반을 넘는 과대 vpos만 차단해 상단 여백
+            // 재현(test-image.hwp 폴백 목적)은 유지한다.
+            let session_stale_vpos =
+                self.profile.get().session_edited() && vpos0_px > col_area.height * 0.5;
+            if vpos0_px > 0.0 && !session_stale_vpos {
                 y += vpos0_px;
             }
         }
@@ -3447,6 +3579,30 @@ impl LayoutEngine {
                         && range
                             .windows(2)
                             .all(|w| w[1].vertical_pos >= w[0].vertical_pos)
+                        // vpos 는 쪽(단) 상단 기준 쪽-상대 좌표다(아래 #3637 주석).
+                        // 단 높이를 유의미하게 넘는 vpos 는 앞 쪽 좌표계의 잔재다 —
+                        // 셀 편집으로 커진 자리차지 표가 분할 이월된 뒤의 host 후행
+                        // 줄(재현 실측: vpos 가 단 높이 초과)을 절대 스냅하면
+                        // 다음 쪽 본문 밖에 그려져 하단 문구가 소실된다. 이때는
+                        // 흐름 y(분할 조각 하단)로 폴백한다.
+                        && range.iter().all(|seg| {
+                            hwpunit_to_px(seg.vertical_pos, self.dpi) <= col_area.height + 60.0
+                        })
+                        // [편집 세션] Enter로 자란 자리차지 표의 post-text가 다음 쪽으로
+                        // 재배정되면 저장 vpos(앞 쪽 하단 좌표)는 무효다 — 스냅하면 새
+                        // 쪽에서도 쪽 하단에 그려져 잘린다(셀 끝 Enter 재현). 스냅
+                        // 목적지가 흐름 커서보다 단 절반 이상 아래면 흐름 y 로
+                        // 폴백한다. 같은 쪽 배치(괴리 소폭)는 종전 스냅을 유지한다.
+                        // 반대 방향도 같다 — 목적지가 흐름보다 8px 넘게 **위**면 편집
+                        // 성장 전 좌표라 앞 표에 겹친다(셀 Enter 재현: 후행 안내
+                        // 문구가 저장 vpos 로 스냅돼 커진 표 하단 위에 얹힘).
+                        // 8px 는 vpos_adjust 백워드 클램프와 동일.
+                        && !(self.profile.get().session_edited()
+                            && range.first().is_some_and(|seg| {
+                                let snap_y =
+                                    col_area.y + hwpunit_to_px(seg.vertical_pos, self.dpi);
+                                snap_y > y + col_area.height * 0.5 || y - snap_y > 8.0
+                            }))
                     {
                         let base_vpos = if start_line == 0 {
                             0
@@ -4031,21 +4187,8 @@ impl LayoutEngine {
 
             // 정렬별 간격 분배 계산
             let has_forced_break = comp_line.has_line_break;
-            // 머리말/꼬리말은 내부 문단 인덱스를 `usize::MAX - i`로 넘긴다.
-            // 저장 LINE_SEG가 있는 가져온 HF는 한컴 원본의 단일 줄 Justify 분배를
-            // 보존한다(#1692). 새로 만든 합성 HF는 본문 기본 양쪽 정렬과 같은 마지막
-            // 줄 규칙을 사용해, 짧은 한 줄의 공백이 영역 전체로 늘어나지 않게 한다.
-            let is_header_footer_para = para_index >= usize::MAX - 1024;
-            let distribute_stored_hf_justify_last_line = is_header_footer_para
-                && para.is_some_and(|paragraph| {
-                    !crate::renderer::para_has_no_stored_line_segs(paragraph)
-                });
-            let needs_justify = needs_word_distribution(
-                alignment,
-                is_last_line_of_para,
-                distribute_stored_hf_justify_last_line,
-                has_forced_break,
-            );
+            let needs_justify =
+                needs_word_distribution(alignment, is_last_line_of_para, has_forced_break);
             let needs_distribute = alignment == Alignment::Distribute;
 
             let has_tabs = comp_line.runs.iter().any(|r| r.text.contains('\t'));
@@ -4266,6 +4409,7 @@ impl LayoutEngine {
                 &cell_ctx,
                 &tab_stops,
                 &tac_offsets_px,
+                &line_tac_offsets_for_width,
                 &shape_markers,
                 fn_positions,
                 &mut fn_marker_inserted,
@@ -4790,6 +4934,7 @@ impl LayoutEngine {
         cell_ctx: &Option<CellContext>,
         tab_stops: &[TabStop],
         tac_offsets_px: &[(usize, f64, usize)],
+        line_tac_offsets: &[(usize, f64, usize)],
         shape_markers: &[(usize, String)],
         fn_positions: &[(usize, u16, usize)],
         fn_marker_inserted: &mut [bool],
@@ -4833,6 +4978,31 @@ impl LayoutEngine {
             mut pending_right_leader_digit_render,
             mut current_line_reserved_tac_picture_height,
         } = st;
+        // 줄 끝 표와 다음 줄 첫 개체는 같은 가시 문자 위치에 투영될 수 있다.
+        // 그때는 저장 UTF-16 줄 소속으로 다른 줄의 표를 걸러 낸다.
+        let stored_assign = para.and_then(|p| stored_tac_line_assignment(p, composed));
+        let line_table_owner = para.and_then(|p| {
+            line_tac_offsets.iter().find_map(|(_, _, ci)| {
+                if stored_assign.as_ref().is_some_and(|assign| {
+                    !assign
+                        .iter()
+                        .any(|(control, owner)| control == ci && *owner == line_idx)
+                }) {
+                    return None;
+                }
+                match p.controls.get(*ci) {
+                    Some(Control::Table(table)) if table.common.treat_as_char => {
+                        let h = hwpunit_to_px(table.common.height as i32, self.dpi);
+                        let mt = hwpunit_to_px(table.outer_margin_top as i32, self.dpi);
+                        let mb = hwpunit_to_px(table.outer_margin_bottom as i32, self.dpi);
+                        ((mt > 0.0 || mb > 0.0)
+                            && (h + mt + mb - 0.2..=h + mt + mb + 0.2).contains(&raw_lh))
+                        .then_some((h, mt))
+                    }
+                    _ => None,
+                }
+            })
+        });
         let is_last_run_of_line = |idx: usize| idx == comp_line.runs.len() - 1;
         for (run_idx, run) in comp_line.runs.iter().enumerate() {
             // 조판부호: 이 run 시작 위치 이전의 도형 마커를 먼저 삽입
@@ -5135,7 +5305,8 @@ impl LayoutEngine {
             let run_tacs: Vec<(usize, f64, usize)> = tac_offsets_px
                 .iter()
                 .filter(|(pos, _, _)| {
-                    *pos >= run_char_pos
+                    empty_tac_host_before_text(composed, *pos).is_none_or(|host| host == line_idx)
+                        && *pos >= run_char_pos
                         && (*pos < run_char_end || (allow_end_tac && *pos == run_char_end))
                 })
                 .map(|(pos, w, ci)| (pos - run_char_pos, *w, *ci))
@@ -5501,10 +5672,25 @@ impl LayoutEngine {
                                 {
                                     0.0
                                 } else {
-                                    hwpunit_to_px(
+                                    let raw = hwpunit_to_px(
                                         calc_sibling_topandbottom_reserved_hu(&p.controls),
                                         self.dpi,
-                                    )
+                                    );
+                                    // [편집 세션] typeset 이 라인 흐름(표 아래·새 쪽
+                                    // 재배정)을 이미 끝낸 상태라 저장-형상 가정의 예약
+                                    // 가산이 이중이 된다 — 이월된 쪽에서 그림이 쪽
+                                    // 하단 밖에 그려지던 결함(셀 끝 Enter 재현).
+                                    // 흐름 y 를 그대로 신뢰한다.
+                                    if self.profile.get().session_edited() {
+                                        0.0
+                                    } else if raw > 40.0
+                                        && (y >= col_area.y + raw - 4.0
+                                            || y + raw > col_area.y + col_area.height + 3.8)
+                                    {
+                                        0.0
+                                    } else {
+                                        raw
+                                    }
                                 };
                                 if raw_lh + 4.0 >= pic_h {
                                     current_line_reserved_tac_picture_height = Some(pic_h);
@@ -5629,15 +5815,19 @@ impl LayoutEngine {
                                 crate::renderer::equation::parser::EqParser::new(tokens).parse();
                             let font_size_px = hwpunit_to_px(eq.font_size as i32, self.dpi);
                             let layout_box =
-                                crate::renderer::equation::layout::EqLayout::new(font_size_px)
-                                    .layout(&ast);
+                                crate::renderer::equation::layout::EqLayout::with_font(
+                                    font_size_px,
+                                    &eq.font_name,
+                                )
+                                .layout(&ast);
                             let color_str =
                                 crate::renderer::equation::svg_render::eq_color_to_svg(eq.color);
                             let svg_content =
-                                crate::renderer::equation::svg_render::render_equation_svg(
+                                crate::renderer::equation::svg_render::render_equation_svg_with_font(
                                     &layout_box,
                                     &color_str,
                                     font_size_px,
+                                    Some(&eq.font_name),
                                 );
                             // HWP 저장 높이를 우선 사용 (한컴 조판 결과 기준)
                             let hwp_eq_h = hwpunit_to_px(eq.common.height as i32, self.dpi);
@@ -5668,6 +5858,7 @@ impl LayoutEngine {
                                         color_str,
                                         color: eq.color,
                                         font_size: font_size_px,
+                                        font_name: eq.font_name.clone(),
                                         section_index: note_ref
                                             .as_ref()
                                             .map(|r| r.section_index)
@@ -5682,6 +5873,7 @@ impl LayoutEngine {
                                         } else {
                                             Some(tac_ci)
                                         },
+                                        inner_control_index: cell_ctx.as_ref().map(|_| tac_ci),
                                         cell_index: eq_cell_idx,
                                         cell_para_index: eq_cell_para_idx,
                                         note_ref,
@@ -5702,7 +5894,6 @@ impl LayoutEngine {
                         }
                     }
                     // 인라인 TAC 표: 텍스트 흐름 위치에 직접 렌더링
-                    // 표 하단 = 베이스라인 + outer_margin_bottom
                     if let (Some(p), Some(bdc)) = (para, bin_data_content) {
                         if let Some(Control::Table(t)) = p.controls.get(tac_ci) {
                             let raw_seg_width =
@@ -5734,9 +5925,26 @@ impl LayoutEngine {
                             }
                             if t.common.treat_as_char && should_render_inline && !already_rendered {
                                 let table_h = hwpunit_to_px(t.common.height as i32, self.dpi);
+                                let om_top = hwpunit_to_px(t.outer_margin_top as i32, self.dpi);
                                 let om_bottom =
                                     hwpunit_to_px(t.outer_margin_bottom as i32, self.dpi);
-                                let table_y = (y + baseline + om_bottom - table_h).max(y);
+                                // [#7150] 저장 lh가 자기 높이와 상하 여백의 합이면 자기
+                                // 바깥여백에 앉힌다. 동반 표는 위에서 한 번 선택한 줄별
+                                // 앵커를 공유한다.
+                                let stored_lh_covers_om = (om_top > 0.0 || om_bottom > 0.0)
+                                    && (table_h + om_top + om_bottom - 0.2
+                                        ..=table_h + om_top + om_bottom + 0.2)
+                                        .contains(&raw_lh);
+                                let table_y = if stored_lh_covers_om {
+                                    y + om_top
+                                } else if let Some((owner_h, owner_om_top)) = line_table_owner {
+                                    // 소유자가 `y + owner_om_top` 에 앉으면 공유 기준선은
+                                    // `y + owner_om_top + 0.85×owner_h`. 이 표를 거기에
+                                    // 앉히면 `y + owner_om_top + 0.85×(owner_h − table_h)`.
+                                    (y + owner_om_top + (owner_h - table_h) * 0.85).max(y)
+                                } else {
+                                    (y + baseline + om_bottom - table_h).max(y)
+                                };
                                 // [Task #2212] 셀 안 인라인 TAC 표는 외곽 셀 경로를
                                 // 확장한 2단 cell_context 로 렌더해야 경로 기반 조회
                                 // (get_table_cell_bboxes_by_path 등)가 내부 셀을 찾는다.
@@ -6656,10 +6864,21 @@ impl LayoutEngine {
                             let sibling_reserved_px = if vars.has_topbottom_vpos_base {
                                 0.0
                             } else {
-                                hwpunit_to_px(
+                                let raw = hwpunit_to_px(
                                     calc_sibling_topandbottom_reserved_hu(&p.controls),
                                     self.dpi,
-                                )
+                                );
+                                // 위 텍스트 줄 경로와 동일한 가드 — 편집 세션은
+                                // typeset 흐름이 재배정을 끝냈으므로 예약을 가산하지
+                                // 않고, 열람은 이중 가산(줄 y 가 이미 예약 아래)만
+                                // 차단한다.
+                                if self.profile.get().session_edited() {
+                                    0.0
+                                } else if raw > 40.0 && vars.y >= raw - 4.0 {
+                                    0.0
+                                } else {
+                                    raw
+                                }
                             };
                             if vars.raw_lh + 4.0 >= pic_h {
                                 *current_line_reserved_tac_picture_height = Some(pic_h);
@@ -7183,36 +7402,11 @@ mod issue_2809_split_alignment_tests {
 
     #[test]
     fn split_distributes_single_last_line_but_justify_does_not() {
-        assert!(needs_word_distribution(
-            Alignment::Split,
-            true,
-            false,
-            false
-        ));
-        assert!(!needs_word_distribution(
-            Alignment::Justify,
-            true,
-            false,
-            false
-        ));
-        assert!(needs_word_distribution(
-            Alignment::Justify,
-            true,
-            true,
-            false
-        ));
-        assert!(needs_word_distribution(
-            Alignment::Justify,
-            false,
-            false,
-            false
-        ));
-        assert!(!needs_word_distribution(
-            Alignment::Split,
-            true,
-            false,
-            true
-        ));
+        assert!(needs_word_distribution(Alignment::Split, true, false));
+        assert!(!needs_word_distribution(Alignment::Justify, true, false));
+        assert!(needs_word_distribution(Alignment::Justify, false, false));
+        assert!(!needs_word_distribution(Alignment::Justify, false, true));
+        assert!(!needs_word_distribution(Alignment::Split, true, true));
     }
 
     #[test]
@@ -7236,6 +7430,99 @@ mod issue_2809_split_alignment_tests {
         assert!((extra_word - 30.0).abs() < 0.001);
         assert_eq!(extra_char, 0.0);
         assert_eq!(extra_dash, 0.0);
+    }
+
+    #[test]
+    fn justify_trailing_spaces_use_each_runs_font_metrics_in_body_and_cells() {
+        let styles = ResolvedStyleSet {
+            char_styles: vec![
+                ResolvedCharStyle {
+                    font_size: 12.0,
+                    ..Default::default()
+                },
+                ResolvedCharStyle {
+                    font_size: 36.0,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut line = split_label_line();
+        line.runs = vec![
+            ComposedTextRun {
+                text: "그림 앞 문장입니다.   ".into(),
+                ..Default::default()
+            },
+            ComposedTextRun {
+                text: " ".into(),
+                char_style_id: 1,
+                ..Default::default()
+            },
+        ];
+        let visible_width = estimate_text_width(
+            "그림 앞 문장입니다.",
+            &resolved_to_text_style(&styles, 0, 0),
+        );
+        let total_width: f64 = line
+            .runs
+            .iter()
+            .map(|run| {
+                estimate_text_width(
+                    &run.text,
+                    &resolved_to_text_style(&styles, run.char_style_id, run.lang_index),
+                )
+            })
+            .sum();
+        for in_cell in [false, true] {
+            let (word, character, dash) = compute_line_extra_spacing(
+                &line,
+                &styles,
+                Alignment::Justify,
+                in_cell,
+                true,
+                false,
+                false,
+                false,
+                line.runs.iter().map(|r| r.text.chars().count()).sum(),
+                total_width,
+                visible_width + 8.0,
+                40.0,
+            );
+            assert!((word - 4.0).abs() < 0.001,
+                "in_cell={in_cell}: only the 8px of visible slack belongs to the two word gaps, got {word}");
+            assert_eq!((character, dash), (0.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn justify_one_word_ignores_trailing_spaces_in_body_and_cells() {
+        let styles = ResolvedStyleSet::default();
+        let mut line = split_label_line();
+        line.runs[0].text = "그림 ".into();
+        let style = resolved_to_text_style(&styles, 0, 0);
+        let visible = estimate_text_width("그림", &style);
+        let total = estimate_text_width("그림 ", &style);
+        for in_cell in [false, true] {
+            for object_width in [0.0, 240.0] {
+                let (word, character, dash) = compute_line_extra_spacing(
+                    &line,
+                    &styles,
+                    Alignment::Justify,
+                    in_cell,
+                    true,
+                    false,
+                    false,
+                    false,
+                    3,
+                    total + object_width,
+                    visible + object_width + 4.0,
+                    40.0,
+                );
+                assert!((character - 2.0).abs() < 0.001,
+                    "in_cell={in_cell}, object_width={object_width}: expected 2px per visible character, got {character}");
+                assert_eq!((word, dash), (0.0, 0.0));
+            }
+        }
     }
 
     #[test]
@@ -7282,7 +7569,7 @@ mod issue_2809_split_alignment_tests {
 
 #[cfg(test)]
 mod trailing_tac_width_tests {
-    use super::tac_offsets_for_line_width;
+    use super::{empty_tac_host_before_text, tac_offsets_for_line, tac_offsets_for_line_width};
     use crate::renderer::composer::{ComposedLine, ComposedParagraph, ComposedTextRun};
 
     fn line(text: &str, char_start: usize, has_line_break: bool) -> ComposedLine {
@@ -7337,6 +7624,37 @@ mod trailing_tac_width_tests {
 
         assert_eq!(tac_offsets_for_line_width(&comp, &offsets, 0), offsets);
         assert!(tac_offsets_for_line_width(&comp, &offsets, 1).is_empty());
+    }
+
+    #[test]
+    fn control_only_line_owns_picture_width_not_following_text() {
+        let mut picture_line = line("", 1, false);
+        picture_line.runs.clear();
+        let comp = composed(vec![line("A", 0, false), picture_line, line("B", 1, false)]);
+        let offsets = [(1, 266.1, 0)];
+
+        assert_eq!(empty_tac_host_before_text(&comp, 1), Some(1));
+        for index in 0..3 {
+            let expected = if index == 1 {
+                offsets.to_vec()
+            } else {
+                Vec::new()
+            };
+            assert_eq!(tac_offsets_for_line(&comp, &offsets, index), expected);
+            assert_eq!(tac_offsets_for_line_width(&comp, &offsets, index), expected);
+        }
+    }
+
+    #[test]
+    fn unrelated_empty_line_does_not_capture_picture() {
+        let mut empty_line = line("", 0, false);
+        empty_line.runs.clear();
+        let comp = composed(vec![empty_line, line("B", 1, false)]);
+        let offsets = [(1, 100.0, 0)];
+
+        assert_eq!(empty_tac_host_before_text(&comp, 1), None);
+        assert!(tac_offsets_for_line_width(&comp, &offsets, 0).is_empty());
+        assert_eq!(tac_offsets_for_line_width(&comp, &offsets, 1), offsets);
     }
 }
 

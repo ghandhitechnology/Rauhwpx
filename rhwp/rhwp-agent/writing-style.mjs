@@ -7,6 +7,7 @@ import {
   recoverInterruptedFileReplacement,
   removeFileAndReplacementBackup,
   replaceFileAtomically,
+  retryLockedOperation,
 } from './harness-update.mjs';
 import { readFileBytesBounded, readUtf8FileBounded } from './bounded-file.mjs';
 
@@ -156,9 +157,16 @@ export function assertWritingStyleAppendCompatible(status, { language, baseRevis
 }
 
 export class WritingStyleStore {
-  constructor({ root = defaultWritingStyleRoot(), platform = process.platform } = {}) {
+  constructor({
+    root = defaultWritingStyleRoot(),
+    platform = process.platform,
+    fsApi = fs,
+    retryDelays,
+  } = {}) {
     this.root = root;
     this.platform = platform;
+    this.fs = fsApi;
+    this.lockRetry = retryDelays ? { platform, delays: retryDelays } : { platform };
     this.profilePath = path.join(root, PROFILE_FILE);
     this.metadataPath = path.join(root, METADATA_FILE);
     this.structuredPath = path.join(root, STRUCTURED_FILE);
@@ -170,12 +178,21 @@ export class WritingStyleStore {
   }
 
   async init() {
-    await fs.mkdir(this.root, { recursive: true });
+    await this.fs.mkdir(this.root, { recursive: true });
     await recoverInterruptedFileReplacement(this.additionalInstructionPath, {
       platform: this.platform,
+      fsApi: this.fs,
+    });
+    await recoverInterruptedFileReplacement(this.commitJournalPath, {
+      platform: this.platform,
+      fsApi: this.fs,
     });
     await this.recoverInterruptedCommit();
     return this;
+  }
+
+  #locked(operation) {
+    return retryLockedOperation(operation, this.lockRetry);
   }
 
   async recoverInterruptedCommit() {
@@ -211,35 +228,40 @@ export class WritingStyleStore {
         const target = path.join(this.root, entry.target);
         const backup = `${target}.old-${id}`;
         try {
-          await fs.lstat(backup);
-          await fs.rm(target, { recursive: true, force: true });
-          await fs.rename(backup, target);
+          await this.fs.lstat(backup);
+          await this.#locked(() => this.fs.rm(target, { recursive: true, force: true }));
+          await this.#locked(() => this.fs.rename(backup, target));
         } catch (error) {
           if (error?.code !== 'ENOENT') throw error;
         }
-        if (!entry.hadOriginal) await fs.rm(target, { recursive: true, force: true });
-        if (entry.staged) await fs.rm(path.join(this.root, entry.staged), { recursive: true, force: true });
+        if (!entry.hadOriginal) await this.#locked(() => this.fs.rm(target, { recursive: true, force: true }));
+        if (entry.staged) {
+          await this.#locked(() => this.fs.rm(path.join(this.root, entry.staged), { recursive: true, force: true }));
+        }
       }
-      await fs.rm(this.commitJournalPath, { force: true });
+      await this.#locked(() => this.fs.rm(this.commitJournalPath, { force: true }));
     }
 
     // Recover transactions from builds predating the journal, then remove
     // abandoned staging files. Scope is limited to known writing-style targets.
-    const entries = await fs.readdir(this.root).catch((error) => error?.code === 'ENOENT' ? [] : Promise.reject(error));
+    const entries = await this.fs.readdir(this.root).catch((error) => error?.code === 'ENOENT' ? [] : Promise.reject(error));
     for (const name of entries) {
       const oldMatch = name.match(/^(style\.md|metadata\.json|profile\.json|sources|sources\.json)\.old-[a-zA-Z0-9-]+$/);
       if (oldMatch) {
         const backup = path.join(this.root, name);
         const target = path.join(this.root, oldMatch[1]);
-        try { await fs.lstat(target); await fs.rm(backup, { recursive: true, force: true }); }
+        try {
+          await this.fs.lstat(target);
+          await this.#locked(() => this.fs.rm(backup, { recursive: true, force: true }));
+        }
         catch (error) {
           if (error?.code !== 'ENOENT') throw error;
-          await fs.rename(backup, target);
+          await this.#locked(() => this.fs.rename(backup, target));
         }
         continue;
       }
       if (/^(style\.md|metadata\.json|profile\.json|sources|sources\.json|commit-journal\.json)\.tmp-[a-zA-Z0-9-]+$/.test(name)) {
-        await fs.rm(path.join(this.root, name), { recursive: true, force: true });
+        await this.#locked(() => this.fs.rm(path.join(this.root, name), { recursive: true, force: true }));
       }
     }
   }
@@ -274,7 +296,7 @@ export class WritingStyleStore {
         sourceCount: Number.isFinite(metadata.sourceCount) ? metadata.sourceCount : 0,
         pageEstimate: Number.isFinite(metadata.pageEstimate) ? metadata.pageEstimate : 0,
         summary: typeof metadata.summary === 'string' ? metadata.summary : '',
-        agent: ['codex', 'claude', 'pi', 'grok', 'cursor'].includes(metadata.agent) ? metadata.agent : null,
+        agent: ['codex', 'claude', 'pi'].includes(metadata.agent) ? metadata.agent : null,
         model: typeof metadata.model === 'string' ? metadata.model : null,
         additionalInstruction: additionalInstruction.trim(),
         sourceDocuments,
@@ -452,7 +474,7 @@ export class WritingStyleStore {
     const committed = [];
     const journalTemp = `${this.commitJournalPath}.tmp-${transactionId}`;
     const originalStates = await Promise.all(artifacts.map(async (artifact) => {
-      try { await fs.lstat(artifact.target); return true; }
+      try { await this.fs.lstat(artifact.target); return true; }
       catch (error) {
         if (error?.code === 'ENOENT') return false;
         throw error;
@@ -467,22 +489,25 @@ export class WritingStyleStore {
         hadOriginal: originalStates[index],
       })),
     };
-    await fs.writeFile(journalTemp, `${JSON.stringify(journal, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    await fs.rename(journalTemp, this.commitJournalPath);
+    await this.fs.writeFile(journalTemp, `${JSON.stringify(journal, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await replaceFileAtomically(journalTemp, this.commitJournalPath, {
+      platform: this.platform,
+      fsApi: this.fs,
+    });
     try {
       for (const artifact of artifacts) {
         const backup = `${artifact.target}.old-${transactionId}`;
         let hadOriginal = true;
-        try { await fs.rename(artifact.target, backup); }
+        try { await this.#locked(() => this.fs.rename(artifact.target, backup)); }
         catch (error) {
           if (error?.code === 'ENOENT') hadOriginal = false;
           else throw error;
         }
         try {
-          if (artifact.staged) await fs.rename(artifact.staged, artifact.target);
+          if (artifact.staged) await this.#locked(() => this.fs.rename(artifact.staged, artifact.target));
           committed.push({ ...artifact, backup, hadOriginal });
         } catch (error) {
-          if (hadOriginal) await fs.rename(backup, artifact.target).catch(() => {});
+          if (hadOriginal) await this.#locked(() => this.fs.rename(backup, artifact.target)).catch(() => {});
           throw error;
         }
       }
@@ -499,8 +524,10 @@ export class WritingStyleStore {
     }
     // Removing the journal commits the transaction. Backup cleanup can then be
     // retried opportunistically without making a completed save look failed.
-    await fs.rm(this.commitJournalPath, { force: true });
-    await Promise.all(committed.map((artifact) => fs.rm(artifact.backup, { recursive: true, force: true }).catch(() => {})));
+    await this.#locked(() => this.fs.rm(this.commitJournalPath, { force: true }));
+    await Promise.all(committed.map((artifact) => (
+      this.#locked(() => this.fs.rm(artifact.backup, { recursive: true, force: true })).catch(() => {})
+    )));
   }
 
   async save(profile, options = {}) {
@@ -522,7 +549,7 @@ export class WritingStyleStore {
       sourceCount: Math.max(0, Math.round(Number(sourceCount) || 0)),
       pageEstimate: Math.max(0, Math.round(Number(pageEstimate) || 0)),
       summary: String(summary || '').slice(0, 500),
-      agent: ['codex', 'claude', 'pi', 'grok', 'cursor'].includes(agent) ? agent : null,
+      agent: ['codex', 'claude', 'pi'].includes(agent) ? agent : null,
       model: typeof model === 'string' && model.trim() ? model.trim().slice(0, 200) : null,
     };
     const profileTemp = `${this.profilePath}.tmp-${transactionId}`;
@@ -573,17 +600,19 @@ export class WritingStyleStore {
     if (!instruction) {
       await removeFileAndReplacementBackup(this.additionalInstructionPath, {
         platform: this.platform,
+        fsApi: this.fs,
       });
       return this.status();
     }
     const temp = `${this.additionalInstructionPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
     try {
-      await fs.writeFile(temp, `${instruction}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      await this.fs.writeFile(temp, `${instruction}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
       await replaceFileAtomically(temp, this.additionalInstructionPath, {
         platform: this.platform,
+        fsApi: this.fs,
       });
     } finally {
-      await fs.rm(temp, { force: true }).catch(() => {});
+      await this.fs.rm(temp, { force: true }).catch(() => {});
     }
     return this.status();
   }
@@ -612,21 +641,26 @@ export class WritingStyleStore {
         }),
       ]);
       if (!markdown.trim()) return '';
+      // 이전 버전의 자동 생성 수치 기준은 저장 파일에 남기고 작문 문맥에서만 뺍니다.
+      const voiceMarkdown = markdown.replace(
+        /^## (?:지문 \(쓴 뒤에만 본다\)|Fingerprint \(check after writing\))\r?\n[\s\S]*?(?=^## |$(?![\s\S]))/gm,
+        '',
+      ).trim();
       const instructionBlock = additionalInstruction.trim()
-        ? `\n\n<personal_writing_instruction>\nApply this user-authored instruction in addition to the measured profile. It may refine tone and delivery, but it follows the same precedence and factual boundaries as the profile.\n\n${additionalInstruction.trim()}\n</personal_writing_instruction>`
+        ? `\n\n<personal_writing_instruction>\nApply this user-authored instruction in addition to the voice profile. It may refine tone and delivery, but it follows the same precedence and factual boundaries as the profile.\n\n${additionalInstruction.trim()}\n</personal_writing_instruction>`
         : '';
       return `<personal_writing_style>
 This is a portrait of how the user writes, drawn from documents they confirmed they wrote. It is a person to inhabit, not a specification to satisfy. If you assemble a sentence to hit a bullet or a measured number, you have already lost the voice.
 
 Write as they would write — with their temperament, their unevenness, their way of caring about a sentence. Draft in that voice from the first line. Do not write generic "good" prose and then dress it in their habits.
 
-How to read it: the portrait is the authority. Axis notes name habits that carry that portrait; inhabit them, do not execute them as a checklist. Measured numbers are a fingerprint you glance at after a paragraph. If every sentence sat at one length and theirs do not, you drifted — rewrite the paragraph as them. Never pad or trim tokens to hit a median.
+How to read it: the portrait is the authority. Axis notes name habits that carry that portrait; inhabit them, do not execute them as a checklist. Ignore any numeric style targets in older profiles. Sentence length, paragraph shape, endings, and transitions should follow the thought and the situation. Read for continuity and the author’s voice; do not compare the draft to a statistical distribution.
 
 Do not sand this voice into polished AI prose, and do not replace it with generic anti-AI writing (punchy fragments, numbers-first, zero connectives) unless that is actually them. If they are blunt, stay blunt. If they leave a seam, leave it. If they repeat a word, repeat it. Generic polish is the failure mode.
 
 Precedence: what the open document already does comes first, the genre and recipient come second, this portrait third. It never overrides facts, quoted wording, legal or official phrasing, accessibility, or a formality level the user asked for. Do not reuse distinctive passages from the profile as if they were the user's sentences, and do not apply it to ordinary chat replies unless the user asks.
 
-${markdown.trim()}
+${voiceMarkdown}
 </personal_writing_style>${instructionBlock}`;
     } catch (error) {
       if (error?.code === 'ENOENT') return '';

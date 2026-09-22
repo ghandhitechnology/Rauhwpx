@@ -12,15 +12,104 @@ import {
   replaceFileAtomically,
   retryLockedOperation,
 } from '../harness-update.mjs';
+import {
+  applyNodeHostEnv,
+  createNodeHost,
+  isNodeBinary,
+  nodeHostNeedsShim,
+  nodeHostShimFileName,
+  writeNodeHostShim,
+} from '../npm-cli-launch.mjs';
 import { bundledNpmLaunch } from '../npm-runtime.mjs';
 import { terminateProcessTree } from '../process-tree.mjs';
 import { createIpcSecretStore } from '../secret-store.mjs';
 import { setupFailureMessage, shouldUseNpmNetworkPath } from '../setup-errors.mjs';
 
+function errorWithCode(code) {
+  return Object.assign(new Error(code), { code });
+}
+
+function rmFileOnly(filePath, options) {
+  if (options?.recursive) throw new Error(`recursive rm is forbidden for ${filePath}`);
+  return fs.rm(filePath, options);
+}
+
+function vaultSafeStorage() {
+  return {
+    async isAsyncEncryptionAvailable() { return true; },
+    async encryptStringAsync(value) { return Buffer.from(`protected:${value}`); },
+    async decryptStringAsync(value) {
+      return { shouldReEncrypt: false, result: value.toString().replace(/^protected:/, '') };
+    },
+  };
+}
+
+async function pendingVaultTemps(root) {
+  return (await fs.readdir(root)).filter((name) => name.startsWith('secrets.json.tmp-'));
+}
+
+function lyingLstatFs(target, overrides = {}) {
+  return {
+    lstat: (filePath) => (filePath === target
+      ? Promise.resolve({ isDirectory: () => false, isFile: () => true })
+      : fs.lstat(filePath)),
+    access: (...args) => fs.access(...args),
+    rename: (...args) => fs.rename(...args),
+    rm: rmFileOnly,
+    ...overrides,
+  };
+}
+
 test('the bundled npm launcher uses the current Node-compatible executable', () => {
   const launch = bundledNpmLaunch({ nodeCommand: 'Rauhwpx.exe' });
   assert.equal(launch.command, 'Rauhwpx.exe');
   assert.match(launch.leadingArgs[0], /npm[/\\]bin[/\\]npm-cli\.js$/);
+});
+
+test('Windows Electron hosts get a node.cmd shim and npm_node_execpath', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-node-host-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const electron = path.join(root, 'Rauhwpx.exe');
+  assert.equal(isNodeBinary(electron), false);
+  assert.equal(nodeHostNeedsShim('win32', electron), true);
+  assert.equal(nodeHostShimFileName('win32'), 'node.cmd');
+  const shim = await writeNodeHostShim(root, electron, { platform: 'win32' });
+  assert.equal(path.basename(shim), 'node.cmd');
+  const body = await fs.readFile(shim, 'utf8');
+  assert.match(body, /ELECTRON_RUN_AS_NODE=1/);
+  assert.match(body, /Rauhwpx\.exe/);
+  const env = applyNodeHostEnv({ PATH: 'C:\\Windows\\System32' }, {
+    nodeCommand: electron, shimDir: root, platform: 'win32',
+  });
+  assert.equal(env.npm_node_execpath, electron);
+  assert.equal(env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(env.PATH.startsWith(`${root};`), true);
+});
+
+test('a real Node host on Unix does not need a PATH shim', () => {
+  assert.equal(nodeHostNeedsShim('darwin', '/usr/bin/node'), false);
+  assert.equal(nodeHostNeedsShim('darwin', '/Applications/Rauhwpx.app/Contents/MacOS/Rauhwpx'), true);
+});
+
+test('a failed node-host write is retried on the next ensure', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-node-host-retry-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let attempts = 0;
+  const ensure = createNodeHost({
+    rootDir: root,
+    nodeCommand: path.join(root, 'Rauhwpx.exe'),
+    platform: 'win32',
+    writeFile: async (file, body) => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+      }
+      await fs.writeFile(file, body);
+    },
+  });
+  await assert.rejects(ensure(), { code: 'EBUSY' });
+  assert.equal(await ensure(), path.join(root, 'node-host'));
+  assert.equal(attempts, 2);
 });
 
 test('Windows process cleanup never retargets a reusable PID after its first tree command', async () => {
@@ -106,6 +195,80 @@ test('Windows replacement recovery does not publish over a restored directory ba
   assert.equal(await fs.readFile(temp, 'utf8'), 'new');
 });
 
+test('Windows file replacement restores a directory that appears between lstat and rename', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-dir-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  const previous = `${target}.previous-write`;
+  await fs.mkdir(target);
+  await fs.writeFile(path.join(target, 'inside.txt'), 'keep');
+  await fs.writeFile(temp, 'new');
+
+  await assert.rejects(
+    replaceFileAtomically(temp, target, { platform: 'win32', fsApi: lyingLstatFs(target) }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await fs.readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(temp, 'utf8'), 'new');
+});
+
+test('Windows file replacement leaves a raced directory stranded when restore fails', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-dir-stranded-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  const previous = `${target}.previous-write`;
+  await fs.mkdir(target);
+  await fs.writeFile(path.join(target, 'inside.txt'), 'keep');
+  await fs.writeFile(temp, 'new');
+  const fsApi = lyingLstatFs(target, {
+    async rename(from, to) {
+      if (from === previous && to === target) throw errorWithCode('EIO');
+      return fs.rename(from, to);
+    },
+  });
+
+  await assert.rejects(
+    replaceFileAtomically(temp, target, { platform: 'win32', fsApi }),
+    (error) => error instanceof AggregateError
+      && error.code === 'FILE_REPLACE_ROLLBACK_FAILED'
+      && error.backupPath === previous
+      && error.tempPath === temp
+      && error.errors[0].code === 'EISDIR'
+      && error.errors[1].code === 'EIO',
+  );
+  assert.equal(await fs.readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(target), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(temp, 'utf8'), 'new');
+});
+
+test('Windows file replacement refuses a directory left in the backup slot before moving the target aside', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-dir-backup-slot-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  const previous = `${target}.previous-write`;
+  await fs.writeFile(target, 'old');
+  await fs.mkdir(previous);
+  await fs.writeFile(path.join(previous, 'inside.txt'), 'keep');
+  await fs.writeFile(temp, 'new');
+  const fsApi = {
+    access: (...args) => fs.access(...args),
+    rename: (...args) => fs.rename(...args),
+    rm: rmFileOnly,
+  };
+
+  await assert.rejects(
+    replaceFileAtomically(temp, target, { platform: 'win32', fsApi }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await fs.readFile(target, 'utf8'), 'old');
+  assert.equal(await fs.readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
+  assert.equal(await fs.readFile(temp, 'utf8'), 'new');
+});
+
 test('a stale Windows backup cleanup cannot turn a committed replacement into failure', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-cleanup-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -132,6 +295,39 @@ test('a stale Windows backup cleanup cannot turn a committed replacement into fa
   assert.equal(await fs.readFile(previous, 'utf8'), 'old');
 });
 
+test('a failed Windows publish rollback reports where the previous file is', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-rollback-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  const previous = `${target}.previous-write`;
+  await fs.writeFile(target, 'old');
+  await fs.writeFile(temp, 'new');
+  const fsApi = {
+    access: (...args) => fs.access(...args),
+    async rename(from, to) {
+      if (to === target) throw errorWithCode('EIO');
+      return fs.rename(from, to);
+    },
+    rm: rmFileOnly,
+  };
+
+  await assert.rejects(
+    replaceFileAtomically(temp, target, { platform: 'win32', fsApi }),
+    (error) => error.code === 'FILE_REPLACE_ROLLBACK_FAILED'
+      && error.backupPath === previous
+      && error.tempPath === temp
+      && error.errors[0].code === 'EIO',
+  );
+  assert.equal(await fs.readFile(previous, 'utf8'), 'old');
+  await assert.rejects(fs.access(target), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(temp, 'utf8'), 'new');
+
+  assert.equal(await recoverInterruptedFileReplacement(target, { platform: 'win32' }), true);
+  assert.equal(await fs.readFile(target, 'utf8'), 'old');
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+});
+
 test('Windows replacement recovery restores a backup left at the rename gap', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-recovery-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -145,6 +341,20 @@ test('Windows replacement recovery restores a backup left at the rename gap', as
   );
   assert.equal(await fs.readFile(target, 'utf8'), 'recover me');
   await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+});
+
+test('Windows replacement recovery does not recursively delete a leftover directory backup', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-dir-leftover-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const previous = `${target}.previous-write`;
+  await fs.writeFile(target, 'new');
+  await fs.mkdir(previous);
+  await fs.writeFile(path.join(previous, 'inside.txt'), 'keep');
+
+  assert.equal(await recoverInterruptedFileReplacement(target, { platform: 'win32' }), false);
+  assert.equal(await fs.readFile(target, 'utf8'), 'new');
+  assert.equal(await fs.readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
 });
 
 test('Windows deletion removes recovery state first and fails closed when it is locked', async (t) => {
@@ -175,6 +385,23 @@ test('Windows deletion removes recovery state first and fails closed when it is 
   await removeFileAndReplacementBackup(target, { platform: 'win32' });
   await assert.rejects(fs.access(target), { code: 'ENOENT' });
   await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+});
+
+test('Windows deletion fails closed on a directory backup without recursion', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-delete-dir-backup-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const previous = `${target}.previous-write`;
+  await fs.writeFile(target, 'current');
+  await fs.mkdir(previous);
+  await fs.writeFile(path.join(previous, 'inside.txt'), 'keep');
+
+  await assert.rejects(
+    removeFileAndReplacementBackup(target, { platform: 'win32', fsApi: { rm: rmFileOnly } }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await fs.readFile(target, 'utf8'), 'current');
+  assert.equal(await fs.readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
 });
 
 test('setup errors give Windows-specific proxy, certificate, lock and path guidance', () => {
@@ -274,6 +501,176 @@ test('a locked stale Windows vault backup does not invalidate the committed prim
   assert.equal(await vault.get('rhwp.test'), 'committed-secret');
   assert.equal((await fs.stat(previous)).isFile(), true);
   await fs.rm(root, { recursive: true, force: true });
+});
+
+test('Windows vault replacement refuses to move a directory target aside', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-dir-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'secrets.json');
+  const safeStorage = {
+    async isAsyncEncryptionAvailable() { return true; },
+    async encryptStringAsync(value) { return Buffer.from(`protected:${value}`); },
+    async decryptStringAsync(value) {
+      return { shouldReEncrypt: false, result: value.toString().replace(/^protected:/, '') };
+    },
+  };
+  const vault = createSecretVault({ filePath, safeStorage, platform: 'win32' });
+  await vault.set('rhwp.test', 'first');
+  await fs.rm(filePath);
+  await fs.mkdir(filePath);
+  await fs.writeFile(path.join(filePath, 'inside.txt'), 'keep');
+
+  await assert.rejects(() => vault.set('rhwp.test', 'second'), { code: 'EISDIR' });
+  assert.equal(await fs.readFile(path.join(filePath, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(`${filePath}.previous-write`), { code: 'ENOENT' });
+  const temps = (await fs.readdir(root)).filter((name) => name.startsWith('secrets.json.tmp-'));
+  assert.equal(temps.length, 1);
+  const pending = JSON.parse(await fs.readFile(path.join(root, temps[0]), 'utf8'));
+  assert.equal(pending.version, 1);
+  assert.equal(typeof pending.secrets['rhwp.test'], 'string');
+});
+
+test('Windows vault replacement recovery does not publish over a restored directory backup', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-dir-recovery-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'secrets.json');
+  const previous = `${filePath}.previous-write`;
+  const safeStorage = {
+    async isAsyncEncryptionAvailable() { return true; },
+    async encryptStringAsync(value) { return Buffer.from(`protected:${value}`); },
+    async decryptStringAsync(value) {
+      return { shouldReEncrypt: false, result: value.toString().replace(/^protected:/, '') };
+    },
+  };
+  const vault = createSecretVault({ filePath, safeStorage, platform: 'win32' });
+  await vault.set('rhwp.test', 'first');
+  await fs.rm(filePath);
+  await fs.mkdir(previous);
+  await fs.writeFile(path.join(previous, 'inside.txt'), 'keep');
+
+  await assert.rejects(() => vault.set('rhwp.test', 'second'), { code: 'EISDIR' });
+  assert.equal(await fs.readFile(path.join(filePath, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+  const temps = (await fs.readdir(root)).filter((name) => name.startsWith('secrets.json.tmp-'));
+  assert.equal(temps.length, 1);
+  assert.equal(JSON.parse(await fs.readFile(path.join(root, temps[0]), 'utf8')).version, 1);
+});
+
+test('Windows vault replacement restores a directory that appears between lstat and rename', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-dir-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'secrets.json');
+  const previous = `${filePath}.previous-write`;
+  const vault = createSecretVault({
+    filePath,
+    safeStorage: vaultSafeStorage(),
+    platform: 'win32',
+    fileOperations: {
+      lstat: (target) => (target === filePath
+        ? Promise.resolve({ isDirectory: () => false, isFile: () => true })
+        : fs.lstat(target)),
+      rm: rmFileOnly,
+    },
+  });
+  await vault.set('rhwp.test', 'first');
+  await fs.rm(filePath);
+  await fs.mkdir(filePath);
+  await fs.writeFile(path.join(filePath, 'inside.txt'), 'keep');
+
+  await assert.rejects(() => vault.set('rhwp.test', 'second'), { code: 'EISDIR' });
+  assert.equal(await fs.readFile(path.join(filePath, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+  assert.equal((await pendingVaultTemps(root)).length, 1);
+});
+
+test('Windows vault replacement leaves a raced directory stranded when restore fails', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-dir-stranded-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'secrets.json');
+  const previous = `${filePath}.previous-write`;
+  const vault = createSecretVault({
+    filePath,
+    safeStorage: vaultSafeStorage(),
+    platform: 'win32',
+    fileOperations: {
+      lstat: (target) => (target === filePath
+        ? Promise.resolve({ isDirectory: () => false, isFile: () => true })
+        : fs.lstat(target)),
+      async rename(from, to) {
+        if (from === previous && to === filePath) throw errorWithCode('EIO');
+        return fs.rename(from, to);
+      },
+      rm: rmFileOnly,
+    },
+  });
+  await vault.set('rhwp.test', 'first');
+  await fs.rm(filePath);
+  await fs.mkdir(filePath);
+  await fs.writeFile(path.join(filePath, 'inside.txt'), 'keep');
+
+  await assert.rejects(
+    () => vault.set('rhwp.test', 'second'),
+    (error) => error.code === 'FILE_REPLACE_ROLLBACK_FAILED'
+      && error.backupPath === previous
+      && typeof error.tempPath === 'string'
+      && path.basename(error.tempPath).startsWith('secrets.json.tmp-'),
+  );
+  assert.equal(await fs.readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(filePath), { code: 'ENOENT' });
+  assert.equal((await pendingVaultTemps(root)).length, 1);
+});
+
+test('Windows vault replacement does not recursively delete a leftover directory backup', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-dir-leftover-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'secrets.json');
+  const previous = `${filePath}.previous-write`;
+  const vault = createSecretVault({
+    filePath,
+    safeStorage: vaultSafeStorage(),
+    platform: 'win32',
+    fileOperations: { rm: rmFileOnly },
+  });
+  await vault.set('rhwp.test', 'first');
+  const committed = await fs.readFile(filePath, 'utf8');
+  await fs.mkdir(previous);
+  await fs.writeFile(path.join(previous, 'inside.txt'), 'keep');
+
+  await assert.rejects(() => vault.set('rhwp.test', 'second'), { code: 'EISDIR' });
+  assert.equal(await fs.readFile(filePath, 'utf8'), committed);
+  assert.equal(await fs.readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
+});
+
+test('Windows vault replacement restores the target when post-aside lstat fails', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-dir-lstat-fail-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'secrets.json');
+  const previous = `${filePath}.previous-write`;
+  let asideDone = false;
+  const vault = createSecretVault({
+    filePath,
+    safeStorage: vaultSafeStorage(),
+    platform: 'win32',
+    fileOperations: {
+      async lstat(target) {
+        if (asideDone && target === previous) throw errorWithCode('EIO');
+        return fs.lstat(target);
+      },
+      async rename(from, to) {
+        const result = await fs.rename(from, to);
+        if (from === filePath && to === previous) asideDone = true;
+        return result;
+      },
+      rm: rmFileOnly,
+    },
+  });
+  await vault.set('rhwp.test', 'first');
+  const committed = await fs.readFile(filePath, 'utf8');
+
+  await assert.rejects(() => vault.set('rhwp.test', 'second'), { code: 'EIO' });
+  assert.equal(await fs.readFile(filePath, 'utf8'), committed);
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+  assert.equal((await pendingVaultTemps(root)).length, 0);
 });
 
 test('the Windows vault recovers a validated previous-write after an interrupted replace', async () => {

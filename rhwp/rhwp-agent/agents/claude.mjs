@@ -12,7 +12,7 @@ import {
   flushCredentialMirrorSync,
   prepareCredentialMirrorSync,
 } from '../credential-mirror.mjs';
-import { resolveNpmCliLaunch } from '../npm-cli-launch.mjs';
+import { applyManagedCliLaunch, resolveNpmCliLaunch } from '../npm-cli-launch.mjs';
 import {
   createLineReader,
   isPlanningRestricted,
@@ -87,8 +87,7 @@ function createClaudeInputQueue() {
   };
 }
 
-// rhwp 전용 서브에이전트 정의(RHWP_SUBAGENTS)는 backend.mjs 로 이동했다 —
-// grok 도 같은 정의를 --agents 로 공유한다.
+// rhwp 전용 서브에이전트 정의(RHWP_SUBAGENTS)는 backend.mjs 로 이동했다.
 
 const claudeMirrorsByHome = new Map();
 
@@ -1033,11 +1032,14 @@ export function createClaudeSession(opts, {
     sessionIdConsumed = true;
     // 새 프로세스 = usage 누적 카운터 리셋 — 차분 기준선도 함께 리셋한다.
     usageBaseline = new Map();
-    const launch = claudeCliLaunch();
-    const proc = spawnProcess(launch.command, [...launch.leadingArgs, ...buildArgv(resume)], {
+    const spawnEnv = claudeProcessEnv(opts, opts.providerEnv ?? process.env);
+    const launched = applyManagedCliLaunch(opts.claudeBin ?? 'claude', buildArgv(resume), {
+      platform, nodeCommand, env: spawnEnv,
+    });
+    const proc = spawnProcess(launched.command, launched.argv, {
       ...processTreeSpawnOptions(),
       cwd: opts.rootDir,
-      env: { ...claudeProcessEnv(opts, opts.providerEnv ?? process.env), ...launch.env },
+      env: launched.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child = proc;

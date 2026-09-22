@@ -10,7 +10,7 @@ import {
 } from '../versioning/types.ts';
 
 export const MERGE_ANALYSIS_VERSION = 1;
-export const MERGE_MANIFEST_VERSION = 2;
+export const MERGE_MANIFEST_VERSION = 3;
 
 function propertyHash(value: unknown): `blake3:${string}` {
   return hashBytes(new TextEncoder().encode(JSON.stringify(value))) as `blake3:${string}`;
@@ -97,14 +97,26 @@ export function buildMergeManifest(
       : null
   );
   const parentGroups = new Map<string, MergeManifestEntry[]>();
+  const parentPositions = new Set<string>();
   const seedGroups = new Map<string, MergeManifestEntrySeed[]>();
   for (const entry of inherited) {
     const key = groupKey(entry.kind, entry.path);
-    if (key) parentGroups.set(key, [...(parentGroups.get(key) ?? []), entry]);
+    if (!key) continue;
+    const group = parentGroups.get(key) ?? [];
+    // Both merge parents often describe the same node. Count it once when
+    // checking sibling positions, or a merge commit loses its inherited IDs.
+    const position = `${entry.kind}\u0000${entry.identity}\u0000${entry.path.join('\u0000')}`;
+    if (!parentPositions.has(position)) group.push(entry);
+    parentPositions.add(position);
+    parentGroups.set(key, group);
   }
   for (const seed of seeds) {
     const key = groupKey(seed.kind, seed.path);
-    if (key) seedGroups.set(key, [...(seedGroups.get(key) ?? []), seed]);
+    if (key) {
+      const group = seedGroups.get(key) ?? [];
+      group.push(seed);
+      seedGroups.set(key, group);
+    }
   }
   for (const [key, children] of seedGroups) {
     const parents = parentGroups.get(key);

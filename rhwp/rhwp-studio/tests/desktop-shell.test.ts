@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -10,10 +10,12 @@ import {
   readGeneratedDocumentResponse,
   resolveGeneratedDocumentArtifact,
 } from '../../../desktop/generated-document-artifact.mjs';
+import { documentEditMenuItem } from '../../../desktop/edit-menu.mjs';
 import { deliverPlainTextPaste } from '../../../desktop/plain-text-paste.mjs';
 import { SessionManager } from '../../../desktop/session-manager.mjs';
 import { safeSuggestedFilename } from '../../../desktop/safe-filename.mjs';
 import { SerializedStateWriter } from '../../../desktop/serialized-state-writer.mjs';
+import { completeWindowClose } from '../../../desktop/update-lifecycle.mjs';
 import {
   CREDENTIAL_RETENTION_DIR,
   LEGACY_CLEANUP_MARKER_FILE,
@@ -41,6 +43,80 @@ function fakeWindow(id: number) {
 function associationExts(association: { ext?: string | string[] }): string[] {
   if (!association.ext) return [];
   return Array.isArray(association.ext) ? association.ext : [association.ext];
+}
+
+function errorWithCode(code: string) {
+  return Object.assign(new Error(code), { code });
+}
+
+const WINDOWS_LOCK_CODES = ['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'] as const;
+
+function lockedOp<Args extends unknown[], Result>(
+  operation: (...args: Args) => Promise<Result>,
+  { failTimes = Infinity, code = 'EPERM' } = {},
+) {
+  let failures = 0;
+  return async (...args: Args) => {
+    if (failures < failTimes) {
+      failures += 1;
+      throw errorWithCode(code);
+    }
+    return operation(...args);
+  };
+}
+
+function windowsRename(realRename: typeof rename) {
+  return async (from: string, to: string) => {
+    try {
+      await stat(to);
+    } catch (error: NodeJS.ErrnoException) {
+      if (error?.code === 'ENOENT') return realRename(from, to);
+      throw error;
+    }
+    throw errorWithCode('EEXIST');
+  };
+}
+
+const OWNER_LAUNCH_ID = '2257ce8b-6e52-4fec-889e-c6ba489226f8';
+const OWNER_PROFILE_ID = '1234567890abcdef1234';
+const LEGACY_LAUNCH_ID = '2848f76b-9d57-4d81-8410-4023c59cb403';
+
+async function writeOwner(directory: string, pid: number, createdAtMs: number, options = {}) {
+  return writeLaunchOwnerMetadata(directory, {
+    launchId: OWNER_LAUNCH_ID,
+    profileId: OWNER_PROFILE_ID,
+    pid,
+    createdAtMs,
+  }, options);
+}
+
+async function prepareLegacyLaunch(t: { after: (fn: () => Promise<void>) => void }) {
+  const root = await mkdtemp(path.join(tmpdir(), 'rauhwpx-legacy-marker-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, LEGACY_LAUNCH_ID);
+  await mkdir(directory);
+  const now = Date.now();
+  const old = new Date(now - 8 * 24 * 60 * 60 * 1000);
+  await utimes(directory, old, old);
+  return { root, directory, now };
+}
+
+async function prepareOwnedStaleLaunch(
+  t: { after: (fn: () => Promise<void>) => void },
+  prefix: string,
+) {
+  const root = await mkdtemp(path.join(tmpdir(), prefix));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const launchId = '5327bd99-1d76-4ed5-81cf-f3182f6d127f';
+  const profileId = OWNER_PROFILE_ID;
+  const directory = path.join(root, launchId);
+  await writeLaunchOwnerMetadata(directory, {
+    launchId,
+    profileId,
+    pid: 11,
+    createdAtMs: 1_000,
+  });
+  return { root, directory, launchId, profileId };
 }
 
 test('dialog suggestions are portable across Windows and strip renderer paths', () => {
@@ -269,13 +345,32 @@ test('bookmark persistence serializes writes and close queues a latest-state flu
   assert.deepEqual(errors, ['disk unavailable']);
   assert.deepEqual(started, ['first', 'second', 'failed', 'latest']);
 
+  const closed: string[] = [];
+  const session = { allowCloseOnce: false, window: { close: () => closed.push('closed') } };
+  let canceled = false;
+  assert.equal(await completeWindowClose({
+    session, allowClose: true, timeoutMs: 100,
+    cancelQuit: () => { canceled = true; },
+    persistBookmarks: () => writer.enqueue('failed', { rejectOnError: true }),
+  }), false);
+  assert.equal(canceled, true);
+  assert.equal(session.allowCloseOnce, false);
+  assert.deepEqual(closed, []);
+  assert.equal(await completeWindowClose({
+    session, allowClose: true, timeoutMs: 100,
+    cancelQuit: () => {},
+    persistBookmarks: () => writer.enqueue('retry', { rejectOnError: true }),
+  }), true);
+  assert.deepEqual(closed, ['closed']);
+  assert.equal(started.at(-1), 'retry');
+
   assert.match(
     desktopMain,
     /desktop:remember-native-document'[\s\S]*?await persistNativeBookmarks\(\)/,
   );
   assert.match(
     desktopMain,
-    /desktop:close-response'[\s\S]*?if \(!allowClose\)[\s\S]*?await persistNativeBookmarks\(\)[\s\S]*?session\.window\.close\(\)/,
+    /desktop:close-response'[\s\S]*?completeWindowClose\(\{[\s\S]*?persistBookmarks: \(\) => persistNativeBookmarks\(\{ rejectOnError: true \}\)/,
   );
 });
 
@@ -661,6 +756,232 @@ test('owner metadata is written before cleanup begins', async () => {
   assert.equal(renames[0][1], path.join('/runtime/launch', LAUNCH_OWNER_FILE));
 });
 
+test('win32 marker publish retries a locked rename then succeeds', async (t) => {
+  const ownerRoot = await mkdtemp(path.join(tmpdir(), 'rauhwpx-owner-retry-'));
+  t.after(() => rm(ownerRoot, { recursive: true, force: true }));
+  await writeOwner(ownerRoot, 11, 1_000, {
+    renameImpl: lockedOp(rename, { failTimes: 1 }),
+    platform: 'win32',
+    sleep: async () => {},
+  });
+  assert.equal(JSON.parse(await readFile(path.join(ownerRoot, LAUNCH_OWNER_FILE), 'utf8')).pid, 11);
+
+  const { root, now } = await prepareLegacyLaunch(t);
+  assert.deepEqual(await removeLegacyLaunchDirectories(root, '', {
+    now: () => now,
+    uptimeSeconds: () => 10_000,
+    renameImpl: lockedOp(rename, { failTimes: 1 }),
+    platform: 'win32',
+    sleep: async () => {},
+  }), []);
+  assert.equal(JSON.parse(await readFile(
+    path.join(root, LEGACY_LAUNCH_ID, LEGACY_CLEANUP_MARKER_FILE),
+    'utf8',
+  )).observedUptimeSeconds, 10_000);
+});
+
+test('win32 marker publish overwrites an existing marker', async (t) => {
+  const ownerRoot = await mkdtemp(path.join(tmpdir(), 'rauhwpx-owner-overwrite-'));
+  t.after(() => rm(ownerRoot, { recursive: true, force: true }));
+  await writeOwner(ownerRoot, 11, 1_000);
+  await writeOwner(ownerRoot, 22, 2_000, {
+    renameImpl: windowsRename(rename),
+    platform: 'win32',
+    sleep: async () => {},
+  });
+  assert.equal(JSON.parse(await readFile(path.join(ownerRoot, LAUNCH_OWNER_FILE), 'utf8')).pid, 22);
+
+  const { root, directory, now } = await prepareLegacyLaunch(t);
+  await removeLegacyLaunchDirectories(root, '', {
+    now: () => now,
+    uptimeSeconds: () => 10_000,
+  });
+  assert.deepEqual(await removeLegacyLaunchDirectories(root, '', {
+    now: () => now + 1_000,
+    uptimeSeconds: () => 20_000,
+    renameImpl: windowsRename(rename),
+    rmImpl: lockedOp(rm, { failTimes: 1 }),
+    platform: 'win32',
+    sleep: async () => {},
+  }), []);
+  assert.equal(JSON.parse(await readFile(
+    path.join(directory, LEGACY_CLEANUP_MARKER_FILE),
+    'utf8',
+  )).observedUptimeSeconds, 20_000);
+});
+
+test('win32 marker publish keeps the previous marker when replacement rename fails', async (t) => {
+  const ownerRoot = await mkdtemp(path.join(tmpdir(), 'rauhwpx-owner-restore-'));
+  t.after(() => rm(ownerRoot, { recursive: true, force: true }));
+  await writeOwner(ownerRoot, 11, 1_000);
+  const ownerPath = path.join(ownerRoot, LAUNCH_OWNER_FILE);
+  const winRename = windowsRename(rename);
+  let asideDone = false;
+  await assert.rejects(
+    writeOwner(ownerRoot, 22, 2_000, {
+      renameImpl: async (from: string, to: string) => {
+        if (from === ownerPath) {
+          const result = await winRename(from, to);
+          asideDone = true;
+          return result;
+        }
+        if (asideDone && to === ownerPath && path.basename(from).includes('.tmp')) {
+          throw errorWithCode('EIO');
+        }
+        return winRename(from, to);
+      },
+      platform: 'win32',
+      sleep: async () => {},
+    }),
+    { code: 'EIO' },
+  );
+  assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).pid, 11);
+});
+
+test('win32 marker publish surfaces a lock that outlasts the delay budget', async (t) => {
+  const ownerRoot = await mkdtemp(path.join(tmpdir(), 'rauhwpx-owner-locked-'));
+  t.after(() => rm(ownerRoot, { recursive: true, force: true }));
+  await assert.rejects(
+    writeOwner(ownerRoot, 11, 1_000, {
+      renameImpl: lockedOp(rename),
+      platform: 'win32',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+
+  const { root, now } = await prepareLegacyLaunch(t);
+  await assert.rejects(
+    removeLegacyLaunchDirectories(root, '', {
+      now: () => now,
+      uptimeSeconds: () => 10_000,
+      renameImpl: lockedOp(rename),
+      platform: 'win32',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+});
+
+test('unix marker publish does not retry a locked rename', async (t) => {
+  const ownerRoot = await mkdtemp(path.join(tmpdir(), 'rauhwpx-owner-unix-lock-'));
+  t.after(() => rm(ownerRoot, { recursive: true, force: true }));
+  await assert.rejects(
+    writeOwner(ownerRoot, 11, 1_000, {
+      renameImpl: lockedOp(rename, { failTimes: 1 }),
+      platform: 'linux',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+
+  const { root, now } = await prepareLegacyLaunch(t);
+  await assert.rejects(
+    removeLegacyLaunchDirectories(root, '', {
+      now: () => now,
+      uptimeSeconds: () => 10_000,
+      renameImpl: lockedOp(rename, { failTimes: 1 }),
+      platform: 'linux',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+});
+
+test('win32 launch-directory cleanup retries a locked recursive rm then succeeds', async (t) => {
+  for (const code of WINDOWS_LOCK_CODES) {
+    const stale = await prepareOwnedStaleLaunch(t, `rauhwpx-stale-rm-${code.toLowerCase()}-`);
+    assert.deepEqual(await removeStaleLaunchDirectories(stale.root, '', {
+      expectedProfileId: stale.profileId,
+      minimumAgeMs: 0,
+      now: () => 20_000,
+      isAlive: () => false,
+      rmImpl: lockedOp(rm, { failTimes: 1, code }),
+      platform: 'win32',
+      sleep: async () => {},
+    }), [stale.launchId]);
+    await assert.rejects(stat(stale.directory), { code: 'ENOENT' });
+
+    const ownedLegacy = await prepareOwnedStaleLaunch(
+      t,
+      `rauhwpx-legacy-owned-rm-${code.toLowerCase()}-`,
+    );
+    assert.deepEqual(await removeLegacyLaunchDirectories(ownedLegacy.root, '', {
+      minimumAgeMs: 0,
+      now: () => 20_000,
+      uptimeSeconds: () => 10,
+      isAlive: () => false,
+      rmImpl: lockedOp(rm, { failTimes: 1, code }),
+      platform: 'win32',
+      sleep: async () => {},
+    }), [ownedLegacy.launchId]);
+    await assert.rejects(stat(ownedLegacy.directory), { code: 'ENOENT' });
+
+    const { root, directory, now } = await prepareLegacyLaunch(t);
+    await removeLegacyLaunchDirectories(root, '', {
+      now: () => now,
+      uptimeSeconds: () => 10_000,
+    });
+    assert.deepEqual(await removeLegacyLaunchDirectories(root, '', {
+      now: () => now + 2_000,
+      uptimeSeconds: () => 10,
+      rmImpl: lockedOp(rm, { failTimes: 1, code }),
+      platform: 'win32',
+      sleep: async () => {},
+    }), [LEGACY_LAUNCH_ID]);
+    await assert.rejects(stat(directory), { code: 'ENOENT' });
+  }
+});
+
+test('unix launch-directory cleanup does not retry a locked recursive rm', async (t) => {
+  const stale = await prepareOwnedStaleLaunch(t, 'rauhwpx-stale-rm-unix-');
+  await assert.rejects(
+    removeStaleLaunchDirectories(stale.root, '', {
+      expectedProfileId: stale.profileId,
+      minimumAgeMs: 0,
+      now: () => 20_000,
+      isAlive: () => false,
+      rmImpl: lockedOp(rm, { failTimes: 1 }),
+      platform: 'linux',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+  assert.equal((await stat(stale.directory)).isDirectory(), true);
+
+  const ownedLegacy = await prepareOwnedStaleLaunch(t, 'rauhwpx-legacy-owned-rm-unix-');
+  await assert.rejects(
+    removeLegacyLaunchDirectories(ownedLegacy.root, '', {
+      minimumAgeMs: 0,
+      now: () => 20_000,
+      uptimeSeconds: () => 10,
+      isAlive: () => false,
+      rmImpl: lockedOp(rm, { failTimes: 1 }),
+      platform: 'linux',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+  assert.equal((await stat(ownedLegacy.directory)).isDirectory(), true);
+
+  const { root, directory, now } = await prepareLegacyLaunch(t);
+  await removeLegacyLaunchDirectories(root, '', {
+    now: () => now,
+    uptimeSeconds: () => 10_000,
+  });
+  await assert.rejects(
+    removeLegacyLaunchDirectories(root, '', {
+      now: () => now + 2_000,
+      uptimeSeconds: () => 10,
+      rmImpl: lockedOp(rm, { failTimes: 1 }),
+      platform: 'linux',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+  assert.equal((await stat(directory)).isDirectory(), true);
+});
+
 test('desktop package registers supported document associations without bundling runtime data', () => {
   const hangulAssociation = rootPackage.build.fileAssociations.find(
     (association: { name?: string }) => association.name === 'Hangul document',
@@ -682,4 +1003,15 @@ test('desktop package registers supported document associations without bundling
   assert.match(desktopMain, /RauHWPX history archive/);
   assert.ok(rootPackage.build.asarUnpack.includes('rhwp/rhwp-agent/**'));
   assert.ok(rootPackage.build.files.every((entry: string) => !/runtime|launch-work/.test(entry)));
+});
+
+
+test('desktop edit accelerators send commands to the focused renderer', () => {
+  const events: unknown[] = [];
+  const item = documentEditMenuItem('undo', 'Undo', 'CmdOrCtrl+Z');
+  assert.equal(item.accelerator, 'CmdOrCtrl+Z');
+  item.click(null, { webContents: { send: (...args: unknown[]) => events.push(args) } });
+  item.click(null, null);
+  item.click(null, { isDestroyed: () => true });
+  assert.deepEqual(events, [['desktop:edit-command', 'undo']]);
 });

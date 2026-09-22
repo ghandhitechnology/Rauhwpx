@@ -1,5 +1,6 @@
+import type { CloudCheckpointPayload } from '../cloud/types.ts';
 import type { AgentBridge } from '../agent/bridge.ts';
-import type { CheckpointTitleSummary, PendingEditsChangeEvent, SidebarEvent } from '../agent/types.ts';
+import type { CheckpointTitleSummary } from '../agent/types.ts';
 import { CompareSessionStore } from '../compare/session.ts';
 import { compareDocuments, compareSnapshots } from '../compare/diff-engine.ts';
 import type { EventBus } from '../core/event-bus.ts';
@@ -15,9 +16,10 @@ import {
   type MergeAppliedReceipt,
   type MaterializedMergeResult,
 } from '../merge/index.ts';
-import { MERGE_ANALYSIS_VERSION, MERGE_MANIFEST_VERSION } from '../merge/manifest.ts';
+import { MERGE_MANIFEST_VERSION } from '../merge/manifest.ts';
 import { getHistoryPayload, listHistoryMeta } from '../history/idb-store.ts';
 import { showPendingAgentEditsDialog } from '../ui/pending-agent-edits-dialog.ts';
+import { prepareUncommittedMerge } from '../ui/version-merge-preparation.ts';
 import { CompareResultWindow } from '../ui/compare-result-window.ts';
 import type {
   LegacyVersionView,
@@ -53,7 +55,7 @@ import {
   type VersionBlob,
   type MergeResolution,
 } from './index.ts';
-import { hashBytes } from './hash.ts';
+import { hashBytes, fingerprintBytes } from './hash.ts';
 import {
   commitCompositeMerge,
   reconcileCompositeEditor,
@@ -83,6 +85,7 @@ interface VersionControllerDeps {
   getInputHandler: () => InputHandler | null;
   getDocumentId: () => string | null;
   agentBridge: AgentBridge;
+  autoEnable?: () => boolean;
 }
 
 interface CreateCheckpointOptions {
@@ -101,11 +104,6 @@ interface WorkspaceToken {
   editorRevision: number;
   repositoryId: string | null;
   repositoryRevision: number | null;
-}
-
-interface DeferredSavedSnapshot {
-  workspace: WorkspaceToken;
-  snapshot: CapturedVersionSnapshot;
 }
 
 function emptyState(): VersionManagerState {
@@ -190,14 +188,6 @@ export function persistActiveBranch(id: string, branch: string): void {
   }
 }
 
-function successfulTurn(event: SidebarEvent): boolean {
-  if (event.type !== 'agent' || event.event.type !== 'turn-end') return false;
-  if (event.event.errorMessage) return false;
-  return event.event.stopReason === 'end_turn'
-    || event.event.stopReason === 'completed'
-    || event.event.stopReason === 'success';
-}
-
 function tagForMessage(message: string, refs: readonly VersionRef[]): string {
   const base = message.normalize('NFC').trim().replace(/[\u0000-\u001f\u007f/\\]/g, ' ').slice(0, 64).trim()
     || timestampTitle();
@@ -246,6 +236,7 @@ export class DocumentVersionController implements VersionManagerController {
   readonly #getInputHandler: () => InputHandler | null;
   readonly #getDocumentId: () => string | null;
   readonly #agentBridge: AgentBridge;
+  readonly #autoEnable: () => boolean;
   readonly #ownsStore: boolean;
   readonly #listeners = new Set<(state: VersionManagerState) => void>();
   readonly #unsubscribers: Array<() => void> = [];
@@ -255,6 +246,7 @@ export class DocumentVersionController implements VersionManagerController {
   readonly #mergeResolver = new MergeResolverWindow();
   #state = emptyState();
   #repository: VersionRepository | null = null;
+  #savedBaseline: { documentId: string; capture: CapturedVersionSnapshot } | null = null;
   #refs: VersionRef[] = [];
   #commits: VersionCommit[] = [];
   #shelves: VersionShelf[] = [];
@@ -264,12 +256,10 @@ export class DocumentVersionController implements VersionManagerController {
   #editorRevision = 0;
   #semanticDirty = false;
   #semanticDirtyRevision = -1;
-  #deferredSavedSnapshot: DeferredSavedSnapshot | null = null;
   #refreshEpoch = 0;
   #operation = Promise.resolve();
-  #pendingApprovalTimer: number | null = null;
-  #suppressApprovalCheckpoint = 0;
   #mergeResolverActive = false;
+  #mergeCompletion: Promise<boolean> | null = null;
   #mergeLockedHandler: InputHandler | null = null;
   #mergePreviousUserEditingLocked = false;
   readonly #pendingMergeFinalizers = new WeakMap<
@@ -286,6 +276,7 @@ export class DocumentVersionController implements VersionManagerController {
     this.#getInputHandler = deps.getInputHandler;
     this.#getDocumentId = deps.getDocumentId;
     this.#agentBridge = deps.agentBridge;
+    this.#autoEnable = deps.autoEnable ?? (() => false);
     this.#compareStore = new CompareSessionStore(this.#eventBus);
 
     const documentChanged = () => {
@@ -301,50 +292,22 @@ export class DocumentVersionController implements VersionManagerController {
         void this.refresh();
       }),
       this.#eventBus.on('document-saved', () => {
-        if (this.#agentBridge.isTurnRunning()) {
-          try {
-            const workspace = this.#captureWorkspaceToken();
-            if (!workspace.repositoryId) throw new VersionError('VERSIONING_DISABLED', 'Versioning is not enabled');
-            this.#deferredSavedSnapshot = {
-              workspace,
-              snapshot: captureVersionSnapshot(this.#wasm),
-            };
-          } catch {
-            this.#deferredSavedSnapshot = null;
-          }
-          return;
-        }
+        // A file save updates disk state; only an explicit commit advances HEAD.
+        const id = this.#getDocumentId();
+        const capture = this.#wasm.hasLoadedDocument() ? captureVersionSnapshot(this.#wasm) : null;
+        if (id && capture) this.#savedBaseline = { documentId: id, capture };
         void this.#enqueue(async () => {
+          if (!capture || id !== this.#getDocumentId()) return;
           await this.#refreshData(false);
-          this.#deferredSavedSnapshot = null;
-          if (!this.#repository) return;
-          await this.#createCheckpoint({ reason: 'save', lastSaved: true });
-        });
+          if (!this.#repository || id !== this.#getDocumentId()) return;
+          this.#repository = await this.#store.markSaved(
+            this.#repository.id, capture.fingerprint, this.#repository.revision,
+          );
+          await this.#refreshData(false);
+        }).catch((error) => console.warn('Version save state could not be updated', error));
       }),
-      this.#agentBridge.onEvent((event) => {
-        const turnEnded = event.type === 'agent' && event.event.type === 'turn-end';
-        if (turnEnded) {
-          void this.#enqueue(async () => {
-            await this.#refreshData(false);
-            await this.#flushDeferredSave();
-            if (
-              this.#repository
-              && successfulTurn(event)
-              && this.#agentBridge.getPermissionProfile() === 'unrestricted'
-            ) await this.#createCheckpoint({
-              reason: 'agent',
-              author: { kind: 'agent', label: this.#agentBridge.getActiveAgent() ?? '에이전트' },
-            });
-          });
-        }
-        this.#syncTransientState();
-      }),
-      this.#agentBridge.pendingEdits.onChange((event: PendingEditsChangeEvent) => {
-        this.#syncTransientState();
-        if (event.type !== 'approved' || this.#suppressApprovalCheckpoint > 0) return;
-        if (this.#pendingApprovalTimer !== null) window.clearTimeout(this.#pendingApprovalTimer);
-        this.#pendingApprovalTimer = window.setTimeout(() => this.#queueApprovalCheckpoint(), 80);
-      }),
+      this.#agentBridge.onEvent(() => this.#syncTransientState()),
+      this.#agentBridge.pendingEdits.onChange(() => this.#syncTransientState()),
     );
   }
 
@@ -357,12 +320,21 @@ export class DocumentVersionController implements VersionManagerController {
     return () => this.#listeners.delete(listener);
   }
 
+  async documentLoaded(): Promise<void> {
+    const id = this.#getDocumentId();
+    if (id && !this.#wasm.isNewDocument && !this.#documentState.isDirty()) {
+      this.#savedBaseline = { documentId: id, capture: captureVersionSnapshot(this.#wasm) };
+    } else {
+      this.#savedBaseline = null;
+    }
+    await this.refresh();
+  }
+
   async refresh(): Promise<void> {
     await this.#enqueue(() => this.#refreshData(true));
   }
 
   async whenIdle(): Promise<void> {
-    if (this.#pendingApprovalTimer !== null) this.#queueApprovalCheckpoint();
     let pending: Promise<void>;
     do {
       pending = this.#operation;
@@ -370,37 +342,29 @@ export class DocumentVersionController implements VersionManagerController {
     } while (pending !== this.#operation);
   }
 
-  #queueApprovalCheckpoint(): void {
-    if (this.#pendingApprovalTimer !== null) window.clearTimeout(this.#pendingApprovalTimer);
-    this.#pendingApprovalTimer = null;
-    void this.#enqueue(async () => {
-      await this.#refreshData(false);
-      if (this.#repository) await this.#createCheckpoint({
-        reason: 'agent',
-        author: { kind: 'agent', label: this.#agentBridge.getActiveAgent() ?? '에이전트' },
-      });
-    });
+  async enable(): Promise<void> {
+    await this.#enqueue(() => this.#enableVersioning());
   }
 
-  async enable(): Promise<void> {
-    await this.#enqueue(async () => {
+  async #enableVersioning(): Promise<void> {
       this.#guardSaved();
       await this.#guardMutation();
-      if (this.#documentState.isDirty()) {
+      const baseline = this.#savedBaseline?.documentId === this.#getDocumentId() ? this.#savedBaseline.capture : null;
+      if (this.#documentState.isDirty() && !baseline) {
         throw new VersionError('SAVE_REQUIRED', 'Save the document before enabling version history');
       }
       const id = this.#getDocumentId();
       if (!id) throw new VersionError('SAVE_REQUIRED', 'A saved document ID is required');
       const workspace = this.#captureWorkspaceToken();
       const existing = await this.#store.findRepositoryByDocumentId(documentId(id));
-      this.#assertWorkspaceToken(workspace);
+      this.#assertWorkspaceToken(workspace, { editor: false });
       if (existing) {
         await this.#refreshData(true);
         return;
       }
-      const capture = captureVersionSnapshot(this.#wasm);
+      const capture = baseline ?? captureVersionSnapshot(this.#wasm);
       const mergeManifestEntries = await this.#mergeWorker.buildDocumentManifest(capture.bytes);
-      this.#assertWorkspaceToken(workspace);
+      this.#assertWorkspaceToken(workspace, { editor: false });
       const analysis = analyzeVersionDiff(null, capture.compareSnapshot);
       const createdAt = Date.now();
       const result = await this.#store.createRepository({
@@ -427,7 +391,147 @@ export class DocumentVersionController implements VersionManagerController {
       persistActiveBranch(id, result.branch.name);
       await this.#refreshData(true);
       this.#requestGeneratedTitle(result.commit, analysis.titleSummary);
+  }
+
+  /** Persist the exact handoff without committing or replacing the local working tree. */
+  async prepareCloudBranch(startId: string, bytes: Uint8Array, fileName: string, sourceStartId?: string): Promise<Uint8Array> {
+    return this.#enqueue(async () => {
+      await this.#refreshData(false);
+      if (!this.#repository) await this.#enableVersioning();
+      await this.#guardMutation();
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      const anchorId = commitId(`cloud-base:${repository.id}:${startId}`);
+      const existing = await this.#store.getCommit(anchorId);
+      if (existing) {
+        const blob = await this.#store.getBlob(existing.blobId);
+        this.#assertWorkspaceToken(workspace);
+        if (!blob) throw new VersionError('CORRUPT_BLOB', 'Cloud 시작 문서를 찾을 수 없습니다.');
+        return blob.bytes;
+      }
+      const sourceBranch = sourceStartId
+        ? await this.#store.getBranch(repository.id, this.#cloudBranchName(sourceStartId))
+        : null;
+      this.#assertWorkspaceToken(workspace);
+      if (sourceStartId && !sourceBranch) return bytes;
+      const capture = await this.#captureIncoming(bytes, fileName);
+      this.#assertWorkspaceToken(workspace);
+      const name = this.#cloudBranchName(startId);
+      let branch = await this.#store.getBranch(repository.id, name);
+      if (!branch) {
+        const created = await this.#store.createBranch({
+          repositoryId: repository.id, name, target: sourceBranch?.target ?? this.#requireActiveBranch().target,
+          expectedRepositoryRevision: repository.revision,
+        });
+        this.#repository = created.repository;
+        branch = created.branch;
+      }
+      await this.#appendBranchSnapshot(branch, capture, 'Cloud 시작 문서', 'agent', anchorId);
+      return bytes;
     });
+  }
+
+  async isCloudCheckpointMerged(checkpoint: Pick<CloudCheckpointPayload, 'documentId' | 'sessionId' | 'revision' | 'operationId' | 'sha256'>): Promise<boolean> {
+    return this.#enqueue(async () => {
+      await this.#refreshData(false);
+      if (!this.#repository || this.#captureWorkspaceToken().documentId !== checkpoint.documentId) return false;
+      const workspace = this.#captureWorkspaceToken();
+      const operationId = this.#cloudCheckpointCommitId(checkpoint);
+      const legacyId = commitId(`cloud:${this.#repository.id}:${checkpoint.sessionId}:${checkpoint.revision}`);
+      const commit = await this.#store.getCommit(operationId) ?? await this.#store.getCommit(legacyId);
+      if (!commit) return false;
+      const blob = await this.#store.getBlob(commit.blobId);
+      if (!blob) return false;
+      const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', blob.bytes.slice().buffer))]
+        .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      if (digest !== checkpoint.sha256) return false;
+      const relation = await this.#store.getMergeRelation(this.#repository.id, this.#requireActiveBranch().target, commit.id);
+      this.#assertWorkspaceToken(workspace);
+      return relation.relation === 'already-integrated';
+    });
+  }
+
+  async mergeCloudCheckpoint(startId: string, checkpoint: CloudCheckpointPayload): Promise<boolean> {
+    const source = await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation(true);
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      if (checkpoint.documentId !== workspace.documentId || checkpoint.kind !== 'turn'
+        || !Number.isSafeInteger(checkpoint.revision) || checkpoint.revision < 1) {
+        throw new Error('이 문서의 완료된 Cloud 작업만 병합할 수 있습니다.');
+      }
+      const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', checkpoint.bytes.slice().buffer))]
+        .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      if (digest !== checkpoint.sha256 || checkpoint.bytes.length !== checkpoint.byteLength) {
+        throw new VersionError('CORRUPT_BLOB', 'Cloud 문서 검증에 실패했습니다. 다시 다운로드하세요.');
+      }
+      const name = this.#cloudBranchName(startId);
+      const anchor = await this.#store.getCommit(commitId(`cloud-base:${repository.id}:${startId}`));
+      const branch = await this.#store.getBranch(repository.id, name);
+      if (!anchor || !branch) {
+        throw new Error('이 기기에 병합에 필요한 Cloud 시작 기록이 없습니다. Cloud 상태에서 완료 문서를 사본으로 저장할 수 있습니다.');
+      }
+      if (branch.name === this.#requireActiveBranch().name) {
+        throw new Error('Cloud 결과를 받을 로컬 브랜치를 먼저 선택하세요.');
+      }
+      const id = this.#cloudCheckpointCommitId(checkpoint);
+      let existing = await this.#store.getCommit(id);
+      if (!existing) {
+        const legacy = await this.#store.getCommit(commitId(`cloud:${repository.id}:${checkpoint.sessionId}:${checkpoint.revision}`));
+        if (legacy?.blobId === hashBytes(checkpoint.bytes)) existing = legacy;
+      }
+      if (existing) {
+        if (existing.blobId !== hashBytes(checkpoint.bytes)) {
+          throw new VersionError('CORRUPT_BLOB', '같은 Cloud 버전의 문서 내용이 달라졌습니다.');
+        }
+        if (existing.id !== branch.target) {
+          const relation = await this.#store.getMergeRelation(repository.id, this.#requireActiveBranch().target, existing.id);
+          this.#assertWorkspaceToken(workspace);
+          if (relation.relation === 'already-integrated') return { name, integrated: true };
+          throw new VersionError('STALE_WORKSPACE', '더 최신 Cloud 변경을 이미 가져왔습니다. 최신 작업을 선택하세요.');
+        }
+      } else {
+        // Pin the source head. An old or replayed boundary must never move it backwards.
+        const head = await this.#requireCommit(branch.target);
+        const prefix = `cloud:${repository.id}:${checkpoint.sessionId}:`;
+        if (head.id.startsWith(prefix) && Number(head.id.slice(prefix.length).split(':')[0]) > checkpoint.revision) {
+          throw new VersionError('STALE_WORKSPACE', '더 최신 Cloud 변경을 이미 가져왔습니다.');
+        }
+        const capture = await this.#captureIncoming(checkpoint.bytes, checkpoint.fileName);
+        this.#assertWorkspaceToken(workspace);
+        await this.#appendBranchSnapshot(branch, capture, `Cloud · ${checkpoint.turn}턴`, 'agent', id);
+      }
+      const latest = await this.#store.getBranch(repository.id, name);
+      const relation = await this.#store.getMergeRelation(repository.id, this.#requireActiveBranch().target, latest!.target);
+      return { name, integrated: relation.relation === 'already-integrated' };
+    });
+    if (source.integrated) return true;
+    this.#mergeCompletion = null;
+    await this.startMerge(source.name);
+    return this.#mergeCompletion ? await this.#mergeCompletion : false;
+  }
+
+  #cloudCheckpointCommitId(checkpoint: Pick<CloudCheckpointPayload, 'sessionId' | 'revision' | 'operationId'>): CommitId {
+    const operation = hashBytes(new TextEncoder().encode(checkpoint.operationId)).slice(7);
+    return commitId(`cloud:${this.#requireRepository().id}:${checkpoint.sessionId}:${checkpoint.revision}:${operation}`);
+  }
+
+  #cloudBranchName(startId: string): BranchName {
+    return branchName(`Cloud ${hashBytes(new TextEncoder().encode(startId)).slice(7, 23)}`);
+  }
+
+  async #captureIncoming(bytes: Uint8Array, fileName: string): Promise<CapturedVersionSnapshot> {
+    const parsed = new WasmBridge();
+    await parsed.initialize();
+    try {
+      parsed.loadDocument(bytes, fileName);
+      const snapshot = captureVersionSnapshot(parsed);
+      // Keep authenticated transfer bytes, even when the parser normalizes an export.
+      return { ...snapshot, bytes, fingerprint: fingerprintBytes(bytes) };
+    } finally {
+      parsed.releaseDocument();
+    }
   }
 
   async checkpoint(message?: string): Promise<void> {
@@ -732,7 +836,7 @@ export class DocumentVersionController implements VersionManagerController {
     await this.#enqueue(async () => {
       await this.#refreshData(false);
       await this.#guardMutation(true);
-      await this.#checkpointDirty('pre-merge');
+      if (!await this.#prepareMergeWorkingTree()) return;
       await this.#refreshData(false);
       await this.#openMergeResolver(branchName(sourceBranch));
     });
@@ -750,7 +854,7 @@ export class DocumentVersionController implements VersionManagerController {
       if (draft.targetBranch !== this.#requireActiveBranch().name) {
         throw new VersionError('STALE_WORKSPACE', `병합을 이어가려면 먼저 ${draft.targetBranch} 브랜치로 전환하세요.`);
       }
-      await this.#checkpointDirty('pre-merge');
+      if (!await this.#prepareMergeWorkingTree()) return;
       await this.#refreshData(false);
       await this.#openMergeResolver(draft.sourceBranch, draft);
     });
@@ -787,7 +891,10 @@ export class DocumentVersionController implements VersionManagerController {
   }
 
   async createShelf(title?: string): Promise<void> {
-    await this.#enqueue(async () => {
+    await this.#enqueue(() => this.#createShelf(title));
+  }
+
+  async #createShelf(title?: string): Promise<void> {
       await this.#refreshData(false);
       await this.#guardMutation(true);
       const workspace = this.#captureWorkspaceToken();
@@ -830,52 +937,41 @@ export class DocumentVersionController implements VersionManagerController {
       this.#repository = result.repository;
       this.#setDirtyForFingerprint(head.contentFingerprint, 'version-shelf', head.contentFingerprint);
       await this.#refreshData(true);
-    });
   }
 
   async applyShelf(id: string, remove: boolean): Promise<void> {
     await this.#enqueue(async () => {
       await this.#refreshData(false);
       await this.#guardMutation(true);
-      await this.#checkpointDirty('pre-restore');
+      if (!await this.#prepareMergeWorkingTree()) return;
       const workspace = this.#captureWorkspaceToken();
       const repository = this.#requireRepository();
       const shelf = await this.#store.getShelf(shelfId(id));
-      if (!shelf || shelf.repositoryId !== repository.id) throw new VersionError('SHELF_NOT_FOUND', 'Shelf was not found');
-      const blob = await this.#store.getBlob(shelf.blobId);
+      if (!shelf || shelf.repositoryId !== repository.id) throw new VersionError('SHELF_NOT_FOUND', '보관한 변경을 찾을 수 없습니다.');
+      const [blob, compared] = await Promise.all([
+        this.#store.getBlob(shelf.blobId), this.#store.getCompareSnapshot(shelf.compareSnapshotId),
+      ]);
       this.#assertWorkspaceToken(workspace);
-      if (!blob) throw new VersionError('CORRUPT_BLOB', 'Shelf bytes are missing');
-      const handler = this.#requireInputHandler();
-      const original = captureVersionSnapshot(this.#wasm);
-      const wasDirty = this.#documentState.isDirty();
-      handler.prepareSnapshotCapacity(remove ? 4 : 2);
-      try {
-        handler.replaceContentFromBytes(blob.bytes);
-      } catch (error) {
-        throw new VersionError('RESTORE_PARSE_FAILED', 'Shelf bytes could not be applied', {
-          cause: error instanceof Error ? error : undefined,
+      if (!blob || !compared) throw new VersionError('CORRUPT_BLOB', '보관한 문서를 찾을 수 없습니다.');
+      const name = branchName(`보관 ${hashBytes(new TextEncoder().encode(id)).slice(7, 23)}`);
+      const sourceId = commitId(`shelf:${repository.id}:${id}`);
+      let branch = await this.#store.getBranch(repository.id, name);
+      if (!branch) {
+        const existing = await this.#store.getCommit(sourceId);
+        const created = await this.#store.createBranch({
+          repositoryId: repository.id, name, target: existing?.id ?? shelf.baseCommitId,
+          expectedRepositoryRevision: repository.revision,
         });
+        this.#repository = created.repository;
+        branch = created.branch;
       }
-      this.#setDirtyForFingerprint(shelf.contentFingerprint, 'version-shelf-apply');
-      if (remove) {
-        const replacementWorkspace = this.#captureWorkspaceToken();
-        let persisted = false;
-        try {
-          const updated = await this.#store.deleteShelf({
-            repositoryId: repository.id,
-            shelfId: shelf.id,
-            expectedRepositoryRevision: repository.revision,
-          });
-          persisted = true;
-          if (this.#isWorkspaceTokenCurrent(replacementWorkspace, { editor: false, repository: false })) {
-            this.#repository = updated;
-          }
-        } catch (error) {
-          if (!persisted) this.#rollbackReplacement(handler, original, wasDirty, replacementWorkspace);
-          throw error;
-        }
+      if (branch.target !== sourceId) {
+        await this.#appendBranchSnapshot(branch, {
+          bytes: blob.bytes, fingerprint: shelf.contentFingerprint, compareSnapshot: compared.snapshot,
+        }, shelf.title, 'manual', sourceId);
       }
-      await this.#refreshData(true);
+      await this.#refreshData(false);
+      await this.#openMergeResolver(name, undefined, { id: shelf.id, remove });
     });
   }
 
@@ -930,22 +1026,6 @@ export class DocumentVersionController implements VersionManagerController {
       // Keep the session preference when storage is unavailable.
     }
     this.#emit();
-  }
-
-  async collectGarbage(): Promise<void> {
-    await this.#enqueue(async () => {
-      await this.#refreshData(false);
-      await this.#guardMutation();
-      // A composite merge Redo may be the only remaining owner of its merge
-      // commit after Undo. Do not collect that commit out from under history.
-      if (this.#getInputHandler()?.canRedo()) {
-        throw new VersionError('VERSION_STORE_FAILED', 'Redo or replace pending editor history before garbage collection');
-      }
-      const workspace = this.#captureWorkspaceToken();
-      const repository = this.#requireRepository();
-      await this.#store.collectGarbage(repository.id, repository.revision);
-      await this.#refreshData(true);
-    });
   }
 
   async createPortableHistoryBundle(): Promise<PortableHistoryArchive> {
@@ -1011,7 +1091,6 @@ export class DocumentVersionController implements VersionManagerController {
   }
 
   dispose(): void {
-    if (this.#pendingApprovalTimer !== null) window.clearTimeout(this.#pendingApprovalTimer);
     for (const unsubscribe of this.#unsubscribers) unsubscribe();
     this.#listeners.clear();
     this.#compareWindow.hide();
@@ -1093,23 +1172,19 @@ export class DocumentVersionController implements VersionManagerController {
       throw new VersionError('STALE_WORKSPACE', 'The active document changed during version review');
     }
     if (choice === 'cancel') throw new VersionError('PENDING_AGENT_REVIEW', 'The version action was cancelled');
-    this.#suppressApprovalCheckpoint += 1;
-    try {
-      if (choice === 'approve') {
-        if (!sets().every((set) => this.#agentBridge.pendingEdits.approve(set.id))) {
-          throw new VersionError('PENDING_AGENT_REVIEW', 'Some agent edits could not be approved');
-        }
-      } else {
-        for (const set of sets()) this.#agentBridge.pendingEdits.reject(set.id);
+    if (choice === 'approve') {
+      if (!sets().every((set) => this.#agentBridge.pendingEdits.approve(set.id))) {
+        throw new VersionError('PENDING_AGENT_REVIEW', 'Some agent edits could not be approved');
       }
-    } finally {
-      this.#suppressApprovalCheckpoint -= 1;
+    } else {
+      for (const set of sets()) this.#agentBridge.pendingEdits.reject(set.id);
     }
   }
 
   async #openMergeResolver(
     sourceName: BranchName,
     previousDraft?: VersionMergeDraft,
+    shelfApply = previousDraft?.shelfApply,
   ): Promise<void> {
     const workspace = this.#captureWorkspaceToken();
     const repository = this.#requireRepository();
@@ -1165,6 +1240,7 @@ export class DocumentVersionController implements VersionManagerController {
       current.blob.bytes,
       incoming.blob.bytes,
       {
+        review: true,
         manifests: {
           // 합성한 가상 문서에는 단일 소스 경로 맵이 없다. 빈 Base 힌트로 보수적으로
           // 일치시키고, 각 HEAD 매니페스트는 이전 기록의 안정적인 식별자를 계속 전달한다.
@@ -1196,6 +1272,7 @@ export class DocumentVersionController implements VersionManagerController {
     );
     const now = Date.now();
     const draft: VersionMergeDraft = {
+      ...(shelfApply ? { shelfApply } : {}),
       id: previousDraft?.id ?? createMergeDraftId(),
       repositoryId: repository.id,
       targetBranch: targetBranch.name,
@@ -1207,10 +1284,8 @@ export class DocumentVersionController implements VersionManagerController {
       sourceBranchRevision: sourceBranch.revision,
       targetBranchGeneration: targetBranch.generation,
       sourceBranchGeneration: sourceBranch.generation,
-      mode: relation.relation === 'fast-forward'
-        ? previousDraft?.mode === 'explicit-checkpoint' ? 'explicit-checkpoint' : 'fast-forward'
-        : 'diverged',
-      analysisVersion: MERGE_ANALYSIS_VERSION,
+      mode: relation.relation === 'fast-forward' ? 'explicit-checkpoint' : 'diverged',
+      analysisVersion: analysis.analysisVersion,
       conflicts: analysis.conflicts,
       resolutions,
       automaticResult: analysis.result,
@@ -1228,12 +1303,14 @@ export class DocumentVersionController implements VersionManagerController {
       signal: AbortSignal,
     ): Promise<MaterializedMergeResult> => {
       const hydratedResolutions = await this.#hydrateMergeAssetResolutions(mergeResolutions);
-      const output = await this.#mergeWorker.materializeDocument(
+          const output = await this.#mergeWorker.materializeDocument(
         baseBytes,
         current.blob.bytes,
         incoming.blob.bytes,
         hydratedResolutions,
         {
+          review: true,
+          softBudgetMs: 60_000,
           manifests: {
             base: baseManifests.length === 1 ? baseManifests[0] : { entries: [] },
             current: currentManifest,
@@ -1243,9 +1320,9 @@ export class DocumentVersionController implements VersionManagerController {
           onProgress: (progress) => this.#eventBus.emit('merge-progress', progress),
         },
       );
-      // Fast-forward adopts the source commit itself, so retain its exact bytes.
-      // The structural engine still materializes and validates above.
-      const bytes = relation.relation === 'fast-forward' ? incoming.blob.bytes : output.bytes;
+      // A review can reject or edit incoming changes even on a linear history.
+      // Always commit the reviewed bytes as an explicit checkpoint.
+      const bytes = output.bytes;
       try {
         await this.#validateMergeDocument(bytes, this.#wasm.fileName);
         return {
@@ -1283,22 +1360,37 @@ export class DocumentVersionController implements VersionManagerController {
     };
     this.#setMergeResolverLock(true);
     try {
+      let applied = false;
+      let resolveCompletion!: (applied: boolean) => void;
+      this.#mergeCompletion = new Promise<boolean>((resolve) => { resolveCompletion = resolve; });
       this.#mergeResolver.open({
         draft: storedDraft,
         analysis,
         sourceBranch: sourceBranch.name,
         currentBranch: targetBranch.name,
         mode: storedDraft.mode,
-        title: `${sourceBranch.name} → ${targetBranch.name} 병합`,
+        title: shelfApply ? '보관한 변경 적용' : `${sourceBranch.name} → ${targetBranch.name} 병합`,
         documents: {
           base: { bytes: baseBytes, fileName: this.#wasm.fileName, label: '기준' },
           current: { bytes: current.blob.bytes, fileName: this.#wasm.fileName, label: '현재' },
           incoming: { bytes: incoming.blob.bytes, fileName: this.#wasm.fileName, label: '가져올 변경' },
         },
-        canDeleteSource: sourceBranch.name !== repository.defaultBranch,
+        canDeleteSource: !shelfApply && sourceBranch.name !== repository.defaultBranch && !sourceBranch.name.startsWith('Cloud '),
         materialize: ({ analysis: nextAnalysis, resolutions: nextResolutions, signal }) => (
           materialize(nextAnalysis, nextResolutions, signal)
         ),
+        materializeReplacement: async () => {
+          await this.#validateMergeDocument(incoming.blob.bytes, this.#wasm.fileName);
+          return {
+            tree: analysis.result,
+            document: { bytes: incoming.blob.bytes, fileName: this.#wasm.fileName, label: '가져온 문서' },
+            validation: { valid: true, errors: [] },
+          };
+        },
+        reanalyze: async () => {
+          await this.#mergeResolver.close();
+          await this.resumeMerge(storedDraft.id);
+        },
         saveDraft: async (nextDraft) => {
           await this.#enqueue(async () => {
             const existing = await this.#store.getMergeDraft(nextDraft.id);
@@ -1349,9 +1441,9 @@ export class DocumentVersionController implements VersionManagerController {
         },
         complete: (request) => this.#enqueue(() => this.#completeMerge(request)),
         finalizeSourceDisposition: (receipt, disposition) => this.#enqueue(
-          () => this.#finalizeMergeSource(receipt, disposition),
+          async () => { await this.#finalizeMergeSource(receipt, disposition); applied = true; },
         ),
-        onClosed: () => this.#setMergeResolverLock(false),
+        onClosed: () => { this.#setMergeResolverLock(false); resolveCompletion(applied); },
       });
     } catch (error) {
       this.#setMergeResolverLock(false);
@@ -1402,6 +1494,9 @@ export class DocumentVersionController implements VersionManagerController {
   }
 
   async #completeMerge(request: MergeApplicationRequest): Promise<MergeAppliedReceipt> {
+    if (request.draft.analysisVersion >= 2 && request.mode === 'fast-forward') {
+      request = { ...request, mode: 'explicit-checkpoint', draft: { ...request.draft, mode: 'explicit-checkpoint' } };
+    }
     if (!request.materialized.validation.valid || !request.materialized.document) {
       throw new VersionError('MERGE_VALIDATION_FAILED', '해결한 병합 결과가 올바른 문서가 아닙니다.');
     }
@@ -1448,6 +1543,42 @@ export class DocumentVersionController implements VersionManagerController {
       request.materialized.document.bytes,
       request.materialized.document.fileName,
     );
+    if (completionDraft.shelfApply) {
+      const workspace = this.#captureWorkspaceToken();
+      if (this.#activeBranch !== targetBranch.name) throw new VersionError('STALE_WORKSPACE', '현재 브랜치가 달라졌습니다.');
+      const handler = this.#requireInputHandler();
+      const original = captureVersionSnapshot(this.#wasm);
+      const head = await this.#requireCommit(targetBranch.target);
+      this.#assertWorkspaceToken(workspace);
+      if (original.fingerprint !== head.contentFingerprint) {
+        throw new VersionError('STALE_WORKSPACE', '보관한 변경을 검토하는 동안 문서가 바뀌었습니다.');
+      }
+      const wasDirty = this.#documentState.isDirty();
+      handler.prepareSnapshotCapacity(4);
+      const updated = await commitCompositeMerge({
+        applyEditor: () => handler.replaceContentFromBytes(captured.bytes),
+        commitRefs: () => this.#store.completeShelfMerge({
+          repositoryId: repository.id, expectedRepositoryRevision: repository.revision, draftId: completionDraft.id,
+        }),
+        rollbackEditor: () => {
+          reconcileCompositeEditor({
+            undoAppliedMerge: () => handler.performUndo(true),
+            discardMergeRedo: () => handler.discardRedoHistory(),
+            matchesExpectedDocument: () => fingerprintVersionContent(this.#wasm) === original.fingerprint,
+            replaceWithExpectedDocument: () => { handler.replaceContentFromBytes(original.bytes); },
+            discardFallbackUndo: () => handler.discardLatestUndoHistory(),
+          });
+          if (wasDirty) this.#documentState.markDirty('version-shelf-rollback');
+          else this.#documentState.markClean('version-shelf-rollback');
+        },
+      });
+      this.#repository = updated;
+      this.#setDirtyForFingerprint(captured.fingerprint, 'version-shelf-apply');
+      await this.#refreshData(true);
+      const receipt = {} as MergeAppliedReceipt;
+      this.#pendingMergeFinalizers.set(receipt, async () => {});
+      return receipt;
+    }
     const mergeManifestEntries = request.mode === 'fast-forward'
       ? null
       : await this.#mergeWorker.buildDocumentManifest(captured.bytes);
@@ -1457,6 +1588,9 @@ export class DocumentVersionController implements VersionManagerController {
     const analysis = analyzeVersionDiff(currentSnapshot.snapshot, captured.compareSnapshot);
     const handler = this.#requireInputHandler();
     const original = captureVersionSnapshot(this.#wasm);
+    if (original.fingerprint !== currentCommit.contentFingerprint) {
+      throw new VersionError('STALE_WORKSPACE', '검토하는 동안 문서가 바뀌었습니다. 최신 문서로 다시 검토하세요.');
+    }
     const wasDirty = this.#documentState.isDirty();
     handler.prepareSnapshotCapacity(4);
     let mergeCommitted = false;
@@ -1510,7 +1644,7 @@ export class DocumentVersionController implements VersionManagerController {
             sourceBranchAtMerge: sourceBranch.name,
             targetBranchAtMerge: targetBranch.name,
             baseCommitIds: [...request.draft.baseCommitIds],
-            conflictCount: request.draft.conflicts.length,
+            conflictCount: request.draft.conflicts.filter((item) => item.automatic !== true).length,
           },
         }),
       rollbackEditor: () => {
@@ -1838,22 +1972,6 @@ export class DocumentVersionController implements VersionManagerController {
     }
   }
 
-  async #flushDeferredSave(): Promise<void> {
-    const deferred = this.#deferredSavedSnapshot;
-    const repository = this.#repository;
-    if (!deferred) return;
-    if (
-      !repository
-      || this.#getDocumentId() !== deferred.workspace.documentId
-      || repository.id !== deferred.workspace.repositoryId
-    ) {
-      this.#deferredSavedSnapshot = null;
-      return;
-    }
-    await this.#createCheckpoint({ reason: 'save', lastSaved: true }, deferred.snapshot);
-    this.#deferredSavedSnapshot = null;
-  }
-
   async #refreshData(includeLegacy: boolean): Promise<void> {
     const epoch = ++this.#refreshEpoch;
     const id = this.#getDocumentId();
@@ -1875,6 +1993,12 @@ export class DocumentVersionController implements VersionManagerController {
     const repository = await this.#store.findRepositoryByDocumentId(documentId(id));
     if (epoch !== this.#refreshEpoch || this.#getDocumentId() !== id) return;
     this.#repository = repository;
+    if (repository) this.#savedBaseline = null;
+    if (!repository && this.#autoEnable() && (!this.#documentState.isDirty() || this.#savedBaseline?.documentId === id)
+      && !this.#agentBridge.isTurnRunning()) {
+      await this.#enableVersioning();
+      return;
+    }
     if (!repository) {
       this.#refs = [];
       this.#commits = [];
@@ -2174,6 +2298,7 @@ export class DocumentVersionController implements VersionManagerController {
     options.onPersisted?.();
     if (!this.#isWorkspaceTokenCurrent(workspace, { editor: false })) return result.commit;
     this.#repository = result.repository;
+    await this.#collectGarbage(result.repository);
     await this.#refreshData(true);
     if (!message) {
       this.#requestGeneratedTitle(
@@ -2181,6 +2306,76 @@ export class DocumentVersionController implements VersionManagerController {
         analysis.titleSummary,
       );
     }
+    return result.commit;
+  }
+
+  async #prepareMergeWorkingTree(): Promise<boolean> {
+    const workspace = this.#captureWorkspaceToken();
+    const branch = this.#requireActiveBranch();
+    const capture = captureVersionSnapshot(this.#wasm);
+    const head = await this.#requireCommit(branch.target);
+    this.#assertWorkspaceToken(workspace);
+    if (capture.fingerprint === head.contentFingerprint) return true;
+    this.#setMergeResolverLock(true);
+    let choice: Awaited<ReturnType<typeof prepareUncommittedMerge>>;
+    try {
+      choice = await prepareUncommittedMerge(branch.name);
+      this.#assertWorkspaceToken(workspace);
+    } finally {
+      this.#setMergeResolverLock(false);
+    }
+    if (choice.kind === 'cancel') return false;
+    if (choice.kind === 'stash') {
+      await this.#createShelf('병합 전 내 변경');
+    } else if (choice.kind === 'commit') {
+      await this.#createCheckpoint({ reason: 'manual', message: '병합 전 내 변경' }, capture);
+    } else if (choice.kind === 'branch') {
+      const repository = this.#requireRepository();
+      const blob = await this.#store.getBlob(head.blobId);
+      if (!blob) throw new VersionError('CORRUPT_BLOB', '현재 브랜치 문서를 찾을 수 없습니다.');
+      const handler = this.#requireInputHandler();
+      handler.prepareSnapshotCapacity(2);
+      this.#assertWorkspaceToken(workspace);
+      const created = await this.#store.createBranch({
+        repositoryId: repository.id,
+        name: branchName(choice.name),
+        target: head.id,
+        expectedRepositoryRevision: repository.revision,
+      });
+      this.#repository = created.repository;
+      await this.#appendBranchSnapshot(created.branch, capture, '내 변경', 'manual');
+      // The new branch owns the edits. Keep the original target selected.
+      this.#assertWorkspaceToken(workspace, { repository: false });
+      handler.replaceContentFromBytes(blob.bytes);
+      this.#setDirtyForFingerprint(head.contentFingerprint, 'version-merge-prepare', head.contentFingerprint);
+      await this.#refreshData(true);
+    }
+    return true;
+  }
+
+  async #appendBranchSnapshot(
+    branch: BranchRef,
+    capture: CapturedVersionSnapshot,
+    title: string,
+    reason: 'manual' | 'agent',
+    id?: CommitId,
+  ): Promise<VersionCommit> {
+    const workspace = this.#captureWorkspaceToken();
+    const repository = this.#requireRepository();
+    await this.#ensureFullMergeManifest(repository.id, branch.target, new Map());
+    const mergeManifestEntries = await this.#mergeWorker.buildDocumentManifest(capture.bytes);
+    this.#assertWorkspaceToken(workspace);
+    const result = await this.#store.createCheckpoint({
+      id, repositoryId: repository.id, branch: branch.name,
+      expectedRepositoryRevision: repository.revision,
+      expectedBranchRevision: branch.revision, expectedHead: branch.target,
+      reason, bytes: capture.bytes, compareSnapshot: capture.compareSnapshot,
+      contentFingerprint: capture.fingerprint, mergeManifestEntries,
+      title, titleOrigin: 'manual', titleRevision: 0,
+      author: reason === 'agent' ? { kind: 'agent', label: 'Cloud' } : { kind: 'user', label: '사용자' },
+    });
+    this.#repository = result.repository;
+    await this.#refreshData(true);
     return result.commit;
   }
 
@@ -2195,6 +2390,13 @@ export class DocumentVersionController implements VersionManagerController {
       return;
     }
     await this.#createCheckpoint({ reason }, capture);
+  }
+
+  async #collectGarbage(repository: VersionRepository): Promise<void> {
+    // A composite merge Redo may be the only remaining owner of its merge
+    // commit after Undo. Do not collect that commit out from under history.
+    if (this.#getInputHandler()?.canRedo()) return;
+    await this.#store.collectGarbage(repository.id, repository.revision);
   }
 
   #requestGeneratedTitle(commit: VersionCommit, summary: CheckpointTitleSummary): void {

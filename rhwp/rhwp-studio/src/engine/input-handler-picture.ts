@@ -3,9 +3,10 @@
 
 import { MovePictureCommand, MoveShapeCommand, MoveInlinePictureCommand, ResizeObjectCommand } from './command';
 import type { HeaderFooterObjectRef, ObjectResizeTarget } from './command';
+import { PictureResizeJournal } from './picture-resize-journal';
 import { computeArrowResize, MIN_SIZE_HWP, type ArrowKey } from './picture-resize';
 import { computeRotationRecord } from './object-drag-record';
-import { isMasterPageDecoration } from './picture-hit-policy';
+import { isMasterPageDecoration, isSupportedPictureControl } from './picture-hit-policy';
 import { clearObjectEditingPage, summarizeObjectSelection } from './object-selection-page';
 import type { CellPathLike } from '@/core/types';
 import { objectAddressScope } from '@/core/object-address';
@@ -23,6 +24,7 @@ type PictureObjectRef = {
   type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole';
   cellIdx?: number;
   cellParaIdx?: number;
+  innerControlIdx?: number;
   outerTableControlIdx?: number;
   cellPath?: CellPathLike;
   noteRef?: any;
@@ -61,7 +63,8 @@ function matchesControlRef(ctrl: any, ref: PictureObjectRef, layoutType: string)
     return false;
   }
   if (hasCellPath(ref)) {
-    return sameCellPath(ctrl.cellPath, ref.cellPath);
+    return sameCellPath(ctrl.cellPath, ref.cellPath)
+      && (ref.innerControlIdx === undefined || ctrl.innerControlIdx === ref.innerControlIdx);
   }
   if (Array.isArray(ctrl.cellPath) && ctrl.cellPath.length > 0 &&
       ref.cellIdx === undefined && ref.cellParaIdx === undefined) {
@@ -128,7 +131,7 @@ function isAboveControl(a: any, b: any): boolean {
 function controlToRef(ctrl: any): PictureObjectRef {
   const ref: PictureObjectRef = {
     sec: ctrl.secIdx, ppi: ctrl.paraIdx, ci: ctrl.controlIdx, type: ctrl.type,
-    cellIdx: ctrl.cellIdx, cellParaIdx: ctrl.cellParaIdx, outerTableControlIdx: ctrl.outerTableControlIdx,
+    cellIdx: ctrl.cellIdx, cellParaIdx: ctrl.cellParaIdx, innerControlIdx: ctrl.innerControlIdx, outerTableControlIdx: ctrl.outerTableControlIdx,
     cellPath: ctrl.cellPath, noteRef: ctrl.noteRef, memoRef: ctrl.memoRef,
     headerFooter: ctrl.headerFooter, missing: ctrl.missing,
   };
@@ -220,7 +223,7 @@ export function findPictureAtClick(this: any,
   pageIdx: number, pageX: number, pageY: number,
 ): PictureObjectRef | null {
   try {
-    const layout = this.wasm.getPageControlLayout(pageIdx);
+    const layout = { controls: this.wasm.getPageControlLayout(pageIdx).controls.filter(isSupportedPictureControl) };
     // [Task #1171] picture 우선: 클릭이 컨테이너 Shape(글상자) 와 그 안의 nested picture
     // (cellPath 동반 image/equation) 둘 다에 들어가면 picture 를 우선 선택한다.
     // collect_controls 가 Shape 를 자식 picture 보다 먼저 방출하므로, 이 우선 패스가 없으면
@@ -349,7 +352,7 @@ export function findPictureAtClick(this: any,
 
 /** 선택된 개체의 bbox를 페이지 레이아웃에서 찾는다. */
 export function findPictureBbox(this: any,
-  ref: { sec: number; ppi: number; ci: number; type?: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; cellPath?: CellPathLike; noteRef?: any },
+  ref: { sec: number; ppi: number; ci: number; type?: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; innerControlIdx?: number; cellPath?: CellPathLike; noteRef?: any },
 ): { pageIndex: number; x: number; y: number; w: number; h: number; x1?: number; y1?: number; x2?: number; y2?: number } | null {
   const matchType = ref.type ?? 'image';
   // line은 shape의 하위 타입 → layout에서 'line'으로 반환됨
@@ -357,12 +360,13 @@ export function findPictureBbox(this: any,
   try {
     const pageCount = this.wasm.pageCount;
     for (let p = 0; p < pageCount; p++) {
-      const layout = this.wasm.getPageControlLayout(p);
+      const layout = { controls: this.wasm.getPageControlLayout(p).controls.filter(isSupportedPictureControl) };
       for (const ctrl of layout.controls) {
         if (matchesControlRef(ctrl, { ...ref, type: matchType } as PictureObjectRef, layoutType)) {
           // 표 셀 내 수식: cellIdx/cellParaIdx도 매칭
           if (matchType === 'equation' && ref.cellIdx !== undefined) {
-            if (ctrl.cellIdx !== ref.cellIdx || ctrl.cellParaIdx !== ref.cellParaIdx) continue;
+            if (ctrl.cellIdx !== ref.cellIdx || ctrl.cellParaIdx !== ref.cellParaIdx
+              || (ref.innerControlIdx !== undefined && ctrl.innerControlIdx !== ref.innerControlIdx)) continue;
           }
           if (matchType === 'equation' && ref.noteRef) {
             const nr = ctrl.noteRef;
@@ -438,12 +442,13 @@ export function renderPictureObjectSelection(this: any): void {
     const zoom = this.viewportManager.getZoom();
     const pageCount = this.wasm.pageCount;
     for (let p = 0; p < pageCount; p++) {
-      const layout = this.wasm.getPageControlLayout(p);
+      const layout = { controls: this.wasm.getPageControlLayout(p).controls.filter(isSupportedPictureControl) };
       for (const ctrl of layout.controls) {
         if (matchesControlRef(ctrl, ref as PictureObjectRef, layoutType)) {
           // 표 셀 내 수식: cellIdx/cellParaIdx도 매칭
           if (matchType === 'equation' && ref.cellIdx !== undefined) {
-            if (ctrl.cellIdx !== ref.cellIdx || ctrl.cellParaIdx !== ref.cellParaIdx) continue;
+            if (ctrl.cellIdx !== ref.cellIdx || ctrl.cellParaIdx !== ref.cellParaIdx
+              || (ref.innerControlIdx !== undefined && ctrl.innerControlIdx !== ref.innerControlIdx)) continue;
           }
           if (matchType === 'equation' && ref.noteRef) {
             const nr = ctrl.noteRef;
@@ -605,7 +610,8 @@ export function isObjectSizeProtected(this: any, ref: PictureObjectRef | null | 
 /** 개체를 타입에 따라 삭제한다. */
 export function canDeleteObjectControl(ref: PictureObjectRef): boolean {
   const scope = objectAddressScope(ref);
-  return scope === 'body' || (scope === 'cell' && ref.type === 'image');
+  return scope === 'body' || (scope === 'cell' && (ref.type === 'image'
+    || (ref.type === 'equation' && ref.innerControlIdx !== undefined)));
 }
 
 /**
@@ -620,7 +626,17 @@ export function deleteObjectControl(this: any, ref: PictureObjectRef): boolean {
   if (ref.type === 'shape' || ref.type === 'group' || ref.type === 'line' || ref.type === 'ole') {
     this.wasm.deleteShapeControl(ref.sec, ref.ppi, ref.ci);
   } else if (ref.type === 'equation') {
-    this.wasm.deleteEquationControl(ref.sec, ref.ppi, ref.ci);
+    if (ref.cellPath?.length && ref.innerControlIdx !== undefined) {
+      this.wasm.deleteEquationControlInCellByPath(
+        ref.sec, ref.ppi, ref.cellPath, ref.innerControlIdx,
+      );
+    } else if (ref.cellIdx !== undefined && ref.cellParaIdx !== undefined && ref.innerControlIdx !== undefined) {
+      this.wasm.deleteEquationControlInCell(
+        ref.sec, ref.ppi, ref.ci, ref.cellIdx, ref.cellParaIdx, ref.innerControlIdx,
+      );
+    } else {
+      this.wasm.deleteEquationControl(ref.sec, ref.ppi, ref.ci);
+    }
   } else {
     if (hasCellPath(ref)) {
       this.wasm.deleteCellPictureControlByPath(ref.sec, ref.ppi, ref.cellPath, ref.ci);
@@ -671,13 +687,19 @@ export function resizeSelectedPicture(this: any, key: ArrowKey): void {
     if (pending.length === 0) return;
     // 2단계: 적용 후 Undo 기록 (드래그 리사이즈와 동일 순서; 원본 ref 로 적용해
     // headerFooter 등 dispatch 필드를 보존한다)
-    for (const { r, target } of pending) {
-      setObjectProperties.call(this, r, target.after);
+    const journal = PictureResizeJournal.capture(this.wasm, pending.map((p) => p.r));
+    try {
+      for (const { r, target } of pending) {
+        setObjectProperties.call(this, r, target.after);
+      }
+      this.executeOperation({
+        kind: 'record',
+        command: journal.command(pending.map((p) => p.target)),
+      });
+    } catch (error) {
+      journal.cancel(this.wasm);
+      throw error;
     }
-    this.executeOperation({
-      kind: 'record',
-      command: new ResizeObjectCommand(pending.map((p) => p.target)),
-    });
     this.eventBus.emit('document-changed');
     this.renderPictureObjectSelection();
   } catch (err) {
@@ -857,6 +879,18 @@ export function finishPictureResizeDrag(this: any, e: MouseEvent): void {
   const zoom = this.viewportManager.getZoom();
   const PX2HWP = PX_TO_HWP;
 
+  // [#6806] 드래그 중에는 점선 프리뷰만 그리므로 첫 뮤테이션 직전인 여기가 원본 변환의
+  // 보관 시점이다. 기록되지 않은 채 남은 저널은 cleanupPictureResizeDrag 가 되돌린다.
+  try {
+    state.resizeTransformJournal = PictureResizeJournal.capture(
+      this.wasm, state.multiRefs ?? [state.ref],
+    );
+  } catch (error) {
+    console.warn('[InputHandler] 그림 리사이즈 원본 보관 실패:', error);
+    this.cleanupPictureResizeDrag();
+    return;
+  }
+
   // 다중 선택 리사이즈를 최종 좌표에 한 번 적용한다.
   if (state.multiRefs && state.multiRefs.length > 0) {
     const newBbox = this.calcResizedBbox(e, zoom);
@@ -897,7 +931,8 @@ export function finishPictureResizeDrag(this: any, e: MouseEvent): void {
         historyTargets.push({ sec: r.sec, ppi: r.ppi, ci: r.ci, type: r.type, cellPath: r.cellPath, headerFooter: r.headerFooter, before, after: updated });
       }
       if (historyTargets.length > 0) {
-        this.executeOperation({ kind: 'record', command: new ResizeObjectCommand(historyTargets) });
+        this.executeOperation({ kind: 'record', command: state.resizeTransformJournal.command(historyTargets) });
+        state.resizeTransformJournal = null;
       }
       this.eventBus.emit('document-changed');
     } catch (err) {
@@ -951,8 +986,9 @@ export function finishPictureResizeDrag(this: any, e: MouseEvent): void {
       setObjectProperties.call(this, state.ref, updated);
       this.executeOperation({
         kind: 'record',
-        command: new ResizeObjectCommand([{ sec: state.ref.sec, ppi: state.ref.ppi, ci: state.ref.ci, type: state.ref.type, cellPath: state.ref.cellPath, headerFooter: state.ref.headerFooter, before, after: updated }]),
+        command: state.resizeTransformJournal.command([{ sec: state.ref.sec, ppi: state.ref.ppi, ci: state.ref.ci, type: state.ref.type, cellPath: state.ref.cellPath, headerFooter: state.ref.headerFooter, before, after: updated }]),
       });
+      state.resizeTransformJournal = null;
       this.eventBus.emit('document-changed');
     }
   } catch (err) {
@@ -999,6 +1035,12 @@ export function calcResizedBbox(this: any, e: MouseEvent, zoom: number): { x: nu
 }
 
 export function cleanupPictureResizeDrag(this: any): void {
+  const journal = this.pictureResizeState?.resizeTransformJournal;
+  if (journal) {
+    this.pictureResizeState.resizeTransformJournal = null;
+    try { journal.cancel(this.wasm); }
+    catch (error) { console.warn('[InputHandler] 그림 리사이즈 취소 복원 실패:', error); }
+  }
   this.isPictureResizeDragging = false;
   this.pictureResizeState = null;
   this.container.style.cursor = '';

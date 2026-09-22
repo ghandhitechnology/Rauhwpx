@@ -302,6 +302,69 @@ fn extract_dib_as_bmp(data: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// [#7266] `Contents` 안에서 `EMR_HEADER` 부터의 EMF 조각을 돌려준다.
+///
+/// 한컴 산출 변형은 앞에 `u32` 길이를 붙인다 — 2817919 실측 `6C 00 00 00`
+/// (= 뒤따르는 `EMR_HEADER` 사본 108B) + 사본 + 본 EMF. `data[0..4] == 1` 만 보면
+/// 이 갈래를 통째로 놓쳐, 미리보기가 실패해도 `Contents` 폴백이 받지 못한다.
+pub fn contents_emf_payload(data: &[u8]) -> Option<&[u8]> {
+    fn emf_header_at(data: &[u8], at: usize) -> bool {
+        data.len() >= at + 44
+            && u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]) == 1
+            && &data[at + 40..at + 44] == b" EMF"
+    }
+
+    if emf_header_at(data, 0) {
+        return Some(data);
+    }
+    if data.len() >= 8 {
+        let declared = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if (44..=data.len()).contains(&declared) && emf_header_at(data, 4) {
+            return Some(&data[4..]);
+        }
+    }
+    None
+}
+
+/// [#5724] `Contents` 가 EMF 인지 — `contents_emf_payload` 와 같다.
+pub fn raw_contents_is_emf(data: &[u8]) -> bool {
+    contents_emf_payload(data).is_some()
+}
+
+/// [#5725] `Contents` 가 한글 수식 편집기 봉투면 수식 스크립트를 꺼낸다.
+///
+/// 봉투 구조 (2921145 `BinData/ole1.ole` 실측):
+/// - offset 0..32: 시그니처 `Hwp 5.0 Equation Editor(HwpEq5x)` (정확히 32바이트)
+/// - offset 52: u32 LE 버전 (실측 5)
+/// - offset 68: u32 LE 스크립트 바이트 길이
+/// - offset 72: UTF-16LE 수식 스크립트
+///
+/// 이 OLE 들의 `\x02OlePres000` 은 전부 28바이트 스텁(헤더만)이라 미리보기
+/// 폴백으로는 그릴 것이 없다 — 스크립트가 유일한 출처다.
+pub fn parse_equation_contents_script(data: &[u8]) -> Option<String> {
+    const SIG: &[u8] = b"Hwp 5.0 Equation Editor(HwpEq5x)";
+    if data.len() < 72 || !data.starts_with(SIG) {
+        return None;
+    }
+    let len = u32::from_le_bytes([data[68], data[69], data[70], data[71]]) as usize;
+    let end = 72usize.checked_add(len)?;
+    if len == 0 || !len.is_multiple_of(2) || end > data.len() {
+        return None;
+    }
+    let units: Vec<u16> = data[72..end]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let script = String::from_utf16_lossy(&units)
+        .trim_end_matches('\0')
+        .to_string();
+    if script.trim().is_empty() {
+        None
+    } else {
+        Some(script)
+    }
+}
+
 /// OLE Presentation Stream 헤더를 스킵하고 내부 EMF/메타파일 바이트를 반환한다.
 ///
 /// OLE Presentation Stream 대략 구조 (MS-OLEDS):
@@ -310,11 +373,15 @@ fn extract_dib_as_bmp(data: &[u8]) -> Option<Vec<u8>> {
 ///
 /// 여기서는 EMR_HEADER 매직(record_type=0x00000001 + " EMF" @ offset +40)을
 /// 찾아서 그 위치부터 바이트를 반환한다. 매직을 찾지 못하면 `None`.
-fn strip_ole_presentation_header(data: &[u8]) -> Option<Vec<u8>> {
+pub fn strip_ole_presentation_header(data: &[u8]) -> Option<Vec<u8>> {
     // EMF record header: u32 type=1, u32 size, 16 bytes bounds, 16 bytes frame, u32 signature=" EMF"(0x464D4520)
     // signature(" EMF")는 EMR_HEADER의 offset 40부터
     if data.len() < 64 {
         return None;
+    }
+    // [#7266] EMF-in-WMF 가 먼저다. 아래 바이트 스캔은 `WMFC` 주석 헤더를 EMF 안에 남긴다.
+    if let Some(emf) = emf_from_wmf_comment_chunks(data) {
+        return Some(emf);
     }
     // 스캔 범위 제한 (OLE 헤더가 보통 수십~수백 바이트)
     let scan_limit = data.len().min(4096);
@@ -336,6 +403,11 @@ fn strip_ole_presentation_header(data: &[u8]) -> Option<Vec<u8>> {
 /// EMF 스트립과 동일한 스캔 방식 — 표준 WMF 매직(mtType=1|2, mtHeaderSize=9,
 /// mtVersion 0x0100|0x0300) 또는 placeable WMF 매직(`D7 CD C6 9A`)을 탐색한다.
 fn strip_ole_presentation_header_wmf(data: &[u8]) -> Option<Vec<u8>> {
+    wmf_start_offset(data).map(|at| data[at..].to_vec())
+}
+
+/// WMF 가 시작하는 offset — placeable 매직 또는 표준 METAHEADER 중 먼저 나오는 쪽.
+fn wmf_start_offset(data: &[u8]) -> Option<usize> {
     if data.len() < 26 {
         return None;
     }
@@ -343,7 +415,7 @@ fn strip_ole_presentation_header_wmf(data: &[u8]) -> Option<Vec<u8>> {
     for i in 0..(scan_limit.saturating_sub(8)) {
         // placeable WMF
         if data[i..i + 4] == [0xD7, 0xCD, 0xC6, 0x9A] {
-            return Some(data[i..].to_vec());
+            return Some(i);
         }
         // 표준 WMF: mtType(1=memory, 2=file) u16 + mtHeaderSize=9 u16 + mtVersion u16
         let mt_type = u16::from_le_bytes([data[i], data[i + 1]]);
@@ -353,10 +425,81 @@ fn strip_ole_presentation_header_wmf(data: &[u8]) -> Option<Vec<u8>> {
             && header_size == 9
             && (version == 0x0100 || version == 0x0300)
         {
-            return Some(data[i..].to_vec());
+            return Some(i);
         }
     }
     None
+}
+
+/// [#7266] `OlePres000` 이 EMF 를 WMF 주석 청크로 쪼개 담았으면 원본 EMF 를 복원한다.
+///
+/// 한컴·GDI+ 산출 프레젠테이션 스트림은 EMF 를 통째로 넣지 않고
+/// `META_ESCAPE`(func `0x0626`) + `META_ESCAPE_ENHANCED_METAFILE`(escape `0x000F`) 의
+/// `WMFC` 주석으로 나눠 싣는다 — 청크마다 44B 헤더(레코드 6B + escape/count 4B +
+/// `EmfComment` 34B) + 데이터 ≤ 8,192B.
+///
+/// `" EMF"` 를 바이트 스캔해 뒤를 통째로 복사하면 8,192바이트마다 그 44B 가 EMF 안에
+/// 박힌다. 복원본이 첫 청크의 `EnhancedMetafileDataSize` 선언값과 `EMR_HEADER` 서명을
+/// **함께** 만족할 때만 채택한다. 아니면 `None` 을 돌려 종전 바이트 스캔으로 내려간다.
+fn emf_from_wmf_comment_chunks(data: &[u8]) -> Option<Vec<u8>> {
+    const META_ESCAPE: u16 = 0x0626;
+    const ENHANCED_METAFILE: u16 = 0x000F;
+    /// `EmfComment` 헤더: WMFC(4) + Type(4) + Version(4) + Checksum(2) + Flags(4)
+    /// + RecordCount(4) + CurrentRecordSize(4) + RemainingBytes(4) + TotalSize(4).
+    const EMF_COMMENT_HEADER: usize = 34;
+    /// `EnhancedMetafileDataSize` 의 `EmfComment` 헤더 안 offset.
+    const TOTAL_SIZE_AT: usize = 30;
+
+    let start = wmf_start_offset(data)?;
+    let placeable = data[start..].starts_with(&[0xD7, 0xCD, 0xC6, 0x9A]);
+    // placeable 헤더 22B 뒤에 METAHEADER 18B 가 온다.
+    let mut pos = start.checked_add(if placeable { 22 + 18 } else { 18 })?;
+
+    let mut emf: Vec<u8> = Vec::new();
+    let mut declared: Option<usize> = None;
+    while pos + 6 <= data.len() {
+        let size_words =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let function = u16::from_le_bytes([data[pos + 4], data[pos + 5]]);
+        // 최소 레코드(rdSize + rdFunction)는 3워드. 그보다 작으면 프레이밍이 깨진 것이다.
+        if size_words < 3 {
+            break;
+        }
+        let end = pos.checked_add(size_words.checked_mul(2)?)?;
+        if end > data.len() {
+            break;
+        }
+        if function == META_ESCAPE && size_words >= 5 {
+            let escape = u16::from_le_bytes([data[pos + 6], data[pos + 7]]);
+            let count = u16::from_le_bytes([data[pos + 8], data[pos + 9]]) as usize;
+            let body = pos + 10;
+            if escape == ENHANCED_METAFILE
+                && count >= EMF_COMMENT_HEADER
+                && body + count <= end
+                && &data[body..body + 4] == b"WMFC"
+            {
+                if declared.is_none() {
+                    let at = body + TOTAL_SIZE_AT;
+                    declared = Some(u32::from_le_bytes([
+                        data[at],
+                        data[at + 1],
+                        data[at + 2],
+                        data[at + 3],
+                    ]) as usize);
+                }
+                emf.extend_from_slice(&data[body + EMF_COMMENT_HEADER..body + count]);
+            }
+        }
+        pos = end;
+    }
+
+    if emf.len() < 44 || declared != Some(emf.len()) {
+        return None;
+    }
+    if u32::from_le_bytes([emf[0], emf[1], emf[2], emf[3]]) != 1 || &emf[40..44] != b" EMF" {
+        return None;
+    }
+    Some(emf)
 }
 
 #[cfg(test)]
@@ -394,6 +537,39 @@ mod tests {
     fn test_parse_empty_bytes() {
         assert!(parse_ole_container(&[]).is_none());
         assert!(parse_ole_container(&[0u8; 4]).is_none());
+    }
+
+    fn equation_contents_envelope(sig: &[u8], script: &str, len: Option<u32>) -> Vec<u8> {
+        let script_bytes: Vec<u8> = script
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        let mut data = vec![0u8; 72];
+        data[..sig.len()].copy_from_slice(sig);
+        data[68..72].copy_from_slice(&len.unwrap_or(script_bytes.len() as u32).to_le_bytes());
+        data.extend_from_slice(&script_bytes);
+        data
+    }
+
+    #[test]
+    fn parse_equation_contents_script_reads_utf16le_after_envelope() {
+        const SIG: &[u8] = b"Hwp 5.0 Equation Editor(HwpEq5x)";
+        let data = equation_contents_envelope(SIG, "a over b", None);
+        assert_eq!(
+            parse_equation_contents_script(&data).as_deref(),
+            Some("a over b")
+        );
+        assert!(parse_equation_contents_script(b"not an equation envelope").is_none());
+        let prefix_only = equation_contents_envelope(b"Hwp 5.0 Equation Editor", "a over b", None);
+        assert!(
+            parse_equation_contents_script(&prefix_only).is_none(),
+            "prefix without (HwpEq5x) is not a hwpeq5x envelope"
+        );
+        let wrap_len = equation_contents_envelope(SIG, "a over b", Some(0xFFFF_FFFE));
+        assert!(
+            parse_equation_contents_script(&wrap_len).is_none(),
+            "script length that overflows 72+len must not slice"
+        );
     }
 
     #[test]

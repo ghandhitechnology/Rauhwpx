@@ -166,7 +166,7 @@ function defaultSettings(): AppSettings {
       clipView: true,
     },
     versionControl: {
-      useHancomGit: false,
+      useHancomGit: true,
     },
     autosave: {
       recoveryEnabled: true,
@@ -358,7 +358,7 @@ class UserSettingsService {
         clipView: normalizeBoolean(next.view.clipView, true),
       },
       versionControl: {
-        useHancomGit: normalizeBoolean(next.versionControl.useHancomGit, false),
+        useHancomGit: normalizeBoolean(next.versionControl.useHancomGit, true),
       },
       autosave: {
         recoveryEnabled: normalizeBoolean(next.autosave.recoveryEnabled, true),

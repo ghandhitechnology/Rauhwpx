@@ -162,6 +162,11 @@ export type MergeConflictReason =
   | 'budget-exceeded';
 
 export interface MergeConflict {
+  /** Review schema v2: compatible changes are selectable alongside conflicts. */
+  automatic?: boolean;
+  /** Structural conflicts contained in this indivisible review unit. */
+  dependencyIds?: string[];
+  position?: { section: number; paragraph: number };
   id: string;
   kind: MergeNodeKind;
   path: MergeDocumentPath;
@@ -211,6 +216,8 @@ export interface MergeDraftHistoryEntry {
 }
 
 export interface VersionMergeDraft {
+  /** Reapply a stash into the working tree without advancing the target branch. */
+  shelfApply?: { id: ShelfId; remove: boolean };
   id: MergeDraftId;
   repositoryId: RepositoryId;
   targetBranch: BranchName;

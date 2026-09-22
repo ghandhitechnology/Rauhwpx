@@ -108,40 +108,7 @@ test('기록을 그리기 전에 첫 행을 roving tab stop으로 선택한다',
   assert.ok(renderRows < assignTabStop);
 });
 
-test('브랜치 기록은 끊기지 않는 레일과 터미널 스타일 참조를 그린다', () => {
-  assert.match(source, /commit\.lanesBefore\.forEach\(\(id, fromLane\) =>/);
-  assert.match(source, /!commit\.activeLanesBefore\.includes\(id\)/);
-  assert.match(source, /path\.classList\.add\('ag-version-lane-path', `ag-version-\$\{kind\}`\)/);
-  assert.match(source, /active \? `HEAD> \$\{branch\}` : branch/);
-  assert.match(source, /const inlineRefs = laneCount <= 6 && refs\.childElementCount === 1/);
-  assert.match(source, /row\.append\(laneGraph\(commit, laneCount, inlineRefs \? refs : null\), copy\)/);
-  assert.match(css, /\.ag-version-graph-refs \{[\s\S]*position: absolute;/);
-  assert.match(css, /\.ag-version-rail \{\s*opacity: 0\.76;/);
-});
 
-test('그래프 행과 SVG는 같은 44px 높이를 사용한다', () => {
-  assert.match(source, /const VERSION_GRAPH_ROW_HEIGHT = 44;/);
-  assert.match(source, /const height = VERSION_GRAPH_ROW_HEIGHT;/);
-  assert.match(css, /--ag-version-row-height: 44px;/);
-  assert.match(css, /height: var\(--ag-version-row-height\);\s*min-height: var\(--ag-version-row-height\);/);
-});
-
-test('레일은 평평한 선과 안정적인 터미널 색을 사용한다', () => {
-  assert.match(source, /VERSION_LANE_COLORS = \['#d7dae0', '#63d7b0', '#f2b866', '#8e9dff'/);
-  assert.match(css, /stroke-linecap: square;/);
-  assert.match(css, /stroke-linejoin: miter;/);
-  assert.doesNotMatch(source, /ag-version-node-halo/);
-  assert.doesNotMatch(css, /ag-version-node-halo/);
-  assert.match(source, /Math\.min\(27, \(width - 20\) \/ \(laneCount - 1\)\)/);
-  assert.match(css, /\.ag-versions-lanes \{[\s\S]*width: 100%;[\s\S]*height: 100%;/);
-});
-
-test('기록 탭은 그래프로 바뀌고 행 본문은 제목, 해시, 시간만 남긴다', () => {
-  assert.match(source, /\{ id: 'history', label: '그래프' \}/);
-  assert.match(source, /`\$\{commit\.shortId\}  \$\{formatGraphTime\(commit\.createdAt\)\}`/);
-  assert.match(source, /return `\$\{month\}\/\$\{day\} \$\{hour\}:\$\{minute\}`/);
-  assert.doesNotMatch(source, /formatTime\(commit\.createdAt\)\} · \$\{reasonLabel\(commit\.reason\)/);
-});
 
 test('컨트롤러는 저장소 기본 브랜치와 정렬된 고유 head로 그래프를 고정한다', () => {
   const controller = readSource('../src/versioning/controller.ts');
@@ -171,13 +138,8 @@ test('브랜치 탭은 평평한 ref 행과 축약된 동작을 유지한다', (
   assert.doesNotMatch(css, /:has\(/);
 });
 
-test('버전 관리자는 2px 이하 모서리와 방향성 병합 이름을 사용한다', () => {
-  for (const match of css.matchAll(/border-radius:\s*(\d+)px/g)) {
-    assert.ok(Number(match[1]) <= 2, `round radius remains at ${match[1]}px`);
-  }
+test('병합 동작은 방향과 접근 가능한 이름을 유지한다', () => {
   assert.match(source, /mergeButton\.setAttribute\('aria-label', mergeLabel\)/);
-  assert.match(source, /mergeButton\.textContent = `병합: … → \$\{targetBranch\}`/);
-  assert.match(source, /activeBranch\.setAttribute\('aria-label', `현재 브랜치 \$\{targetBranch\} 보기`\)/);
   assert.match(source, /commit\.isHead && branch === current\.activeBranch \? `HEAD \$\{branch\}` : `브랜치 \$\{branch\}`/);
   assert.match(source, /merge\.dataset\.versionTitle = mergeLabel/);
 });

@@ -355,7 +355,7 @@ test('sidecar validates credentials and the Stagehand Node floor', () => {
     apiKey: 'browser-key',
     projectId: 'project-id',
     modelApiKey: 'model-key',
-    modelName: 'google/gemini-3.5-flash-lite',
+    modelName: 'google/gemini-3.5-flash',
   });
   assert.equal(supportsStagehandNode('22.17.9'), false);
   assert.equal(supportsStagehandNode('22.18.0'), true);

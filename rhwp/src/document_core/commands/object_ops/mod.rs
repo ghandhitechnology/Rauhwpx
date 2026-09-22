@@ -20,6 +20,19 @@ use crate::model::document::Section;
 /// table_ops의 MIN_CELL_SIZE와 동일한 기준을 사용한다.
 pub(crate) const MIN_SHAPE_SIZE: u32 = 200;
 
+/// [#6806] 크기 봉지의 최소 크기 판정 — **퇴화값 0 만** `MIN_SHAPE_SIZE` 로 올린다.
+///
+/// 클램프의 원 목적은 리사이즈 핸들을 반대편으로 넘길 때 studio 가 보내는 0 이다.
+/// 한컴 문서에는 200 미만 치수(가로선 높이 3·4 등)가 정당하게 저장되어 있으므로
+/// `max(MIN_SHAPE_SIZE)` 는 같은 값 되먹임·undo 봉지까지 부풀렸다.
+pub(crate) fn clamp_degenerate_size(v: u32) -> u32 {
+    if v == 0 {
+        MIN_SHAPE_SIZE
+    } else {
+        v
+    }
+}
+
 /// 페이지 레이어 순서에 참여하는 최상위 개체 종류.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LayerOrderKind {

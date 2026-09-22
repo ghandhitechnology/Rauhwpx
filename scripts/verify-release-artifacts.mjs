@@ -13,6 +13,8 @@ import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 
+import { packagedStagedNativeExtractorPath } from '../desktop/native-rhwp-path.mjs';
+
 const MAX_BLOCKMAP_COMPRESSED_BYTES = 64 * 1024 * 1024;
 const MAX_BLOCKMAP_EXPANDED_BYTES = 128 * 1024 * 1024;
 const MAX_UPDATE_DESCRIPTOR_BYTES = 4 * 1024 * 1024;
@@ -325,6 +327,11 @@ export function verifyReleaseArtifacts({
       'Rauhwpx',
     ));
     verifyMacExecutable(join(appDirectory, 'Resources', 'bin', 'rhwp'));
+    verifyMacExecutable(packagedStagedNativeExtractorPath(
+      join(appDirectory, 'Resources'),
+      'darwin',
+      architecture,
+    ));
     return { artifacts: [dmg, zip, `${zip}.blockmap`, updateDescriptor] };
   }
 
@@ -345,6 +352,11 @@ export function verifyReleaseArtifacts({
     const unpackedDirectory = join(directory, 'win-unpacked');
     verifyWindowsExecutable(join(unpackedDirectory, 'Rauhwpx.exe'));
     verifyWindowsExecutable(join(unpackedDirectory, 'resources', 'bin', 'rhwp.exe'));
+    verifyWindowsExecutable(packagedStagedNativeExtractorPath(
+      join(unpackedDirectory, 'resources'),
+      'win32',
+      architecture,
+    ));
     return { artifacts: [installer, `${installer}.blockmap`, join(directory, 'latest.yml')] };
   }
 

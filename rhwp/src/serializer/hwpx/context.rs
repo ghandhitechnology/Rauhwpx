@@ -111,6 +111,21 @@ pub struct SerializeContext {
     /// 방출했으므로 중복 방지를 위해 건너뛴다. `write_section` 이 첫 문단 렌더 직전
     /// true 로 설정하고, 첫 본문 ColumnDef 방출 시 `render_control_slot` 이 소거한다.
     pub body_coldef_template_pending: bool,
+    /// [#6869] 이 문단에서 `hp:pageNum` 을 이미 냈는가.
+    ///
+    /// HWP5 는 같은 문단에 쪽번호 위치(`pngp`) 컨트롤을 여러 개 담을 수 있고 rhwp 파서는
+    /// 그것을 그대로 보존한다(156532689 문단 179 는 **9개**). 그런데 HWPX 로 그 9개를
+    /// 그대로 내면 **한글이 그 문서에서 멈춘다**(정답지 실측: 20분 타임아웃, 이슈는
+    /// 44쪽→12쪽으로 관측). 한컴 자신이 같은 문서를 HWPX 로 저장하면 문단당 하나로
+    /// 접는다(문서 전체 23 → 5).
+    ///
+    /// 접은 슬롯은 **축에서도 빠져야 한다** — 컨트롤만 지우고 `textpos` 를 그대로 두면
+    /// 오히려 축이 더 어긋나 여전히 멈춘다(실측). 접을 때는 **XML 을 한 글자도 내지 않고**,
+    /// `render_control_slot_tracked` 가 그 위치만 모아 lineseg `textpos` 를 8씩 내린다.
+    /// `secd`·`cold` 침묵 슬롯은 여기 넣지 않는다 (`#5943` 미이식).
+    /// `render_runs_limited` 의 호출 스코프에서만 사용하며, 중첩 문단 종료 시 부모 상태를
+    /// 복원한다.
+    pub(crate) para_page_num_pos_emitted: bool,
 }
 
 impl SerializeContext {

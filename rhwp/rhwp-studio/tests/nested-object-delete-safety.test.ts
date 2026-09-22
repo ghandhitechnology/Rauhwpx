@@ -38,7 +38,8 @@ test('unsupported nested object addresses never fall through to body delete APIs
   const helper = picture.slice(helperStart, helperEnd);
   assert.match(helper, /objectAddressScope\(ref\)/);
   assert.match(helper, /scope === 'body'/);
-  assert.match(helper, /scope === 'cell' && ref\.type === 'image'/);
+  assert.match(helper, /ref\.type === 'image'/);
+  assert.match(helper, /ref\.type === 'equation' && ref\.innerControlIdx !== undefined/);
 
   const commandStart = insert.indexOf("id: 'insert:picture-delete'");
   const commandEnd = insert.indexOf("id: 'insert:group-shapes'", commandStart);

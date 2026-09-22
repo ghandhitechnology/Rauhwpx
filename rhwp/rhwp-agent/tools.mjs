@@ -151,6 +151,7 @@ export const TOOL_CATEGORIES = Object.freeze([
   'background-control',
   'background-worker',
   'browser',
+  'environment',
 ]);
 
 /**
@@ -160,11 +161,11 @@ export const TOOL_CATEGORIES = Object.freeze([
  * destructive 로 표시하지 않는다. 그렇게 표시하면 Codex 안전 모드
  * (`workspace-write` + `approval_policy=never`)가 문서 편집 도구를 거절한다.
  *
- * @param {'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'background-control'|'background-worker'|'browser'} category
+ * @param {'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'background-control'|'background-worker'|'browser'|'environment'} category
  */
 export function toolAnnotations(category) {
   return {
-    readOnlyHint: category === 'instruction-read' || category === 'document-read' || category === 'reference-read' || category === 'template-read',
+    readOnlyHint: category === 'instruction-read' || category === 'document-read' || category === 'reference-read' || category === 'template-read' || category === 'environment',
     destructiveHint: category === 'download-write',
     openWorldHint: category === 'browser' || category === 'download-write',
   };
@@ -191,6 +192,14 @@ export const IMPLEMENTATION_PLAN_SHAPE = Object.freeze({
  * 전체 도구 정의 목록. 순서가 MCP 클라이언트에 노출되는 순서다.
  * @type {Array<{ name: string, description: string, shape: Record<string, any>, validate?: (args: any) => void }>}
  */
+/**
+ * Browserbase 브라우저 선택자. 생략하면 공유 메인 브라우저, 서브에이전트는 저마다의
+ * id 를 붙여 격리된 브라우저를 받는다 (browserbase-session.mjs 의 BROWSER_ID_PATTERN 과 동일).
+ */
+const BROWSER_ID_ARG = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/, 'browserId: letters, digits, - or _ (max 40)')
+  .optional()
+  .describe('Which browser to use. Omit for the shared main browser; subagents pass their own short id (for example their task name) and reuse it on every call.');
+
 const BASE_TOOL_DEFINITIONS = [
   {
     name: 'read_agent_instructions',
@@ -354,6 +363,11 @@ const BASE_TOOL_DEFINITIONS = [
   {
     name: 'materialize_document_snapshot',
     description: `Materialize the exact current in-memory HWP/HWPX document into this chat's hub-owned read-only input storage and return its absolute path, format, size, checksum, revision, digest, and dirty state. Use this whenever a file-processing workflow needs a local path but get_document_info.sourcePath is null, or when dirty is true and the visible revision must be captured. This does not modify the open document, does not expose or overwrite its native source file, and does not require the user to save first. ${REVISION_NOTE}`,
+    shape: {},
+  },
+  {
+    name: 'publish_cloud_document',
+    description: 'Announce a completed Cloud document for the user to merge into their local branch after this turn succeeds. The Cloud conversation stays open and local edits remain independent. The client archives the completed checkpoint and offers a merge button; it does not overwrite the original file. Use when delivering a finished document. Available only inside a Cloud worker; returns a queued delivery request.',
     shape: {},
   },
   {
@@ -723,6 +737,11 @@ const BASE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'environment_screenshot',
+    description: 'Capture the cloud session virtual desktop (Xvfb) to a PNG under the session work directory and return its absolute imagePath plus an image content block. The path is inside RHWP_IMAGE_ROOTS so insert_image can place it in the open document. Fails with ENVIRONMENT_DISPLAY_UNAVAILABLE when the session has no ready DISPLAY. Prefer this over render_page when the result should show the agent screen rather than a document page.',
+    shape: {},
+  },
+  {
     name: 'insert_equation',
     description: `Insert an equation at (sectionIdx, paraIdx, charOffset), sized automatically and inline with text. Works inside table cells via the cell parameter. WORKFLOW: ALWAYS call preview_equation with the same script first — both tools return widthMm/heightMm/baselineMm metrics and a warnings array; treat ANY warning as an error, fix the script and retry until warnings is empty before inserting (a bad script renders overlapping or broken math). Set fontSizePt from get_char_format of the surrounding text instead of guessing. ${EQUATION_SYNTAX} ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
@@ -1042,37 +1061,40 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'browserbase_start',
-    description: 'Create or reuse the hub-owned Browserbase session for this chat.',
-    shape: {},
+    description: 'Create or reuse a hub-owned Browserbase browser for this chat. Omit browserId for the shared main browser (the orchestrator\'s). Subagents must pass their own browserId so each gets an isolated browser; at most 4 browsers are open per chat, and subagent browsers close automatically when the turn ends.',
+    shape: { browserId: BROWSER_ID_ARG },
   },
   {
     name: 'browserbase_end',
-    description: 'End the hub-owned Browserbase browser session for this chat.',
-    shape: {},
+    description: 'End a hub-owned Browserbase browser for this chat (the main browser when browserId is omitted).',
+    shape: { browserId: BROWSER_ID_ARG },
   },
   {
     name: 'browserbase_navigate',
-    description: 'Navigate the shared Browserbase session to an HTTP(S) URL.',
-    shape: { url: z.string().url().max(8_000).refine((value) => /^https?:\/\//i.test(value), 'url must use http or https') },
+    description: 'Navigate a Browserbase browser to an HTTP(S) URL.',
+    shape: {
+      url: z.string().url().max(8_000).refine((value) => /^https?:\/\//i.test(value), 'url must use http or https'),
+      browserId: BROWSER_ID_ARG,
+    },
   },
   {
     name: 'browserbase_act',
-    description: 'Perform a natural-language action in the shared Browserbase session without per-action confirmation.',
-    shape: { action: z.string().min(1).max(5_000) },
+    description: 'Perform a natural-language action in a Browserbase browser without per-action confirmation.',
+    shape: { action: z.string().min(1).max(5_000), browserId: BROWSER_ID_ARG },
   },
   {
     name: 'browserbase_observe',
-    description: 'Observe actionable elements in the shared Browserbase session.',
-    shape: { instruction: z.string().min(1).max(5_000) },
+    description: 'Observe actionable elements in a Browserbase browser.',
+    shape: { instruction: z.string().min(1).max(5_000), browserId: BROWSER_ID_ARG },
   },
   {
     name: 'browserbase_extract',
-    description: 'Extract structured information from the current page in the shared Browserbase session. Text output is truncated at 50KB.',
-    shape: { instruction: z.string().min(1).max(5_000).optional() },
+    description: 'Extract structured information from the current page of a Browserbase browser. Text output is truncated at 50KB.',
+    shape: { instruction: z.string().min(1).max(5_000).optional(), browserId: BROWSER_ID_ARG },
   },
 ];
 
-/** @type {Readonly<Record<string, 'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'background-control'|'background-worker'|'browser'>>} */
+/** @type {Readonly<Record<string, 'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'background-control'|'background-worker'|'browser'|'environment'>>} */
 export const TOOL_CLASSIFICATIONS = Object.freeze({
   read_agent_instructions: 'instruction-read',
   update_agent_instructions: 'instruction-write',
@@ -1095,6 +1117,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   get_fields: 'document-read',
   get_document_info: 'document-read',
   materialize_document_snapshot: 'document-read',
+  publish_cloud_document: 'document-write',
   find_text: 'document-read',
   render_page: 'document-read',
   get_para_format: 'document-read',
@@ -1121,6 +1144,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   list_numberings: 'document-read',
   apply_style: 'document-write',
   insert_image: 'document-write',
+  environment_screenshot: 'environment',
   insert_equation: 'document-write',
   preview_equation: 'document-read',
   insert_chart: 'document-write',
@@ -1160,11 +1184,11 @@ export const TOOL_DEFINITIONS = Object.freeze(BASE_TOOL_DEFINITIONS.map((definit
 }));
 
 export const TOOL_PROFILES = Object.freeze({
-  direct: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'user-interaction', 'background-control']),
-  planning: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'planning-control', 'browser']),
-  question: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'browser']),
-  'awaiting-approval': Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser']),
-  implementing: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'user-interaction', 'browser', 'background-control']),
+  direct: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'user-interaction', 'background-control', 'environment']),
+  planning: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'planning-control', 'browser', 'environment']),
+  question: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'browser', 'environment']),
+  'awaiting-approval': Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser', 'environment']),
+  implementing: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'user-interaction', 'browser', 'background-control', 'environment']),
   'copy-layout-worker': Object.freeze([
     'read_product_skill',
     'get_document_info',

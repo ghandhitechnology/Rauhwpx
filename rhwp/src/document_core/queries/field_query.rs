@@ -1138,6 +1138,7 @@ fn collect_fields_from_paragraph(
                                 memo_paragraphs: Vec::new(),
                                 memo_text_direction: None,
                                 raw_parameters_xml: None,
+                                hyperlink_format: None,
                             },
                             location: loc,
                             value,
@@ -1315,11 +1316,54 @@ impl DocumentCore {
     }
 }
 
-fn collect_max_field_id(para: &Paragraph, max_id: &mut u32) {
+pub(crate) fn collect_max_field_id(para: &Paragraph, max_id: &mut u32) {
+    for end in &para.orphan_field_ends {
+        *max_id = (*max_id).max(end.begin_id_ref).max(end.field_id);
+    }
+    for range in &para.field_ranges {
+        *max_id = (*max_id).max(range.end_field_id);
+    }
     for ctrl in &para.controls {
         match ctrl {
-            Control::Field(field) if field.field_id > *max_id => {
-                *max_id = field.field_id;
+            Control::Field(field) => {
+                *max_id = (*max_id)
+                    .max(field.field_id)
+                    .max(field.instance_id.unwrap_or(0));
+                for p in &field.memo_paragraphs {
+                    collect_max_field_id(p, max_id);
+                }
+            }
+            Control::Header(h) => {
+                for p in &h.paragraphs {
+                    collect_max_field_id(p, max_id);
+                }
+            }
+            Control::Footer(h) => {
+                for p in &h.paragraphs {
+                    collect_max_field_id(p, max_id);
+                }
+            }
+            Control::Footnote(h) => {
+                for p in &h.paragraphs {
+                    collect_max_field_id(p, max_id);
+                }
+            }
+            Control::Endnote(h) => {
+                for p in &h.paragraphs {
+                    collect_max_field_id(p, max_id);
+                }
+            }
+            Control::HiddenComment(h) => {
+                for p in &h.paragraphs {
+                    collect_max_field_id(p, max_id);
+                }
+            }
+            Control::SectionDef(s) => {
+                for m in &s.master_pages {
+                    for p in &m.paragraphs {
+                        collect_max_field_id(p, max_id);
+                    }
+                }
             }
             Control::Table(table) => {
                 for cell in &table.cells {
@@ -1333,15 +1377,7 @@ fn collect_max_field_id(para: &Paragraph, max_id: &mut u32) {
                     }
                 }
             }
-            Control::Shape(shape) => {
-                if let Some(drawing) = shape.drawing() {
-                    if let Some(text_box) = &drawing.text_box {
-                        for tb_para in &text_box.paragraphs {
-                            collect_max_field_id(tb_para, max_id);
-                        }
-                    }
-                }
-            }
+            Control::Shape(shape) => collect_shape_field_ids(shape, max_id),
             Control::Picture(pic) => {
                 if let Some(caption) = &pic.caption {
                     for cap_para in &caption.paragraphs {
@@ -1350,6 +1386,39 @@ fn collect_max_field_id(para: &Paragraph, max_id: &mut u32) {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+fn collect_shape_field_ids(shape: &crate::model::shape::ShapeObject, max_id: &mut u32) {
+    use crate::model::shape::ShapeObject;
+    if let Some(drawing) = shape.drawing() {
+        if let Some(text_box) = &drawing.text_box {
+            for p in &text_box.paragraphs {
+                collect_max_field_id(p, max_id);
+            }
+        }
+        if let Some(caption) = &drawing.caption {
+            for p in &caption.paragraphs {
+                collect_max_field_id(p, max_id);
+            }
+        }
+    }
+    let caption = match shape {
+        ShapeObject::Group(g) => {
+            for child in &g.children {
+                collect_shape_field_ids(child, max_id);
+            }
+            g.caption.as_ref()
+        }
+        ShapeObject::Picture(p) => p.caption.as_ref(),
+        ShapeObject::Chart(c) => c.caption.as_ref(),
+        ShapeObject::Ole(o) => o.caption.as_ref(),
+        _ => None,
+    };
+    if let Some(caption) = caption {
+        for p in &caption.paragraphs {
+            collect_max_field_id(p, max_id);
         }
     }
 }
@@ -1396,6 +1465,7 @@ fn insert_click_here_field_in_para(
         memo_paragraphs: Vec::new(),
         memo_text_direction: None,
         raw_parameters_xml: None,
+        hyperlink_format: None,
     };
 
     para.controls.insert(insert_idx, Control::Field(field));
@@ -1610,6 +1680,7 @@ mod tests {
             memo_paragraphs: Vec::new(),
             memo_text_direction: None,
             raw_parameters_xml: None,
+            hyperlink_format: None,
         })
     }
 
@@ -1642,6 +1713,7 @@ mod tests {
         core.document.sections.push(Section {
             paragraphs: vec![para_with_click_here_field()],
             raw_stream: Some(vec![0xAB; 64]),
+            raw_provenance: None,
             ..Default::default()
         });
         core.composed = vec![Vec::new()];
@@ -1682,6 +1754,7 @@ mod tests {
         core.document.sections.push(Section {
             paragraphs: vec![parent_para],
             raw_stream: Some(vec![0xAB; 64]),
+            raw_provenance: None,
             ..Default::default()
         });
         core.composed = vec![Vec::new()];
@@ -1895,6 +1968,7 @@ mod tests {
                 ..Default::default()
             }],
             raw_stream: Some(vec![0xAB; 64]),
+            raw_provenance: None,
             ..Default::default()
         });
         core.composed = vec![Vec::new()];

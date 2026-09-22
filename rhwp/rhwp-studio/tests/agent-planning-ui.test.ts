@@ -40,10 +40,10 @@ test('workflow switches use local slash commands without changing the access pro
   assert.match(source, /workflowTransitionPending = true;\s*bridge\.setWorkflow\(next\)/);
 });
 
-test('composer submit keeps plan-transition locks and Rau credit gates', () => {
+test('composer submit keeps plan-transition locks', () => {
   assert.match(
     source,
-    /if \(planningPhase === 'switching' \|\| workflowTransitionPending \|\| planActionPending[\s\S]*selectedAgent === 'rau' && !rauSetupComplete[\s\S]*rauCreditsEmpty\(\)/,
+    /if \(planningPhase === 'switching' \|\| workflowTransitionPending \|\| planActionPending/,
   );
 });
 
@@ -155,11 +155,11 @@ test('mode, model and permission switches are locked while a turn runs or the ch
   assert.match(source, /input\.disabled =[\s\S]*workflowTransitionPending \|\| planActionPending/);
   assert.match(source, /send\.disabled =[\s\S]*workflowTransitionPending \|\| planActionPending/);
   assert.match(source, /const controlsLocked = isControlLocked\(\)/);
-  assert.match(source, /providerTrigger\.disabled = controlsLocked/);
-  assert.match(source, /llmTrigger\.disabled = controlsLocked/);
-  assert.match(source, /effortTrigger\.disabled = controlsLocked/);
+  assert.match(source, /providerTrigger\.disabled = selectionLocked/);
+  assert.match(source, /llmTrigger\.disabled = selectionLocked/);
+  assert.match(source, /effortTrigger\.disabled = selectionLocked/);
   assert.match(source, /permissionBtn\.disabled = controlsLocked \|\| connState !== 'connected'/);
-  assert.match(source, /if \(controlsLocked && chatStartPendingThreadId === null\) setConfigPanelOpen\(false\)/);
+  assert.match(source, /if \(selectionLocked && chatStartPendingThreadId === null\) setConfigPanelOpen\(false\)/);
   assert.match(source, /if \(isControlLocked\(\) \|\| connState !== 'connected'\)/);
 });
 

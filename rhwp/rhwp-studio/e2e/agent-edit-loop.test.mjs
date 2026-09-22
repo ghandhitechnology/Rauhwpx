@@ -2,7 +2,7 @@
  * E2E: 에이전트 편집 루프 종단간 검증 — hub → bridge → executor → pending → wasm 렌더.
  *
  * 실제 rhwp-agent 허브(server.mjs)를 테스트 포트로 띄우고, mcp-stdio.mjs 와 동일한
- * `{v:3,type:'tool-call',id,tool,args}` 프레임을 보는 가짜 MCP WS 클라이언트로
+ * `{v:5,type:'tool-call',id,tool,args}` 프레임을 보는 가짜 MCP WS 클라이언트로
  * 스튜디오의 에이전트 도구 표면을 프로덕션 경로 그대로 구동한다. 검증 순서:
  *   a. get_structure revision 반환 + write 툴 expectedRevision 게이트(REVISION_MISMATCH)
  *   b. replace_range 원자성(단일 'replace' op) + 삽입 텍스트의 교체 구간 글자 서식 상속
@@ -19,12 +19,14 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
 
 import { registerHubSession } from '../../../desktop/agent-hub.mjs';
+import { writeFakeCliBin } from '../../rhwp-agent/tests/fake-cli-bin.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const studioRoot = path.resolve(__dirname, '..');
@@ -96,21 +98,33 @@ async function stopServer(child) {
 
 // ─── 가짜 MCP WS 클라이언트 (mcp-stdio.mjs 와 동일 프레임) ─────
 
-function connectMcpClient(hubPort, token, sessionId) {
+function connectMcpClient(hubPort, token, sessionId, capabilityEpoch) {
   const ws = new WebSocket(
-    `ws://127.0.0.1:${hubPort}/mcp?token=${encodeURIComponent(token)}&sessionId=${encodeURIComponent(sessionId)}&agent=claude`,
+    `ws://127.0.0.1:${hubPort}/mcp?token=${encodeURIComponent(token)}&sessionId=${encodeURIComponent(sessionId)}&agent=pi`,
   );
   let nextId = 1;
   const inflight = new Map();
   ws.addEventListener('message', (ev) => {
     let msg;
     try { msg = JSON.parse(typeof ev.data === 'string' ? ev.data : ''); } catch { return; }
+    if (msg?.type === 'protocol-error') {
+      for (const entry of inflight.values()) { clearTimeout(entry.timer); entry.reject(new Error(msg.message)); }
+      inflight.clear();
+      return;
+    }
     if (msg?.type !== 'tool-result') return;
     const entry = inflight.get(msg.id);
     if (!entry) return;
     inflight.delete(msg.id);
     clearTimeout(entry.timer);
     entry.resolve(msg);
+  });
+  ws.addEventListener('close', (event) => {
+    for (const entry of inflight.values()) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error(`MCP WS 연결 종료 (${event.code}): ${event.reason}`));
+    }
+    inflight.clear();
   });
   const opened = new Promise((resolve, reject) => {
     ws.addEventListener('open', resolve, { once: true });
@@ -124,8 +138,8 @@ function connectMcpClient(hubPort, token, sessionId) {
         inflight.delete(id);
         reject(new Error(`tool-call 응답 시간 초과: ${tool}`));
       }, 45000);
-      inflight.set(id, { resolve, timer });
-      ws.send(JSON.stringify({ v: 3, type: 'tool-call', id, tool, args }));
+      inflight.set(id, { resolve, reject, timer });
+      ws.send(JSON.stringify({ v: 5, type: 'tool-call', id, tool, args, workflow: 'direct', capabilityEpoch }));
     });
   };
   return { ws, opened, call };
@@ -156,11 +170,41 @@ const viteUrl = `http://127.0.0.1:${vitePort}`;
 console.log('=== E2E: 에이전트 편집 루프 (agent-edit-loop) ===\n');
 console.log(`  [setup] 허브 포트=${hubPort}, vite 포트=${vitePort}`);
 
+// 실제 프로바이더 턴을 열되 외부 계정/API 없이 편집 도구를 검증한다.
+const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rhwp-edit-loop-'));
+const piRoot = path.join(fixtureRoot, 'pi');
+const packageDir = path.join(piRoot, 'prefix/node_modules/@earendil-works/pi-coding-agent');
+fs.mkdirSync(packageDir, { recursive: true });
+fs.writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ version: '0.0.0-test' }));
+fs.writeFileSync(path.join(piRoot, 'config.json'), JSON.stringify({
+  version: 1, installedVersion: '0.0.0-test', defaultModelId: 'mock-model',
+  models: [{ id: 'mock-model', name: 'Mock model', reasoning: false, supportsImages: false,
+    efforts: [], defaultEffort: null, contextLength: 8192, pricing: { prompt: 0, completion: 0 } }],
+}));
+fs.mkdirSync(path.join(piRoot, 'agent'), { recursive: true });
+fs.writeFileSync(path.join(piRoot, 'agent/models.json'), JSON.stringify({
+  providers: { openrouter: { apiKey: 'test-placeholder-key' } },
+}));
+const finishTurnPath = path.join(fixtureRoot, 'finish-turn');
+writeFakeCliBin(path.join(piRoot, 'prefix/node_modules/.bin'), 'pi', `
+  if (process.argv.includes('--version')) { console.log('0.0.0-test'); process.exit(0); }
+  const fs = require('node:fs');
+  const timer = setInterval(() => {
+    if (!fs.existsSync(${JSON.stringify(finishTurnPath)})) return;
+    clearInterval(timer);
+    console.log(JSON.stringify({ type: 'agent_settled' }));
+  }, 25);
+`);
+
 const hub = spawnLogged(
   process.execPath,
   [path.join(repoRoot, 'rhwp-agent', 'server.mjs')],
   path.join(repoRoot, 'rhwp-agent'),
-  { RHWP_AGENT_PORT: String(hubPort), RHWP_AGENT_TOKEN: HUB_TOKEN },
+  { NODE_ENV: 'test', RHWP_AGENT_MODE: 'development', RHWP_SECRET_BROKER: '',
+    RHWP_AGENT_PORT: String(hubPort), RHWP_AGENT_TOKEN: HUB_TOKEN,
+    RHWP_PI_DIR: piRoot, RHWP_WORK_DIR: fixtureRoot,
+    RHWP_AGENT_INSTRUCTIONS_DIR: path.join(fixtureRoot, 'instructions'),
+    RHWP_TEMPLATES_DIR: path.join(fixtureRoot, 'templates') },
   path.join(repoRoot, 'target', 'rhwp-agent-e2e-hub.log'),
 );
 await waitForHttp(`http://127.0.0.1:${hubPort}/healthz?token=${encodeURIComponent(HUB_TOKEN)}`, 'rhwp-agent 허브', hub);
@@ -180,7 +224,7 @@ await waitForHttp(viteUrl, 'vite dev server', vite);
 
 process.env.VITE_URL = viteUrl;
 const helpers = await import('./helpers.mjs');
-const { runTest, setTestCase, assert, loadHwpFile, screenshot } = helpers;
+const { runTest, setTestCase, assert, screenshot } = helpers;
 
 // 테스트가 쓰는 본문 (한글 음절 = UTF-16 1유닛 — JS length 와 charOffset 이 일치한다)
 const FILLER =
@@ -221,18 +265,45 @@ try {
     );
     console.log('  [bridge] 스튜디오 ↔ 테스트 허브 연결 확인');
 
-    await loadHwpFile(page, SAMPLE);
+    await page.evaluate(async (name) => {
+      const response = await fetch(`/samples/${name}`);
+      if (!response.ok) throw new Error(`Sample load failed: ${response.status}`);
+      window.__eventBus.emit('open-document-bytes', {
+        bytes: new Uint8Array(await response.arrayBuffer()), fileName: name,
+        suppressDialogs: true, skipUnsavedGuard: true,
+      });
+    }, SAMPLE);
+    await page.waitForFunction(() => window.__wasm?.pageCount > 0
+      && document.querySelector('#scroll-content canvas')
+      && document.querySelector('[aria-label="문서 편집 입력"]')
+      && window.__versionController?.getState().enabled);
 
-    // MCP 도구는 실제 채팅 세션의 workflow/권한 아래에서만 허용된다. 메시지를
-    // 보내지 않으므로 CLI 프로세스는 시작하지 않고, 허브 권한 상태만 direct로 연다.
+
+    // MCP 연결은 프로바이더 턴이 시작된 뒤에만 생성한다.
     await page.evaluate(() => window.__agentBridge.startChat(
-      'claude', 'sonnet', 'high', false, 'safe', 'direct',
-      'agent-edit-loop-e2e', null, 'footnote-01.hwp',
+      'pi', 'mock-model', null, false, 'safe', 'direct',
     ));
     await page.waitForFunction(
-      () => window.__agentBridge?.getActiveAgent?.() === 'claude',
+      () => window.__agentBridge?.getActiveAgent?.() === 'pi',
       { timeout: 10000 },
     );
+
+    const beginProviderTurn = async () => {
+      await page.evaluate(async () => {
+        window.__e2eProviderTurnStarted = false;
+        const unsubscribe = window.__agentBridge.onEvent((event) => {
+          if (event.type === 'agent' && event.event.type === 'turn-start') {
+            window.__e2eProviderTurnStarted = true;
+            unsubscribe();
+          }
+        });
+        await window.__agentBridge.sendUserMessage('Hold the verification turn open.');
+      });
+      await page.waitForFunction(() => window.__e2eProviderTurnStarted, { timeout: 15000 });
+    };
+    await beginProviderTurn();
+
+    const capabilityEpoch = await page.evaluate(() => window.__agentBridge.getWorkflowState().capabilityEpoch);
 
     const healthResponse = await fetch(`http://127.0.0.1:${hubPort}/healthz?token=${encodeURIComponent(HUB_TOKEN)}`);
     const health = await healthResponse.json();
@@ -241,9 +312,9 @@ try {
     const capabilities = await registerHubSession({
       port: hubPort, token: HUB_TOKEN, launchId: health.launchId, sessionId,
     });
-    const mcp = connectMcpClient(hubPort, capabilities.mcp, sessionId);
+    let mcp = connectMcpClient(hubPort, capabilities.mcp, sessionId, capabilityEpoch);
     await mcp.opened;
-    const call = mcp.call;
+    const call = (tool, args) => mcp.call(tool, args);
     try {
       // ── a. revision 게이트 ─────────────────────────────────
       setTestCase('a. revision / REVISION_MISMATCH');
@@ -356,52 +427,6 @@ try {
       }));
       assert(exactOverlay.exactHunks > 0, `replace_range exact canvas hunk 렌더링 (${exactOverlay.exactHunks}개)`);
       assert(exactOverlay.legacyReplaceMarkers === 0, 'replace_range 전체 범위 marker 미렌더링');
-      await page.$eval('[data-diff-hunk]', (element) => {
-        element.scrollIntoView({ block: 'center', inline: 'center' });
-      });
-      const exactBox = await page.$eval('.ag-exact-change', (element) => {
-        const rect = element.getBoundingClientRect();
-        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-      });
-      await page.mouse.move(exactBox.x, exactBox.y);
-      await page.waitForFunction(
-        () => document.querySelector('.ag-exact-popover')?.hidden === false,
-      );
-      const removedPreview = await page.$eval('.ag-exact-popover-text', (element) => element.textContent);
-      assert(removedPreview === '원본', `hover 가 삭제된 fragment 만 표시 ("${removedPreview}")`);
-      await page.mouse.click(exactBox.x, exactBox.y);
-      await page.mouse.move(0, 0);
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      const caretPinned = await page.$eval('.ag-exact-popover', (element) => element.hidden === false);
-      assert(caretPinned, 'exact hunk 클릭이 일반 caret 을 배치하고 popover 를 고정');
-      await page.keyboard.press('Escape');
-      const escaped = await page.$eval('.ag-exact-popover', (element) => element.hidden === true);
-      assert(escaped, 'Escape 로 exact diff popover 닫기');
-      await screenshot(page, 'agent-edit-loop-exact-diff-desktop');
-      await page.waitForFunction(
-        () => document.querySelectorAll('.ag-liquid-flow-in, .ag-liquid-anchor-in').length === 0,
-        { timeout: 2000 },
-      );
-      const desktopViewport = page.viewport();
-      await page.setViewport({ width: 390, height: 844 });
-      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-      const replayedAnimations = await page.$$eval(
-        '.ag-liquid-flow-in, .ag-liquid-anchor-in',
-        (elements) => elements.length,
-      );
-      assert(replayedAnimations === 0, 'viewport rerender 가 liquid reveal 을 재생하지 않음');
-      await page.click('.ag-collapse-tab');
-      await page.waitForFunction(
-        () => document.querySelector('#agent-sidebar')?.classList.contains('ag-collapsed') === true,
-      );
-      await new Promise((resolve) => setTimeout(resolve, 320));
-      await page.$eval('[data-diff-hunk]', (element) => {
-        element.scrollIntoView({ block: 'center', inline: 'center' });
-      });
-      await screenshot(page, 'agent-edit-loop-exact-diff-mobile');
-      await page.click('.ag-collapse-tab');
-      await page.setViewport(desktopViewport ?? { width: 1280, height: 900 });
-
       const vB = must(await call('verify_changes', {}), 'verify_changes(b)');
       const kindsB = vB.ops.map((o) => o.kind);
       assert(
@@ -667,6 +692,55 @@ try {
         `수식 문단 어떤 런도 열 오른쪽을 넘지 않음 (maxX=${maxProbeX.toFixed(1)} <= rightEdge=${overflow.rightEdge.toFixed(1)})`,
       );
 
+      // 에이전트 실행 중에는 사용자 편집이 잠긴다. 턴을 마친 뒤 실제 검토 클릭을 한다.
+      fs.writeFileSync(finishTurnPath, 'finish');
+      await page.waitForFunction(() => !window.__inputHandler.isUserEditingLocked());
+      await page.$eval('[data-diff-hunk]', (element) => {
+        element.scrollIntoView({ block: 'center', inline: 'center' });
+      });
+      const exactBox = await page.$eval('.ag-exact-change', (element) => {
+        const rect = element.getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      });
+      await page.mouse.move(exactBox.x, exactBox.y);
+      await page.waitForFunction(
+        () => document.querySelector('.ag-exact-popover')?.hidden === false,
+      );
+      const removedPreview = await page.$eval('.ag-exact-popover-text', (element) => element.textContent);
+      assert(removedPreview === '원본', `hover 가 삭제된 fragment 만 표시 ("${removedPreview}")`);
+      await page.mouse.click(exactBox.x, exactBox.y);
+      await page.mouse.move(0, 0);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const caretPinned = await page.$eval('.ag-exact-popover', (element) => element.hidden === false);
+      assert(caretPinned, 'exact hunk 클릭이 일반 caret 을 배치하고 popover 를 고정');
+      await page.keyboard.press('Escape');
+      const escaped = await page.$eval('.ag-exact-popover', (element) => element.hidden === true);
+      assert(escaped, 'Escape 로 exact diff popover 닫기');
+      await screenshot(page, 'agent-edit-loop-exact-diff-desktop');
+      await page.waitForFunction(
+        () => document.querySelectorAll('.ag-liquid-flow-in, .ag-liquid-anchor-in').length === 0,
+        { timeout: 2000 },
+      );
+      const desktopViewport = page.viewport();
+      await page.setViewport({ width: 390, height: 844 });
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const replayedAnimations = await page.$$eval(
+        '.ag-liquid-flow-in, .ag-liquid-anchor-in',
+        (elements) => elements.length,
+      );
+      assert(replayedAnimations === 0, 'viewport rerender 가 liquid reveal 을 재생하지 않음');
+      await page.click('.ag-collapse-tab');
+      await page.waitForFunction(
+        () => document.querySelector('#agent-sidebar')?.classList.contains('ag-collapsed') === true,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 320));
+      await page.$eval('[data-diff-hunk]', (element) => {
+        element.scrollIntoView({ block: 'center', inline: 'center' });
+      });
+      await screenshot(page, 'agent-edit-loop-exact-diff-mobile');
+      await page.click('.ag-collapse-tab');
+      await page.setViewport(desktopViewport ?? { width: 1280, height: 900 });
+
       // ── g/h. 승인 전후 page map 동일 + 승인 후 영속 ──────────
       setTestCase('g/h. preview/approve/refresh page map + 영속');
       const affectedParas = [seedBase - 1, fillerP, l1P, l2P, l3P];
@@ -714,6 +788,10 @@ try {
         after.text.includes(REPLACE_TEXT) && !after.text.includes('원본'),
         `approve 후 교체 텍스트 영속: "${after.text}"`,
       );
+      fs.rmSync(finishTurnPath);
+      await beginProviderTurn();
+      mcp = connectMcpClient(hubPort, capabilities.mcp, sessionId, capabilityEpoch);
+      await mcp.opened;
       const pfAfter = must(await call('get_para_format', { sectionIdx: 0, paraIdx: l1P }), 'get_para_format(승인 후)');
       assert(
         pfAfter.headType === 'number' && pfAfter.numberingId === listResDot.numberingId,
@@ -776,6 +854,7 @@ try {
 } finally {
   await stopServer(vite);
   await stopServer(hub);
+  fs.rmSync(fixtureRoot, { recursive: true, force: true });
 }
 
 if (failed) process.exitCode = 1;

@@ -21,6 +21,8 @@ const SEMANTIC_ALIASES: Readonly<Record<string, string>> = {
   insertClickHereFieldInCellEx: 'insertClickHereField',
   insertClickHereFieldByPath: 'insertClickHereField',
   insertClickHereFieldByPathEx: 'insertClickHereField',
+  deleteCellTableControlByPath: 'deleteTableControl',
+  setEquationPropertiesAt: 'setEquationProperties',
   removeFieldAtInCell: 'removeFieldAt',
   removeFieldAtInCellEx: 'removeFieldAt',
 };

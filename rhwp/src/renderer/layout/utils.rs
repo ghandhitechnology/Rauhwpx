@@ -347,10 +347,12 @@ pub(crate) fn drawing_to_shape_style(
     // 0=None, 1=Solid, 2=Dash, 3=Dot, 4=DashDot, 5=DashDotDot,
     // 6=LongDash, 7=CircleDot, 8=Double, 9=ThinBold, 10=BoldThin, 11=ThinBoldThin
     let stroke_dash = match shape_line_type {
-        2 | 6 => StrokeDash::Dash,
-        3 | 7 => StrokeDash::Dot,
+        2 => StrokeDash::Dash,
+        3 => StrokeDash::Dot,
         4 => StrokeDash::DashDot,
         5 => StrokeDash::DashDotDot,
+        6 => StrokeDash::LongDash,
+        7 => StrokeDash::Circle,
         _ => StrokeDash::Solid,
     };
 
@@ -421,8 +423,8 @@ pub(crate) fn drawing_to_line_style(drawing: &crate::model::shape::DrawingObjAtt
         3 => (StrokeDash::Dot, super::super::LineRenderType::Single),
         4 => (StrokeDash::DashDot, super::super::LineRenderType::Single),
         5 => (StrokeDash::DashDotDot, super::super::LineRenderType::Single),
-        6 => (StrokeDash::Dash, super::super::LineRenderType::Single), // LongDash
-        7 => (StrokeDash::Dot, super::super::LineRenderType::Single),  // CircleDot
+        6 => (StrokeDash::LongDash, super::super::LineRenderType::Single),
+        7 => (StrokeDash::Circle, super::super::LineRenderType::Single),
         8 => (StrokeDash::Solid, super::super::LineRenderType::Double),
         9 => (
             StrokeDash::Solid,

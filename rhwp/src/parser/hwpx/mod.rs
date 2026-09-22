@@ -578,13 +578,27 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
 
     // 3. header.xml → DocInfo, DocProperties
     let header_xml = reader.read_file("Contents/header.xml")?;
-    let (original_doc_info, doc_properties) = header::parse_hwpx_header(&header_xml)?;
+    let hwp5_origin_hwpx = hwpx_aux_entries
+        .iter()
+        .any(|(path, _)| path == crate::model::document::HWP5_ORIGIN_HWPX_MARKER_PATH);
+    let margin_units = header::ParagraphMarginUnits::from_package_version(
+        hwpx_aux_entries
+            .iter()
+            .find(|(path, _)| path == "version.xml")
+            .map(|(_, bytes)| bytes.as_slice()),
+    );
+    let (original_doc_info, doc_properties) =
+        header::parse_hwpx_header_with_margin_units(&header_xml, margin_units, hwp5_origin_hwpx)?;
     let remapped_header_xml =
         rewrite_binary_item_id_refs(&header_xml, &bin_data_ids.by_manifest_id)?;
     let mut doc_info = if matches!(&remapped_header_xml, Cow::Borrowed(_)) {
         original_doc_info
     } else {
-        let (mut remapped_doc_info, _) = header::parse_hwpx_header(&remapped_header_xml)?;
+        let (mut remapped_doc_info, _) = header::parse_hwpx_header_with_margin_units(
+            &remapped_header_xml,
+            margin_units,
+            hwp5_origin_hwpx,
+        )?;
         restore_font_manifest_refs(&mut remapped_doc_info, &original_doc_info);
         remapped_doc_info
     };
@@ -598,7 +612,7 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
     // 메타데이터로 진짜 변환본과 네이티브를 구별할 판별자가 없어(조사 확정), 파싱 시점의 HWP3
     // tolerance 부여를 제거한다.
     let hwpml_version = header::parse_hwpx_hwpml_version(&header_xml);
-    // 무손실: 원본 HWPML 버전을 보존해 직렬화 때 그대로 재방출(하드코딩 금지).
+    // 원본 선언을 그대로 보존한다. HwpUnitChar 단위 승격은 version.xml 쪽에서만 한다.
     doc_info.hwpml_version = hwpml_version.clone();
 
     // BinData 목록을 DocInfo에 등록
@@ -691,6 +705,8 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
         }
     }
 
+    section::link_orphan_field_ends_across_sections(&mut sections);
+
     // [Task #1608] (제거) 과거 Task #554 의 HWP3-origin tolerance 부여는
     // head version == "1.4" 오탐지로 네이티브 HWPX 전반에 부당 적용되어 삭제했다.
     // 상세 사유는 위 hwpml_version 파싱부 주석 참조.
@@ -728,7 +744,7 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
         .iter()
         .zip(bin_data_ids.ordered.iter().copied())
     {
-        // [Task #873] isEmbeded="0" (외부 file 참조) 는 ZIP 영역 영역 부재. skip.
+        // isEmbeded="0"은 ZIP에 포함되지 않은 외부 파일 참조다.
         // populate_link_image_paths + populate_external_images_from_dir 가 후처리.
         //
         // Issue #1283: 일부 HWPX는 ZIP 내부 OLE(`BinData/*.ole`)에도 isEmbeded="0"을
@@ -805,10 +821,15 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
         },
     };
 
-    // [Task #873] BinData Link 타입 의 외부 file path 영역 영역 Picture.external_path 영역
-    // 전달. 이후 model::document::populate_external_images_from_dir (Task #741) 가 같은
-    // dir 영역 basename 매칭 영역 image 영역 자동 load. HWP5 parser 와 동일 처리.
+    // BinData Link의 외부 파일 경로를 Picture.external_path로 전달한다.
+    // 이후 populate_external_images_from_dir가 문서 폴더에서 파일명이 일치하는 그림을 읽는다.
     populate_hwpx_link_image_paths(&mut doc);
+
+    if let Ok(bytes) =
+        reader.read_file_bytes_limited(crate::model::hyperlink_format::HWPX_ENTRY, 16 * 1024 * 1024)
+    {
+        crate::model::hyperlink_format::decode(&mut doc, &bytes);
+    }
 
     Ok(doc)
 }

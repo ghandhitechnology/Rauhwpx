@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 77개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 77);
+test('도구는 정확히 79개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 79);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -50,11 +50,12 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 66);
+  assert.equal(direct.size, 68);
   assert.ok(direct.has('read_agent_instructions'));
   assert.ok(direct.has('update_agent_instructions'));
   assert.ok(direct.has('materialize_document_snapshot'));
   assert.ok(direct.has('publish_artifact'));
+  assert.ok(direct.has('publish_cloud_document'));
   assert.ok(direct.has('apply_edits'));
   assert.ok(direct.has('insert_text'));
   assert.ok(direct.has('get_engine_edit_capabilities'));
@@ -79,6 +80,7 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
 
   const planning = new Set(filterToolDefinitions('planning').map((definition) => definition.name));
   assert.ok(planning.has('get_structure'));
+  assert.ok(!planning.has('publish_cloud_document'));
   assert.ok(planning.has('download_file'));
   assert.ok(planning.has('browserbase_act'));
   assert.ok(planning.has('present_implementation_plan'));
@@ -133,6 +135,19 @@ test('app-only AGENTS.md tools separate reads from bounded revision-checked writ
   assert.match(update?.description ?? '', /not persisted until the user explicitly confirms/);
   assert.match(update?.description ?? '', /Settings > 지시/);
   assert.match(read?.description ?? '', /outside this app/);
+});
+
+test('browserbase tools take an optional browserId so subagents get isolated browsers', () => {
+  for (const name of ['browserbase_start', 'browserbase_end', 'browserbase_navigate', 'browserbase_act', 'browserbase_observe', 'browserbase_extract']) {
+    const definition = byName.get(name);
+    assert.equal(definition?.category, 'browser');
+    assert.ok(definition.shape.browserId, `${name} lacks browserId`);
+    assert.equal(definition.shape.browserId.safeParse(undefined).success, true);
+    assert.equal(definition.shape.browserId.safeParse('researcher-1').success, true);
+    assert.equal(definition.shape.browserId.safeParse('bad id!').success, false);
+    assert.equal(definition.shape.browserId.safeParse('x'.repeat(41)).success, false);
+  }
+  assert.match(byName.get('browserbase_start').description, /subagents must pass their own browserId/i);
 });
 
 test('template tools separate read-only inspection from pending document writes', () => {

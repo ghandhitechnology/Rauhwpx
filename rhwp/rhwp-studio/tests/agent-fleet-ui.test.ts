@@ -189,20 +189,21 @@ test('한 턴의 서브에이전트는 도크 팝업에 모이고 턴이 끝나�
   assert.equal(hosted.length, 1, '에이전트 묶음은 카드 하나를 쓴다');
   const card = hosted[0];
   assert.equal(all(card, 'ag-fleet-row').length, 2);
-  assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 2');
   assert.ok(one(card, 'ag-fleet-dot').className.includes('ag-run'));
   // 알약은 남은 작업 수를 말하고 픽셀 휠을 싣는다.
-  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2');
   assert.equal(all(pill(view), 'ag-pixel-bit').length, 8);
   assert.ok(pill(view).className.includes('ag-live'));
   assert.equal((view.root as unknown as FakeNode).hidden, false);
-  assert.equal(popup(view).hidden, false, '새 편대는 팝업을 연 채로 시작한다');
+  assert.equal(popup(view).hidden, true, '새 편대는 접힌 상태로 시작한다');
+  pill(view).click();
 
   view.taskEnd({ type: 'task-end', agent: 'claude', taskId: 't1', status: 'completed' } as never);
   // 하나가 남아 도는 동안 카드는 계속 작업 중이다.
-  assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 2');
   // 알약은 카드 머리와 같은 수를 말한다 — 남은 수가 아니라 전체다.
-  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2');
   assert.equal(popup(view).hidden, false);
 
   view.taskEnd({ type: 'task-end', agent: 'claude', taskId: 't2', status: 'failed' } as never);
@@ -272,8 +273,8 @@ test('다 끝난 묶음 뒤에 같은 턴의 새 서브에이전트가 오면 �
   assert.equal(all(hosted[0], 'ag-fleet-row').length, 1);
   assert.equal(all(hosted[1], 'ag-fleet-row').length, 1);
   assert.equal(slots.length, 2, '새 카드도 자기 슬롯을 예약한다');
-  assert.equal(popup(view).hidden, false, '새 묶음은 팝업을 다시 연다');
-  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(popup(view).hidden, true, '새 묶음도 자동으로 펼치지 않는다');
+  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2');
 
   view.sweep();
   // 두 카드가 각자의 슬롯으로, 태어난 순서대로 정착한다.
@@ -294,7 +295,7 @@ test('워크플로는 자기 카드에 단계 레일과 멤버 행을 그린다'
   assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '워크플로 · 작업 중');
   view.taskStart(taskStart('a1') as never);
   assert.equal(hostedCards(view).length, 2, '워크플로는 서브에이전트 묶음과 카드를 나눠 쓴다');
-  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2');
 
   const card = hostedCards(view)[0];
   view.taskProgress({
@@ -328,7 +329,7 @@ test('워크플로는 자기 카드에 단계 레일과 멤버 행을 그린다'
   view.taskEnd({ type: 'task-end', agent: 'claude', taskId: 'w1', status: 'completed' } as never);
   assert.equal(one(card, 'ag-fleet-label').textContent, '워크플로 · 초안 파이프라인 · 1 오류');
   // a1 이 아직 돌고 있으니 알약의 시제는 작업 중이다 — 멤버 실패는 정착한 뒤에 오른다.
-  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2');
   view.taskEnd({ type: 'task-end', agent: 'claude', taskId: 'a1', status: 'completed' } as never);
   assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 1 오류');
   view.reset();
@@ -341,7 +342,7 @@ test('서브에이전트가 부른 도구는 그 행의 드릴인으로 들어�
   const card = hostedCards(view)[0];
   const row = one(card, 'ag-fleet-row');
   const head = one(row, 'ag-fleet-head');
-  assert.equal(head.disabled, true, '기록이 없으면 열 것이 없다');
+  assert.equal(head.disabled, false, '첫 도구 호출 전에도 근황을 볼 수 있다');
 
   const routed = view.routeToolCall({
     type: 'tool-call', agent: 'claude', callId: 'c1', tool: 'read_document',
@@ -351,9 +352,9 @@ test('서브에이전트가 부른 도구는 그 행의 드릴인으로 들어�
   assert.equal(head.disabled, false);
   assert.equal(one(row, 'ag-fleet-activity').textContent, '▸ read_document');
   assert.equal(all(row, 'ag-tool-row').length, 1);
-  assert.equal(one(row, 'ag-fleet-detail').hidden, true, '드릴인은 닫힌 채로 시작한다');
+  assert.equal(head.getAttribute('aria-expanded'), 'false');
   head.click();
-  assert.equal(one(row, 'ag-fleet-detail').hidden, false);
+  assert.ok(row.classList.contains('ag-open'));
   assert.equal(head.getAttribute('aria-expanded'), 'true');
 
   assert.equal(
@@ -457,7 +458,7 @@ test('독립 백그라운드 provider task 는 owning turn 과 다음 turn 을 �
   const card = hostedCards(view)[0];
   assert.equal(hostedCards(view).length, 1, 'owning turn 종료 뒤에도 도크에서 실행 중이다');
   assert.equal(settledCards(conversation).length, 0);
-  assert.equal(one(card, 'ag-fleet-label').textContent, '백그라운드 작업 1 · 작업 중');
+  assert.equal(one(card, 'ag-fleet-label').textContent, '백그라운드 작업 1');
   assert.equal(all(card, 'ag-fleet-row').length, 1, 'single worker is represented by the task row only');
   assert.equal(all(card, 'ag-fleet-member').length, 0);
   assert.equal(one(card, 'ag-fleet-role').hidden, true, 'redundant dedicated-worker badge is omitted');
@@ -487,7 +488,10 @@ test('알약 클릭은 팝업을 접었다 펼치고 aria-expanded 를 따라간
   view.beginTurn();
   view.taskStart(taskStart('t1') as never);
   const button = pill(view);
-  // 새 묶음이 태어나면 팝업은 열린 채로 시작하고 호출부에 알린다.
+  // 스폰은 접힌 상태로 시작한다. 사용자가 직접 펼친다.
+  assert.equal(popup(view).hidden, true);
+  assert.deepEqual(popupToggles, []);
+  button.click();
   assert.equal(popup(view).hidden, false);
   assert.equal(button.getAttribute('aria-expanded'), 'true');
   assert.deepEqual(popupToggles, [true]);
@@ -499,11 +503,11 @@ test('알약 클릭은 팝업을 접었다 펼치고 aria-expanded 를 따라간
   assert.equal(popup(view).hidden, false);
   assert.deepEqual(popupToggles, [true, false, true]);
 
-  // 새 카드가 태어나면 다시 연다 — 사용자가 접어 둔 상태와 상관없이.
+  // 새 카드도 사용자가 접어 둔 상태를 유지한다.
   button.click();
   view.beginTurn();
   view.taskStart(taskStart('t2') as never);
-  assert.equal(popup(view).hidden, false);
+  assert.equal(popup(view).hidden, true);
   view.reset();
 });
 
@@ -511,6 +515,7 @@ test('closePopup 은 팝업만 접고 알약은 남긴다', () => {
   const { view, popupToggles } = mountFleet();
   view.beginTurn();
   view.taskStart(taskStart('t1') as never);
+  pill(view).click();
   view.closePopup();
   assert.equal(popup(view).hidden, true);
   assert.equal((view.root as unknown as FakeNode).hidden, false, '알약은 그대로다');
@@ -566,7 +571,7 @@ test('살아 있는 기록은 한 번에 하나만 펼친다 — 팝업과 도�
 });
 
 test('행 높이는 고정 그리드로 못 박혀 있고 진행 표시는 픽셀 휠 하나다', () => {
-  assert.match(css, /\.ag-fleet-head\s*\{[^}]*grid-template-rows:\s*16px 14px 13px;/s);
+  assert.match(css, /\.ag-fleet-head\s*\{[^}]*grid-template-rows:\s*16px 14px;/s);
   assert.match(css, /\.ag-fleet-head\s*\{[^}]*grid-template-columns:\s*12px minmax\(0, 1fr\) auto 11px;/s);
   assert.match(css, /\.ag-fleet-dot\.ag-run\s*\{\s*background:\s*var\(--ag-run\);/);
   assert.match(css, /\.ag-fleet-dot\.ag-ok\s*\{\s*background:\s*var\(--ag-ok\);/);
@@ -602,4 +607,47 @@ test('편대 도크는 입력기 위 알약과 팝업으로 그려진다', () =>
   // 도크가 서 있는 동안 계획 복원 overlay 는 도크 위로 올라간다.
   assert.match(source, /--ag-fleet-dock-h/);
   assert.match(css, /var\(--ag-fleet-dock-h, 0px\)/);
+});
+
+
+test('텍스트만 있는 작업도 펼쳐지고 선택한 미리보기만 실시간 갱신된다', () => {
+  const { view } = mountFleet();
+  view.beginTurn();
+  view.taskStart(taskStart('first') as never);
+  view.taskStart(taskStart('second') as never);
+  const rows = all(hostedCards(view)[0], 'ag-fleet-row');
+  const first = one(rows[0], 'ag-fleet-head');
+  const second = one(rows[1], 'ag-fleet-head');
+  first.click();
+  view.routeTextDelta({ type: 'text-delta', agent: 'claude', parentTaskId: 'first', text: '문서를 읽습니다.\n' } as never);
+  view.routeTextDelta({ type: 'text-delta', agent: 'claude', parentTaskId: 'first', text: '문장을 정리합니다.' } as never);
+  assert.equal(one(rows[0], 'ag-fleet-preview').textContent, '문서를 읽습니다.\n문장을 정리합니다.');
+  second.click();
+  assert.equal(first.getAttribute('aria-expanded'), 'false');
+  assert.equal(second.getAttribute('aria-expanded'), 'true');
+  assert.equal((one(rows[0], 'ag-fleet-reveal') as unknown as HTMLElement).inert, true);
+  view.taskProgress({ type: 'task-progress', agent: 'claude', taskId: 'second', activity: '표를 확인합니다.' } as never);
+  assert.equal(one(rows[1], 'ag-fleet-preview').textContent, '표를 확인합니다.');
+  second.click();
+  assert.equal(second.getAttribute('aria-expanded'), 'false');
+  view.reset();
+});
+
+
+test('선택한 미리보기는 새 출력의 끝으로 스크롤하고 목록으로 돌아간다', () => {
+  const { view } = mountFleet();
+  view.beginTurn();
+  view.taskStart(taskStart('scroll') as never);
+  const row = one(hostedCards(view)[0], 'ag-fleet-row');
+  const detail = one(row, 'ag-fleet-detail') as unknown as HTMLElement;
+  Object.assign(detail, { scrollHeight: 1200, clientHeight: 240, scrollTop: 0 });
+  one(row, 'ag-fleet-head').click();
+  assert.equal(detail.scrollTop, 1200);
+  detail.scrollTop = 0;
+  view.routeTextDelta({ type: 'text-delta', agent: 'claude', parentTaskId: 'scroll', text: '새 출력' } as never);
+  assert.equal(detail.scrollTop, 1200);
+  one(row, 'ag-fleet-back').click();
+  assert.equal(one(row, 'ag-fleet-head').getAttribute('aria-expanded'), 'false');
+  assert.equal((one(row, 'ag-fleet-reveal') as unknown as HTMLElement).inert, true);
+  view.reset();
 });

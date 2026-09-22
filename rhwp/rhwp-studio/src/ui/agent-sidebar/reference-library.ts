@@ -1,6 +1,6 @@
 import './reference-library.css';
 
-import type { AgentBridge } from '../../agent/bridge.ts';
+import type { SidebarBridge } from '../../agent/bridge.ts';
 import type {
   ReferenceFile,
   ReferenceScope,
@@ -61,10 +61,10 @@ export interface ReferenceLibraryContext {
 }
 
 export interface ReferenceLibraryOptions {
-  bridge: AgentBridge;
+  bridge: SidebarBridge;
   getContext(): ReferenceLibraryContext;
   onOpenChange?(open: boolean): void;
-  onDraftStateChange?(): void;
+  onDraftStateChange?(change: 'content' | 'status' | 'context'): void;
   onFileDeleted?(fileId: string): void;
 }
 
@@ -75,13 +75,17 @@ export interface ReferenceLibraryUi {
   quickUploads: HTMLElement;
   isOpen(): boolean;
   setOpen(open: boolean, scope?: ReferenceScope): void;
-  setConnectionState(state: ReturnType<AgentBridge['getConnectionState']>): void;
+  setConnectionState(state: ReturnType<SidebarBridge['getConnectionState']>): void;
   contextChanged(): void;
+  snapshotDraftFiles(): File[];
   hasDrafts(): boolean;
   hasBlockingDrafts(): boolean;
   takeReadyDrafts(): StagedReference[];
+  takeReadyCloudDrafts(): Promise<Array<StagedReference & { bytes: Uint8Array }>>;
   discardDrafts(): void;
   stageDraftFiles(files: File[]): void;
+  stageInlineFiles(files: File[], signal?: AbortSignal): Promise<StagedReference[]>;
+  discardInlineFiles(files: StagedReference[]): Promise<void>;
   hasImageDrafts(): boolean;
   allDraftsAreImages(): boolean;
   openFile(fileId: string): Promise<void>;
@@ -107,6 +111,28 @@ function extensionOf(name: string): string {
 function isImageFile(file: Pick<File, 'name' | 'type'>): boolean {
   return (IMAGE_EXTENSIONS as readonly string[]).includes(extensionOf(file.name))
     || ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type.toLowerCase());
+}
+
+/** Stage one inline-selection batch atomically; partial and cancelled batches are discarded. */
+export async function stageInlineReferences(
+  bridge: Pick<SidebarBridge, 'stageReference' | 'discardStagedReference'>,
+  scopeId: string,
+  files: File[],
+  signal?: AbortSignal,
+): Promise<StagedReference[]> {
+  const discard = async (staged: StagedReference[]): Promise<void> => {
+    await Promise.all(staged.map((file) => bridge.discardStagedReference(file.scopeId, file.id).catch(() => undefined)));
+  };
+  if (signal?.aborted) throw new DOMException('선택 자료 전송이 취소되었습니다.', 'AbortError');
+  const settled = await Promise.allSettled(files.map((file) => bridge.stageReference(scopeId, file)));
+  const staged = settled.flatMap((entry) => entry.status === 'fulfilled' ? [entry.value] : []);
+  const failed = settled.find((entry): entry is PromiseRejectedResult => entry.status === 'rejected');
+  if (failed || signal?.aborted) {
+    await discard(staged);
+    if (signal?.aborted) throw new DOMException('선택 자료 전송이 취소되었습니다.', 'AbortError');
+    throw failed!.reason;
+  }
+  return staged;
 }
 
 export function createReferenceLibrary(options: ReferenceLibraryOptions): ReferenceLibraryUi {
@@ -234,6 +260,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     add.disabled = !connected || targetFor(activeScope, context) === null;
     if (!connected) add.title = '에이전트 서버가 연결되면 파일을 추가할 수 있습니다.';
     else add.removeAttribute('title');
+    scopeHint.hidden = activeScope === 'chat';
     if (activeScope === 'document' && !context.documentId) {
       scopeHint.textContent = '문서를 열면 해당 문서의 모든 채팅에서 쓸 참고자료를 추가할 수 있습니다.';
     } else if (activeScope === 'document') {
@@ -241,7 +268,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     } else if (activeScope === 'global') {
       scopeHint.textContent = '모든 문서와 모든 채팅에서 항상 검색합니다.';
     } else {
-      scopeHint.textContent = '현재 채팅에서만 검색합니다.';
+      scopeHint.textContent = '';
     }
   }
 
@@ -510,7 +537,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       if (chip.staged && chip.target) {
         void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
       }
-      options.onDraftStateChange?.();
+      options.onDraftStateChange?.('content');
     });
     retry.addEventListener('click', async () => {
       if (!chip.target) return;
@@ -534,7 +561,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     );
     quickUploads.appendChild(root);
     draftUploads.push(chip);
-    options.onDraftStateChange?.();
+    options.onDraftStateChange?.('content');
     return chip;
   }
 
@@ -548,7 +575,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     chip.state.textContent = '업로드 중';
     chip.retry.hidden = true;
     chip.remove.hidden = true;
-    options.onDraftStateChange?.();
+    options.onDraftStateChange?.('status');
     try {
       const staged = await bridge.stageReference(chip.target.scopeId, chip.file);
       if (chip.cancelled) {
@@ -570,7 +597,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       chip.remove.hidden = false;
       throw caught;
     } finally {
-      options.onDraftStateChange?.();
+      options.onDraftStateChange?.('status');
     }
   }
 
@@ -617,6 +644,21 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     }
   }
 
+  /** 인라인 선택이 만든 이미지 파일을 현재 턴 전용으로 올린다. */
+  async function stageInlineFiles(files: File[], signal?: AbortSignal): Promise<StagedReference[]> {
+    const target = targetFor('chat', options.getContext());
+    if (!target || connectionState !== 'connected') {
+      throw new Error('현재 채팅에 선택 이미지를 첨부할 수 없습니다.');
+    }
+    const accepted = validateFiles(files);
+    if (accepted.length !== files.length) throw new Error('선택 이미지 파일을 첨부할 수 없습니다.');
+    return stageInlineReferences(bridge, target.scopeId, accepted, signal);
+  }
+
+  async function discardInlineFiles(files: StagedReference[]): Promise<void> {
+    await Promise.all(files.map((file) => bridge.discardStagedReference(file.scopeId, file.id).catch(() => undefined)));
+  }
+
   async function uploadFiles(files: File[], target: ScopeTarget): Promise<void> {
     const accepted = validateFiles(files);
     if (accepted.length === 0) return;
@@ -641,7 +683,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     fileInput.click();
   }
 
-  function discardDrafts(): void {
+  function discardDrafts(change: 'content' | 'context' = 'content'): void {
     for (const chip of draftUploads.splice(0)) {
       chip.cancelled = true;
       releaseChip(chip);
@@ -649,15 +691,30 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
         void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
       }
     }
-    options.onDraftStateChange?.();
+    options.onDraftStateChange?.(change);
   }
 
   function takeReadyDrafts(): StagedReference[] {
     if (draftUploads.some((chip) => chip.uploadState !== 'ready' || !chip.staged)) return [];
     const batch = draftUploads.splice(0);
     for (const chip of batch) releaseChip(chip);
-    options.onDraftStateChange?.();
+    options.onDraftStateChange?.('content');
     return batch.map((chip) => chip.staged!);
+  }
+
+  async function takeReadyCloudDrafts(): Promise<Array<StagedReference & { bytes: Uint8Array }>> {
+    if (draftUploads.some((chip) => chip.uploadState !== 'ready' || !chip.staged)) return [];
+    const batch = [...draftUploads];
+    const bytes = await Promise.all(batch.map(async (chip) => new Uint8Array(await chip.file.arrayBuffer())));
+    draftUploads.splice(0, batch.length);
+    for (const chip of batch) {
+      releaseChip(chip);
+      if (chip.staged && chip.target) {
+        void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
+      }
+    }
+    options.onDraftStateChange?.('content');
+    return batch.map((chip, index) => ({ ...chip.staged!, bytes: bytes[index] }));
   }
 
   async function openFile(fileId: string): Promise<void> {
@@ -779,18 +836,22 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       contextRevision++;
       requestRevision++;
       countRevision++;
-      discardDrafts();
+      discardDrafts('context');
       filesByScope.clear();
       if (activeScope === 'document' && !options.getContext().documentId) activeScope = 'chat';
       updateTabs();
       void refreshCounts();
       if (open) void refreshActiveScope();
     },
+    snapshotDraftFiles: () => draftUploads.map((chip) => chip.file),
     hasDrafts: () => draftUploads.length > 0,
     hasBlockingDrafts: () => draftUploads.some((chip) => chip.uploadState !== 'ready'),
     takeReadyDrafts,
+    takeReadyCloudDrafts,
     discardDrafts,
     stageDraftFiles: stageFiles,
+    stageInlineFiles,
+    discardInlineFiles,
     hasImageDrafts: () => draftUploads.some((chip) => isImageFile(chip.file)),
     allDraftsAreImages: () => draftUploads.length > 0 && draftUploads.every((chip) => isImageFile(chip.file)),
     openFile,

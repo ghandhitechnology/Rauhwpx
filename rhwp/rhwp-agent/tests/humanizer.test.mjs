@@ -18,39 +18,30 @@ test('작문 규율은 문서 쓰기가 열린 단계에서만 붙는다', () =>
   assert.match(humanizerPromptBlock('direct'), /<korean_writing_discipline>/);
 });
 
-test('규율 블록은 금지 패턴과 보정 규칙을 함께 싣는다', () => {
-  const block = humanizerPromptBlock('implementing');
-  assert.match(block, /결론적으로/);
-  assert.match(block, /번역투/);
-  assert.match(block, /S1 must be 0/);
-  assert.match(block, /at most ~20% of sentences/);
-  assert.match(block, /Over 50%: stop and ask/);
-  assert.match(block, /Read 2-3 paragraphs around the insertion point/);
-  assert.match(block, /does not apply to your chat replies/);
-  assert.match(block, /Meaning is invariant/);
-  assert.match(block, /Style decides how a sentence is built, never what it asserts/);
-  assert.match(block, /Have a temperature/);
+test('both languages preserve meaning without mechanical writing quotas', () => {
+  for (const language of ['ko', 'en']) {
+    for (const personalProfile of [false, true]) {
+      const block = humanizerPromptBlock('implementing', { language, personalProfile });
+      assert.match(block, /Preserve facts, figures/);
+      assert.match(block, /negation, uncertainty, and causality/);
+      assert.match(block, /does not apply to your chat replies/);
+      assert.match(block, /Honour an explicit length limit/);
+      assert.match(block, /The user's scope determines how much to change/);
+      assert.doesNotMatch(block, /S1|S2|S3|\d+%|per ~\d+|five-word|thirty-word/);
+      assert.match(block, /Do not score it for AI tells/);
+      if (personalProfile) assert.match(block, /Ignore numeric style targets in older profiles/);
+    }
+  }
 });
 
-test('개인 프로필이 있으면 초상을 따르고 수치에 맞추지 않는다', () => {
-  const generic = humanizerPromptBlock('direct');
-  const profiled = humanizerPromptBlock('direct', { personalProfile: true });
-  assert.match(generic, /because a person would, not because a rubric said to/);
-  assert.match(generic, /Have a temperature/);
-  assert.doesNotMatch(profiled, /because a person would, not because a rubric said to/);
-  assert.match(profiled, /Inhabit that person/);
-  assert.match(profiled, /Do not write to the measured numbers/);
-  assert.match(profiled, /They yield to the portrait above/);
-  assert.doesNotMatch(profiled, /Write like a person, not like a cleaned-up model/);
-});
-
-test('영어 프로필에는 영어 규율 블록이 붙는다', () => {
-  const english = humanizerPromptBlock('implementing', { language: 'en' });
+test('language-specific guidance follows idiom and register', () => {
+  const korean = humanizerPromptBlock('direct');
+  assert.match(korean, /존댓말과 반말을 섞거나/);
+  assert.match(korean, /금지어 목록처럼 기계적으로 지우지 않는다/);
+  const english = humanizerPromptBlock('direct', { language: 'en' });
   assert.match(english, /<english_writing_discipline>/);
-  assert.doesNotMatch(english, /<korean_writing_discipline>/);
-  assert.match(english, /In today's fast-paced world/);
-  assert.match(english, /Meaning is invariant/);
-  assert.match(english, /at most ~20% of sentences/);
+  assert.match(english, /regional spelling/);
+  assert.match(english, /Do not alternate short and long sentences/);
   assert.equal(humanizerPromptBlock('planning', { language: 'en' }), '');
 });
 

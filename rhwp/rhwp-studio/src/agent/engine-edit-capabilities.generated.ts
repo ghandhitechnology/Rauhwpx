@@ -411,6 +411,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "deleteEquationControlInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, eqControlIdx: number)"
   },
   {
+    "method": "deleteEquationControlInCellByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "cellPath",
+      "eqControlIdx"
+    ],
+    "signature": "deleteEquationControlInCellByPath(sec: number, parentPara: number, cellPath: CellPathLike, eqControlIdx: number)"
+  },
+  {
     "method": "deleteFootnote",
     "kind": "document",
     "parameters": [
@@ -533,6 +544,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "deleteTableColumn(sec: number, parentPara: number, controlIdx: number, colIdx: number)"
   },
   {
+    "method": "deleteTableColumnByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "colIdx"
+    ],
+    "signature": "deleteTableColumnByPath(sec: number, parentPara: number, pathJson: string, colIdx: number)"
+  },
+  {
     "method": "deleteTableControl",
     "kind": "document",
     "parameters": [
@@ -552,6 +574,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "rowIdx"
     ],
     "signature": "deleteTableRow(sec: number, parentPara: number, controlIdx: number, rowIdx: number)"
+  },
+  {
+    "method": "deleteTableRowByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "rowIdx"
+    ],
+    "signature": "deleteTableRowByPath(sec: number, parentPara: number, pathJson: string, rowIdx: number)"
   },
   {
     "method": "deleteText",
@@ -764,6 +797,20 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "insertEquationInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, charOffset: number, script: string, fontSizeHwpunit: number, color: number)"
   },
   {
+    "method": "insertEquationInCellByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "cellPath",
+      "charOffset",
+      "script",
+      "fontSizeHwpunit",
+      "color"
+    ],
+    "signature": "insertEquationInCellByPath(sec: number, parentPara: number, cellPath: CellPathLike, charOffset: number, script: string, fontSizeHwpunit: number, color: number)"
+  },
+  {
     "method": "insertFieldInHf",
     "kind": "document",
     "parameters": [
@@ -785,6 +832,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "charOffset"
     ],
     "signature": "insertFootnote(sec: number, para: number, charOffset: number)"
+  },
+  {
+    "method": "insertHyperlink",
+    "kind": "document",
+    "parameters": [
+      "target",
+      "start",
+      "end",
+      "uri"
+    ],
+    "signature": "insertHyperlink(target: HyperlinkTarget, start: number, end: number, uri: string)"
   },
   {
     "method": "insertNewNumber",
@@ -832,9 +890,10 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "extension",
       "description",
       "paperOffsetXHu",
-      "paperOffsetYHu"
+      "paperOffsetYHu",
+      "placement"
     ],
-    "signature": "insertPicture(sec: number, paraIdx: number, charOffset: number, cellPathJson: string, imageData: Uint8Array, width: number, height: number, naturalWidthPx: number, naturalHeightPx: number, extension: string, description: string = '', paperOffsetXHu?: number, paperOffsetYHu?: number)"
+    "signature": "insertPicture(sec: number, paraIdx: number, charOffset: number, cellPathJson: string, imageData: Uint8Array, width: number, height: number, naturalWidthPx: number, naturalHeightPx: number, extension: string, description: string = '', paperOffsetXHu?: number, paperOffsetYHu?: number, placement?: 'inline' | 'floating')"
   },
   {
     "method": "insertTableColumn",
@@ -849,6 +908,18 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "insertTableColumn(sec: number, parentPara: number, controlIdx: number, colIdx: number, right: boolean)"
   },
   {
+    "method": "insertTableColumnByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "colIdx",
+      "right"
+    ],
+    "signature": "insertTableColumnByPath(sec: number, parentPara: number, pathJson: string, colIdx: number, right: boolean)"
+  },
+  {
     "method": "insertTableRow",
     "kind": "document",
     "parameters": [
@@ -859,6 +930,18 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "below"
     ],
     "signature": "insertTableRow(sec: number, parentPara: number, controlIdx: number, rowIdx: number, below: boolean)"
+  },
+  {
+    "method": "insertTableRowByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "rowIdx",
+      "below"
+    ],
+    "signature": "insertTableRowByPath(sec: number, parentPara: number, pathJson: string, rowIdx: number, below: boolean)"
   },
   {
     "method": "insertText",
@@ -1016,6 +1099,20 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "mergeTableCells(sec: number, parentPara: number, controlIdx: number, startRow: number, startCol: number, endRow: number, endCol: number)"
   },
   {
+    "method": "mergeTableCellsByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "startRow",
+      "startCol",
+      "endRow",
+      "endCol"
+    ],
+    "signature": "mergeTableCellsByPath(sec: number, parentPara: number, pathJson: string, startRow: number, startCol: number, endRow: number, endCol: number)"
+  },
+  {
     "method": "moveLineEndpoint",
     "kind": "document",
     "parameters": [
@@ -1115,6 +1212,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "pasteHtmlInCellByPath(sec: number, parentPara: number, pathJson: string, charOffset: number, html: string)"
   },
   {
+    "method": "pasteHwpJson",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "para",
+      "charOffset",
+      "json"
+    ],
+    "signature": "pasteHwpJson(sec: number, para: number, charOffset: number, json: string)"
+  },
+  {
     "method": "pasteInternal",
     "kind": "document",
     "parameters": [
@@ -1171,6 +1279,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "pasteTableCellsTransposedAsTable(sec: number, para: number, charOffset: number,)"
   },
   {
+    "method": "promoteOleEquation",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "para",
+      "ci"
+    ],
+    "signature": "promoteOleEquation(sec: number, para: number, ci: number)"
+  },
+  {
     "method": "reflowLinesegs",
     "kind": "document",
     "parameters": [],
@@ -1183,6 +1301,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "pos"
     ],
     "signature": "removeFieldAt(pos: DocumentPosition)"
+  },
+  {
+    "method": "removeHyperlink",
+    "kind": "document",
+    "parameters": [
+      "target",
+      "fieldId",
+      "restoreFormatting"
+    ],
+    "signature": "removeHyperlink(target: HyperlinkTarget, fieldId: number, restoreFormatting = false)"
   },
   {
     "method": "renameBookmark",
@@ -1216,6 +1344,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "text"
     ],
     "signature": "replaceBodyTextLocal(sec: number, para: number, charOffset: number, deleteCount: number, text: string,)"
+  },
+  {
+    "method": "replaceHyperlinkText",
+    "kind": "document",
+    "parameters": [
+      "target",
+      "fieldId",
+      "text"
+    ],
+    "signature": "replaceHyperlinkText(target: HyperlinkTarget, fieldId: number, text: string)"
   },
   {
     "method": "replaceOne",
@@ -1279,6 +1417,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "updates"
     ],
     "signature": "resizeTableCells(sec: number, parentPara: number, controlIdx: number, updates: TableCellResizeUpdate[],)"
+  },
+  {
+    "method": "resizeTableCellsByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "updates"
+    ],
+    "signature": "resizeTableCellsByPath(sec: number, parentPara: number, pathJson: string, updates: TableCellResizeUpdate[],)"
   },
   {
     "method": "setCellParaShapeId",
@@ -1421,6 +1570,31 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "setCharShapeIdInHf(sec: number, isHeader: boolean, applyTo: number, para: number, start: number, end: number, shapeId: number)"
   },
   {
+    "method": "setCharShapeRuns",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "para",
+      "start",
+      "end",
+      "runs"
+    ],
+    "signature": "setCharShapeRuns(sec: number, para: number, start: number, end: number, runs: CharShapeRun[])"
+  },
+  {
+    "method": "setCharShapeRunsInCellByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "para",
+      "path",
+      "start",
+      "end",
+      "runs"
+    ],
+    "signature": "setCharShapeRunsInCellByPath(sec: number, para: number, path: string, start: number, end: number, runs: CharShapeRun[])"
+  },
+  {
     "method": "setColumnDef",
     "kind": "document",
     "parameters": [
@@ -1441,9 +1615,22 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "ci",
       "cellIdx",
       "cellParaIdx",
+      "props",
+      "innerControlIdx"
+    ],
+    "signature": "setEquationProperties(sec: number, para: number, ci: number, cellIdx: number | undefined, cellParaIdx: number | undefined, props: Record<string, unknown>, innerControlIdx?: number)"
+  },
+  {
+    "method": "setEquationPropertiesByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "cellPath",
+      "innerControlIdx",
       "props"
     ],
-    "signature": "setEquationProperties(sec: number, para: number, ci: number, cellIdx: number | undefined, cellParaIdx: number | undefined, props: Record<string, unknown>)"
+    "signature": "setEquationPropertiesByPath(sec: number, parentPara: number, cellPath: CellPathLike, innerControlIdx: number, props: Record<string, unknown>)"
   },
   {
     "method": "setFieldValue",
@@ -1760,6 +1947,18 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "splitTableCell(sec: number, parentPara: number, controlIdx: number, row: number, col: number)"
   },
   {
+    "method": "splitTableCellByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "row",
+      "col"
+    ],
+    "signature": "splitTableCellByPath(sec: number, parentPara: number, pathJson: string, row: number, col: number)"
+  },
+  {
     "method": "splitTableCellInto",
     "kind": "document",
     "parameters": [
@@ -1774,6 +1973,22 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "mergeFirst"
     ],
     "signature": "splitTableCellInto(sec: number, parentPara: number, controlIdx: number, row: number, col: number, nRows: number, mCols: number, equalRowHeight: boolean, mergeFirst: boolean,)"
+  },
+  {
+    "method": "splitTableCellIntoByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "row",
+      "col",
+      "nRows",
+      "mCols",
+      "equalRowHeight",
+      "mergeFirst"
+    ],
+    "signature": "splitTableCellIntoByPath(sec: number, parentPara: number, pathJson: string, row: number, col: number, nRows: number, mCols: number, equalRowHeight: boolean, mergeFirst: boolean,)"
   },
   {
     "method": "splitTableCellsInRange",
@@ -1791,6 +2006,23 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "equalRowHeight"
     ],
     "signature": "splitTableCellsInRange(sec: number, parentPara: number, controlIdx: number, startRow: number, startCol: number, endRow: number, endCol: number, nRows: number, mCols: number, equalRowHeight: boolean,)"
+  },
+  {
+    "method": "splitTableCellsInRangeByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "startRow",
+      "startCol",
+      "endRow",
+      "endCol",
+      "nRows",
+      "mCols",
+      "equalRowHeight"
+    ],
+    "signature": "splitTableCellsInRangeByPath(sec: number, parentPara: number, pathJson: string, startRow: number, startCol: number, endRow: number, endCol: number, nRows: number, mCols: number, equalRowHeight: boolean,)"
   },
   {
     "method": "toggleHideHeaderFooter",
@@ -1842,6 +2074,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "updateConnectorsInSection(sec: number)"
   },
   {
+    "method": "updateHyperlink",
+    "kind": "document",
+    "parameters": [
+      "target",
+      "fieldId",
+      "uri"
+    ],
+    "signature": "updateHyperlink(target: HyperlinkTarget, fieldId: number, uri: string)"
+  },
+  {
     "method": "updateStyle",
     "kind": "document",
     "parameters": [
@@ -1872,6 +2114,7 @@ export const ENGINE_EDIT_TYPE_DEFINITIONS = {
   "DocumentPosition": "export interface DocumentPosition { sectionIndex: number; paragraphIndex: number; charOffset: number; parentParaIndex?: number; controlIndex?: number; cellIndex?: number; cellParaIndex?: number; cellPath?: CellPathEntry[]; isTextBox?: boolean; cursorRect?: CursorRect; }",
   "TableCellResizeUpdate": "export interface TableCellResizeUpdate { cellIdx: number; widthDelta?: number; heightDelta?: number; localResize?: boolean; renderWidth?: number; renderHeight?: number; }",
   "CellProperties": "export interface CellProperties { width: number; height: number; paddingLeft: number; paddingRight: number; paddingTop: number; paddingBottom: number; applyInnerMargin: boolean; verticalAlign: number; textDirection: number; isHeader: boolean; cellProtect?: boolean; fieldName?: string; editableInForm?: boolean; borderFillId?: number; borderLeft?: BorderLineInfo; borderRight?: BorderLineInfo; borderTop?: BorderLineInfo; borderBottom?: BorderLineInfo; fillType?: string; fillColor?: string; patternColor?: string; patternType?: number; diagonalLine?: number; diagonalSlash?: number; diagonalBackSlash?: number; diagonalWidth?: number; diagonalColor?: string; centerLine?: string; }",
+  "CharShapeRun": "export interface CharShapeRun { startOffset: number; endOffset: number; charShapeId: number; }",
   "NoteControlRef": "export interface NoteControlRef { kind: 'footnote' | 'endnote'; sectionIdx: number; paraIdx: number; controlIdx: number; noteParaIdx: number; innerControlIdx: number; }",
   "PageBorderFillSettings": "export interface PageBorderFillSettings { attr: number; basis: 'paper' | 'page'; spacingLeft: number; spacingRight: number; spacingTop: number; spacingBottom: number; borderFillId: number; headerInside: boolean; footerInside: boolean; fillArea: 'paper' | 'page' | 'border'; hideBorder: boolean; hideFill: boolean; borderLeft: BorderLineProps; borderRight: BorderLineProps; borderTop: BorderLineProps; borderBottom: BorderLineProps; fillType: 'none' | 'solid' | string; fillColor: string; patternColor: string; patternType: number; applyPage?: 'all' | 'exceptFirst' | 'firstOnly'; }",
   "PageDef": "export interface PageDef { width: number; height: number; marginLeft: number; marginRight: number; marginTop: number; marginBottom: number; marginHeader: number; marginFooter: number; marginGutter: number; landscape: boolean; binding: number; }",

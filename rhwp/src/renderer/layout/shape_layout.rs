@@ -776,12 +776,14 @@ impl LayoutEngine {
             let ast = super::super::equation::parser::EqParser::new(tokens).parse();
             let font_size_px = hwpunit_to_px(eq.font_size as i32, self.dpi);
             let layout_box =
-                super::super::equation::layout::EqLayout::new(font_size_px).layout(&ast);
+                super::super::equation::layout::EqLayout::with_font(font_size_px, &eq.font_name)
+                    .layout(&ast);
             let color_str = super::super::equation::svg_render::eq_color_to_svg(eq.color);
-            let svg_content = super::super::equation::svg_render::render_equation_svg(
+            let svg_content = super::super::equation::svg_render::render_equation_svg_with_font(
                 &layout_box,
                 &color_str,
                 font_size_px,
+                Some(&eq.font_name),
             );
 
             let eq_node = RenderNode::new(
@@ -792,9 +794,11 @@ impl LayoutEngine {
                     color_str,
                     color: eq.color,
                     font_size: font_size_px,
+                    font_name: eq.font_name.clone(),
                     section_index: Some(section_index),
                     para_index: Some(para_index),
                     control_index: Some(control_index),
+                    inner_control_index: None,
                     cell_index: None,
                     cell_para_index: None,
                     note_ref: None,
@@ -1028,6 +1032,12 @@ impl LayoutEngine {
                 &mut self.auto_counter.borrow_mut(),
                 bin_data_content,
                 None,
+                CaptionOwner::new(
+                    Some(section_index),
+                    Some(para_index),
+                    Some(control_index),
+                    CaptionControlKind::Shape,
+                ),
             );
         }
     }
@@ -2246,6 +2256,37 @@ impl LayoutEngine {
                                     rendered = true;
                                 }
                             }
+
+                            if !rendered {
+                                if let Some(raw) = container.raw_contents.as_deref() {
+                                    if let Some(contents_emf) =
+                                        crate::parser::ole_container::contents_emf_payload(raw)
+                                    {
+                                        let render_rect = (
+                                            render_x as f32,
+                                            render_y as f32,
+                                            render_w as f32,
+                                            render_h as f32,
+                                        );
+                                        if let Ok(svg_fragment) =
+                                            crate::emf::convert_to_svg(contents_emf, render_rect)
+                                        {
+                                            push_ole_raw_svg_render_node(
+                                                tree,
+                                                parent,
+                                                BoundingBox::new(
+                                                    render_x, render_y, render_w, render_h,
+                                                ),
+                                                svg_fragment,
+                                                section_index,
+                                                para_index,
+                                                control_index,
+                                            );
+                                            rendered = true;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         if !rendered
                             && self.push_hwpx_hmapsi_preview_clip_node(
@@ -3201,16 +3242,19 @@ impl LayoutEngine {
                             let tokens = super::super::equation::tokenizer::tokenize(&eq.script);
                             let ast = super::super::equation::parser::EqParser::new(tokens).parse();
                             let font_size_px = hwpunit_to_px(eq.font_size as i32, self.dpi);
-                            let layout_box =
-                                super::super::equation::layout::EqLayout::new(font_size_px)
-                                    .layout(&ast);
+                            let layout_box = super::super::equation::layout::EqLayout::with_font(
+                                font_size_px,
+                                &eq.font_name,
+                            )
+                            .layout(&ast);
                             let color_str =
                                 super::super::equation::svg_render::eq_color_to_svg(eq.color);
                             let svg_content =
-                                super::super::equation::svg_render::render_equation_svg(
+                                super::super::equation::svg_render::render_equation_svg_with_font(
                                     &layout_box,
                                     &color_str,
                                     font_size_px,
+                                    Some(&eq.font_name),
                                 );
 
                             let eq_node = RenderNode::new(
@@ -3221,9 +3265,11 @@ impl LayoutEngine {
                                     color_str,
                                     color: eq.color,
                                     font_size: font_size_px,
+                                    font_name: eq.font_name.clone(),
                                     section_index: Some(section_index),
                                     para_index: Some(para_index),
                                     control_index: Some(ctrl_idx_in_para),
+                                    inner_control_index: Some(ctrl_idx_in_para),
                                     cell_index: None,
                                     cell_para_index: None,
                                     note_ref: None,

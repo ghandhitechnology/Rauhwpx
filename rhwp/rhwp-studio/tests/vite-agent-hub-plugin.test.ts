@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createServer } from 'vite';
+import { get } from 'node:http';
 
 import {
   AGENT_HUB_ENSURE_PATH,
@@ -124,4 +130,64 @@ test('unrelated valid requests continue through the Vite middleware chain', asyn
 
   assert.equal(nextCalls, 1);
   assert.equal(res.statusCode, 0);
+});
+
+
+test('owned Vite hub starts without Electron and retains production request checks', { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rhwp-vite-hub-test-'));
+  const overrides = {
+    RHWP_SKIP_AGENT_HUB: undefined,
+    VITE_RHWP_AGENT_URL: undefined,
+    RHWP_AGENT_PORT: '0',
+    RHWP_PI_DIR: join(root, 'pi'),
+    RHWP_RAU_DIR: join(root, 'rau'),
+    RHWP_WRITING_STYLE_DIR: join(root, 'writing-style'),
+    RHWP_AGENT_INSTRUCTIONS_DIR: join(root, 'instructions'),
+    RHWP_TEMPLATES_DIR: join(root, 'templates'),
+  };
+  const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
+  let server;
+  try {
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    const studioRoot = fileURLToPath(new URL('../', import.meta.url));
+    server = await createServer({
+      root: studioRoot,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [rhwpAgentHubPlugin(studioRoot)],
+      server: { host: '127.0.0.1', port: 0, hmr: false },
+    });
+    await server.listen();
+    const address = server.httpServer.address();
+    assert.ok(address && typeof address !== 'string');
+    const origin = `http://127.0.0.1:${address.port}`;
+    const response = await fetch(`${origin}${AGENT_HUB_ENSURE_PATH}?sessionId=owned-hub-test`, {
+      method: 'POST', headers: { origin }, signal: AbortSignal.timeout(20_000),
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.ready, true, body.error);
+    assert.ok(body.hubToken && body.referenceToken && body.templateToken);
+    const hub = body.hubUrl.replace('ws:', 'http:');
+    const unauthenticated = await fetch(`${hub}/healthz`);
+    assert.equal(unauthenticated.status, 401);
+    // fetch normalizes Host, so use HTTP directly to exercise DNS-rebinding protection.
+    const reboundStatus = await new Promise<number>((resolve, reject) => {
+      get(`${hub}/healthz`, { headers: { host: 'evil.example' } }, response => {
+        response.resume();
+        resolve(response.statusCode!);
+      }).on('error', reject);
+    });
+    assert.equal(reboundStatus, 403);
+  } finally {
+    await server?.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });

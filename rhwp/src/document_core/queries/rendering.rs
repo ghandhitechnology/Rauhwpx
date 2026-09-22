@@ -11,8 +11,8 @@ use crate::model::document::{Document, Section};
 use crate::model::page::ColumnDef;
 use crate::model::paragraph::{ColumnBreakType, Paragraph};
 use crate::paint::{
-    resolve_embedded_font_face_index, EmbeddedFontFace, LayerBuilder, LayerOutputOptions,
-    PageLayerTree, RenderProfile,
+    resolve_embedded_font_face_aliases, resolve_embedded_font_face_index, EmbeddedFontFace,
+    LayerBuilder, LayerOutputOptions, PageLayerTree, RenderProfile,
 };
 use crate::renderer::canvas::CanvasRenderer;
 use crate::renderer::composer::{compose_paragraph, compose_section, ComposedParagraph};
@@ -82,6 +82,7 @@ fn image_fill_mode_json_name(mode: crate::model::style::ImageFillMode) -> &'stat
         ImageFillMode::TileVertLeft => "tileVertLeft",
         ImageFillMode::TileVertRight => "tileVertRight",
         ImageFillMode::FitToSize => "fitToSize",
+        ImageFillMode::Zoom => "zoom",
         ImageFillMode::Total => "total",
         ImageFillMode::Center => "center",
         ImageFillMode::CenterTop => "centerTop",
@@ -654,17 +655,16 @@ impl DocumentCore {
                 else {
                     continue;
                 };
-                let mut characters = run.text.chars();
-                let (Some(character), None, Some(char_shape_id)) =
-                    (characters.next(), characters.next(), run.char_shape_id)
-                else {
+                let Some(char_shape_id) = run.char_shape_id else {
                     continue;
                 };
-                let language_index =
-                    crate::renderer::style_resolver::detect_lang_category(character);
-                let slot = (char_shape_id, language_index);
-                if !used_font_slots.contains(&slot) {
-                    used_font_slots.push(slot);
+                for character in run.text.chars() {
+                    let language_index =
+                        crate::renderer::style_resolver::detect_lang_category(character);
+                    let slot = (char_shape_id, language_index);
+                    if !used_font_slots.contains(&slot) {
+                        used_font_slots.push(slot);
+                    }
                 }
             }
 
@@ -818,6 +818,7 @@ impl DocumentCore {
     }
 
     pub fn render_page_svg_legacy_native(&self, page_num: u32) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let tree = self.build_page_tree(page_num)?;
         let _overflows = self.layout_engine.take_overflows();
         let mut renderer = SvgRenderer::new();
@@ -837,6 +838,7 @@ impl DocumentCore {
         page_num: u32,
         profile: RenderProfile,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let layer_tree = self.build_page_layer_tree_with_profile(page_num, profile)?;
         let mut renderer = SvgLayerRenderer::new();
         // WASM에서도 문서 내장 face 사용량을 수집한다. 실제 CSS 생성은 아래의
@@ -856,6 +858,14 @@ impl DocumentCore {
                 let insert = format!("\n<style>\n{}</style>\n", style_css);
                 svg.insert_str(pos + 1, &insert);
             }
+        }
+        if !profile.shows_editor_visuals() {
+            let links = self
+                .hyperlinks_in_layer_tree(&layer_tree)?
+                .iter()
+                .map(|l| l.pdf_link())
+                .collect::<Vec<_>>();
+            crate::renderer::hyperlinks::append_svg_links(&mut svg, &links);
         }
         Ok(svg)
     }
@@ -887,6 +897,7 @@ impl DocumentCore {
         page_nums: &[u32],
         options: &crate::renderer::pdf::PdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         if page_nums.is_empty() {
             return Err(HwpError::RenderError(
                 "PDF export requires at least one page".to_string(),
@@ -894,10 +905,17 @@ impl DocumentCore {
         }
 
         let mut svg_pages = Vec::with_capacity(page_nums.len());
+        let mut page_links = Vec::with_capacity(page_nums.len());
         for &page_num in page_nums {
             svg_pages.push(self.render_page_svg_native(page_num)?);
+            page_links.push(
+                self.page_hyperlinks_native(page_num, RenderProfile::Print)?
+                    .iter()
+                    .map(|l| l.pdf_link())
+                    .collect(),
+            );
         }
-        crate::renderer::pdf::svgs_to_pdf_with_options(&svg_pages, options)
+        crate::renderer::pdf::svgs_to_pdf_with_links(&svg_pages, &page_links, options)
             .map_err(HwpError::RenderError)
     }
 
@@ -916,10 +934,17 @@ impl DocumentCore {
         }
 
         let mut svg_pages = Vec::with_capacity(page_nums.len());
+        let mut page_links = Vec::with_capacity(page_nums.len());
         for &page_num in page_nums {
             svg_pages.push(self.render_page_svg_layer_with_profile_native(page_num, profile)?);
+            page_links.push(
+                self.page_hyperlinks_native(page_num, profile)?
+                    .iter()
+                    .map(|l| l.pdf_link())
+                    .collect(),
+            );
         }
-        crate::renderer::pdf::svgs_to_pdf_with_options(&svg_pages, options)
+        crate::renderer::pdf::svgs_to_pdf_with_links(&svg_pages, &page_links, options)
             .map_err(HwpError::RenderError)
     }
 
@@ -981,6 +1006,7 @@ impl DocumentCore {
         profile: RenderProfile,
         options: &crate::renderer::pdf::DirectPdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         if page_nums.is_empty() {
             return Err(HwpError::RenderError(
                 "PDF export requires at least one page".to_string(),
@@ -988,10 +1014,18 @@ impl DocumentCore {
         }
 
         let mut layer_trees = Vec::with_capacity(page_nums.len());
+        let mut page_links = Vec::with_capacity(page_nums.len());
         for &page_num in page_nums {
-            layer_trees.push(self.build_page_layer_tree_with_profile(page_num, profile)?);
+            let tree = self.build_page_layer_tree_with_profile(page_num, profile)?;
+            page_links.push(
+                self.hyperlinks_in_layer_tree(&tree)?
+                    .iter()
+                    .map(|l| l.pdf_link())
+                    .collect(),
+            );
+            layer_trees.push(tree);
         }
-        crate::renderer::pdf::layer_trees_to_pdf_with_options(&layer_trees, options)
+        crate::renderer::pdf::layer_trees_to_pdf_with_links(&layer_trees, &page_links, options)
             .map_err(HwpError::RenderError)
     }
 
@@ -1049,6 +1083,92 @@ impl DocumentCore {
         map
     }
 
+    pub(crate) fn collect_resolved_shaping_fonts(
+        &self,
+    ) -> Vec<crate::renderer::layout::ResolvedShapingFont> {
+        let mut requested = Vec::<(String, Vec<String>, u16)>::new();
+        for shape in &self.document.doc_info.char_shapes {
+            for (language_index, font_id) in shape.font_ids.iter().copied().enumerate() {
+                let Some(font) = self
+                    .document
+                    .doc_info
+                    .font_faces
+                    .get(language_index)
+                    .and_then(|faces| faces.get(font_id as usize))
+                else {
+                    continue;
+                };
+                if font.is_embedded {
+                    if let Some(bin_data_id) = font.resolved_bin_data_id {
+                        requested.push((font.name.clone(), vec![font.name.clone()], bin_data_id));
+                    }
+                }
+                if let Some(substitute) = font
+                    .subst_font
+                    .as_ref()
+                    .filter(|substitute| substitute.is_embedded)
+                {
+                    if let Some(bin_data_id) = substitute.resolved_bin_data_id {
+                        requested.push((
+                            substitute.face.clone(),
+                            vec![substitute.face.clone(), font.name.clone()],
+                            bin_data_id,
+                        ));
+                    }
+                }
+            }
+        }
+        requested.sort();
+        requested.dedup();
+        let ids = requested.iter().map(|(_, _, id)| *id).collect::<Vec<_>>();
+        let bytes_by_id = load_bounded_embedded_font_bytes(
+            &self.document.bin_data_content,
+            &ids,
+            MAX_EMBEDDED_FONT_BYTES,
+            MAX_EMBEDDED_FONT_BYTES_PER_PAGE,
+        );
+        let mut resolved = requested
+            .into_iter()
+            .flat_map(|(face_family, aliases, bin_data_id)| {
+                let bytes = bytes_by_id.get(&bin_data_id)?;
+                let aliases = aliases.iter().map(String::as_str).collect::<Vec<_>>();
+                resolve_embedded_font_face_aliases(bytes, &face_family, &aliases).map(
+                    |resolved_aliases| {
+                        resolved_aliases
+                            .into_iter()
+                            .map(move |(family, face_index)| {
+                                crate::renderer::layout::ResolvedShapingFont {
+                                    family,
+                                    bytes: std::sync::Arc::clone(bytes),
+                                    face_index,
+                                }
+                            })
+                    },
+                )
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        resolved.sort_by(|left, right| {
+            left.family
+                .cmp(&right.family)
+                .then(left.face_index.cmp(&right.face_index))
+        });
+        resolved.dedup_by(|left, right| {
+            left.family.eq_ignore_ascii_case(&right.family)
+                && left.face_index == right.face_index
+                && std::sync::Arc::ptr_eq(&left.bytes, &right.bytes)
+        });
+        resolved
+    }
+
+    pub(crate) fn resolved_shaping_font_scope(
+        &self,
+    ) -> crate::renderer::layout::ResolvedShapingFontScope {
+        crate::renderer::layout::enter_resolved_shaping_fonts(
+            self.layout_engine.resolved_shaping_fonts(),
+        )
+    }
+
     /// SVG 렌더링 (폰트 임베딩 옵션 포함)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn render_page_svg_with_fonts(
@@ -1057,6 +1177,7 @@ impl DocumentCore {
         font_embed_mode: crate::renderer::svg::FontEmbedMode,
         font_paths: &[std::path::PathBuf],
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let tree = self.build_page_tree(page_num)?;
         let _overflows = self.layout_engine.take_overflows();
         let mut renderer = SvgRenderer::new();
@@ -1088,6 +1209,7 @@ impl DocumentCore {
 
     /// HTML 렌더링 (네이티브 에러 타입)
     pub fn render_page_html_native(&self, page_num: u32) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let tree = self.build_page_tree(page_num)?;
         let _overflows = self.layout_engine.take_overflows();
         let mut renderer = HtmlRenderer::new();
@@ -1099,6 +1221,7 @@ impl DocumentCore {
 
     /// Canvas 렌더링 (네이티브 에러 타입)
     pub fn render_page_canvas_native(&self, page_num: u32) -> Result<u32, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let tree = self.build_page_layer_tree(page_num)?;
         let mut renderer = CanvasRenderer::new();
         renderer.render_page(&tree)?;
@@ -1106,6 +1229,7 @@ impl DocumentCore {
     }
 
     pub fn render_page_canvas_legacy_native(&self, page_num: u32) -> Result<u32, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let tree = self.build_page_tree(page_num)?;
         let _overflows = self.layout_engine.take_overflows();
         let mut renderer = CanvasRenderer::new();
@@ -1193,6 +1317,7 @@ impl DocumentCore {
         use crate::renderer::layer_renderer::LayerRasterRenderer;
         use crate::renderer::skia::SkiaLayerRenderer;
 
+        let _font_scope = self.resolved_shaping_font_scope();
         let layer_tree = self.build_page_layer_tree(page_num)?;
         SkiaLayerRenderer::new().render_png(&layer_tree)
     }
@@ -1208,6 +1333,7 @@ impl DocumentCore {
         use crate::renderer::layer_renderer::LayerRasterRenderer;
         use crate::renderer::skia::SkiaLayerRenderer;
 
+        let _font_scope = self.resolved_shaping_font_scope();
         let layer_tree = self.build_page_layer_tree(page_num)?;
         SkiaLayerRenderer::new()
             .with_font_paths(font_paths)
@@ -1239,6 +1365,7 @@ impl DocumentCore {
         use crate::renderer::layer_renderer::{LayerRasterRenderer, RasterRenderOptions};
         use crate::renderer::skia::SkiaLayerRenderer;
 
+        let _font_scope = self.resolved_shaping_font_scope();
         let layer_tree = self.build_page_layer_tree_with_profile(page_num, profile)?;
 
         // 페이지 크기에서 effective scale + max_dimension 결정
@@ -2581,6 +2708,24 @@ impl DocumentCore {
         Ok(format!("{{\"runs\":[{}]}}", runs.join(",")))
     }
 
+    /// 도형 노드는 `CellContext` 가 없고 #1138 스칼라만 든다. 그 셋이 곧 1단계
+    /// `cellPath` 이며, 전부 있거나 전부 없다.
+    fn shape_cell_context_json(
+        cell_index: Option<usize>,
+        cell_para_index: Option<usize>,
+        outer_table_control_index: Option<usize>,
+    ) -> String {
+        let (Some(cei), Some(cpi), Some(otci)) =
+            (cell_index, cell_para_index, outer_table_control_index)
+        else {
+            return String::new();
+        };
+        format!(
+            ",\"cellIdx\":{cei},\"cellParaIdx\":{cpi},\"outerTableControlIdx\":{otci},\
+             \"cellPath\":[{{\"controlIndex\":{otci},\"cellIndex\":{cei},\"cellParaIndex\":{cpi}}}]"
+        )
+    }
+
     /// 컨트롤(표, 이미지 등) 레이아웃 정보 (네이티브 에러 타입)
     pub fn get_page_control_layout_native(&self, page_num: u32) -> Result<String, HwpError> {
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
@@ -2588,7 +2733,11 @@ impl DocumentCore {
         let tree = self.build_page_tree_cached(page_num)?;
 
         // 렌더 트리에서 Table, Image 노드를 재귀적으로 수집
-        fn collect_controls(node: &RenderNode, controls: &mut Vec<String>) {
+        fn collect_controls(
+            node: &RenderNode,
+            controls: &mut Vec<String>,
+            doc: &crate::model::document::Document,
+        ) {
             // [Task #1280 v2] 컨트롤별 plane/zOrder/stableIndex 노출 — 렌더 정렬키
             // `paper_node_sort_key`(layout.rs)를 그대로 재사용해 프런트 히트테스트가
             // 겹침 시 "최상단 개체"를 선택할 수 있게 한다. inline(layer=None) 노드는
@@ -2614,25 +2763,55 @@ impl DocumentCore {
                     None => "",
                 }
             };
+            let public_section = |section: Option<usize>| {
+                node.header_footer_source
+                    .as_ref()
+                    .map(|(si, _)| *si)
+                    .or(section)
+            };
+            let public_para = |pi: usize| {
+                if node.header_footer_source.is_some() && pi >= usize::MAX - 1024 {
+                    usize::MAX - pi
+                } else {
+                    pi
+                }
+            };
+            let hf_extra = match &node.header_footer_source {
+                Some((_, hf)) if !matches!(node.node_type, RenderNodeType::Image(_)) => {
+                    let kind = match hf.kind {
+                        crate::renderer::render_tree::HeaderFooterKind::Header => "header",
+                        crate::renderer::render_tree::HeaderFooterKind::Footer => "footer",
+                    };
+                    format!(
+                        ",\"headerFooter\":{{\"kind\":\"{}\",\"outerParaIdx\":{},\"outerControlIdx\":{}}}",
+                        kind, hf.outer_para_index, hf.outer_control_index
+                    )
+                }
+                _ => String::new(),
+            };
             let layer_str = format!(
-                ",\"plane\":{},\"zOrder\":{},\"stableIndex\":{}{}",
-                plane, z_order, stable_index, wrap_extra
+                ",\"plane\":{},\"zOrder\":{},\"stableIndex\":{}{}{}",
+                plane, z_order, stable_index, wrap_extra, hf_extra
             );
             match &node.node_type {
                 RenderNodeType::Table(table_node) => {
                     // 문서 좌표
                     let doc_coords = match (
-                        table_node.section_index,
+                        public_section(table_node.section_index),
                         table_node.para_index,
                         table_node.control_index,
                     ) {
                         (Some(si), Some(pi), Some(ci)) => {
                             format!(
                                 ",\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}",
-                                si, pi, ci
+                                si,
+                                public_para(pi),
+                                ci
                             )
                         }
-                        _ => String::new(),
+                        _ => public_section(table_node.section_index)
+                            .map(|si| format!(",\"secIdx\":{si}"))
+                            .unwrap_or_default(),
                     };
 
                     // 셀 정보 수집
@@ -2659,21 +2838,29 @@ impl DocumentCore {
                 }
                 RenderNodeType::Equation(eq_node) => {
                     let doc_coords = match (
-                        eq_node.section_index,
+                        public_section(eq_node.section_index),
                         eq_node.para_index,
                         eq_node.control_index,
                     ) {
                         (Some(si), Some(pi), Some(ci)) => {
                             format!(
                                 ",\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}",
-                                si, pi, ci
+                                si,
+                                public_para(pi),
+                                ci
                             )
                         }
-                        _ => String::new(),
+                        _ => public_section(eq_node.section_index)
+                            .map(|si| format!(",\"secIdx\":{si}"))
+                            .unwrap_or_default(),
                     };
                     let cell_coords = match (eq_node.cell_index, eq_node.cell_para_index) {
                         (Some(ci), Some(cpi)) => {
-                            format!(",\"cellIdx\":{},\"cellParaIdx\":{}", ci, cpi)
+                            let inner =
+                                eq_node.inner_control_index.map_or_else(String::new, |idx| {
+                                    format!(",\"innerControlIdx\":{}", idx)
+                                });
+                            format!(",\"cellIdx\":{},\"cellParaIdx\":{}{}", ci, cpi, inner)
                         }
                         _ => String::new(),
                     };
@@ -2689,8 +2876,34 @@ impl DocumentCore {
                         )
                     });
 
+                    // [#7105] 한/글 5.x·97 계열 수식은 `hwpeq5X` OLE 개체로 저장되지만
+                    // `#5725` 경로가 수식 렌더러로 그려 `Equation` 노드가 된다. 그 노드를
+                    // `equation` 으로 알리면 편집기가 삭제·속성을 수식 전용 명령
+                    // (`deleteEquationControl` · 수식 속성)으로 보내고, 그 명령은 native
+                    // `Control::Equation` 만 받아 거부한다 — 선택 핸들은 뜨는데 지워지지 않는다.
+                    // 원본이 OLE 도형이면 `ole` 로 알려 도형 명령(삭제·속성은 코어에서 성공)을
+                    // 쓰게 한다. 칸 안·주석 안 수식은 문단 좌표 체계가 달라 여기서 판정하지 않는다.
+                    let source_is_ole = eq_node.cell_index.is_none()
+                        && eq_node.note_ref.is_none()
+                        && matches!(
+                            (eq_node.section_index, eq_node.para_index, eq_node.control_index),
+                            (Some(si), Some(pi), Some(ci))
+                                if matches!(
+                                    doc.sections
+                                        .get(si)
+                                        .and_then(|section| section.paragraphs.get(pi))
+                                        .and_then(|para| para.controls.get(ci)),
+                                    Some(crate::model::control::Control::Shape(shape))
+                                        if matches!(
+                                            shape.as_ref(),
+                                            crate::model::shape::ShapeObject::Ole(_)
+                                        )
+                                )
+                        );
+                    let control_type = if source_is_ole { "ole" } else { "equation" };
                     controls.push(format!(
-                        "{{\"type\":\"equation\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1}{}{}{}{}}}",
+                        "{{\"type\":\"{}\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1}{}{}{}{}}}",
+                        control_type,
                         node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
                         doc_coords, cell_coords, note_ref, layer_str
                     ));
@@ -2698,17 +2911,21 @@ impl DocumentCore {
                 }
                 RenderNodeType::Image(image_node) => {
                     let doc_coords = match (
-                        image_node.section_index,
+                        public_section(image_node.section_index),
                         image_node.para_index,
                         image_node.control_index,
                     ) {
                         (Some(si), Some(pi), Some(ci)) => {
                             format!(
                                 ",\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}",
-                                si, pi, ci
+                                si,
+                                public_para(pi),
+                                ci
                             )
                         }
-                        _ => String::new(),
+                        _ => public_section(image_node.section_index)
+                            .map(|si| format!(",\"secIdx\":{si}"))
+                            .unwrap_or_default(),
                     };
                     // Task #516 결함 3: hit-test 정합 (옵션 3-C) — wrap 모드 노출.
                     // BehindText 그림은 텍스트 영역 위에서는 hit-test 후순위 처리.
@@ -2798,8 +3015,8 @@ impl DocumentCore {
                             node.bbox.y,
                             node.bbox.width,
                             node.bbox.height,
-                            control_ref.section_index,
-                            control_ref.para_index,
+                            public_section(Some(control_ref.section_index)).unwrap_or(control_ref.section_index),
+                            public_para(control_ref.para_index),
                             control_ref.control_index,
                             layer_str
                         ));
@@ -2818,8 +3035,8 @@ impl DocumentCore {
                             node.bbox.y,
                             node.bbox.width,
                             node.bbox.height,
-                            control_ref.section_index,
-                            control_ref.para_index,
+                            public_section(Some(control_ref.section_index)).unwrap_or(control_ref.section_index),
+                            public_para(control_ref.para_index),
                             control_ref.control_index,
                             layer_str
                         ));
@@ -2869,8 +3086,8 @@ impl DocumentCore {
                             node.bbox.y,
                             node.bbox.width,
                             node.bbox.height,
-                            control_ref.section_index,
-                            control_ref.para_index,
+                            public_section(Some(control_ref.section_index)).unwrap_or(control_ref.section_index),
+                            public_para(control_ref.para_index),
                             control_ref.control_index,
                             cell_str,
                             cell_path_str,
@@ -2881,128 +3098,101 @@ impl DocumentCore {
                 }
                 RenderNodeType::Group(group_node) => {
                     if let (Some(si), Some(pi), Some(ci)) = (
-                        group_node.section_index,
+                        public_section(group_node.section_index),
                         group_node.para_index,
                         group_node.control_index,
                     ) {
                         controls.push(format!(
                             "{{\"type\":\"group\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}}}",
                             node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
-                            si, pi, ci, layer_str
+                            si, public_para(pi), ci, layer_str
                         ));
                         return; // 자식 개별 수집하지 않음 — 묶음 전체가 하나의 컨트롤
                     }
                 }
                 RenderNodeType::Rectangle(rect_node) => {
-                    // 문서 좌표가 있는 Rectangle만 shape로 수집 (배경 사각형 제외)
                     if let (Some(si), Some(pi), Some(ci)) = (
-                        rect_node.section_index,
+                        public_section(rect_node.section_index),
                         rect_node.para_index,
                         rect_node.control_index,
                     ) {
-                        // [Task #1138] 표 셀 안 사각형: cellIdx/cellParaIdx/outerTableControlIdx
-                        let cell_str = match (rect_node.cell_index, rect_node.cell_para_index) {
-                            (Some(cei), Some(cpi)) => {
-                                format!(",\"cellIdx\":{},\"cellParaIdx\":{}", cei, cpi)
-                            }
-                            _ => String::new(),
-                        };
-                        let outer_table_str = match rect_node.outer_table_control_index {
-                            Some(otci) => format!(",\"outerTableControlIdx\":{}", otci),
-                            None => String::new(),
-                        };
+                        let cell_str = DocumentCore::shape_cell_context_json(
+                            rect_node.cell_index,
+                            rect_node.cell_para_index,
+                            rect_node.outer_table_control_index,
+                        );
                         controls.push(format!(
-                            "{{\"type\":\"shape\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}{}{}}}",
+                            "{{\"type\":\"shape\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}{}}}",
                             node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
-                            si, pi, ci, cell_str, outer_table_str, layer_str
+                            si, public_para(pi), ci, cell_str, layer_str
                         ));
-                        // [Task #1171] return 하지 않고 자식으로 재귀 — 사각형 글상자(text_box)
-                        // 안 중첩 picture/도형이 cellPath(cell_index=0 sentinel)로 수집되도록 한다.
-                        // 장식 노드(테두리 등)는 section/para/control 좌표가 None 이라 컨트롤로
-                        // 방출되지 않는다(좌표 가드). Table 핸들러와 동일하게 자식 탐색.
+                        // [#1171] return 하지 않는다. 사각형 글상자는 자식으로 재귀해야
+                        // 안쪽 picture/도형이 cell_index=0 sentinel 경로를 탄다.
                     }
                 }
                 RenderNodeType::Line(line_node) => {
                     if let (Some(si), Some(pi), Some(ci)) = (
-                        line_node.section_index,
+                        public_section(line_node.section_index),
                         line_node.para_index,
                         line_node.control_index,
                     ) {
-                        // [Task #1138] 표 셀 안 직선
-                        let cell_str = match (line_node.cell_index, line_node.cell_para_index) {
-                            (Some(cei), Some(cpi)) => {
-                                format!(",\"cellIdx\":{},\"cellParaIdx\":{}", cei, cpi)
-                            }
-                            _ => String::new(),
-                        };
-                        let outer_table_str = match line_node.outer_table_control_index {
-                            Some(otci) => format!(",\"outerTableControlIdx\":{}", otci),
-                            None => String::new(),
-                        };
+                        let cell_str = DocumentCore::shape_cell_context_json(
+                            line_node.cell_index,
+                            line_node.cell_para_index,
+                            line_node.outer_table_control_index,
+                        );
                         controls.push(format!(
-                            "{{\"type\":\"line\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"x1\":{:.1},\"y1\":{:.1},\"x2\":{:.1},\"y2\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}{}{}}}",
+                            "{{\"type\":\"line\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"x1\":{:.1},\"y1\":{:.1},\"x2\":{:.1},\"y2\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}{}}}",
                             node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
                             line_node.x1, line_node.y1, line_node.x2, line_node.y2,
-                            si, pi, ci, cell_str, outer_table_str, layer_str
+                            si, public_para(pi), ci, cell_str, layer_str
                         ));
                         return;
                     }
                 }
                 RenderNodeType::Ellipse(ell_node) => {
                     if let (Some(si), Some(pi), Some(ci)) = (
-                        ell_node.section_index,
+                        public_section(ell_node.section_index),
                         ell_node.para_index,
                         ell_node.control_index,
                     ) {
-                        // [Task #1138] 표 셀 안 타원
-                        let cell_str = match (ell_node.cell_index, ell_node.cell_para_index) {
-                            (Some(cei), Some(cpi)) => {
-                                format!(",\"cellIdx\":{},\"cellParaIdx\":{}", cei, cpi)
-                            }
-                            _ => String::new(),
-                        };
-                        let outer_table_str = match ell_node.outer_table_control_index {
-                            Some(otci) => format!(",\"outerTableControlIdx\":{}", otci),
-                            None => String::new(),
-                        };
+                        let cell_str = DocumentCore::shape_cell_context_json(
+                            ell_node.cell_index,
+                            ell_node.cell_para_index,
+                            ell_node.outer_table_control_index,
+                        );
                         controls.push(format!(
-                            "{{\"type\":\"shape\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}{}{}}}",
+                            "{{\"type\":\"shape\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}{}}}",
                             node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
-                            si, pi, ci, cell_str, outer_table_str, layer_str
+                            si, public_para(pi), ci, cell_str, layer_str
                         ));
                         return;
                     }
                 }
                 RenderNodeType::Path(path_node) => {
                     if let (Some(si), Some(pi), Some(ci)) = (
-                        path_node.section_index,
+                        public_section(path_node.section_index),
                         path_node.para_index,
                         path_node.control_index,
                     ) {
-                        // [Task #1138] 표 셀 안 path (다각형/곡선/연결선)
-                        let cell_str = match (path_node.cell_index, path_node.cell_para_index) {
-                            (Some(cei), Some(cpi)) => {
-                                format!(",\"cellIdx\":{},\"cellParaIdx\":{}", cei, cpi)
-                            }
-                            _ => String::new(),
-                        };
-                        let outer_table_str = match path_node.outer_table_control_index {
-                            Some(otci) => format!(",\"outerTableControlIdx\":{}", otci),
-                            None => String::new(),
-                        };
+                        let cell_str = DocumentCore::shape_cell_context_json(
+                            path_node.cell_index,
+                            path_node.cell_para_index,
+                            path_node.outer_table_control_index,
+                        );
                         if let Some((x1, y1, x2, y2)) = path_node.connector_endpoints {
-                            // 연결선: 선 선택 방식 (시작/끝 좌표 포함)
+                            // 연결선은 채워진 도형이 아니라 선으로 선택된다.
                             controls.push(format!(
-                                "{{\"type\":\"line\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"x1\":{:.1},\"y1\":{:.1},\"x2\":{:.1},\"y2\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}{}{}}}",
+                                "{{\"type\":\"line\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"x1\":{:.1},\"y1\":{:.1},\"x2\":{:.1},\"y2\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}{}}}",
                                 node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
                                 x1, y1, x2, y2,
-                                si, pi, ci, cell_str, outer_table_str, layer_str
+                                si, public_para(pi), ci, cell_str, layer_str
                             ));
                         } else {
                             controls.push(format!(
-                                "{{\"type\":\"shape\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}{}{}}}",
+                                "{{\"type\":\"shape\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}{}}}",
                                 node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
-                                si, pi, ci, cell_str, outer_table_str, layer_str
+                                si, public_para(pi), ci, cell_str, layer_str
                             ));
                         }
                         return;
@@ -3011,12 +3201,12 @@ impl DocumentCore {
                 _ => {}
             }
             for child in &node.children {
-                collect_controls(child, controls);
+                collect_controls(child, controls, doc);
             }
         }
 
         let mut controls = Vec::new();
-        collect_controls(&tree.root, &mut controls);
+        collect_controls(&tree.root, &mut controls, &self.document);
 
         Ok(format!("{{\"controls\":[{}]}}", controls.join(",")))
     }
@@ -3223,6 +3413,16 @@ impl DocumentCore {
         &mut self,
         fragment_budget: usize,
     ) -> DeferredPaginationStepResult {
+        let fonts = self.layout_engine.resolved_shaping_fonts();
+        crate::renderer::layout::with_resolved_shaping_fonts(fonts, || {
+            self.begin_deferred_pagination_with_active_fonts(fragment_budget)
+        })
+    }
+
+    fn begin_deferred_pagination_with_active_fonts(
+        &mut self,
+        fragment_budget: usize,
+    ) -> DeferredPaginationStepResult {
         self.pending_pagination_job = None;
         let Some(descriptor) = self.deferred_pagination_descriptor.clone() else {
             return DeferredPaginationStepResult {
@@ -3284,7 +3484,9 @@ impl DocumentCore {
         let hwp3_origin_flow_spacing_before = uses_hwp3_origin_flow_spacing_before(&self.document);
         let measurer = HeightMeasurer::new(self.dpi)
             .with_hwp3_variant(profile.hwp3_layout())
+            .with_hwpx_cell_spacing(profile.hwpx_stored_layout() || profile.hwp5_origin_hwpx())
             .with_hwp3_origin_flow_spacing_before(hwp3_origin_flow_spacing_before)
+            .with_session_edited(profile.session_edited())
             .with_render_normalization(std::sync::Arc::clone(&self.render_normalization.overlay));
         let column_def = Self::find_initial_column_def(paragraphs);
         let layout =
@@ -3353,6 +3555,16 @@ impl DocumentCore {
     /// [#2424] shadow job에서 fragment budget만큼 전진한다.
     /// 완료 전에는 기존 공개 pagination과 render tree cache를 유지한다.
     pub fn step_deferred_pagination(
+        &mut self,
+        fragment_budget: usize,
+    ) -> DeferredPaginationStepResult {
+        let fonts = self.layout_engine.resolved_shaping_fonts();
+        crate::renderer::layout::with_resolved_shaping_fonts(fonts, || {
+            self.step_deferred_pagination_with_active_fonts(fragment_budget)
+        })
+    }
+
+    fn step_deferred_pagination_with_active_fonts(
         &mut self,
         fragment_budget: usize,
     ) -> DeferredPaginationStepResult {
@@ -3567,6 +3779,14 @@ impl DocumentCore {
     /// 측정 통일(B). `paginate_pass` 의 `force_break_before` 훅과 `LayoutOverflow` 의
     /// section_index/is_first_in_column 계측은 측정 통일 작업의 진단·후속용으로 유지한다.
     pub(crate) fn paginate(&mut self) {
+        let fonts = self.collect_resolved_shaping_fonts();
+        self.layout_engine.set_resolved_shaping_fonts(fonts.clone());
+        crate::renderer::layout::with_resolved_shaping_fonts(fonts, || {
+            self.paginate_with_resolved_shaping_fonts()
+        });
+    }
+
+    fn paginate_with_resolved_shaping_fonts(&mut self) {
         self.header_footer_preview_tree_cache.borrow_mut().take();
         self.pending_pagination_job = None;
         let sec_count = self.document.sections.len().max(1);
@@ -3619,7 +3839,9 @@ impl DocumentCore {
         let profile = self.document.layout_profile();
         let measurer = HeightMeasurer::new(self.dpi)
             .with_hwp3_variant(profile.hwp3_layout())
+            .with_hwpx_cell_spacing(profile.hwpx_stored_layout() || profile.hwp5_origin_hwpx())
             .with_hwp3_origin_flow_spacing_before(hwp3_origin_flow_spacing_before)
+            .with_session_edited(profile.session_edited())
             .with_render_normalization(std::sync::Arc::clone(&self.render_normalization.overlay));
 
         if self.document.sections.is_empty() {
@@ -4360,9 +4582,33 @@ impl DocumentCore {
         }
     }
 
+    fn previous_cell_metric_styles(
+        &self,
+    ) -> Option<crate::renderer::style_resolver::ResolvedStyleSet> {
+        use crate::model::provenance::FontMetricsPolicy;
+        if !self.document.layout_profile().hwp5_origin_hwpx()
+            || self.document.doc_info.font_metrics_policy != FontMetricsPolicy::HcrDeclared
+        {
+            return None;
+        }
+        let mut styles = self.styles.clone();
+        for style in &mut styles.char_styles {
+            style.font_metrics_policy = FontMetricsPolicy::HancomWindows;
+        }
+        Some(styles)
+    }
+
     /// [#2004] 부동 전면 이미지 스택 섹션의 정규화본(그림 tac=true 재분류 + 재구성)을 재계산.
     /// 원본 `document`/`composed` 는 무손상(save 무결). paginate 시작 시 호출.
     pub(crate) fn compute_render_normalized(&mut self) {
+        // Rau's HWP5-origin exports can retain wrapping computed with the old
+        // Windows substitution. The projection requires an exact reproduction
+        // with those metrics and unchanged line geometry with current metrics.
+        // Native HWP and documents without that exporter lineage stay untouched.
+        let previous_metric_styles = self.previous_cell_metric_styles();
+        let can_project_body_spacing =
+            matches!(self.source_format, crate::parser::FileFormat::Hwpx)
+                && self.document.layout_profile().hwp5_origin_hwpx();
         let sec_count = self.document.sections.len();
         self.render_normalization
             .section_revisions
@@ -4405,11 +4651,39 @@ impl DocumentCore {
                     _ => false,
                 })
             });
-            if matches.is_empty() && !has_cell_stack {
+            let metric_projection = previous_metric_styles.as_ref().and_then(|previous_styles| {
+                let mut paragraphs = section.paragraphs.clone();
+                crate::renderer::composer::repair_metric_stale_cell_lines(
+                    &mut paragraphs,
+                    previous_styles,
+                    &self.styles,
+                    self.dpi,
+                )
+                .then_some(paragraphs)
+            });
+            let body_projection = can_project_body_spacing
+                .then(|| {
+                    crate::renderer::composer::doubled_body_spacing_projection(
+                        &section.paragraphs,
+                        &self.styles,
+                        self.dpi,
+                    )
+                })
+                .flatten();
+            let body_spacing_projected = body_projection.is_some();
+            if matches.is_empty()
+                && !has_cell_stack
+                && metric_projection.is_none()
+                && !body_spacing_projected
+            {
                 out.push(None);
                 continue;
             }
-            let mut np = section.paragraphs.clone();
+            // Body projection excludes table controls, so the two corrections
+            // cannot compete for the same section.
+            let mut np = body_projection
+                .or(metric_projection)
+                .unwrap_or_else(|| section.paragraphs.clone());
             if has_cell_stack {
                 for p in np.iter_mut() {
                     reclassify_cell_floating_stacks(p, min_height_hu);
@@ -4460,6 +4734,7 @@ impl DocumentCore {
                 .collect();
             out.push(Some(super::super::RenderNormalizedSection {
                 source_revision,
+                body_spacing_projected,
                 paragraphs: std::sync::Arc::new(np),
                 composed: std::sync::Arc::new(nc),
             }));
@@ -4480,7 +4755,26 @@ impl DocumentCore {
         section_idx: usize,
         para_idx: usize,
     ) {
-        let source_para = self.document.sections[section_idx].paragraphs[para_idx].clone();
+        if self
+            .render_normalization
+            .sections
+            .get(section_idx)
+            .and_then(|section| section.as_ref())
+            .is_some_and(|section| section.body_spacing_projected)
+        {
+            self.render_normalization.sections[section_idx] = None;
+            self.compute_render_normalized();
+            return;
+        }
+        let mut source_para = self.document.sections[section_idx].paragraphs[para_idx].clone();
+        if let Some(previous_styles) = self.previous_cell_metric_styles() {
+            crate::renderer::composer::repair_metric_stale_cell_lines(
+                std::slice::from_mut(&mut source_para),
+                &previous_styles,
+                &self.styles,
+                self.dpi,
+            );
+        }
         let source_composed = self.composed[section_idx][para_idx].clone();
         let Some(Some(section)) = self.render_normalization.sections.get_mut(section_idx) else {
             return;
@@ -5255,6 +5549,17 @@ impl DocumentCore {
         page_num: u32,
         build: impl FnOnce(&PageRenderTree) -> Result<T, HwpError>,
     ) -> Result<T, HwpError> {
+        let fonts = self.layout_engine.resolved_shaping_fonts();
+        crate::renderer::layout::with_resolved_shaping_fonts(fonts, || {
+            self.with_page_tree_cached_with_active_fonts(page_num, build)
+        })
+    }
+
+    fn with_page_tree_cached_with_active_fonts<T>(
+        &self,
+        page_num: u32,
+        build: impl FnOnce(&PageRenderTree) -> Result<T, HwpError>,
+    ) -> Result<T, HwpError> {
         let idx = page_num as usize;
         let cached = self
             .page_tree_cache
@@ -5365,6 +5670,17 @@ impl DocumentCore {
     }
 
     fn build_page_tree_with_header_footer_override(
+        &self,
+        page_num: u32,
+        header_footer_override: Option<(usize, bool, u8)>,
+    ) -> Result<PageRenderTree, HwpError> {
+        let fonts = self.layout_engine.resolved_shaping_fonts();
+        crate::renderer::layout::with_resolved_shaping_fonts(fonts, || {
+            self.build_page_tree_with_active_shaping_fonts(page_num, header_footer_override)
+        })
+    }
+
+    fn build_page_tree_with_active_shaping_fonts(
         &self,
         page_num: u32,
         header_footer_override: Option<(usize, bool, u8)>,
@@ -5781,8 +6097,26 @@ impl DocumentCore {
             },
         }
 
-        fn collect_line_text(node: &RenderNode, out: &mut String, has_token: &mut bool) {
+        fn collect_line_text(
+            node: &RenderNode,
+            out: &mut String,
+            has_token: &mut bool,
+            items: &mut Vec<MarkdownItem>,
+        ) {
             match &node.node_type {
+                RenderNodeType::Image(image_node) => {
+                    if *has_token {
+                        items.push(MarkdownItem::Line(std::mem::take(out)));
+                        *has_token = false;
+                    }
+                    items.push(MarkdownItem::Image {
+                        sec_idx: image_node.section_index,
+                        para_idx: image_node.para_index,
+                        control_idx: image_node.control_index,
+                        bin_data_id: image_node.bin_data_id,
+                    });
+                    return;
+                }
                 RenderNodeType::TextRun(tr) => {
                     // 사람이 읽을 문자열이므로 표시 텍스트를 쓴다 — 머리말 필드는
                     // 모델에 제어문자 1자라 그대로 내보내면 값이 사라진다 (Task #3216).
@@ -5806,7 +6140,7 @@ impl DocumentCore {
             }
 
             for child in &node.children {
-                collect_line_text(child, out, has_token);
+                collect_line_text(child, out, has_token, items);
             }
         }
 
@@ -5818,18 +6152,90 @@ impl DocumentCore {
                 .to_string()
         }
 
-        fn table_cell_text(cell: &crate::model::table::Cell) -> String {
+        const MAX_NEST_DEPTH: usize = 8;
+
+        fn cell_text_slice(chars: &[char], start: usize, end: usize) -> String {
+            let text: String = chars[start..end]
+                .iter()
+                .copied()
+                .filter(|&c| c != '\u{FFFC}')
+                .collect();
+            markdown_escape_cell(&text)
+        }
+
+        fn table_cell_text(
+            cell: &crate::model::table::Cell,
+            table_id: &str,
+            nested_tables: &mut Vec<String>,
+            depth: usize,
+        ) -> String {
             let mut parts: Vec<String> = Vec::new();
             for para in &cell.paragraphs {
-                let txt = para.text.trim();
-                if !txt.is_empty() {
-                    parts.push(markdown_escape_cell(txt));
+                if para
+                    .controls
+                    .iter()
+                    .any(|ctrl| matches!(ctrl, Control::Table(_)))
+                {
+                    let chars: Vec<char> = para.text.chars().collect();
+                    let positions = para.control_text_positions();
+                    let mut cursor = 0;
+                    let mut content = String::new();
+                    for (index, control) in para.controls.iter().enumerate() {
+                        let insertion = match control {
+                            Control::Table(table) => {
+                                let child_id = format!("{}-{}", table_id, nested_tables.len() + 1);
+                                if depth + 1 < MAX_NEST_DEPTH {
+                                    let markdown = table_to_markdown(table, &child_id, depth + 1);
+                                    nested_tables.push(format!(
+                                        "**하위 표 {} — 표 {}의 {}행 {}열**\n\n{}",
+                                        child_id,
+                                        table_id,
+                                        usize::from(cell.row) + 1,
+                                        usize::from(cell.col) + 1,
+                                        markdown,
+                                    ));
+                                }
+                                format!("[하위 표 {} 참조]", child_id)
+                            }
+                            Control::Equation(equation) => markdown_escape_cell(&equation.script),
+                            _ => continue,
+                        };
+                        let position = positions
+                            .get(index)
+                            .copied()
+                            .unwrap_or(chars.len())
+                            .min(chars.len())
+                            .max(cursor);
+                        content.push_str(&cell_text_slice(&chars, cursor, position));
+                        if !content.is_empty() {
+                            content.push(' ');
+                        }
+                        content.push_str(&insertion);
+                        content.push(' ');
+                        cursor = position;
+                        if chars.get(cursor) == Some(&'\u{FFFC}') {
+                            cursor += 1;
+                        }
+                    }
+                    content.push_str(&cell_text_slice(&chars, cursor, chars.len()));
+                    if !content.trim().is_empty() {
+                        parts.push(content.trim().to_string());
+                    }
+                } else {
+                    let txt = para.text.trim();
+                    if !txt.is_empty() {
+                        parts.push(markdown_escape_cell(txt));
+                    }
                 }
             }
             parts.join(" <br> ")
         }
 
-        fn table_to_markdown(table: &crate::model::table::Table) -> String {
+        fn table_to_markdown(
+            table: &crate::model::table::Table,
+            table_id: &str,
+            depth: usize,
+        ) -> String {
             let rows = table.row_count as usize;
             let cols = table.col_count as usize;
             if rows == 0 || cols == 0 {
@@ -5837,6 +6243,7 @@ impl DocumentCore {
             }
 
             let mut grid = vec![vec![String::new(); cols]; rows];
+            let mut nested_tables = Vec::new();
 
             for cell in &table.cells {
                 let r = cell.row as usize;
@@ -5844,7 +6251,7 @@ impl DocumentCore {
                 if r >= rows || c >= cols {
                     continue;
                 }
-                grid[r][c] = table_cell_text(cell);
+                grid[r][c] = table_cell_text(cell, table_id, &mut nested_tables, depth);
             }
 
             let make_row = |cells: &[String]| -> String { format!("| {} |", cells.join(" | ")) };
@@ -5862,7 +6269,12 @@ impl DocumentCore {
             for row in grid.iter().skip(1) {
                 lines.push(make_row(row));
             }
-            lines.join("\n")
+            let mut markdown = lines.join("\n");
+            for nested in nested_tables {
+                markdown.push_str("\n\n");
+                markdown.push_str(&nested);
+            }
+            markdown
         }
 
         fn lookup_table<'a>(
@@ -5906,7 +6318,13 @@ impl DocumentCore {
                         table_node.control_index,
                     ) {
                         if let Some(table) = lookup_table(doc, si, pi, ci) {
-                            let md = table_to_markdown(table);
+                            let table_id = (items
+                                .iter()
+                                .filter(|item| matches!(item, MarkdownItem::Table(_)))
+                                .count()
+                                + 1)
+                            .to_string();
+                            let md = table_to_markdown(table, &table_id, 0);
                             if !md.is_empty() {
                                 items.push(MarkdownItem::Table(md));
                             }
@@ -5932,7 +6350,7 @@ impl DocumentCore {
                     let mut line = String::new();
                     let mut has_token = false;
                     for child in &node.children {
-                        collect_line_text(child, &mut line, &mut has_token);
+                        collect_line_text(child, &mut line, &mut has_token, items);
                     }
                     if has_token {
                         items.push(MarkdownItem::Line(line));
@@ -6205,6 +6623,7 @@ fn format_line_seg_brief(para: Option<&Paragraph>) -> String {
 mod tests {
     use super::*;
     use crate::model::bin_data::BinDataContent;
+    use crate::model::table::{Cell, Table};
     use crate::renderer::render_tree::RenderNodeType;
 
     fn assert_send<T: Send>() {}
@@ -6934,6 +7353,7 @@ mod tests {
                 ..Default::default()
             }],
             raw_stream: None,
+            raw_provenance: None,
         });
 
         let mut core = DocumentCore::new_empty();
@@ -6953,6 +7373,52 @@ mod tests {
             Some("glyphOutline")
         );
         assert!(!plan.text_variants[0].fallback_required);
+    }
+
+    #[test]
+    fn ttc_substitute_binds_declared_and_substitute_names_to_one_face() {
+        use crate::model::style::{CharShape, Font, SubstFont};
+
+        let mut document = crate::model::document::Document::default();
+        document.doc_info.font_faces = vec![Vec::new(); 7];
+        document.doc_info.font_faces[0].push(Font {
+            name: "Legacy Declared Family".to_string(),
+            subst_font: Some(SubstFont {
+                face: "RHWP Exact Face One".to_string(),
+                font_type: 1,
+                is_embedded: true,
+                bin_item_id_ref: "font-ttc".to_string(),
+                resolved_bin_data_id: Some(1),
+            }),
+            ..Default::default()
+        });
+        document.doc_info.char_shapes.push(CharShape {
+            font_ids: [0; 7],
+            ..Default::default()
+        });
+        document.bin_data_content.push(BinDataContent {
+            id: 1,
+            data: include_bytes!("../../../tests/fixtures/fonts/RHWPExactFaceSmoke.ttc")
+                .to_vec()
+                .into(),
+            extension: "ttc".to_string(),
+        });
+        let mut core = DocumentCore::new_empty();
+        core.document = document;
+
+        let fonts = core.collect_resolved_shaping_fonts();
+        let declared = fonts
+            .iter()
+            .find(|font| font.family == "Legacy Declared Family")
+            .expect("declared alias");
+        let substitute = fonts
+            .iter()
+            .find(|font| font.family == "RHWP Exact Face One")
+            .expect("substitute family");
+
+        assert_eq!(declared.face_index, 1);
+        assert_eq!(substitute.face_index, 1);
+        assert!(std::sync::Arc::ptr_eq(&declared.bytes, &substitute.bytes));
     }
 
     #[test]
@@ -7005,6 +7471,39 @@ mod tests {
             .get_page_control_layout_native(0)
             .expect("control layout for page 0");
 
+        fn remove_image_control_index(
+            node: &mut crate::renderer::render_tree::RenderNode,
+        ) -> Option<usize> {
+            if let crate::renderer::render_tree::RenderNodeType::Image(image) = &mut node.node_type
+            {
+                if let Some(section) = image.section_index {
+                    image.control_index = None;
+                    return Some(section);
+                }
+            }
+            node.children
+                .iter_mut()
+                .find_map(remove_image_control_index)
+        }
+        let mut partial_tree = core.build_page_tree_cached(0).unwrap();
+        let expected_section = remove_image_control_index(&mut partial_tree.root)
+            .expect("fixture has an image with source section");
+        core.page_tree_cache.borrow_mut()[0] = Some(partial_tree);
+        let partial: serde_json::Value =
+            serde_json::from_str(&core.get_page_control_layout_native(0).unwrap()).unwrap();
+        assert!(
+            partial["controls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|control| {
+                    control["type"] == "image"
+                        && control["secIdx"] == expected_section
+                        && control.get("controlIdx").is_none()
+                }),
+            "known section disappeared with a missing control index: {partial}"
+        );
+
         // 신규 필드가 노출됨
         assert!(json.contains("\"plane\":"), "plane 필드 누락: {json}");
         assert!(json.contains("\"zOrder\":"), "zOrder 필드 누락: {json}");
@@ -7052,6 +7551,7 @@ mod tests {
             },
             paragraphs: vec![Paragraph::default()],
             raw_stream: None,
+            raw_provenance: None,
         });
 
         let mut core = DocumentCore::new_empty();
@@ -7098,6 +7598,7 @@ mod tests {
                 section_def,
                 paragraphs: vec![Paragraph::default()],
                 raw_stream: None,
+                raw_provenance: None,
             }
         }
 
@@ -7168,6 +7669,7 @@ mod tests {
                 section_def,
                 paragraphs: vec![Paragraph::default()],
                 raw_stream: None,
+                raw_provenance: None,
             }
         }
 
@@ -7231,6 +7733,7 @@ mod tests {
                 section_def,
                 paragraphs: vec![Paragraph::default()],
                 raw_stream: None,
+                raw_provenance: None,
             }
         }
 
@@ -7288,6 +7791,7 @@ mod tests {
             section_def: SectionDef::default(),
             paragraphs: vec![Paragraph::default()],
             raw_stream: None,
+            raw_provenance: None,
         });
         core.set_document(document);
         core.paginate();
@@ -7561,5 +8065,101 @@ mod tests {
                 t
             );
         }
+    }
+
+    fn one_cell_table(paragraph: Paragraph) -> Table {
+        Table {
+            row_count: 1,
+            col_count: 1,
+            cells: vec![Cell {
+                row: 0,
+                col: 0,
+                col_span: 1,
+                row_span: 1,
+                width: 20_000,
+                height: 4_000,
+                paragraphs: vec![paragraph],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn core_with_body_table(table: Table) -> DocumentCore {
+        let mut document = Document::default();
+        let mut body = Paragraph::default();
+        body.controls.push(Control::Table(Box::new(table)));
+        document.sections.push(Section {
+            paragraphs: vec![body],
+            ..Default::default()
+        });
+        let composed = document
+            .sections
+            .iter()
+            .map(crate::renderer::composer::compose_section)
+            .collect();
+        let mut core = DocumentCore::new_empty();
+        core.document = document;
+        core.composed = composed;
+        core.dirty_sections = vec![true];
+        core.paginate();
+        core
+    }
+
+    #[test]
+    fn nested_table_markdown_skips_hwp3_object_replacement() {
+        let inner = one_cell_table(Paragraph {
+            text: "INNER".into(),
+            ..Default::default()
+        });
+        let text = "BEFORE\u{FFFC}AFTER";
+        let host = Paragraph {
+            text: text.to_string(),
+            char_offsets: (0..text.chars().count() as u32).collect(),
+            controls: vec![Control::Table(Box::new(inner))],
+            ..Default::default()
+        };
+        let core = core_with_body_table(one_cell_table(host));
+        let (markdown, _) = core
+            .extract_page_markdown_with_images_native(0)
+            .expect("markdown");
+        assert!(
+            !markdown.contains('\u{FFFC}'),
+            "object replacement must not leak: {markdown:?}"
+        );
+        assert!(markdown.contains("BEFORE"), "{markdown}");
+        assert!(markdown.contains("AFTER"), "{markdown}");
+        assert!(markdown.contains("INNER"), "{markdown}");
+    }
+
+    #[test]
+    fn nested_table_markdown_stops_at_export_tables_depth() {
+        let mut table = one_cell_table(Paragraph {
+            text: "LEAF".into(),
+            ..Default::default()
+        });
+        for depth in (0..12).rev() {
+            let label = format!("L{depth}\u{FFFC}");
+            table = one_cell_table(Paragraph {
+                text: label.clone(),
+                char_offsets: (0..label.chars().count() as u32).collect(),
+                controls: vec![Control::Table(Box::new(table))],
+                ..Default::default()
+            });
+        }
+        let core = core_with_body_table(table);
+        let (markdown, _) = core
+            .extract_page_markdown_with_images_native(0)
+            .expect("markdown");
+        assert!(
+            !markdown.contains('\u{FFFC}'),
+            "object replacement must not leak: {markdown:?}"
+        );
+        let headings = markdown.matches("**하위 표").count();
+        assert!(
+            headings <= 8,
+            "nested expansion must cap at export-tables depth: {headings} {markdown}"
+        );
+        assert!(markdown.contains("L0"), "{markdown}");
     }
 }

@@ -1,0 +1,167 @@
+name: Build desktop package
+description: Build once, package, and verify a supported desktop installer.
+inputs:
+  platform:
+    description: macos or windows.
+    required: true
+  signed:
+    description: Sign and notarize macOS release packages.
+    default: 'false'
+  version:
+    description: Optional nightly package version.
+    default: ''
+  artifact:
+    description: Optional artifact upload name.
+    default: ''
+  certificate:
+    description: Developer ID certificate.
+    required: false
+  certificate-password:
+    description: Certificate password.
+    required: false
+  apple-id:
+    description: Apple notarization account.
+    required: false
+  apple-team-id:
+    description: Apple developer team.
+    required: false
+  apple-password:
+    description: Apple notarization password.
+    required: false
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v5
+      with:
+        node-version: 22.18.0
+        cache: npm
+        cache-dependency-path: |
+          package-lock.json
+          rhwp/rhwp-studio/package-lock.json
+          rhwp/rhwp-agent/package-lock.json
+    - name: Assert runner architecture
+      shell: bash
+      env:
+        EXPECTED_NODE_ARCH: ${{ inputs.platform == 'macos' && 'arm64' || 'x64' }}
+      run: node -e "if (process.arch !== process.env.EXPECTED_NODE_ARCH) throw new Error('Unexpected runner architecture ' + process.arch)"
+    - uses: ./.github/actions/setup-rust
+      with:
+        wasm: 'true'
+        cache: package
+    - name: Install dependencies
+      shell: bash
+      run: |
+        npm ci
+        npm --prefix rhwp/rhwp-studio ci
+        npm --prefix rhwp/rhwp-agent ci --omit=dev
+    - name: Set nightly package version
+      if: inputs.version != ''
+      shell: bash
+      env:
+        PACKAGE_VERSION: ${{ inputs.version }}
+      run: npm version --no-git-tag-version "$PACKAGE_VERSION"
+    - name: Build desktop application
+      shell: bash
+      run: npm run build:desktop
+    - name: Verify native Windows atomic replacement
+      if: inputs.platform == 'windows'
+      shell: bash
+      working-directory: rhwp
+      run: cargo test --locked --bin rhwp atomic_file::tests -- --nocapture
+    - name: Package unsigned macOS installers
+      if: inputs.platform == 'macos' && inputs.signed != 'true'
+      shell: bash
+      env:
+        CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      run: >-
+        npm run package:mac --
+        -c.mac.identity=null
+        -c.mac.hardenedRuntime=false
+        -c.mac.notarize=false
+    - name: Verify Developer ID and Apple ID notarization secrets
+      if: inputs.platform == 'macos' && inputs.signed == 'true'
+      shell: bash
+      env:
+        CSC_LINK: ${{ inputs.certificate }}
+        CSC_KEY_PASSWORD: ${{ inputs.certificate-password }}
+        APPLE_ID: ${{ inputs.apple-id }}
+        APPLE_TEAM_ID: ${{ inputs.apple-team-id }}
+        APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.apple-password }}
+      run: |
+        set -euo pipefail
+        for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+          if [[ -z "${!name}" ]]; then
+            echo "Required macos-release secret is missing: ${name}" >&2
+            exit 1
+          fi
+        done
+    - name: Build signed and notarized macOS installers
+      if: inputs.platform == 'macos' && inputs.signed == 'true'
+      shell: bash
+      env:
+        CSC_IDENTITY_AUTO_DISCOVERY: true
+        CSC_NAME: "TAEWOOK HA (C8M34MMT8W)"
+        CSC_LINK: ${{ inputs.certificate }}
+        CSC_KEY_PASSWORD: ${{ inputs.certificate-password }}
+        APPLE_ID: ${{ inputs.apple-id }}
+        APPLE_TEAM_ID: ${{ inputs.apple-team-id }}
+        APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.apple-password }}
+      run: npm run package:mac
+    - name: Package Windows installer
+      if: inputs.platform == 'windows'
+      shell: bash
+      run: npm run package:win
+    - name: Verify packaged runtime files
+      shell: bash
+      run: npm run verify:package
+    - name: Verify installer set and architecture
+      shell: bash
+      env:
+        PACKAGE_PLATFORM: ${{ inputs.platform }}
+        PACKAGE_ARCH: ${{ inputs.platform == 'macos' && 'arm64' || 'x64' }}
+      run: node scripts/verify-release-artifacts.mjs "$PACKAGE_PLATFORM" "$PACKAGE_ARCH"
+    - name: Verify Developer ID signature and notarization
+      if: inputs.platform == 'macos' && inputs.signed == 'true'
+      shell: bash
+      env:
+        EXPECTED_IDENTITY: "Developer ID Application: TAEWOOK HA (C8M34MMT8W)"
+      run: |
+        set -euo pipefail
+        while IFS= read -r -d '' app_path; do
+          codesign --verify --deep --strict --verbose=2 "${app_path}"
+          signing_info="$(codesign -dv --verbose=4 "${app_path}" 2>&1)"
+          printf '%s\n' "${signing_info}"
+          if ! grep -F "Authority=${EXPECTED_IDENTITY}" <<<"${signing_info}"; then
+            echo "App was not signed with ${EXPECTED_IDENTITY}: ${app_path}" >&2
+            exit 1
+          fi
+          if grep -E 'Signature=(adhoc|unofficial)|Authority=Apple Development' <<<"${signing_info}"; then
+            echo "Rejected development or ad-hoc signature: ${app_path}" >&2
+            exit 1
+          fi
+          xcrun stapler validate "${app_path}"
+        done < <(find release -type d -name 'Rauhwpx.app' -print0)
+    - name: Verify Windows installer is unsigned by design
+      if: inputs.platform == 'windows'
+      shell: pwsh
+      run: |
+        $installers = @(Get-ChildItem -Path release -Filter '*-x64.exe' -File)
+        if ($installers.Count -ne 1) {
+          throw "Expected one Windows x64 installer, found $($installers.Count)."
+        }
+        $signature = Get-AuthenticodeSignature -FilePath $installers[0].FullName
+        if ($signature.Status -ne 'NotSigned') {
+          throw "The Windows installer must remain unsigned; status was $($signature.Status)."
+        }
+    - name: Upload installers
+      if: inputs.artifact != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact }}
+        if-no-files-found: error
+        path: |
+          release/*.dmg
+          release/*.zip
+          release/*.exe
+          release/*.blockmap
+          release/*.yml

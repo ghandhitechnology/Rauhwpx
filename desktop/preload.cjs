@@ -68,6 +68,52 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
   commitDocument: (reservationId) => ipcRenderer.invoke('desktop:document-commit', reservationId),
   cancelDocument: (reservationId) => ipcRenderer.invoke('desktop:document-cancel', reservationId),
   releaseDocument: () => ipcRenderer.invoke('desktop:document-release'),
+  cloudGetState: (payload) => ipcRenderer.invoke('cloud:get-state', payload),
+  cloudSaveProfile: (payload) => ipcRenderer.invoke('cloud:save-profile', payload),
+  cloudTestProfile: (payload) => ipcRenderer.invoke('cloud:test-profile', payload),
+  cloudProvision: (payload) => ipcRenderer.invoke('cloud:provision', payload),
+  cloudPair: (payload) => ipcRenderer.invoke('cloud:pair', payload),
+  cloudSelectServerMode: (payload) => ipcRenderer.invoke('cloud:select-server-mode', payload),
+  cloudSpawnSandbox: (payload) => ipcRenderer.invoke('cloud:spawn-sandbox', payload),
+  cloudSandboxStatus: () => ipcRenderer.invoke('cloud:sandbox-status'),
+  cloudTeardownSandbox: (payload) => ipcRenderer.invoke('cloud:teardown-sandbox', payload),
+  cloudForceQuitAccount: () => ipcRenderer.invoke('cloud:force-quit-account'),
+  cloudReconnectLink: () => ipcRenderer.invoke('cloud:reconnect-link'),
+  cloudRecreateLink: () => ipcRenderer.invoke('cloud:recreate-link'),
+  cloudTakeoverSandbox: () => ipcRenderer.invoke('cloud:takeover-sandbox'),
+  cloudAccountLogout: () => ipcRenderer.invoke('cloud:account-logout'),
+  cloudTransfer: (payload) => ipcRenderer.invoke('cloud:transfer', payload),
+  cloudSetTransferIntent: (payload) => ipcRenderer.invoke('cloud:transfer-intent', payload),
+  cloudReadReference: (payload) => ipcRenderer.invoke('cloud:read-reference', payload),
+  cloudCommand: (payload) => ipcRenderer.invoke('cloud:command', payload),
+  cloudDismissSession: (payload) => ipcRenderer.invoke('cloud:dismiss-session', payload),
+  cloudCompleteTakeover: (payload) => ipcRenderer.invoke('cloud:complete-takeover', payload),
+  cloudDownloadResult: (payload) => ipcRenderer.invoke('cloud:download-result', payload),
+  cloudDownloadCheckpoint: (payload) => ipcRenderer.invoke('cloud:download-checkpoint', payload),
+  cloudPrepareRestartDocument: (payload) => ipcRenderer.invoke('cloud:prepare-restart-document', payload),
+  cloudPublishCheckpoint: (payload) => ipcRenderer.invoke('cloud:publish-checkpoint', payload),
+  cloudOpenDisplay: (payload) => ipcRenderer.invoke('cloud:display-open', payload),
+  cloudCloseDisplay: (payload) => ipcRenderer.invoke('cloud:display-close', payload),
+  cloudDisplayInput: (payload) => ipcRenderer.invoke('cloud:display-input', payload),
+  cloudResolveResult: (payload) => ipcRenderer.invoke('cloud:resolve-result', payload),
+  cloudBeginEdit: (payload) => ipcRenderer.invoke('cloud:begin-edit', payload),
+  cloudContinueEdit: (payload) => ipcRenderer.invoke('cloud:continue-edit', payload),
+  cloudPersistEditDraft: (payload) => ipcRenderer.invoke('cloud:edit-draft-save', payload),
+  onCloudEvent: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('cloud:event', listener);
+    return () => ipcRenderer.removeListener('cloud:event', listener);
+  },
+  onCloudDisplayEvent: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('cloud:display-event', listener);
+    return () => ipcRenderer.removeListener('cloud:display-event', listener);
+  },
+  onCloudEditDraftSaveRequested: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('cloud:edit-draft-save-requested', listener);
+    return () => ipcRenderer.removeListener('cloud:edit-draft-save-requested', listener);
+  },
   ensureAgentHub: () => ipcRenderer.invoke('agent-hub:ensure'),
   respondToCloseRequest: (requestId, allowClose) => (
     ipcRenderer.invoke('desktop:close-response', requestId, allowClose)
@@ -91,6 +137,9 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
     ipcRenderer.on('desktop:open-generated-document', (_event, payload) => {
       callback(payload);
     });
+  },
+  onEditCommand: (callback) => {
+    ipcRenderer.on('desktop:edit-command', (_event, command) => callback(command));
   },
   onPastePlainText: (callback) => {
     ipcRenderer.on('desktop:paste-plain-text', (_event, text) => {

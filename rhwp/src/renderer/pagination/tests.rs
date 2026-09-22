@@ -1,11 +1,13 @@
 use super::*;
 use crate::model::control::Control;
+use crate::model::image::Picture;
 use crate::model::page::{ColumnDef, PageDef};
 use crate::model::paragraph::{LineSeg, Paragraph};
 use crate::model::shape::{
     Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, RectangleShape, ShapeObject,
     SizeCriterion, TextWrap, VertAlign, VertRelTo,
 };
+use crate::renderer::page_layout::PageLayoutInfo;
 
 fn a4_page_def() -> PageDef {
     PageDef {
@@ -1778,5 +1780,98 @@ fn bottom_caption_reserve_ignores_negative_host_line_spacing_issue2699() {
         20,
         "마지막 파트 end_row은 전체 행 수(20)여야 함, partials={:?}",
         partials
+    );
+}
+
+const ISSUE_6972_PICTURE_HU: i32 = 72347;
+
+fn issue6972_cover_picture_paragraph() -> Paragraph {
+    let mut picture = Picture::default();
+    picture.common.treat_as_char = true;
+    picture.common.height = ISSUE_6972_PICTURE_HU as u32;
+    Paragraph {
+        text: "< 규제 개요 >".to_string(),
+        char_offsets: (0..9).collect(),
+        controls: vec![Control::Picture(Box::new(picture))],
+        line_segs: vec![
+            LineSeg {
+                text_start: 0,
+                line_height: ISSUE_6972_PICTURE_HU,
+                ..Default::default()
+            },
+            LineSeg {
+                text_start: 8,
+                line_height: 1500,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+fn issue6972_page_with_paragraph_fragment(start_line: usize, end_line: usize) -> PageContent {
+    PageContent {
+        page_index: 0,
+        page_number: 1,
+        section_index: 0,
+        layout: PageLayoutInfo::from_page_def(&a4_page_def(), &ColumnDef::default(), 96.0),
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            start_height: 0.0,
+            endnote_flow: false,
+            items: vec![PageItem::PartialParagraph {
+                para_index: 0,
+                start_line,
+                end_line,
+            }],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: Default::default(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+    }
+}
+
+#[test]
+fn tac_full_page_picture_routes_to_the_page_holding_its_own_stored_line() {
+    let para = issue6972_cover_picture_paragraph();
+    let first_page = issue6972_page_with_paragraph_fragment(0, 1);
+    let current_items = vec![PageItem::PartialParagraph {
+        para_index: 0,
+        start_line: 1,
+        end_line: 2,
+    }];
+
+    assert_eq!(
+        find_inline_control_target_page(&[first_page], &current_items, 0, 0, &para),
+        Some((0, 0)),
+        "전면 TAC 그림은 자기 저장 줄이 있는 첫 쪽으로 라우팅해야 한다. \
+         글자 위치 투영은 글자 줄(1)을 가리키므로 기하 판정이 없으면 None 이 된다"
+    );
+}
+
+#[test]
+fn ambiguous_same_height_lines_keep_the_character_position_projection() {
+    let mut para = issue6972_cover_picture_paragraph();
+    para.line_segs[1].line_height = ISSUE_6972_PICTURE_HU;
+    let first_page = issue6972_page_with_paragraph_fragment(0, 1);
+    let current_items = vec![PageItem::PartialParagraph {
+        para_index: 0,
+        start_line: 1,
+        end_line: 2,
+    }];
+
+    assert_eq!(
+        find_inline_control_target_page(&[first_page], &current_items, 0, 0, &para),
+        None,
+        "높이가 같은 줄이 둘이면 기하 판정을 쓰지 않고 종전 경로를 유지해야 한다"
     );
 }

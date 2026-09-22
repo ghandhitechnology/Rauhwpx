@@ -12,6 +12,7 @@ import {
   terminateAndWaitForProcessTreeExitOutcome,
   terminateProcessTree,
 } from '../process-tree.mjs';
+import { applyManagedCliLaunch } from '../npm-cli-launch.mjs';
 
 const PASSTHROUGH = { parse: (value) => value };
 const MAX_PROVIDER_FRAME_BYTES = 8 * 1024 * 1024;
@@ -49,7 +50,7 @@ export function createBoundedNdjsonTransform(maxFrameBytes = MAX_PROVIDER_FRAME_
  * @property {string} command
  * @property {string[]} args
  * @property {string} cwd
- * @property {NodeJS.ProcessEnv} [env]
+ * @property {NodeJS.ProcessEnv|(() => NodeJS.ProcessEnv)} [env]
  * @property {string|null} [authMethodId]
  * @property {any[]} [mcpServers]
  * @property {string|null} [resumeSessionId]
@@ -138,6 +139,14 @@ function matchConfigValue(option, requested) {
   return byName ? String(byName.value) : null;
 }
 
+function matchConfigAliases(option, requested) {
+  for (const alias of Array.isArray(requested) ? requested : []) {
+    const value = matchConfigValue(option, alias);
+    if (value) return value;
+  }
+  return null;
+}
+
 function findConfig(options, category, id) {
   return (Array.isArray(options) ? options : []).find((option) => (
     option?.category === category || option?.id === id
@@ -161,7 +170,7 @@ function combineSignals(first, second) {
  * Long-lived ACP client. It deliberately does not project provider events: adapters retain
  * their established event semantics and receive raw session/update payloads here.
  * @param {PersistentAcpOptions} options
- * @param {{spawnProcess?:Function, terminateProcess?:(child:any)=>unknown}} [dependencies]
+ * @param {{spawnProcess?:Function, terminateProcess?:(child:any)=>unknown, platform?:NodeJS.Platform, nodeCommand?:string}} [dependencies]
  */
 export function createPersistentAcpSession({
   clientName,
@@ -184,6 +193,8 @@ export function createPersistentAcpSession({
 }, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
+  platform = process.platform,
+  nodeCommand = process.execPath,
 } = {}) {
   /** @type {any} */
   let proc = null;
@@ -234,8 +245,8 @@ export function createPersistentAcpSession({
         getUnrestricted() || isRhwpAcpPermissionRequest(ctx.params),
       );
     });
-    // Register this as a custom parser as well as a typed method. Grok has shipped private
-    // sessionUpdate variants; a pass-through parser keeps those extensions observable.
+    // Register this as a custom parser as well as a typed method so provider
+    // sessionUpdate extensions remain observable.
     generationApp.onNotification(String(methods.client.session.update), PASSTHROUGH, (ctx) => {
       if (!promptIsCurrent()) return;
       const notification = ctx.params;
@@ -416,10 +427,14 @@ export function createPersistentAcpSession({
   async function startOnce() {
     if (disposed) throw new Error(`${clientName} ACP session is disposed`);
     if (proc) throw new Error(`${clientName} ACP process-tree cleanup is still pending`);
-    const child = spawnProcess(command, args, {
+    const spawnEnv = typeof env === 'function' ? env() : env;
+    const launched = applyManagedCliLaunch(command, args, {
+      platform, nodeCommand, env: spawnEnv,
+    });
+    const child = spawnProcess(launched.command, launched.argv, {
       ...processTreeSpawnOptions(),
       cwd,
-      env,
+      ...(launched.env ? { env: launched.env } : {}),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     proc = child;
@@ -542,9 +557,9 @@ export function createPersistentAcpSession({
     if (Array.isArray(response?.configOptions) && setupResponse) setupResponse.configOptions = response.configOptions;
   }
 
-  /** @param {{modeAliases?:string[], requireModeMatch?:boolean, model?:string|null, effort?:string|null}} [selection] */
+  /** @param {{modeAliases?:string[], requireModeMatch?:boolean, model?:string|null, requireModelMatch?:boolean, effort?:string|null}} [selection] */
   async function configure({
-    modeAliases = [], requireModeMatch = false, model = null, effort = null,
+    modeAliases = [], requireModeMatch = false, model = null, requireModelMatch = false, effort = null,
   } = {}) {
     if (hadUnprovenCleanup) {
       throw new Error(`${clientName} ACP process-tree cleanup remains unconfirmed`);
@@ -552,22 +567,46 @@ export function createPersistentAcpSession({
     await start();
     const agentContext = context;
     if (!agentContext) throw new Error(`${clientName} ACP session is not started`);
-    const modes = setupResponse?.modes;
-    const target = selectAcpMode(modes, modeAliases, { required: requireModeMatch, clientName });
-    if (target?.id && target.id !== modes.currentModeId) {
-      await agentContext.request(methods.agent.session.setMode, { sessionId, modeId: target.id });
-      modes.currentModeId = target.id;
+    let configs = setupResponse?.configOptions;
+    const modeOption = findConfig(configs, 'mode', 'mode');
+    if (modeOption) {
+      const modeValue = matchConfigAliases(modeOption, modeAliases);
+      if (!modeValue && requireModeMatch) {
+        const requested = modeAliases.length ? modeAliases.join(', ') : 'unspecified';
+        throw new Error(`${clientName} ACP does not advertise required mode (${requested})`);
+      }
+      if (modeValue && modeValue !== modeOption.currentValue) {
+        await setConfig(modeOption.id, modeValue);
+        modeOption.currentValue = modeValue;
+        configs = setupResponse?.configOptions ?? configs;
+      }
+    } else {
+      const modes = setupResponse?.modes;
+      const target = selectAcpMode(modes, modeAliases, { required: requireModeMatch, clientName });
+      if (target?.id && target.id !== modes.currentModeId) {
+        await agentContext.request(methods.agent.session.setMode, { sessionId, modeId: target.id });
+        modes.currentModeId = target.id;
+      }
     }
-    const configs = setupResponse?.configOptions;
+    const requestedModel = String(model ?? '').trim();
     if (!setModelMethod) {
       const modelOption = findConfig(configs, 'model', 'model');
       const modelValue = matchConfigValue(modelOption, model);
-      if (modelValue && modelValue !== modelOption.currentValue) await setConfig(modelOption.id, modelValue);
+      if (requestedModel && !modelValue && requireModelMatch) {
+        throw new Error(`${clientName} ACP does not advertise required model (${requestedModel})`);
+      }
+      if (modelValue && modelValue !== modelOption.currentValue) {
+        await setConfig(modelOption.id, modelValue);
+        modelOption.currentValue = modelValue;
+        configs = setupResponse?.configOptions ?? configs;
+      }
     }
     const effortOption = findConfig(configs, 'thought_level', 'reasoning');
     const effortValue = matchConfigValue(effortOption, effort);
-    if (effortValue && effortValue !== effortOption.currentValue) await setConfig(effortOption.id, effortValue);
-    const requestedModel = String(model ?? '').trim();
+    if (effortValue && effortValue !== effortOption.currentValue) {
+      await setConfig(effortOption.id, effortValue);
+      effortOption.currentValue = effortValue;
+    }
     if (setModelMethod && requestedModel && (
       selectedModel?.generation !== connectionGeneration
       || selectedModel.model !== requestedModel

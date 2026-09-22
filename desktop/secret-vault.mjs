@@ -2,6 +2,12 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 const KEY_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
+const LINUX_SECURE_STORAGE_BACKENDS = new Set([
+  'gnome_libsecret',
+  'kwallet',
+  'kwallet5',
+  'kwallet6',
+]);
 const LOCK_CODES = new Set(['EPERM', 'EBUSY', 'ENOTEMPTY', 'EACCES']);
 const MAX_VAULT_BYTES = 8 * 1024 * 1024;
 const MAX_SECRET_ENTRIES = 256;
@@ -18,13 +24,58 @@ async function retryWindows(operation, platform) {
   }
 }
 
+async function lstatOrMissing(lstatImpl, filePath) {
+  try {
+    return await lstatImpl(filePath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function directoryReplaceError(targetPath) {
+  const error = new Error(`Refusing to replace directory ${targetPath}`);
+  error.code = 'EISDIR';
+  return error;
+}
+
+function rollbackFailedError(error, rollbackError, previous, tempPath) {
+  const failure = new AggregateError(
+    [error, rollbackError],
+    `Windows secret-vault replacement failed; the previous value remains at ${previous}`,
+  );
+  failure.code = 'FILE_REPLACE_ROLLBACK_FAILED';
+  failure.backupPath = previous;
+  failure.tempPath = tempPath;
+  return failure;
+}
+
+async function removeVaultBackup(previous, { rm, lstat, platform }) {
+  const info = await lstatOrMissing(lstat, previous);
+  if (info?.isDirectory()) throw directoryReplaceError(previous);
+  await retryWindows(() => rm(previous, { force: true }), platform);
+}
+
 async function replaceFile(temp, target, platform, operations) {
   if (platform !== 'win32') {
     await operations.rename(temp, target);
     return null;
   }
+  if ((await lstatOrMissing(operations.lstat, target))?.isDirectory()) {
+    throw directoryReplaceError(target);
+  }
   const previous = `${target}.previous-write`;
-  await retryWindows(() => operations.rm(previous, { force: true }), platform);
+  if (await lstatOrMissing(operations.lstat, previous)) {
+    if (await lstatOrMissing(operations.lstat, target)) {
+      await retryWindows(() => operations.rm(previous, { force: true }), platform).catch(() => {});
+    } else {
+      await retryWindows(() => operations.rename(previous, target), platform);
+    }
+  }
+  if ((await lstatOrMissing(operations.lstat, target))?.isDirectory()) {
+    throw directoryReplaceError(target);
+  }
+  await removeVaultBackup(previous, { ...operations, platform });
   let moved = false;
   try {
     await retryWindows(() => operations.rename(target, previous), platform);
@@ -33,14 +84,18 @@ async function replaceFile(temp, target, platform, operations) {
     if (error?.code !== 'ENOENT') throw error;
   }
   try {
+    if (moved && (await lstatOrMissing(operations.lstat, previous))?.isDirectory()) {
+      throw directoryReplaceError(target);
+    }
     await retryWindows(() => operations.rename(temp, target), platform);
   } catch (error) {
     if (moved) {
-      const restored = await retryWindows(
-        () => operations.rename(previous, target),
-        platform,
-      ).then(() => true, () => false);
-      if (!restored) {
+      try {
+        await retryWindows(() => operations.rename(previous, target), platform);
+      } catch (restoreError) {
+        if (error?.code === 'EISDIR') {
+          throw rollbackFailedError(error, restoreError, previous, temp);
+        }
         throw Object.assign(new Error('Secure secret storage rollback failed.'), {
           code: 'SECRET_VAULT_COMMIT_UNCERTAIN',
           cause: error,
@@ -63,12 +118,20 @@ export function createSecretVault({
   const operations = {
     rename: fileOperations.rename ?? fs.rename,
     rm: fileOperations.rm ?? fs.rm,
+    lstat: fileOperations.lstat ?? fs.lstat,
   };
   let loadPromise = null;
   let entries = {};
   let mutationChain = Promise.resolve();
   let corruptError = null;
   const previousWritePath = `${filePath}.previous-write`;
+
+  async function ensureVaultDirectory() {
+    await fs.mkdir(path.dirname(filePath), {
+      recursive: true,
+      ...(platform === 'win32' ? {} : { mode: 0o700 }),
+    });
+  }
 
   async function readVault(vaultPath) {
     let handle;
@@ -114,8 +177,11 @@ export function createSecretVault({
     if (!safeStorage || !(await safeStorage.isAsyncEncryptionAvailable())) {
       throw new Error('Secure OS credential storage is unavailable.');
     }
-    if (platform === 'linux' && safeStorage.getSelectedStorageBackend?.() === 'basic_text') {
-      throw new Error('A system keyring is required to store API keys securely.');
+    if (platform === 'linux') {
+      const backend = safeStorage.getSelectedStorageBackend?.();
+      if (!LINUX_SECURE_STORAGE_BACKENDS.has(backend)) {
+        throw new Error('A Secret Service or KWallet system keyring is required to store API keys securely.');
+      }
     }
   }
 
@@ -145,7 +211,7 @@ export function createSecretVault({
               }
               throw backupError;
             }
-            await fs.mkdir(path.dirname(filePath), { recursive: true });
+            await ensureVaultDirectory();
             await retryWindows(() => operations.rename(previousWritePath, filePath), platform);
           }
         } catch (error) {
@@ -172,7 +238,7 @@ export function createSecretVault({
     ))) {
       throw new Error('Secure secret storage exceeds its entry or value limit.');
     }
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await ensureVaultDirectory();
     const temp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
     const serialized = `${JSON.stringify({ version: 1, secrets: nextEntries }, null, 2)}\n`;
     if (Buffer.byteLength(serialized, 'utf8') > MAX_VAULT_BYTES) {
@@ -193,14 +259,18 @@ export function createSecretVault({
       if (staleBackup) {
         // The target already contains the new vault. Startup also removes this
         // backup, so antivirus locks during cleanup must not fail the committed write.
-        await retryWindows(() => operations.rm(staleBackup, { force: true }), platform).catch(() => {});
+        await removeVaultBackup(staleBackup, { ...operations, platform }).catch(() => {});
       }
-      if (platform !== 'win32') {
+      // The policy platform can be overridden in cross-platform contract tests;
+      // Windows still cannot fsync a directory on the actual host filesystem.
+      if (platform !== 'win32' && process.platform !== 'win32') {
         const parent = await fs.open(path.dirname(filePath), 'r');
         try { await parent.sync(); } finally { await parent.close(); }
       }
     } catch (error) {
-      await operations.rm(temp, { force: true }).catch(() => {});
+      if (error?.code !== 'EISDIR' && error?.code !== 'FILE_REPLACE_ROLLBACK_FAILED') {
+        await operations.rm(temp, { force: true }).catch(() => {});
+      }
       if (error?.vaultStateUncertain) {
         corruptError = Object.assign(
           new Error('Secure secret storage replacement could not be recovered. Restart or reset the vault.'),

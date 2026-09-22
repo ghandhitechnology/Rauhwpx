@@ -1,130 +1,150 @@
-<p align="center">
-  <img src="rhwp/assets/logo/logo-256.png" alt="Rauhwpx" width="112" />
-</p>
+# Rauhwpx
 
-<h1 align="center">Rauhwpx</h1>
+**한글 문서를 열어 놓고, AI와 함께 고쳐 보세요.**
 
-<p align="center">
-  <a href="README.md">English</a> · 한국어
-</p>
+[English](README.md) · [다운로드](https://github.com/ghandhitechnology/Rauhwpx/releases/latest) · [기여 안내](CONTRIBUTING.md)
 
-<p align="center">
-  AI 네이티브 한글파일(hwpx, hwp)편집기<br />
-</p>
+Rauhwpx는 `.hwp`와 `.hwpx` 문서를 읽고 편집하는 데스크톱 앱입니다. 문서를 직접 고칠 수도 있고, 옆의 AI 사이드바에 필요한 작업을 부탁할 수도 있습니다. 보고서의 한 문단을 다듬거나 표를 채울 때, 문서와 대화를 한 화면에서 이어 갈 수 있도록 만들고 있습니다.
 
-<p align="center">
-  Rauhwpx는 Edward Kim의 <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a>를 기반으로 해서 에이전트 기능을 넣은 프로젝트입니다. 
-</p>
+AI를 연결하지 않아도 문서를 열고 직접 편집할 수 있습니다. 처음부터 모든 기능을 익힐 필요는 없습니다. 지금 작업 중인 문서 하나로 시작해 보세요.
 
-<p align="center">
-  <img src="rhwp/assets/screenshots/studio-agent-sidebar.png" alt="에이전트가 한국어 연구 보고서의 제목 필드를 작성하는 Rauhwpx 화면" width="100%" />
-</p>
+## 먼저 써 보기
 
-## 이 프로젝트
+[최신 릴리스](https://github.com/ghandhitechnology/Rauhwpx/releases/latest)에서 운영체제에 맞는 설치 파일을 받으세요.
 
-사무 업무에서 AI의 사용량이 증가하면서, 워드, 구글독스 등은 Claude for Word, Gemini for Docs 등 AI 와의 협업을 위해 다양한 도구를 제공하고 있습니다. 하지만 한글 에디터는 여전히 이런 도구들이 없어 사람들은 아직도 하나하나 복붙하고, 폰트 바꾸고, 수식 깨지는거 고쳐서 작업하고 있죠. 이 과정을 조금 더 쉽게 만들기 위해 마련한 것이 Rauhwpx 입니다. 
+| 환경 | 설치 파일 |
+| --- | --- |
+| macOS · Apple Silicon (ARM64) | `.dmg` |
+| Windows · 64비트 (x64) | `.exe` |
 
-Rauhwpx는 MCP를 통해서 문서 구조, 텍스트 범위, 표, 필드, 렌더링된 페이지를 읽고 눈앞의 문서를 편집하게 만든 에이전트를 위한 한글 에디터입니다. 제공되는 프로바이더 Rau 를 사용하거나, 기존에 있던 Codex, Claude Code, Grok build, Cursor 요금제를 연결해서 사용할 수 있습니다. 
+Windows 설치 파일은 현재 서명되지 않아 SmartScreen 경고가 나타날 수 있습니다. 공식 릴리스에서 받은 파일인지 확인해 주세요.
 
-## 제품 원칙
-- **사용자 경험 우선** : 문서편집을 하고 에이전트랑 협업을 해야 하는데, 연결 기능들 때문에 사용성이 저하되면 안되죠. 그래서 이 프로그램을 개발할때 집중한 것은 '사용성' 입니다. 
-- **완벽한 자동화** : 이 프로그램의 최종 목표는 '문서 작업의 완벽한 자동화' 입니다. 현존하는 거의 모든 프로그램은 AI가 복잡하고 긴 잡업을 사용하기 시작하면 문제가 발생하고, 수식 생성, 서식 유지, 등 섬세한 작업은 하기 어렵습니다. 그래서 Rauhwpx 에서 **/plan** 과 **subagents** 지원을 통해 장기 작업을 가능하게 했고, 수식 편집과 표 포멧팅에 많은 시간을 쏟아서 완성시켰습니다. 문서 에디터 중 **최초**로, Rauhwpx 는 큰 작업을 쪼개서 병렬 처리하고, 섬세하게 수식과 표를 교차검증하면서 일을 완성시킵니다. 
+설치 파일로 앱을 사용할 때는 아래의 개발 환경을 따로 준비하지 않아도 됩니다.
 
-## 편집기
+### 문서 한 편으로 시작하기
 
-- **형식.** 새 작업의 기본 저장 및 내보내기 형식은 HWPX입니다. HWP 5.0, HWPX, HML은 읽고 쓸 수 있고 HWP3은 읽기 전용입니다. 열린 `.hwp` 파일은 저장할 때 바이너리 HWP 형식을 유지합니다. 라운드트립 충실도는 핵심 계약이며, `rhwp/samples/`의 실제 문서 488개로 검증합니다.
-- **레이아웃과 렌더링.** 전체 페이지 나누기, 어울림 줄바꿈, 페이지 분할 표, 각주와 미주, 수식, 도형, 차트, 포함 개체를 브라우저의 Canvas2D/CanvasKit과 네이티브 Skia로 그립니다.
-- **편집.** 문자, 문단, 스타일 대화상자, 표, 목록 번호 매기기, 필드와 양식, 페이지 설정, 찾기와 바꾸기, 문서 비교, revision 기록, 실행 취소와 다시 실행을 지원합니다.
-- **이식 가능한 작업 기록.** 문서와 전체 revision 그래프를 하나의 `.rhwpx` 아카이브로 저장합니다. 예전 폴더 번들은 별도의 레거시 가져오기 명령으로 열 수 있습니다.
-- **내보내기.** SVG, PNG, PDF, 텍스트, Markdown, 표 덤프를 내보낼 수 있습니다. CLI는 HWPX/HML 변환도 지원합니다.
+1. **문서를 열어 보세요.** 글자와 문단 서식, 표, 그림, 머리말·꼬리말, 쪽 설정 등을 직접 편집할 수 있습니다.
+2. **필요한 부분만 AI에게 부탁하세요.** 사이드바에서 사용할 AI를 연결하고, 고칠 문단이나 원하는 작업을 구체적으로 알려 주세요.
+3. **결과를 살펴보고 저장하세요.** 처음에는 **안전** 권한으로 작은 부분부터 맡겨 보는 것을 권합니다. AI의 변경 내용을 확인한 뒤 승인하거나 거절할 수 있습니다.
 
-## 에이전트 사이드바
+이런 요청부터 해 볼 수 있습니다.
 
-- **76개 MCP 도구.** 일반 작업을 위한 의미 기반 읽기와 쓰기, 한 번의 원자 호출로 최대 32개 편집을 적용하는 일괄 쓰기, 경로와 무관한 라이브 문서 스냅샷, 다운로드 가능한 생성 결과물, 엔진 편집 배치를 제공합니다.
-- **실시간 변경 미리보기.** 변경은 열린 문서에 바로 표시됩니다. 턴이 성공하면 하나의 실행 취소 단계로 커밋되고, 실패하면 정확한 이전 스냅샷으로 복원됩니다.
-- **두 가지 권한 모드.** 안전은 변경을 검토 대상으로 두고 파일 접근을 프로젝트 안으로 제한합니다. 전체는 에이전트가 중단 없이 작업하도록 허용합니다.
-- **구현 전 계획.** 에이전트는 문서를 읽기 전용으로 유지한 채 웹, 하위 에이전트, Browserbase로 조사할 수 있습니다. 정리한 계획은 사용자가 승인한 뒤에만 실행합니다.
-- **revision 계약.** 모든 읽기는 현재 revision을 반환하고, 모든 쓰기는 예상 revision을 요구합니다. 오래된 쓰기는 `REVISION_MISMATCH`로 실패합니다.
-- **여러 에이전트 제공자.** Rau, Claude, Codex, Pi, Grok, Cursor를 선택할 수 있습니다.
+> 선택한 문단을 보고서 문체로 다듬어 줘. 숫자와 고유명사는 그대로 남겨 줘.
 
-## PR 159에서 준비 중인 기능
+> 참고 자료를 읽고 이 표의 빈 설명 칸을 채워 줘. 근거를 찾을 수 없는 항목은 비워 둬.
 
-[PR #159](https://github.com/ghandhitechnology/Rauhwpx/pull/159)는 로컬 편집 상태를 유지하면서 같은 문서 작업을 Cloud로 이어 가는 기능을 준비하고 있습니다.
+> 문서는 수정하지 말고, 핵심 내용과 추가로 확인해야 할 부분만 정리해 줘.
 
-- **하나의 Local / Cloud 작업 공간.** 전환할 때 화면과 입력창의 전송 대상만 바뀝니다. 로컬 선택 영역, 스크롤, 실행 취소 기록, 작성 중인 메시지, 문서와 대화 상태는 그대로 유지됩니다. Cloud가 문서를 쓰는 동안 Local 편집은 잠깁니다.
-- **직접 조작하는 Cloud 화면.** 앱은 서명된 원격 화면을 보여 주고 마우스, 휠, 키보드, 붙여넣기, 한글 IME 입력을 인증된 경로로 전달합니다. 화면 연결이 끊겨도 저장된 대화와 체크포인트는 유지됩니다.
-- **지속되는 다중 턴 대화.** 후속 메시지를 대기열에 넣고 질문에 답하거나 계획을 승인할 수 있습니다. 앱을 닫아도 원격 작업은 계속되며, 실행 환경이 잠든 뒤에도 같은 대화로 돌아올 수 있습니다.
-- **검증된 체크포인트와 이어받기.** 문서와 작업 기록을 함께 저장한 안정 지점에서 복구합니다. 이어받기와 결과 적용은 검증된 경계에서만 로컬 파일을 바꾸고, 외부 변경과 충돌하면 두 파일을 모두 보존합니다.
-- **Raucloud와 내 서버.** Raucloud는 Rauhwpx 계정으로 관리하는 Railway 실행 환경입니다. 내 서버는 사용자가 소유한 서버에 SSH로 Cloud 환경을 설치합니다.
-- **최대 30분의 Raucloud 준비 흐름.** 서버는 작업을 먼저 예약하고 데스크톱은 같은 작업의 상태를 폴링합니다. 설정 창을 닫았다가 열어도 진행 시간과 상태를 이어서 보여 주며 중복 환경을 만들지 않습니다.
+**안전** 권한에서는 성공한 편집이 검토 대기 상태로 남습니다. **전체 접근**에서는 성공한 편집이 자동으로 확정됩니다. 확정된 변경은 편집기의 실행 취소로 되돌릴 수 있지만, 두 권한의 차이를 알고 선택해 주세요.
 
-같은 PR에서 Linux x64 및 arm64 AppImage/Debian 패키지, Rauhwpx 계정 기능, Rau 체험 제공자, Pi/Rau 하위 에이전트도 함께 개발하고 있습니다.
+MCP 도구 목록은 [`rhwp/rhwp-agent/tools.mjs`](rhwp/rhwp-agent/tools.mjs)에 있습니다. [`rhwp/rhwp-agent/tests/tools.test.mjs`](rhwp/rhwp-agent/tests/tools.test.mjs)가 개수를 고정합니다.
 
-## 설치
+### 참고 자료를 곁에 두고 작업하기
 
-[Releases](https://github.com/ghandhitechnology/Rauhwpx/releases)에서 macOS arm64 DMG/ZIP 또는 Windows x64 설치 관리자를 내려받으세요. macOS 빌드는 서명되어 있습니다. Windows 빌드는 현재 미서명이라 SmartScreen 경고가 표시됩니다.
+HWP/HWPX 문서, PDF, DOCX, 텍스트 파일 등을 참고 자료로 붙여 놓고 내용을 찾아보거나 문서 작성에 활용할 수 있습니다. 자료는 대화별·문서별·공통 범위로 관리합니다. PDF와 DOCX는 참고용이며, 이 형식들을 한글 문서처럼 직접 편집하는 기능과는 다릅니다.
 
-Windows는 기본적으로 사용자별로 설치됩니다. 기존의 모든 사용자용 설치를 발견하면 두 번째 사본을 만드는 대신 관리자 권한을 요청해 업그레이드합니다.
+### 수정의 흐름도 남겨 두기
 
-데스크톱에서 기존 파일을 덮어쓸 때는 충돌과 비정상 종료에 안전한 compare-and-swap을 사용하므로 해당 볼륨이 하드 링크를 지원해야 합니다. FAT/exFAT, 일부 SMB 공유 폴더, 일부 Cloud 동기화 볼륨에서는 원본을 바꾸지 않고 저장을 거부할 수 있습니다. 이때는 로컬 APFS 또는 NTFS 볼륨을 사용하거나 지원되는 위치에 다른 이름으로 저장하세요. Windows에서 원본 파일의 접근 권한까지 보존하려면 System32의 기본 Windows PowerShell도 필요합니다. 게시와 롤백이 모두 실패하면 Rauhwpx가 열 수 있는 복구 사본을 남기고 정확한 경로를 알려 줍니다.
+문서를 저장한 뒤 버전 기록을 켜면, 실행 취소와 별도로 수정의 흐름을 살펴볼 수 있습니다. 다른 방향의 수정안을 별도 분기로 나눠 작업할 수도 있습니다. 문서와 버전 기록을 `.rhwpx` 파일 하나로 내보내 다시 열 수도 있습니다.
 
-테스터는 [nightly 태그](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly)에서 현재 사전 릴리스를 내려받을 수 있습니다.
+`.rhwpx`는 Rauhwpx의 **이력 보관 형식**입니다. 다른 한글 편집기에 전달할 문서는 `.hwp`나 `.hwpx`로 저장해 주세요.
 
-자체 CLI를 사용하는 에이전트는 직접 설치하고 로그인해야 합니다. 앱의 **Settings → Connection**에서 제공자를 설치하고 연결할 수 있습니다.
+## AI 연결하기
 
-## 개발
+설정의 연결 목록에서 사용할 AI를 고르고, 표시되는 안내에 따라 설치와 로그인을 진행하세요. 현재 연결 항목은 다음과 같습니다.
+
+| 연결 | 사용 방식 |
+| --- | --- |
+| Rau | Rau 계정과 크레딧을 통해 제공되는 모델을 사용합니다. |
+| Claude · Codex · Grok · Cursor · OpenCode | 각 도구의 실행 환경과 인증을 연결해 사용합니다. |
+| Pi | OpenRouter 연결과 모델 설정을 사용합니다. |
+
+사용 가능한 모델, 인증 방식, 이용 요금은 연결한 서비스에 따라 다릅니다. 앱을 설치하는 것과 AI 서비스를 이용할 권한을 준비하는 것은 별개입니다.
+
+문서 엔진과 에이전트 허브는 내 컴퓨터에서 실행되지만, **AI 요청은 연결한 서비스로 전송됩니다.** 요청에는 문서 내용이나 참고 자료가 포함될 수 있습니다. 민감한 자료를 다룰 때는 연결한 서비스의 데이터 처리 방침과 자료를 공유할 수 있는 범위를 먼저 확인해 주세요.
+
+## 문서 호환성에 대해
+
+HWP 5.0과 HWPX의 읽기·편집·저장을 중심으로 개발하고 있습니다. 새 문서의 기본 저장 형식은 HWPX입니다. HML 불러오기와 일부 HWP 3.0 문서 읽기도 지원합니다.
+
+암호가 걸렸거나 DRM으로 보호된 문서는 지원하지 않습니다. 문서에 따라 글꼴, 표 배치, 쪽 나눔이 원본과 다르게 보일 수 있습니다. 중요한 파일은 사본으로 먼저 작업하고, 저장한 결과를 확인해 주세요.
+
+이 문서는 `main` 브랜치를 기준으로 합니다. 설치한 릴리스에 따라 화면이나 제공되는 기능이 조금 다를 수 있습니다.
+
+## 코드로 실행하기
+
+앱을 고치거나 동작을 살펴보고 싶다면 여기서 시작하세요. 명령은 별도 안내가 없는 한 저장소 루트에서 실행합니다.
+
+### 개발 환경 준비
+
+Git, **Node.js 22.18 이상**과 npm, rustup으로 관리하는 Rust가 필요합니다. 엔진의 Rust 버전과 WASM 타깃은 [`rhwp/rust-toolchain.toml`](rhwp/rust-toolchain.toml)에 고정되어 있습니다. wasm-pack은 **0.15.0**을 사용합니다.
+
+네이티브 빌드를 위해 macOS에서는 Xcode Command Line Tools를, Windows에서는 Visual Studio Build Tools의 C++ 도구를 준비해 주세요.
 
 ```sh
-cd rhwp && wasm-pack build --target web    # build the engine
-cd rhwp-studio && npm install && npm run dev
+git clone https://github.com/ghandhitechnology/Rauhwpx.git
+cd Rauhwpx
+
+cargo install wasm-pack --version 0.15.0 --locked
+npm run setup
+npm run build:wasm
+npm run dev:studio
 ```
 
-Studio는 http://127.0.0.1:7700에서 실행되며 임시 포트에 자체 인증 허브를 띄우므로 병렬 worktree가 충돌하지 않습니다. 저장소 루트에서 `npm run dev:desktop`을 실행하면 Electron 셸이 해당 개발 서버에 붙습니다.
+`setup`은 루트, Studio, 에이전트의 의존성을 설치합니다. 개발 서버는 `http://127.0.0.1:7700`에서 실행되며, 에이전트 허브도 함께 시작합니다. Studio 개발 모드에는 별도로 `npm start`를 실행할 필요가 없습니다.
 
-독립 허브 작업용으로는 루트에서 `npm start`를 실행하면 http://127.0.0.1:5175에서 실행되고 `.run/rhwp-agent.log`에 로그를 남긴 뒤 준비되면 반환됩니다. `npm stop`, `npm run status`, `npm run start:fg`를 함께 사용할 수 있습니다.
+개발 서버를 켜 둔 채 **다른 터미널**에서 다음 명령을 실행하면 Electron 창으로 연결됩니다.
 
-Rust: `cargo test`, `cargo clippy`, `cargo fmt`. Studio: `npm test`, `npm run build`, `npm run e2e:*`.
-
-## 기여하기
-
-[CONTRIBUTING.md](CONTRIBUTING.md)에서 로컬 설정, PR 전에 실행할 검사, [AGENTS.md](AGENTS.md)의 설명 형식을 확인하세요.
-
-## 릴리스
-
-`package.json`과 일치하는 `v*` 태그를 푸시하면 GitHub Actions가 설치 관리자를 빌드하고 첨부합니다.
-
-```bash
-git tag v1.1.0
-git push origin v1.1.0
+```sh
+npm run dev:desktop
 ```
 
-macOS 서명에는 `macos-release` 환경을 사용합니다. 필요한 비밀은 `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`입니다. 로컬 Windows 빌드: Windows에서 `npm run dist:win`.
+### 데스크톱 앱 빌드
 
-### Nightly
+네이티브 문서 도구와 WASM 엔진, Studio를 함께 빌드해 실행하려면 다음 명령을 사용하세요.
 
-GitHub Actions는 KST 오전 4시(`0 19 * * *` UTC)에 nightly 데스크톱 설치 관리자를 빌드합니다. **Actions → Nightly desktop release**에서 수동으로 실행할 수 있으며, 수동 실행은 `main`에서만 게시합니다.
+```sh
+npm run build:desktop
+npm run desktop
+```
 
-테스터는 [nightly 사전 릴리스](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly)에서 현재 빌드를 내려받습니다. 각 성공적인 실행은 해당 사전 릴리스를 대체하고 `nightly` 태그를 이동합니다.
+`desktop`은 이미 만들어진 빌드를 실행합니다. 소스를 바꾼 뒤에는 필요한 부분을 다시 빌드해야 합니다. 설치 파일 패키징과 서명은 [릴리스 안내](docs/releasing.md)를 참고하세요.
 
-이 워크플로는 서명되고 공증된 macOS arm64 DMG 및 ZIP 설치 관리자를 빌드합니다. 또한 태그 릴리스와 동일하게 미서명 Windows x64 NSIS 설치 관리자를 빌드합니다. Linux 데스크톱 nightly는 없습니다.
+### 어디를 고치면 될까요?
 
-`.github/workflows/nightly.yml`은 Linux 엔진과 Studio 검증 워크플로로 남아 있으며 설치 관리자를 게시하지 않습니다.
-
-macOS는 태그 릴리스와 동일한 `macos-release` 환경을 사용합니다. 필요한 비밀은 `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`입니다. 비밀이 하나라도 없으면 macOS 작업이 실패하고 GitHub는 부분적인 nightly를 게시하지 않습니다. `macos-release`에 검토자가 필요하면 예약된 실행은 승인을 기다립니다.
-
-nightly 앱 버전과 아티팩트 이름은 `<version>-nightly.<date>.<sha>` 형식을 사용합니다. `<date>`는 UTC `YYYYMMDD` 날짜이고, `<sha>`는 커밋 SHA의 앞 7자입니다.
-
-## 저장소 레이아웃
-
-| 경로 | 내용 |
+| 경로 | 맡은 일 |
 | --- | --- |
-| `rhwp/src/` | Rust 엔진. parser, model, document_core, renderer, serializer, wasm_api |
-| `rhwp/rhwp-studio/` | 웹 편집기(TypeScript, 프레임워크 없음)와 에이전트 사이드바 |
-| `rhwp/rhwp-agent/` | 에이전트 CLI를 열린 탭에 연결하는 로컬 WS 허브 |
-| `desktop/` | Electron 셸. 다중 창, 창별 에이전트 세션 |
-| `rhwp/rhwp-{chrome,firefox,safari,vscode}/` | 브라우저 및 VS Code 뷰어 확장 |
-| `rhwp/npm/editor/` | 임베드 가능한 편집기 패키지 |
+| [`desktop/`](desktop/) | Electron 창, 네이티브 파일 접근, 앱이 실행하는 에이전트 허브 관리 |
+| [`rhwp/src/`](rhwp/src/) | Rust 문서 엔진: 파일 읽기, 문서 모델과 편집, 조판·렌더링, 저장 |
+| [`rhwp/rhwp-studio/`](rhwp/rhwp-studio/) | TypeScript 편집기, AI 사이드바, 변경 검토, 버전 기록 |
+| [`rhwp/rhwp-agent/`](rhwp/rhwp-agent/) | 로컬 Node.js 허브, AI 연결·인증, MCP 도구와 참고 자료 처리 |
+| [`rhwp/rau-credits/`](rhwp/rau-credits/) | Rau 계정·크레딧 연동과 모델 목록 |
+| [`scripts/`](scripts/) · [`.github/workflows/`](.github/workflows/) | 저장소 검사, 패키지 검증, CI와 배포 |
 
-## 라이선스
+문서를 읽고 고치는 엔진은 Rust/WASM으로 동작합니다. AI가 문서를 수정할 때는 로컬 허브가 MCP 도구 호출을 Studio로 전달하고, Studio가 열린 문서에 변경을 적용합니다. 그래서 AI 연결부와 실제 편집 동작을 나눠 살펴볼 수 있습니다.
 
-[MIT](rhwp/LICENSE). 독립 프로젝트이며, 한글, 한컴, HWP, HWPX는 Hancom 상표입니다. 이 프로젝트는 Hancom과 제휴하거나 Hancom의 승인을 받지 않았습니다.
+### 변경 확인하기
+
+변경한 영역에 맞춰 검사를 선택하세요.
+
+```sh
+npm run test:ci
+npm --prefix rhwp/rhwp-studio test
+npm --prefix rhwp/rhwp-agent test
+```
+
+엔진 테스트, 타입 검사, 브라우저 테스트와 기여 절차는 [기여 안내](CONTRIBUTING.md)에 정리되어 있습니다. 문서만 고치는 작업에 전체 앱 테스트를 돌릴 필요는 없습니다.
+
+## 함께 다듬어 주세요
+
+잘 열리지 않는 문서나 저장 뒤 달라지는 부분을 발견했다면 [이슈](https://github.com/ghandhitechnology/Rauhwpx/issues)로 알려 주세요. 사용한 운영체제와 앱 버전, 기대했던 결과, 실제로 일어난 일을 함께 적어 주시면 확인하는 데 도움이 됩니다. 재현용 파일을 올릴 때는 개인정보와 비공개 내용을 먼저 지워 주세요.
+
+오탈자 수정, 이해하기 어려운 안내 문구, 작은 사용성 개선도 반갑습니다. 코드 기여를 시작하기 전에는 [기여 안내](CONTRIBUTING.md)를 읽어 주세요.
+
+## 바탕이 된 프로젝트와 라이선스
+
+Rauhwpx는 [Edward Kim의 rhwp](https://github.com/edwardkim/rhwp)를 바탕으로 만든 프로젝트입니다. 문서 엔진과 여러 패키지 경로에 `rhwp`라는 이름을 유지하고 있습니다.
+
+라이선스는 [MIT](rhwp/LICENSE)입니다. 함께 사용하는 구성 요소의 고지는 [서드파티 라이선스](rhwp/THIRD_PARTY_LICENSES.md)를 참고하세요.
+
+한글, 한컴, HWP, HWPX는 Hancom의 상표입니다. 이 프로젝트는 Hancom의 공식 제품이 아니며, Hancom과 무관합니다.

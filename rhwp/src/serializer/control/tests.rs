@@ -89,6 +89,7 @@ fn test_roundtrip_section_def() {
     let section = Section {
         paragraphs: vec![para],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
 
@@ -141,6 +142,7 @@ fn test_roundtrip_section_def_page_num_type_without_flags_sync() {
     let section = Section {
         paragraphs: vec![para],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
 
@@ -175,6 +177,7 @@ fn test_roundtrip_column_def() {
     let section = Section {
         paragraphs: vec![para],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
 
@@ -247,6 +250,7 @@ fn test_roundtrip_table() {
     let section = Section {
         paragraphs: vec![para],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
 
@@ -293,6 +297,7 @@ fn test_roundtrip_auto_number() {
     let section = Section {
         paragraphs: vec![para],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
 
@@ -328,6 +333,7 @@ fn test_roundtrip_bookmark() {
     let section = Section {
         paragraphs: vec![para],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
 
@@ -368,6 +374,7 @@ fn test_roundtrip_page_hide() {
     let section = Section {
         paragraphs: vec![para],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
 
@@ -425,6 +432,7 @@ fn test_roundtrip_footnote() {
     let section = Section {
         paragraphs: vec![para],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
 
@@ -480,6 +488,7 @@ fn footnote_after_decoration_zero_is_not_forced_to_paren() {
     let section = Section {
         paragraphs: vec![para],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
 
@@ -533,6 +542,7 @@ fn test_roundtrip_header() {
     let section = Section {
         paragraphs: vec![para],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
 
@@ -603,6 +613,7 @@ fn test_roundtrip_group_picture_child() {
     let section = Section {
         paragraphs: vec![para],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
 
@@ -740,6 +751,7 @@ fn issue2696_top_level_shape_picture_is_serialized() {
     let section = Section {
         paragraphs: vec![para],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
 
@@ -869,6 +881,7 @@ fn roundtrip_single_control(ctrl: Control) -> Control {
             ..Default::default()
         }],
         raw_stream: None,
+        raw_provenance: None,
         ..Default::default()
     };
     let bytes = serialize_section(&section);

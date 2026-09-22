@@ -43,6 +43,7 @@ fn bounded_compression_rejects_incompressible_output_at_the_sink() {
 fn raw_structural_streams_are_checked_before_copying() {
     let section = Section {
         raw_stream: Some(vec![0x5a; 65]),
+        raw_provenance: None,
         ..Default::default()
     };
     let error = crate::serializer::body_text::serialize_section_limited(&section, 64)
@@ -512,6 +513,7 @@ fn test_serialize_hwp_cfb_streams() {
                 ..Default::default()
             }],
             raw_stream: None,
+            raw_provenance: None,
         }],
         preview: None,
         bin_data_content: Vec::new(),
@@ -659,6 +661,7 @@ fn test_full_roundtrip_uncompressed() {
                 ..Default::default()
             }],
             raw_stream: None,
+            raw_provenance: None,
         }],
         preview: None,
         bin_data_content: Vec::new(),
@@ -739,6 +742,7 @@ fn test_full_roundtrip_compressed() {
                 ..Default::default()
             }],
             raw_stream: None,
+            raw_provenance: None,
         }],
         preview: None,
         bin_data_content: Vec::new(),
@@ -2128,6 +2132,7 @@ fn test_ole_storage_size_prefix_restored() {
                 ..Default::default()
             }],
             raw_stream: None,
+            raw_provenance: None,
         }],
         preview: None,
         bin_data_content: vec![BinDataContent {
@@ -2215,6 +2220,7 @@ fn test_compressed_ole_storage_payload_is_deflated() {
                 ..Default::default()
             }],
             raw_stream: None,
+            raw_provenance: None,
         }],
         preview: None,
         bin_data_content: vec![BinDataContent {

@@ -333,6 +333,7 @@ export class TemplateStore {
     now = Date.now,
     maxInFlightUploadBytes = MAX_IN_FLIGHT_TEMPLATE_UPLOAD_BYTES,
     maxInFlightUploads = MAX_IN_FLIGHT_TEMPLATE_UPLOADS,
+    fileOperations = {},
   } = {}) {
     if (!Number.isSafeInteger(maxInFlightUploadBytes) || maxInFlightUploadBytes < 1) {
       throw new TypeError('maxInFlightUploadBytes must be a positive integer');
@@ -345,6 +346,12 @@ export class TemplateStore {
     this.blobDir = path.join(rootDir, 'files');
     this.metadataPath = path.join(rootDir, 'metadata.json');
     this.platform = platform;
+    this.fileOperations = {
+      rename: fileOperations.rename ?? fs.rename,
+      rm: fileOperations.rm ?? fs.rm,
+      lstat: fileOperations.lstat ?? fs.lstat,
+      access: fileOperations.access ?? fs.access,
+    };
     this.now = now;
     this.maxInFlightUploadBytes = maxInFlightUploadBytes;
     this.maxInFlightUploads = maxInFlightUploads;
@@ -664,7 +671,10 @@ export class TemplateStore {
       await handle.sync();
       await handle.close();
       handle = null;
-      await fs.rename(temp, destination);
+      await replaceFileAtomically(temp, destination, {
+        platform: this.platform,
+        fsApi: this.fileOperations,
+      });
     } finally {
       await handle?.close().catch(() => {});
       await fs.unlink(temp).catch(() => {});

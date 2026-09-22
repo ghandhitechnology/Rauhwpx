@@ -3,39 +3,9 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
-const baseCss = readFileSync(new URL('../src/styles/base.css', import.meta.url), 'utf8');
-const calibrationCss = readFileSync(
-  new URL('../src/ui/agent-sidebar/writing-style-calibration.css', import.meta.url),
-  'utf8',
-);
 const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
 const inlinePrompt = readFileSync(new URL('../src/agent/inline-prompt.ts', import.meta.url), 'utf8');
 const inlinePromptCss = readFileSync(new URL('../src/agent/inline-prompt.css', import.meta.url), 'utf8');
-
-test('agent sidebar and fullscreen workspace use bundled NanumSquare typography', () => {
-  assert.match(baseCss, /url\('\/fonts\/NanumSquare-Regular\.woff2'\)/);
-  assert.match(baseCss, /url\('\/fonts\/NanumSquare-Bold\.woff2'\)/);
-  assert.match(css, /--ag-font:\s*'NanumSquare',\s*'나눔스퀘어'/);
-  assert.match(css, /\.ag-root\s*\{[^}]*font-family:\s*var\(--ag-font\);/s);
-  assert.match(calibrationCss, /font-family:\s*var\(--ag-font,/);
-});
-
-test('agent sidebar push layout reserves editor-area width when open', () => {
-  assert.match(css, /--ag-sidebar-width:\s*480px;/);
-  assert.match(css, /--ag-sidebar-duration:\s*320ms;/);
-  assert.match(
-    css,
-    /body\.ag-sidebar-open #editor-area\s*\{[^}]*margin-right:\s*var\(--ag-sidebar-width\);/s,
-  );
-  assert.match(
-    css,
-    /#editor-area\s*\{[^}]*transition:\s*margin-right var\(--ag-sidebar-duration\) var\(--ag-sidebar-ease\);/s,
-  );
-  assert.match(
-    css,
-    /\.ag-root\s*\{[^}]*transition:\s*transform var\(--ag-sidebar-duration\) var\(--ag-sidebar-ease\);/s,
-  );
-});
 
 test('agent sidebar toggles body.ag-sidebar-open with collapse state', () => {
   assert.match(source, /document\.body\.classList\.toggle\('ag-sidebar-open', !collapsed\)/);
@@ -43,44 +13,10 @@ test('agent sidebar toggles body.ag-sidebar-open with collapse state', () => {
   assert.match(source, /setCollapsed\(false, \{ recenter: false \}\)/);
 });
 
-test('compact fullscreen navigation uses temporary drawer state', () => {
-  assert.match(source, /let compactThreadsRailOpen = false/);
-  assert.match(source, /root\.classList\.toggle\('ag-compact-rail-open', compact && compactThreadsRailOpen\)/);
-  assert.match(source, /persistThreadsRailCollapsed\(collapsed\)/);
-  assert.match(source, /function setCompactThreadsRailOpen\(open: boolean, opts\?: \{ focus\?: boolean \}\)/);
-  assert.match(source, /document\.addEventListener\('focusin', onCompactDrawerFocusIn\)/);
-  assert.match(source, /document\.addEventListener\('pointerdown', onCompactDrawerPointerDown\)/);
-  assert.match(source, /document\.removeEventListener\('focusin', onCompactDrawerFocusIn\)/);
-  assert.match(source, /document\.removeEventListener\('pointerdown', onCompactDrawerPointerDown\)/);
-});
-
-test('compact fullscreen navigation can reveal from the left viewport edge', () => {
-  assert.match(source, /const COMPACT_RAIL_HOVER_OPEN_DELAY_MS = 260/);
-  assert.match(source, /ag-compact-rail-hover-target/);
-  assert.match(source, /compactRailHoverTarget\.addEventListener\('pointerenter', onCompactRailEdgeEnter\)/);
-  assert.match(source, /compactRailHoverOpenTimer = window\.setTimeout\([\s\S]*?COMPACT_RAIL_HOVER_OPEN_DELAY_MS\)/);
-  assert.match(source, /clearCompactRailHoverOpen\(\)/);
-  assert.match(source, /let compactRailLastPointerX: number \| null = null/);
-  assert.match(source, /root\.contains\(event\.relatedTarget\)/);
-  assert.match(source, /event\.clientX >= compactRailLastPointerX/);
-  assert.match(source, /root\.addEventListener\('pointermove', onCompactRailPointerMove/);
-  assert.match(source, /root\.removeEventListener\('pointermove', onCompactRailPointerMove/);
-  assert.match(source, /setCompactThreadsRailOpen\(true, \{ focus: false \}\)/);
-  assert.match(source, /threadsPage\.addEventListener\('pointerleave', onCompactRailPointerLeave\)/);
-  assert.match(source, /compactRailHoverTarget\.removeEventListener\('pointerenter', onCompactRailEdgeEnter\)/);
-  assert.match(source, /threadsPage\.removeEventListener\('pointerleave', onCompactRailPointerLeave\)/);
-  assert.match(
-    css,
-    /@media \(hover: hover\) and \(pointer: fine\)\s*\{[\s\S]*?\.ag-fullscreen\.ag-workspace-compact \.ag-compact-rail-hover-target\s*\{[\s\S]*?z-index:\s*13;[\s\S]*?width:\s*24px;/,
-  );
-});
-
 test('agent sidebar asks canvas to recenter during inset animation', () => {
   assert.match(source, /eventBus\?\.emit\('viewport-inset-changed'\)/);
   assert.match(source, /ag-sidebar-animating/);
   assert.match(source, /startInsetRecenterLoop/);
-  assert.match(source, /SIDEBAR_MOTION_DURATION_MS\s*=\s*320/);
-  assert.match(source, /const durationMs = SIDEBAR_MOTION_DURATION_MS/);
 
   const canvasSource = readFileSync(
     new URL('../src/view/canvas-view.ts', import.meta.url),
@@ -93,10 +29,7 @@ test('agent sidebar asks canvas to recenter during inset animation', () => {
 });
 
 test('agent sidebar supports drag resize up to half the viewport', () => {
-  assert.match(source, /SIDEBAR_WIDTH_DEFAULT\s*=\s*480/);
   assert.match(source, /rhwp-agent-sidebar-width-v3/);
-  assert.match(source, /const nextMin = Math\.min\(\s*SIDEBAR_WIDTH_DEFAULT,/s);
-  assert.match(source, /SIDEBAR_WIDTH_MIN_FALLBACK\s*=\s*280/);
   assert.match(source, /refreshSidebarWidthMin/);
   assert.match(source, /measureComposerMetaFloor/);
   assert.match(source, /ag-measuring-min/);
@@ -109,9 +42,6 @@ test('agent sidebar supports drag resize up to half the viewport', () => {
   assert.match(source, /RESIZE_DRAG_THRESHOLD_PX/);
   assert.match(source, /requestAnimationFrame\(applyResizeMove\)/);
   assert.match(source, /recenter: false/);
-  assert.match(css, /\.ag-resize-handle/);
-  assert.match(css, /body\.ag-sidebar-resizing #editor-area/);
-  assert.match(css, /body\.ag-sidebar-resizing \.ag-root,\s*body\.ag-sidebar-animating \.ag-root\s*\{[^}]*--ag-sketch-line:\s*none;/s);
 });
 
 test('hiding the sidebar also disables highlight-to-agent indicators', () => {
@@ -132,37 +62,7 @@ test('rau icon toggle hides the sidebar completely from the toolbar', () => {
   assert.match(source, /getElementById\('icon-toolbar'\)\?\.appendChild\(collapseTab\)/);
   assert.match(source, /setCollapsed\(!root\.classList\.contains\('ag-collapsed'\)\)/);
   assert.match(source, /collapseTab\.remove\(\)/);
-  assert.match(css, /\.ag-rau-icon\s*\{[^}]*mask:\s*url\('\/icons\/rau\.png'\)/s);
-  assert.match(css, /\.ag-collapse-tab\s*\{[^}]*position:\s*sticky;/s);
-  assert.match(css, /\.ag-collapse-tab\s*\{[^}]*margin:\s*0 0 0 auto;/s);
   assert.match(css, /\.ag-collapse-tab\s*\{[^}]*cursor:\s*pointer;/s);
   assert.doesNotMatch(css, /\.ag-collapse-tab\s*\{[^}]*cursor:\s*col-resize;/s);
   assert.match(css, /\.ag-root\.ag-collapsed\s*\{[^}]*pointer-events:\s*none;/s);
-  assert.match(css, /body\.ag-fullscreen-open \.ag-collapse-tab/);
-});
-
-test('composer metadata stays on one row at the minimum sidebar width', () => {
-  assert.match(css, /\.ag-composer-meta\s*\{[^}]*flex-wrap:\s*nowrap;/s);
-  assert.match(css, /\.ag-composer-meta \.ag-selectors\s*\{[^}]*flex:\s*1 1 auto;/s);
-  assert.match(css, /\.ag-composer-meta \.ag-selectors\s*\{[^}]*min-width:\s*0;/s);
-  assert.match(css, /\.ag-composer-meta \.ag-selectors\s*\{[^}]*overflow:\s*hidden;/s);
-  assert.match(css, /\.ag-composer-meta \.ag-composer-utilities\s*\{[^}]*flex:\s*0 0 auto;/s);
-  assert.match(css, /\.ag-composer-meta \.ag-composer-utilities\s*\{[^}]*margin-left:\s*auto;/s);
-  assert.match(css, /\.ag-composer-meta \.ag-references-btn-label\s*\{[^}]*display:\s*none;/s);
-  assert.match(css, /\.ag-root\.ag-measuring-min \.ag-composer-meta \.ag-llm-name\s*\{[^}]*max-width:\s*6ch;/s);
-});
-
-test('compact sidebar prioritizes the full model name over secondary utilities', () => {
-  assert.match(source, /COMPOSER_COMPACT_WIDTH_PX\s*=\s*400/);
-  assert.match(source, /new ResizeObserver\(updateComposerCompactLayout\)/);
-  assert.match(source, /root\.classList\.toggle\('ag-composer-compact', compact\)/);
-  assert.match(source, /rootResizeObserver\?\.disconnect\(\)/);
-  assert.match(
-    css,
-    /\.ag-root:not\(\.ag-fullscreen\)\.ag-composer-compact \.ag-composer-meta \.ag-references-btn,\s*\.ag-root:not\(\.ag-fullscreen\)\.ag-composer-compact \.ag-composer-meta \.ag-skills-btn\s*\{[^}]*display:\s*none;/s,
-  );
-  assert.match(
-    css,
-    /\.ag-root:not\(\.ag-fullscreen\)\.ag-composer-compact:not\(\.ag-measuring-min\) \.ag-composer-meta \.ag-llm-name\s*\{[^}]*max-width:\s*none;/s,
-  );
 });

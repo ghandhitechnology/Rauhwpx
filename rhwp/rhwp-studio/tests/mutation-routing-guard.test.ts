@@ -56,7 +56,7 @@ function bridgePublicMethods(): string[] {
 // 문서 변경을 시사하는 동사 접두어. MUTATING_METHODS 의 모든 이름을 커버해야
 // 하며(아래 자기정합 단언이 강제), 그래야 새 브리지 뮤테이터가 drift 에 걸린다.
 // find* 는 쿼리(findNextEditableControl 등)가 많아 findOrCreate 로 좁힌다.
-const MUTATING_VERB = /^(insert|delete|create|apply|add|remove|move|resize|merge|split|update|toggle|replace|paste|assign|group|ungroup|change|clear|evaluate|transpose|ensure|fit|findOrCreate|reflow|refresh|setPage|setSection|setColumn|setCell|setTable|setPicture|setShape|setEquation|setNote|setChar|setPara|setField|setForm|setNumbering|setHeaderFooter|setActiveField|renameBookmark)/;
+const MUTATING_VERB = /^(insert|delete|create|apply|add|remove|move|resize|merge|split|update|toggle|replace|paste|assign|group|ungroup|change|clear|evaluate|transpose|ensure|fit|promote|findOrCreate|reflow|refresh|setPage|setSection|setColumn|setCell|setTable|setPicture|setShape|setEquation|setNote|setChar|setPara|setField|setForm|setNumbering|setHeaderFooter|setActiveField|renameBookmark)/;
 
 test('MUTATING_VERB 는 MUTATING_METHODS 전 항목을 커버한다(drift 사각 방지)', () => {
   // 목록에 있으나 동사 패턴에 안 걸리는 이름이 있으면, 그 계열의 신규 브리지
@@ -136,17 +136,18 @@ function mutatorCallCount(src: string): number {
 // 뮤테이션 표면 원장 (2026-07-17 동결). 이관/추가 시 이 표를 의식적으로 갱신한다.
 // 값을 낮추는 방향(이관)만 무해하며, 높이거나 신규 키 추가는 리뷰 대상이다.
 const BASELINE: Readonly<Record<string, number>> = {
+  'src/command/commands/hyperlink.ts': 7, // #6963: 삽입·주소/표시 문자열 수정·해제 및 본문/셀 글자 삽입 모두 executeOperation snapshot 내부
   'src/command/commands/edit.ts': 1,
   'src/command/commands/format.ts': 1,
-  'src/command/commands/insert.ts': 19,
+  'src/command/commands/insert.ts': 19, // #327 18 + #7105 promoteOleEquation (recordObjectMutation snapshot 내부)
   'src/command/commands/page.ts': 10,
-  'src/command/commands/table.ts': 34, // +1: 블록계산 이관 시 evaluateTableFormula dry-run(write=false, 검증) 추가
+  'src/command/commands/table.ts': 37, // 중첩 표 구조 변경도 executeOperation snapshot 내부에서 by-path API로 라우팅
   'src/ui/bookmark-dialog.ts': 3,
   'src/ui/cell-border-bg-dialog.ts': 5,
   'src/ui/column-settings-dialog.ts': 1,
   'src/ui/endnote-shape-dialog.ts': 1,
-  'src/ui/equation-editor-dialog.ts': 2,
-  'src/ui/equation-props-dialog.ts': 2,
+  'src/ui/equation-editor-dialog.ts': 6, // 본문/일반 셀/중첩 셀 수식 삽입·편집 모두 snapshot 내부
+  'src/ui/equation-props-dialog.ts': 3, // 중첩 셀 수식 속성 변경도 objectProps snapshot 내부
   'src/ui/find-dialog.ts': 4,
   'src/ui/formula-dialog.ts': 4, // +1: [#2367] 쉼표 포맷이 원시 결과 위에 겹치지 않도록 deleteTextInCell 추가(commit() snapshot 내부 — 라우팅 유지)
   'src/ui/new-number-dialog.ts': 1,
@@ -160,14 +161,15 @@ const BASELINE: Readonly<Record<string, number>> = {
   'src/ui/table-cell-props-dialog.ts': 2,
   'src/ui/toolbar.ts': 4,
   // engine/input-handler* — 드래그/nudge 등 직접-뮤테이션 최고밀도 영역.
-  'src/engine/input-handler.ts': 31, // 누름틀/셀 편집 분기를 포함한 현재 직접 뮤테이션 표면 / +2: #4121 HF 범위 치환·부분 글자 서식
+  'src/engine/input-handler.ts': 27, // 누름틀/셀 편집 분기를 포함한 현재 직접 뮤테이션 표면
   'src/engine/input-handler-connector.ts': 1,
   // +1: 각주 문단 끝 Delete의 다음 문단 병합. 즉시 결과를 MergeParagraphInFootnoteCommand
   // record에 넘겨 undo/redo 및 removedParaMeta 복원을 보존한다.
-  'src/engine/input-handler-keyboard.ts': 22,
+  'src/engine/input-handler-keyboard.ts': 26, // 중첩 셀 수식 삭제 분기도 deleteObject snapshot 내부
   'src/engine/input-handler-mouse.ts': 3,
-  'src/engine/input-handler-picture.ts': 11,
-  'src/engine/input-handler-table.ts': 7,
+  'src/engine/input-handler-picture.ts': 13, // 중첩 셀 수식 삭제가 exact by-path API로 라우팅
+  'src/engine/input-handler-table.ts': 8, // +1: [#7189] 같은 executeOperation 안의 resizeTableCellsByPath 전용 분기
+  'src/engine/input-handler-hyperlink-delete.ts': 3, // #6963: removeHyperlink + 본문/셀 deleteText는 모두 deleteHyperlink snapshot 안에서 실행
   'src/engine/input-handler-text.ts': 11, // #2424: raw IME delete를 command 공통 typed helper로 이관
 };
 

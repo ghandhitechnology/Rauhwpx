@@ -6,6 +6,37 @@ use crate::parser::control::parse_common_obj_attr;
 use serde_json::Value;
 
 #[test]
+fn font_aware_factories_preserve_input_policy_and_only_select_hcr_for_hwpx() {
+    use crate::parser::limits::InputPolicy;
+    let hwpx = include_bytes!(
+        "../../tests/fixtures/editing_parity/mac-hancom-12.30.0/body-mixed-text/edited.hwpx"
+    );
+    let normal = open_with_hwpx_font_metrics(hwpx, InputPolicy::Untrusted, "hcr-declared").unwrap();
+    let local =
+        open_with_hwpx_font_metrics(hwpx, InputPolicy::LocalFileOnce, "hcr-declared").unwrap();
+    assert_eq!(normal.get_font_metrics_policy(), "hcr-declared");
+    assert_eq!(
+        normal.get_page_text_layout_native(0).unwrap(),
+        local.get_page_text_layout_native(0).unwrap()
+    );
+    for bytes in [
+        include_bytes!("../../saved/blank2010.hwp").as_slice(),
+        include_bytes!("../../samples/hml/formatting_table.hml").as_slice(),
+    ] {
+        let doc =
+            open_with_hwpx_font_metrics(bytes, InputPolicy::Untrusted, "hcr-declared").unwrap();
+        assert_eq!(doc.get_font_metrics_policy(), "hancom-windows");
+    }
+    assert!(open_with_hwpx_font_metrics(hwpx, InputPolicy::Untrusted, "invalid").is_err());
+    assert!(open_with_hwpx_font_metrics(
+        b"invalid document",
+        InputPolicy::Untrusted,
+        "hcr-declared"
+    )
+    .is_err());
+}
+
+#[test]
 fn test_create_empty_document() {
     let doc = HwpDocument::create_empty();
     assert_eq!(doc.page_count(), 1);
@@ -1749,6 +1780,7 @@ fn test_document_with_paragraphs() {
             },
         ],
         raw_stream: None,
+        raw_provenance: None,
     });
     doc.set_document(document);
 
@@ -1958,6 +1990,7 @@ fn create_doc_with_table() -> HwpDocument {
         },
         paragraphs: vec![parent_para],
         raw_stream: None,
+        raw_provenance: None,
     });
     doc.set_document(document);
     doc
@@ -2044,6 +2077,7 @@ fn create_doc_with_page_count_boundary_table() -> HwpDocument {
         },
         paragraphs: vec![parent_para],
         raw_stream: None,
+        raw_provenance: None,
     });
     doc.set_document(document);
     doc
@@ -4730,6 +4764,7 @@ fn create_doc_with_floating_picture(tac: bool, voff: u32, hoff: u32) -> HwpDocum
         },
         paragraphs: vec![pic_para, Paragraph::default()],
         raw_stream: None,
+        raw_provenance: None,
     });
     doc.set_document(document);
     doc

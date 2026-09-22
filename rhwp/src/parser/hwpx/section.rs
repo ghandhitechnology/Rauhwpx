@@ -22,7 +22,9 @@ use crate::model::page::{
     BindingMethod, ColumnDef, ColumnDirection, ColumnType, PageBorderBasis, PageBorderFill,
     PageBorderUiBasis, PageDef,
 };
-use crate::model::paragraph::{CharShapeRef, FieldRange, LineSeg, OrphanFieldEnd, Paragraph};
+use crate::model::paragraph::{
+    CharShapeRef, FieldRange, LineSeg, MarkpenMark, OrphanFieldEnd, Paragraph,
+};
 use crate::model::shape::{
     ArcShape, CommonObjAttr, ConnectorControlPoint, ConnectorData, CurveShape, DrawingObjAttr,
     EllipseShape, GroupShape, HorzAlign, HorzRelTo, LineShape, LinkLineType, PolygonShape,
@@ -109,7 +111,64 @@ pub fn parse_hwpx_section(xml: &str) -> Result<Section, HwpxError> {
         buf.clear();
     }
 
+    link_orphan_field_ends(&mut section.paragraphs, &mut Vec::new());
+
     Ok(section)
+}
+
+/// 같은 문단 목록 안에서 끝난 다문단 fieldEnd에 짝 fieldBegin의 HWP5 control id를 연결한다.
+///
+/// HWPX fieldEnd는 beginIDRef와 fieldid만 보관하므로, HWP5 PARA_TEXT로 다시 쓸 때 필요한
+/// field control fourcc는 앞 문단의 fieldBegin에서 찾아야 한다. 짝을 찾지 못한 종료 마커는
+/// 그대로 남긴다.
+fn link_orphan_field_ends(paragraphs: &mut [Paragraph], open_fields: &mut Vec<(u32, u32)>) {
+    for para in paragraphs.iter_mut() {
+        for orphan in &mut para.orphan_field_ends {
+            let Some((field_id, ctrl_id)) = open_fields.last().copied() else {
+                continue;
+            };
+
+            // HWPX는 beginIDRef로 짝을 식별한다. 0은 손상·부분 입력 호환을 위한
+            // 미지정값이므로 HWP5 parser와 같이 현재 열린 필드에 연결한다.
+            if orphan.begin_id_ref != 0 && orphan.begin_id_ref != field_id {
+                continue;
+            }
+
+            open_fields.pop();
+            if orphan.begin_id_ref == 0 {
+                orphan.begin_id_ref = field_id;
+            }
+            orphan.begin_ctrl_id = ctrl_id;
+        }
+
+        for (control_idx, control) in para.controls.iter().enumerate() {
+            let Control::Field(field) = control else {
+                continue;
+            };
+            let closes_in_this_paragraph = para
+                .field_ranges
+                .iter()
+                .any(|range| range.control_idx == control_idx);
+            if !closes_in_this_paragraph && field.field_id != 0 {
+                open_fields.push((field.field_id, field.ctrl_id));
+            }
+        }
+    }
+}
+
+/// 구역 경계를 넘는 누름틀의 종료 마커를 잇는다.
+///
+/// 구역 하나를 파싱하는 동안에는 앞 구역에서 열린 필드를 볼 수 없다. 그래서 구역
+/// 최상위 문단 목록만 하나의 스택으로 다시 훑는다. 이미 짝을 지은 마커에는 같은 값이
+/// 다시 들어갈 뿐이라 구역 안에서 닫힌 필드의 결과는 바뀌지 않는다.
+///
+/// 컨테이너(표 칸·글상자·각주) 목록은 건드리지 않는다. 필드는 컨테이너 경계를 넘지
+/// 못한다.
+pub fn link_orphan_field_ends_across_sections(sections: &mut [Section]) {
+    let mut open_fields: Vec<(u32, u32)> = Vec::new();
+    for section in sections.iter_mut() {
+        link_orphan_field_ends(&mut section.paragraphs, &mut open_fields);
+    }
 }
 
 /// section XML의 `<hp:masterPage idRef="...">` 참조를 문서 순서대로 수집한다.
@@ -454,6 +513,14 @@ fn parse_paragraph(
                 let cname = ce.name();
                 let local = local_name(cname.as_ref());
                 match local {
+                    b"markpenBegin" | b"markpenEnd" => {
+                        push_run_level_markpen(
+                            &mut para,
+                            &text_parts,
+                            (local != b"markpenEnd").then(|| markpen_color_attr(ce)),
+                        );
+                        skip_element(reader, local)?;
+                    }
                     b"run" => {
                         // 런 시작: charPrIDRef 읽기
                         for attr in ce.attributes().flatten() {
@@ -467,7 +534,18 @@ fn parse_paragraph(
                     }
                     b"t" => {
                         // 텍스트 읽기 (탭 확장 데이터 포함)
-                        let (text, tab_exts) = read_text_content_with_tabs(reader)?;
+                        let (text, tab_exts, marks) = read_text_content_with_tabs(reader)?;
+                        let char_base = visible_char_count_from_parts(&text_parts);
+                        let utf16_base = calc_utf16_len_from_parts(&text_parts);
+                        for (rel, color) in marks {
+                            let prefix: u32 =
+                                text.chars().take(rel).map(hwpx_char_utf16_width).sum();
+                            para.markpen_marks.push(MarkpenMark {
+                                char_idx: char_base + rel,
+                                color,
+                                utf16_pos: Some(utf16_base + prefix),
+                            });
+                        }
                         text_parts.push(text);
                         para.tab_extended.extend(tab_exts);
                     }
@@ -605,6 +683,13 @@ fn parse_paragraph(
                 let cname = ce.name();
                 let local = local_name(cname.as_ref());
                 match local {
+                    b"markpenBegin" | b"markpenEnd" => {
+                        push_run_level_markpen(
+                            &mut para,
+                            &text_parts,
+                            (local != b"markpenEnd").then(|| markpen_color_attr(ce)),
+                        );
+                    }
                     b"run" => {
                         // self-closing 빈 run (예: <hp:run charPrIDRef="42"/>)
                         // 빈 paragraph 의 char_shape 가 누락되어 default(id=0) 로
@@ -691,6 +776,7 @@ fn parse_paragraph(
                         char_idx: visible_char_idx,
                         begin_id_ref,
                         field_id,
+                        begin_ctrl_id: 0,
                     });
                 }
             }
@@ -731,14 +817,7 @@ fn parse_paragraph(
                 for c in part.chars() {
                     char_offsets.push(utf16_pos);
                     visual_text.push(c);
-                    let width = if c == '\t' {
-                        8
-                    } else if (c as u32) > 0xFFFF {
-                        2
-                    } else {
-                        1
-                    };
-                    utf16_pos += width;
+                    utf16_pos += hwpx_char_utf16_width(c);
                 }
             }
         }
@@ -957,23 +1036,17 @@ fn parse_note_pr_children(
                                 }
                                 b"suffixChar" => {
                                     if let Ok(s) = std::str::from_utf8(&attr.value) {
-                                        if let Some(c) = s.chars().next() {
-                                            shape.suffix_char = c;
-                                        }
+                                        shape.suffix_char = s.chars().next().unwrap_or('\0');
                                     }
                                 }
                                 b"prefixChar" => {
                                     if let Ok(s) = std::str::from_utf8(&attr.value) {
-                                        if let Some(c) = s.chars().next() {
-                                            shape.prefix_char = c;
-                                        }
+                                        shape.prefix_char = s.chars().next().unwrap_or('\0');
                                     }
                                 }
                                 b"userChar" => {
                                     if let Ok(s) = std::str::from_utf8(&attr.value) {
-                                        if let Some(c) = s.chars().next() {
-                                            shape.user_char = c;
-                                        }
+                                        shape.user_char = s.chars().next().unwrap_or('\0');
                                     }
                                 }
                                 b"supscript" => {
@@ -982,6 +1055,7 @@ fn parse_note_pr_children(
                                 _ => {}
                             }
                         }
+                        shape.deco_chars_from_source = true;
                     }
                     b"noteLine" => {
                         for attr in e.attributes().flatten() {
@@ -1612,7 +1686,7 @@ fn parse_lineseg_element(e: &quick_xml::events::BytesStart) -> LineSeg {
 /// <hp:t> 텍스트 컨텐츠를 읽는다.
 /// 탭 확장 데이터도 함께 반환 (HWPX 인라인 탭의 leader/type/width)
 fn read_text_content(reader: &mut Reader<&[u8]>) -> Result<String, HwpxError> {
-    let (text, _) = read_text_content_with_tabs(reader)?;
+    let (text, _, _) = read_text_content_with_tabs(reader)?;
     Ok(text)
 }
 
@@ -1634,9 +1708,10 @@ fn decode_xml_general_ref(r: &BytesRef<'_>) -> String {
 
 fn read_text_content_with_tabs(
     reader: &mut Reader<&[u8]>,
-) -> Result<(String, Vec<[u16; 7]>), HwpxError> {
+) -> Result<(String, Vec<[u16; 7]>, Vec<(usize, Option<String>)>), HwpxError> {
     let mut text = String::new();
     let mut tab_ext_buf: Vec<[u16; 7]> = Vec::new();
+    let mut marks: Vec<(usize, Option<String>)> = Vec::new();
     let mut buf = Vec::new();
 
     loop {
@@ -1653,6 +1728,17 @@ fn read_text_content_with_tabs(
                     break;
                 }
             }
+            Ok(Event::Start(ref ce)) => {
+                let cname = ce.name();
+                let local = local_name(cname.as_ref());
+                if local == b"markpenBegin" || local == b"markpenEnd" {
+                    marks.push((
+                        text.chars().count(),
+                        (local != b"markpenEnd").then(|| markpen_color_attr(ce)),
+                    ));
+                    skip_element(reader, local)?;
+                }
+            }
             Ok(Event::Empty(ref ce)) => {
                 let cname = ce.name();
                 let local = local_name(cname.as_ref());
@@ -1664,6 +1750,12 @@ fn read_text_content_with_tabs(
                     }
                     b"nbSpace" => text.push('\u{00A0}'),
                     b"fwSpace" => text.push('\u{2007}'),
+                    b"markpenBegin" | b"markpenEnd" => {
+                        marks.push((
+                            text.chars().count(),
+                            (local != b"markpenEnd").then(|| markpen_color_attr(ce)),
+                        ));
+                    }
                     _ => {}
                 }
             }
@@ -1674,7 +1766,7 @@ fn read_text_content_with_tabs(
         buf.clear();
     }
 
-    Ok((text, tab_ext_buf))
+    Ok((text, tab_ext_buf, marks))
 }
 
 fn parse_tab_extension(e: &quick_xml::events::BytesStart) -> [u16; 7] {
@@ -3688,6 +3780,7 @@ fn parse_shape_fill_brush(reader: &mut Reader<&[u8]>) -> Result<Fill, HwpxError>
                                         "FIT" | "FIT_TO_SIZE" | "STRETCH" => {
                                             ImageFillMode::FitToSize
                                         }
+                                        "ZOOM" => ImageFillMode::Zoom,
                                         "TOTAL" => ImageFillMode::Total,
                                         "TOP_LEFT_ALIGN" => ImageFillMode::LeftTop,
                                         _ => ImageFillMode::TileAll,
@@ -5731,8 +5824,18 @@ fn parse_empty_equation(e: &quick_xml::events::BytesStart) -> Control {
 
 // ─── 유틸리티 (section 전용) ───
 
+/// 본문 글자 하나의 UTF-16 폭. 탭은 HWP 바이너리와 동일하게 8 code unit 이다.
+fn hwpx_char_utf16_width(c: char) -> u32 {
+    if c == '\t' {
+        8
+    } else if (c as u32) > 0xFFFF {
+        2
+    } else {
+        1
+    }
+}
+
 /// 텍스트 파트들의 UTF-16 길이 합산
-/// 탭 문자는 HWP 바이너리와 동일하게 8 code unit으로 계산
 fn calc_utf16_len_from_parts(parts: &[String]) -> u32 {
     parts
         .iter()
@@ -5741,20 +5844,36 @@ fn calc_utf16_len_from_parts(parts: &[String]) -> u32 {
             // (offsets 조립 루프와 동일 축). 종전 `_` 분기(1유닛)로 빠져 char_shapes
             // 경계가 offsets 축과 어긋났다 (143E 각주 run 경계 2 → 정답 9).
             "\u{0002}" | "\u{0003}" | "\u{0004}" | "\u{0012}" => 8,
-            _ => s
-                .chars()
-                .map(|c| {
-                    if c == '\t' {
-                        8u32
-                    } else if (c as u32) > 0xFFFF {
-                        2
-                    } else {
-                        1
-                    }
-                })
-                .sum(),
+            _ => s.chars().map(hwpx_char_utf16_width).sum(),
         })
         .sum()
+}
+
+fn visible_char_count_from_parts(parts: &[String]) -> usize {
+    parts
+        .iter()
+        .map(|s| match s.as_str() {
+            "\u{0002}" | "\u{0003}" | "\u{0004}" => 0,
+            "\u{0012}" => 1,
+            _ => s.chars().count(),
+        })
+        .sum()
+}
+
+fn markpen_color_attr(ce: &quick_xml::events::BytesStart<'_>) -> String {
+    ce.attributes()
+        .flatten()
+        .find(|a| a.key.as_ref() == b"color")
+        .map(|a| attr_str(&a))
+        .unwrap_or_default()
+}
+
+fn push_run_level_markpen(para: &mut Paragraph, text_parts: &[String], color: Option<String>) {
+    para.markpen_marks.push(MarkpenMark {
+        char_idx: visible_char_count_from_parts(text_parts),
+        color,
+        utf16_pos: Some(calc_utf16_len_from_parts(text_parts)),
+    });
 }
 
 // ─── 양식 컨트롤 파싱 ───

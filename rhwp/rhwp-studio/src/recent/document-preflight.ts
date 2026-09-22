@@ -22,6 +22,7 @@ export type FreshOpenPayload = {
   fileName: string;
   fileHandle: FileSystemFileHandleLike | null;
   skipUnsavedGuard?: boolean;
+  suppressDialogs?: boolean;
   requestId?: string;
   grant?: never;
   documentId?: never;
@@ -32,6 +33,7 @@ export type BoundOpenPayload = {
   fileName: string;
   fileHandle: FileSystemFileHandleLike;
   skipUnsavedGuard?: boolean;
+  suppressDialogs?: boolean;
   requestId?: string;
   grant: VerifiedDocumentGrant;
 };

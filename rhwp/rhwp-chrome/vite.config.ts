@@ -7,17 +7,16 @@ const currentDir = import.meta.dirname;
 // rhwp-studio를 Chrome 확장용으로 빌드
 // 산출물: rhwp-chrome/dist/ → viewer.html + JS/CSS + WASM + 폰트
 
-// rhwp-studio 의 package.json 버전을 __APP_VERSION__ 으로 주입
-// (rhwp-studio/vite.config.ts 와 동일 패턴 — about-dialog 가 ReferenceError 나지 않도록)
-const studioPkg = JSON.parse(
-  readFileSync(resolve(currentDir, '..', 'rhwp-studio', 'package.json'), 'utf-8'),
+// Display the Rauhwpx product version; the extension manifest keeps its own package version.
+const appPackage = JSON.parse(
+  readFileSync(resolve(currentDir, '..', '..', 'package.json'), 'utf-8'),
 );
 
 export default defineConfig({
   root: resolve(currentDir, '..', 'rhwp-studio'),
   publicDir: false, // public/ 폴더 제외 (samples, images 등 불필요)
   define: {
-    __APP_VERSION__: JSON.stringify(studioPkg.version),
+    __APP_VERSION__: JSON.stringify(appPackage.version),
   },
   resolve: {
     alias: {

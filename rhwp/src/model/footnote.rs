@@ -89,6 +89,8 @@ pub struct FootnoteShape {
     pub print_inline_after_text: bool,
     /// HWP5 미문서화 2바이트. 한컴 UI의 "주석 사이" 값으로 사용된다.
     pub raw_unknown: u16,
+    /// HWPX `<hp:autoNumFormat>` 장식 문자를 원본에서 읽었는지.
+    pub deco_chars_from_source: bool,
 }
 
 impl FootnoteShape {

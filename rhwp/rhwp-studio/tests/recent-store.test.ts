@@ -188,7 +188,7 @@ test('handle-backed Save/Save As만 active document identity를 recent-store에 
   );
   assert.match(
     main,
-    /moveToLibraryDocument: \(target\) => \{[\s\S]*runLibraryMove\(commandServices, target, \(\) => activeDocumentId\)/s,
+    /moveToLibraryDocument: (?:async )?\(target\) => \{[\s\S]*runLibraryMove\(commandServices, target, \(\) => activeDocumentId\)/s,
   );
   assert.match(
     main,

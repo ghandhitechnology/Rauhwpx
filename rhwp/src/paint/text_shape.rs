@@ -7,6 +7,8 @@ use crate::paint::{
 use crate::renderer::render_tree::{BoundingBox, TextRunNode};
 use std::collections::HashSet;
 
+use super::EmbeddedFontFace;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontRequest {
     pub family: String,
@@ -59,6 +61,244 @@ impl FontResolver for NoopFontResolver {
     fn resolve_font(&self, _request: &FontRequest) -> ResolvedFontFace {
         ResolvedFontFace {
             portability: FontPortabilityKind::UnresolvedFallback,
+        }
+    }
+}
+
+pub struct EmbeddedFontResolver<'a> {
+    fonts: &'a [EmbeddedFontFace<'a>],
+}
+
+impl<'a> EmbeddedFontResolver<'a> {
+    pub fn new(fonts: &'a [EmbeddedFontFace<'a>]) -> Self {
+        Self { fonts }
+    }
+
+    fn font_for_run(
+        &self,
+        request: &FontRequest,
+        run: &TextRunNode,
+    ) -> Option<&EmbeddedFontFace<'a>> {
+        let language_index = run
+            .text
+            .chars()
+            .next()
+            .map(crate::renderer::style_resolver::detect_lang_category);
+        self.fonts
+            .iter()
+            .find(|font| {
+                run.char_shape_id == Some(font.char_shape_id)
+                    && language_index == Some(font.language_index)
+            })
+            .or_else(|| {
+                self.fonts.iter().find(|font| {
+                    font.family.eq_ignore_ascii_case(&request.family)
+                        || font
+                            .alternate_family
+                            .is_some_and(|family| family.eq_ignore_ascii_case(&request.family))
+                })
+            })
+    }
+}
+
+impl FontResolver for EmbeddedFontResolver<'_> {
+    fn resolve_font(&self, request: &FontRequest) -> ResolvedFontFace {
+        let resolved = self.fonts.iter().any(|font| {
+            font.family.eq_ignore_ascii_case(&request.family)
+                || font
+                    .alternate_family
+                    .is_some_and(|family| family.eq_ignore_ascii_case(&request.family))
+        });
+        ResolvedFontFace {
+            portability: if resolved {
+                FontPortabilityKind::PortableBlob
+            } else {
+                FontPortabilityKind::UnresolvedFallback
+            },
+        }
+    }
+
+    fn shape_glyph_run(
+        &self,
+        request: &FontRequest,
+        run: &TextRunNode,
+        _resolved: &ResolvedFontFace,
+    ) -> Option<ResolvedGlyphRun> {
+        if run.style.letter_spacing.abs() > f64::EPSILON
+            || run.style.extra_char_spacing.abs() > f64::EPSILON
+            || run.style.extra_word_spacing.abs() > f64::EPSILON
+            || run.style.extra_dash_advance.abs() > f64::EPSILON
+        {
+            return None;
+        }
+        let font = self.font_for_run(request, run)?;
+        let face = rustybuzz::Face::from_slice(font.bytes, font.face_index)?;
+        let units_per_em = f64::from(face.units_per_em());
+        if units_per_em <= 0.0 {
+            return None;
+        }
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(&run.text);
+        buffer.guess_segment_properties();
+        let features = if run.style.kerning {
+            Vec::new()
+        } else {
+            vec!["kern=0".parse().ok()?]
+        };
+        let glyphs = rustybuzz::shape(&face, &features, buffer);
+        let scale = run.style.font_size.max(0.0) / units_per_em;
+        let mut pen_x = 0.0;
+        let mut pen_y = 0.0;
+        let mut positions = Vec::with_capacity(glyphs.len());
+        let mut advances = Vec::with_capacity(glyphs.len());
+        for position in glyphs.glyph_positions() {
+            positions.push(LayerPoint {
+                x: pen_x + f64::from(position.x_offset) * scale,
+                y: pen_y - f64::from(position.y_offset) * scale,
+            });
+            let advance = LayerVector {
+                dx: f64::from(position.x_advance) * scale,
+                dy: -f64::from(position.y_advance) * scale,
+            };
+            pen_x += advance.dx;
+            pen_y += advance.dy;
+            advances.push(advance);
+        }
+
+        let infos = glyphs.glyph_infos();
+        let mut clusters = Vec::new();
+        let mut glyph_start = 0usize;
+        while glyph_start < infos.len() {
+            let byte_start = infos[glyph_start].cluster as usize;
+            let mut glyph_end = glyph_start + 1;
+            while glyph_end < infos.len() && infos[glyph_end].cluster == infos[glyph_start].cluster
+            {
+                glyph_end += 1;
+            }
+            let byte_end = infos[glyph_end..]
+                .iter()
+                .map(|info| info.cluster as usize)
+                .filter(|next| *next > byte_start)
+                .min()
+                .unwrap_or(run.text.len());
+            clusters.push(GlyphCluster {
+                source_range_utf8: crate::paint::TextSourceRange::new(
+                    byte_start as u32,
+                    byte_end as u32,
+                ),
+                source_range_utf16: Some(crate::paint::TextSourceRange::new(
+                    run.text[..byte_start].encode_utf16().count() as u32,
+                    run.text[..byte_end].encode_utf16().count() as u32,
+                )),
+                text_range_utf8: Some(crate::paint::TextSourceRange::new(
+                    byte_start as u32,
+                    byte_end as u32,
+                )),
+                glyph_range: crate::paint::GlyphRange::new(glyph_start as u32, glyph_end as u32),
+                flags: Vec::new(),
+            });
+            glyph_start = glyph_end;
+        }
+
+        let digest = crate::paint::resource_digest_hex(font.bytes);
+        Some(ResolvedGlyphRun {
+            shape_key: ShapeKey {
+                font_instance: crate::paint::FontInstanceKey {
+                    face_key: crate::paint::FontFaceKey(format!(
+                        "font-face-{digest}-{}",
+                        font.face_index
+                    )),
+                    size_px: run.style.font_size,
+                    variations: Vec::new(),
+                    synthetic_bold: run.style.bold,
+                    synthetic_italic: run.style.italic,
+                },
+                direction: crate::paint::TextDirection::Ltr,
+                writing_mode: crate::paint::WritingMode::HorizontalTb,
+                script: None,
+                language: None,
+                features: Vec::new(),
+                shaping_engine: crate::paint::ShapingEngineId("rustybuzz-0.20".to_string()),
+                fallback_policy: crate::paint::FontFallbackPolicyId("embedded-exact".to_string()),
+            },
+            glyph_ids: infos.iter().map(|info| info.glyph_id).collect(),
+            positions,
+            advances: Some(advances),
+            clusters,
+            diagnostics: GlyphRunDiagnostics {
+                quality: TextVariantQuality::Exact,
+                replay_eligibility: GlyphRunReplayEligibility::Portable,
+                strict_visual_eligible: true,
+                max_origin_delta_px: 0.0,
+                max_advance_delta_px: 0.0,
+                max_residual_after_adjustment_px: 0.0,
+                cluster_mismatch_count: 0,
+                missing_glyph_count: infos.iter().filter(|info| info.glyph_id == 0).count() as u32,
+                used_fallback_font_count: 0,
+                reason: None,
+            },
+        })
+    }
+}
+
+pub fn register_embedded_font_resources(
+    resources: &mut crate::paint::ResourceArena,
+    fonts: &[EmbeddedFontFace<'_>],
+) {
+    for font in fonts {
+        let digest_value = crate::paint::resource_digest_hex(font.bytes);
+        let blob_key = crate::paint::FontBlobKey(format!("font-blob-{digest_value}"));
+        let face_key =
+            crate::paint::FontFaceKey(format!("font-face-{digest_value}-{}", font.face_index));
+        if !resources
+            .font_resources()
+            .blobs
+            .iter()
+            .any(|blob| blob.id == blob_key)
+        {
+            resources.intern_font_blob_bytes(font.bytes);
+            let digest = crate::paint::FontDigest {
+                algorithm: "blake3".to_string(),
+                value: digest_value.clone(),
+            };
+            let data_ref = crate::paint::BinaryResourceRef {
+                kind: crate::paint::BinaryResourceKind::FontBlob,
+                id: crate::paint::font_blob_resource_key(font.bytes.len(), &digest_value),
+            };
+            resources
+                .font_resources_mut()
+                .blobs
+                .push(crate::paint::FontBlobResource {
+                    id: blob_key.clone(),
+                    digest: Some(digest.clone()),
+                    source: crate::paint::FontResourceSource::Embedded,
+                    data_ref: Some(data_ref.clone()),
+                    portability: crate::paint::FontPortability::PortableBlob { digest, data_ref },
+                });
+        }
+        if !resources
+            .font_resources()
+            .faces
+            .iter()
+            .any(|face| face.id == face_key)
+        {
+            resources
+                .font_resources_mut()
+                .faces
+                .push(crate::paint::FontFaceResource {
+                    id: face_key,
+                    blob_key,
+                    face_index: font.face_index,
+                    postscript_name: None,
+                    family_names: vec![crate::paint::LocalizedName {
+                        locale: None,
+                        value: font.family.to_string(),
+                    }],
+                    style_names: Vec::new(),
+                    weight_class: None,
+                    width_class: None,
+                    italic: None,
+                });
         }
     }
 }
@@ -651,5 +891,94 @@ mod tests {
         };
         assert_eq!(ops.len(), 1);
         assert!(matches!(ops[0], PaintOp::TextRun { .. }));
+    }
+
+    #[test]
+    fn embedded_font_resolver_shapes_real_glyphs_and_registers_replay_bytes() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/fonts/RHWPBitmapSvgGlyphSmoke.ttf"
+        ));
+        let fonts = [EmbeddedFontFace {
+            char_shape_id: 7,
+            language_index: 6,
+            family: "RHWP Bitmap SVG Glyph Smoke",
+            alternate_family: None,
+            bytes,
+            face_index: 0,
+        }];
+        let resolver = EmbeddedFontResolver::new(&fonts);
+        let mut run = text_run("\u{E100}\u{E101}");
+        run.char_shape_id = Some(7);
+        run.style.font_family = fonts[0].family.to_string();
+        let request = FontRequest::from(&run);
+        let resolved = resolver.resolve_font(&request);
+        let shaped = resolver
+            .shape_glyph_run(&request, &run, &resolved)
+            .expect("shape embedded font run");
+
+        assert_eq!(shaped.glyph_ids.len(), 2);
+        assert_eq!(shaped.positions.len(), 2);
+        assert_eq!(shaped.advances.as_ref().unwrap().len(), 2);
+        assert_eq!(shaped.clusters.len(), 2);
+        assert!(shaped
+            .advances
+            .unwrap()
+            .iter()
+            .all(|advance| advance.dx > 0.0));
+
+        let mut resources = crate::paint::ResourceArena::default();
+        register_embedded_font_resources(&mut resources, &fonts);
+        assert_eq!(resources.font_blob_count(), 1);
+        assert_eq!(resources.font_resources().blobs.len(), 1);
+        assert_eq!(resources.font_resources().faces.len(), 1);
+        assert_eq!(
+            resources.font_resources().faces[0].id,
+            shaped.shape_key.font_instance.face_key
+        );
+    }
+
+    #[test]
+    fn embedded_resolver_shapes_kerning_ligatures_accents_and_mixed_script() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/fonts/RHWPShapingFixture.ttf"
+        ));
+        let fonts = [EmbeddedFontFace {
+            char_shape_id: 9,
+            language_index: 1,
+            family: "RHWP Shaping Fixture",
+            alternate_family: None,
+            bytes,
+            face_index: 0,
+        }];
+        let resolver = EmbeddedFontResolver::new(&fonts);
+        let shape = |text: &str, kerning: bool| {
+            let mut run = text_run(text);
+            run.char_shape_id = Some(9);
+            run.style.font_family = fonts[0].family.to_string();
+            run.style.kerning = kerning;
+            let request = FontRequest::from(&run);
+            let resolved = resolver.resolve_font(&request);
+            resolver
+                .shape_glyph_run(&request, &run, &resolved)
+                .expect("shape fixture run")
+        };
+        let width = |run: &ResolvedGlyphRun| {
+            run.advances
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|advance| advance.dx)
+                .sum::<f64>()
+        };
+
+        assert!(width(&shape("AV", true)) < width(&shape("AV", false)));
+        assert!(width(&shape("To", true)) < width(&shape("To", false)));
+        assert!(shape("office", true).glyph_ids.len() < "office".chars().count());
+        assert_eq!(shape("e\u{301}", true).clusters.len(), 1);
+        let mixed = shape("A한V", true);
+        assert_eq!(mixed.diagnostics.missing_glyph_count, 0);
+        assert_eq!(mixed.clusters.len(), 3);
     }
 }

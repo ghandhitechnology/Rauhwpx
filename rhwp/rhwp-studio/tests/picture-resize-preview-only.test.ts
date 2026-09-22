@@ -31,7 +31,7 @@ globalThis.document = {
 };
 
 const picture = await import(srcRoot + 'engine/input-handler-picture.ts');
-const calls = { preview: [], clearPreview: 0, mutations: [], operations: [], events: [], renders: 0 };
+const calls = { preview: [], clearPreview: 0, mutations: [], operations: [], events: [], renders: 0, journal: [] };
 const host = {
   pictureResizeState: {
     dir: 'se',
@@ -58,6 +58,9 @@ const host = {
   wasm: {
     getPictureProperties() { return { sizeProtect: false }; },
     setPictureProperties(sec, ppi, ci, props) { calls.mutations.push({ sec, ppi, ci, props }); },
+    capturePictureTransform(target) { calls.journal.push(['capture', target, calls.mutations.length]); return 7; },
+    swapPictureTransform(id) { calls.journal.push(['swap', id]); },
+    discardPictureTransform(id) { calls.journal.push(['discard', id]); },
   },
   eventBus: { emit(name) { calls.events.push(name); } },
   executeOperation(operation) { calls.operations.push(operation.kind); },
@@ -117,4 +120,8 @@ test('picture resize mouseup applies one mutation and one undo record', () => {
   assert.equal(observed.afterRelease.clearPreview, 1);
   assert.equal(observed.afterRelease.renders, 1);
   assert.deepEqual(observed.calls.operations, ['record']);
+});
+
+test('[#6806] picture resize journals the original transform before the mutation and hands it to the record', () => {
+  assert.deepEqual(observed.calls.journal, [['capture', { sec: 0, ppi: 1, ci: 2, type: 'image' }, 0]]);
 });

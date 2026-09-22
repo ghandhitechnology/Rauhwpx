@@ -448,3 +448,11 @@ test('chat joins block content and surfaces HTTP errors', async () => {
     return true;
   });
 });
+
+test('missing remote credit amounts are rejected rather than displayed as zero', async () => {
+  for (const data of [{}, { total_credits: null, total_usage: 0 }, { total_credits: '', total_usage: 0 }]) {
+    const client = createOpenRouter({ fetchImpl: async url => jsonResponse(200,
+      String(url).endsWith('/key') ? { data: { limit: null } } : { data }) });
+    await assert.rejects(client.credits('test-key'), { code: 'OPENROUTER_CREDITS_INVALID' });
+  }
+});

@@ -8,5 +8,8 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test --test-concurrency=1 tests/*.test.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.23.0"
   }
 }

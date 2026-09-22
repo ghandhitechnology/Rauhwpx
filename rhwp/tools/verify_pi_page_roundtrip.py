@@ -17,7 +17,7 @@ PI_MOVED 또는 PAGE_DELTA 가 1건 이상이면 종료 코드 1.
     # inventory 기준 표본 (IR_DIFF 전건 + PASS 무작위 N)
     python tools/verify_pi_page_roundtrip.py \
         --inventory output/poc/fidelity3/hwpx/inventory.tsv \
-        --orig-root C:/Users/planet/hwpdocs --rt-root output/poc/fidelity3/hwpx \
+        --orig-root /path/to/hwpdocs --rt-root output/poc/fidelity3/hwpx \
         --status IR_DIFF --pass-sample 300 --seed 42 \
         -o output/poc/fidelity3/pi_page_diff_hwpx.tsv
 

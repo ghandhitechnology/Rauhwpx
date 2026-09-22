@@ -10,6 +10,9 @@ pub mod builders;
 mod commands;
 pub mod converters;
 pub(crate) mod html_table_import;
+/// 한글 클립보드 문서모델(hwpjson) → HWPX 변환
+pub mod hwpjson;
+pub mod hyperlink;
 pub mod queries;
 pub mod table_calc;
 pub mod validation;
@@ -125,6 +128,9 @@ pub struct DeferredPaginationStepResult {
 
 pub(crate) struct RenderNormalizedSection {
     pub(crate) source_revision: u64,
+    /// Body spacing depends on neighboring paragraphs, so single-paragraph
+    /// refresh must recalculate this projection for the whole section.
+    pub(crate) body_spacing_projected: bool,
     pub(crate) paragraphs: Arc<Vec<Paragraph>>,
     pub(crate) composed: Arc<Vec<ComposedParagraph>>,
 }
@@ -304,13 +310,19 @@ pub(crate) struct SnapshotParagraph {
 pub(crate) struct SnapshotSection {
     pub(crate) revision: u64,
     pub(crate) paragraph_sequence_revision: u64,
+    // 원시 바이트와 문단은 아래의 공유 필드에서 보관한다.
     pub(crate) section_shell: Section,
+    pub(crate) raw_stream: Option<Arc<Vec<u8>>>,
     pub(crate) paragraphs: Vec<SnapshotParagraph>,
 }
 
 #[derive(Clone)]
 pub(crate) struct DocumentSnapshot {
+    // 보존용 스트림과 미리보기 이미지 바이트는 셸에서 제외한다.
     pub(crate) document_shell: Document,
+    pub(crate) extra_streams: Arc<Vec<(String, Vec<u8>)>>,
+    pub(crate) hwpx_aux_entries: Arc<Vec<(String, Vec<u8>)>>,
+    pub(crate) preview_image: Option<Arc<Vec<u8>>>,
     pub(crate) sections: Vec<SnapshotSection>,
 }
 
@@ -397,6 +409,13 @@ pub struct DocumentCore {
     pub(crate) snapshot_store: Vec<(u32, Arc<DocumentSnapshot>)>,
     /// 다음 스냅샷 ID
     pub(crate) next_snapshot_id: u32,
+    /// [#6806] 그림 크기 변경의 원본 변환 상태. 문서/이미지 전체는 복제하지 않는다.
+    /// 스냅샷과 달리 코어가 자동 축출하지 않는다 — TS 히스토리의 discard 계약 참조.
+    pub(crate) picture_transform_store: Vec<(
+        u32,
+        commands::picture_transform_journal::PictureTransformCapture,
+    )>,
+    pub(crate) next_picture_transform_id: u32,
     /// 머리말/꼬리말 감추기: (global_page_index, is_header) 조합
     pub(crate) hidden_header_footer: std::collections::HashSet<(u32, bool)>,
     /// 파일 이름 (머리말/꼬리말 필드 치환용)
@@ -613,6 +632,8 @@ impl DocumentCore {
             overflow_links_cache: RefCell::new(HashMap::new()),
             snapshot_store: Vec::new(),
             next_snapshot_id: 0,
+            picture_transform_store: Vec::new(),
+            next_picture_transform_id: 0,
             hidden_header_footer: std::collections::HashSet::new(),
             file_name: String::new(),
             active_field: None,

@@ -357,7 +357,11 @@ mod tests {
         let files = font_files(std::slice::from_ref(&fixture_dir));
         assert_eq!(
             files,
-            vec![fixture_dir.join("RHWPBitmapSvgGlyphSmoke.ttf"), exact,],
+            vec![
+                fixture_dir.join("RHWPBitmapSvgGlyphSmoke.ttf"),
+                exact,
+                fixture_dir.join("RHWPShapingFixture.ttf"),
+            ],
             "디렉토리 source는 SFNT 하위 파일만 경로 순으로 내놓아야 한다"
         );
     }

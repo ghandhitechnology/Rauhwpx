@@ -5,7 +5,7 @@ import {
   prepareBrowserbaseJsonValue,
 } from './browserbase-result.mjs';
 
-const DEFAULT_MODEL = 'google/gemini-3.5-flash-lite';
+const DEFAULT_MODEL = 'google/gemini-3.5-flash';
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1024, height: 768 });
 export const BROWSERBASE_CREATE_TIMEOUT_MS = 30_000;
 export const BROWSERBASE_CLEANUP_TIMEOUT_MS = 10_000;

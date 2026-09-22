@@ -3,16 +3,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createServer } from 'vite';
+import { createTestModuleServer } from './support/module-server.ts';
 import { functionBodyFrom } from './support/source-guard.ts';
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const src = (rel: string): string => readFileSync(join(rootDir, rel), 'utf8');
 
 test('#4121 history 복원용 HF 선택은 현재 target과 문단 경계를 다시 검증한다', async () => {
-  const vite = await createServer({
-    root: rootDir, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-  });
+  const vite = await createTestModuleServer(rootDir);
   try {
     const { CursorState } = await vite.ssrLoadModule('/src/engine/cursor.ts');
     const wasm = {
@@ -47,9 +45,7 @@ test('#4121 history 복원용 HF 선택은 현재 target과 문단 경계를 다
 });
 
 test('#4121 HF snapshot command는 undo/redo 문맥과 선택 정책을 분리한다', async () => {
-  const vite = await createServer({
-    root: rootDir, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-  });
+  const vite = await createTestModuleServer(rootDir);
   try {
     const { SubmodeSelectionSnapshotCommand } = await vite.ssrLoadModule('/src/engine/command.ts');
     let nextSnapshot = 1;
@@ -112,9 +108,7 @@ test('#4121 일반 입력과 IME는 HF 선택을 별도 삭제하지 않고 원�
 });
 
 test('#4121 HF IME 시작은 남아 있는 본문 selection을 삭제하지 않는다', async () => {
-  const vite = await createServer({
-    root: rootDir, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-  });
+  const vite = await createTestModuleServer(rootDir);
   try {
     const { onCompositionStart } = await vite.ssrLoadModule('/src/engine/input-handler-text.ts');
     let bodyDeleteCalls = 0;

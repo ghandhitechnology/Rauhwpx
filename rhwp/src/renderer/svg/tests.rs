@@ -70,6 +70,112 @@ fn test_svg_draw_text_medium_weight() {
 }
 
 #[test]
+fn test_svg_draw_text_gulimche_faux_bold_uses_stroke() {
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 600.0);
+    let font_size = 16.0;
+    renderer.draw_text(
+        "굵게",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_size,
+            font_family: "굴림체".to_string(),
+            bold: true,
+            ..Default::default()
+        },
+    );
+    let output = renderer.output();
+    let want = format!("stroke-width=\"{:.3}\"", font_size * 0.02);
+    assert!(
+        output.contains(&want),
+        "굴림체 볼드는 0.02em 획이어야 함 — {want} 없음: {output}"
+    );
+    assert!(
+        !output.contains("font-weight=\"bold\""),
+        "합성 획과 font-weight=\"bold\" 를 겹치면 안 됨: {output}"
+    );
+}
+
+#[test]
+fn test_svg_draw_text_malgun_gothic_bold_keeps_font_weight() {
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 600.0);
+    renderer.draw_text(
+        "굵게",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_size: 16.0,
+            font_family: "맑은 고딕".to_string(),
+            bold: true,
+            ..Default::default()
+        },
+    );
+    let output = renderer.output();
+    assert!(
+        output.contains("font-weight=\"bold\""),
+        "맑은 고딕은 Bold 메트릭이 있어 font-weight=\"bold\" 를 유지해야 함: {output}"
+    );
+    assert!(
+        !output.contains("stroke-width="),
+        "실제 Bold face 에 합성 획을 겹치면 안 됨: {output}"
+    );
+}
+
+#[test]
+fn test_svg_draw_text_unknown_family_bold_keeps_font_weight() {
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 600.0);
+    renderer.draw_text(
+        "굵게",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_size: 16.0,
+            font_family: "NoSuchFace7151".to_string(),
+            bold: true,
+            ..Default::default()
+        },
+    );
+    let output = renderer.output();
+    assert!(
+        output.contains("font-weight=\"bold\""),
+        "메트릭 DB 미스면 종전 font-weight=\"bold\" 를 유지해야 함: {output}"
+    );
+    assert!(
+        !output.contains("stroke-width="),
+        "DB 미스 face 에 합성 획을 주면 안 됨: {output}"
+    );
+}
+
+#[test]
+fn test_svg_draw_text_headline_without_charshape_bold_has_no_stroke() {
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 600.0);
+    renderer.draw_text(
+        "제목",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_size: 16.0,
+            font_family: "HY헤드라인M".to_string(),
+            bold: false,
+            ..Default::default()
+        },
+    );
+    let output = renderer.output();
+    assert!(
+        output.contains("font-weight=\"bold\""),
+        "HY헤드라인M 은 is_visually_bold 로 font-weight=\"bold\" 여야 함: {output}"
+    );
+    assert!(
+        !output.contains("stroke-width="),
+        "CharShape.bold 없는 heavy display 는 획을 주면 안 됨: {output}"
+    );
+}
+
+#[test]
 fn test_svg_draw_text_superscript_adjusts_baseline_and_size() {
     let mut renderer = SvgRenderer::new();
     renderer.begin_page(800.0, 600.0);
@@ -397,6 +503,105 @@ fn test_page_background_image_fit_to_size_preserves_bbox_output() {
             "<image x=\"10\" y=\"20\" width=\"100\" height=\"50\" preserveAspectRatio=\"none\""
         ),
         "FitToSize PageBackground image should keep bbox output: {output}"
+    );
+}
+
+#[test]
+fn test_page_background_image_none_stretches() {
+    let png = bmp_bytes_to_png_bytes(&make_minimal_bmp_2x2()).expect("BMP->PNG 변환 실패");
+    let image = PageBackgroundImage {
+        data: png.into(),
+        fill_mode: ImageFillMode::None,
+        brightness: 0,
+        contrast: 0,
+        effect: crate::model::image::ImageEffect::RealPic,
+    };
+    let bbox = BoundingBox::new(10.0, 20.0, 100.0, 50.0);
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(200.0, 100.0);
+
+    renderer.render_page_background_image(&image, &bbox);
+
+    let output = renderer.output();
+    assert!(
+        output.contains(
+            "<image x=\"10\" y=\"20\" width=\"100\" height=\"50\" preserveAspectRatio=\"none\""
+        ),
+        "쪽 배경 None은 늘려 채우기다: {output}"
+    );
+}
+
+#[test]
+fn test_page_background_image_zoom_contains() {
+    let png = bmp_bytes_to_png_bytes(&make_minimal_bmp_2x2()).expect("BMP->PNG 변환 실패");
+    let image = PageBackgroundImage {
+        data: png.into(),
+        fill_mode: ImageFillMode::Zoom,
+        brightness: 0,
+        contrast: 0,
+        effect: crate::model::image::ImageEffect::RealPic,
+    };
+    let bbox = BoundingBox::new(10.0, 20.0, 100.0, 50.0);
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(200.0, 100.0);
+
+    renderer.render_page_background_image(&image, &bbox);
+
+    let output = renderer.output();
+    assert!(
+        output.contains(
+            "<image x=\"10\" y=\"20\" width=\"100\" height=\"50\" preserveAspectRatio=\"xMidYMid meet\""
+        ),
+        "쪽 배경 Zoom은 contain이다: {output}"
+    );
+}
+
+fn render_image_node_fill_svg(mode: ImageFillMode) -> String {
+    let png = bmp_bytes_to_png_bytes(&make_minimal_bmp_2x2()).expect("BMP->PNG 변환 실패");
+    let mut image = ImageNode::new(1, Some(png));
+    image.fill_mode = Some(mode);
+    let bbox = BoundingBox::new(10.0, 20.0, 100.0, 50.0);
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(200.0, 100.0);
+    renderer.render_image_node(&image, &bbox);
+    renderer.output().to_string()
+}
+
+#[test]
+fn test_image_node_none_contains_in_bbox() {
+    let output = render_image_node_fill_svg(ImageFillMode::None);
+    assert!(
+        output.contains(
+            "<image x=\"10\" y=\"20\" width=\"100\" height=\"50\" preserveAspectRatio=\"xMidYMid meet\""
+        ),
+        "ImageNode None은 상자 contain이다: {output}"
+    );
+    assert!(
+        !output.contains("fill-clip"),
+        "ImageNode None은 배치 clip이 아니다: {output}"
+    );
+    assert!(
+        !output.contains("width=\"2\" height=\"2\""),
+        "ImageNode None은 원본 2x2로 그리지 않는다: {output}"
+    );
+}
+
+#[test]
+fn test_image_node_zoom_contains_in_bbox() {
+    let output = render_image_node_fill_svg(ImageFillMode::Zoom);
+    assert!(
+        output.contains(
+            "<image x=\"10\" y=\"20\" width=\"100\" height=\"50\" preserveAspectRatio=\"xMidYMid meet\""
+        ),
+        "ImageNode Zoom은 상자 contain이다: {output}"
+    );
+    assert!(
+        !output.contains("fill-clip"),
+        "ImageNode Zoom은 배치 clip이 아니다: {output}"
+    );
+    assert!(
+        !output.contains("width=\"2\" height=\"2\""),
+        "ImageNode Zoom은 원본 2x2로 그리지 않는다: {output}"
     );
 }
 

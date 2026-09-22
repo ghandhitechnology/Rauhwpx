@@ -73,7 +73,7 @@ test('헤더에 설정(기어) 버튼이 있다', () => {
   assert.match(source, /settingsBtn\.setAttribute\('aria-label', '설정'\)/);
   assert.match(source, /settingsBtn\.setAttribute\('aria-controls', 'ag-settings-panel'\)/);
   assert.match(source, /settingsBtn\.appendChild\(createIcon\('gear'\)\)/);
-  assert.match(source, /headerActions\.append\(threadsBtn, versionsBtn, settingsBtn\)/);
+  assert.match(source, /headerActions\.append\(versionsBtn, threadsBtn, settingsBtn\)/);
   assert.match(icons, /gear: 'M/);
   assert.match(icons, /refresh: 'M/);
 });
@@ -139,8 +139,8 @@ test('설정 적용 버튼은 카드 없이 콘텐츠 하단에 머문다', () =
   assert.doesNotMatch(footerRule, /bottom:|z-index:|border:|border-radius:|box-shadow:|backdrop-filter:/);
 });
 
-test('설정은 편집·AI·연결·제품 목적지와 업무별 묶음을 갖는다', () => {
-  for (const title of ['연결', '기본 설정', '글쓰기 보정', '템플릿', '사용량', '고유 설치']) {
+test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', () => {
+  for (const title of ['연결', '새 대화 기본값', '글쓰기 보정', '템플릿', '사용량']) {
     assert.match(settings, new RegExp(`createSection\\('${title}'\\)`));
   }
   for (const title of ['화면과 보기', '글꼴', '저장과 파일']) {
@@ -149,10 +149,8 @@ test('설정은 편집·AI·연결·제품 목적지와 업무별 묶음을 갖�
   assert.match(settings, /\{ id: 'editing', label: '편집' \}/);
   assert.match(settings, /\{ id: 'ai', label: 'AI 설정' \}/);
   assert.match(settings, /\{ id: 'connections', label: 'AI 연결' \}/);
-  assert.match(settings, /\{ id: 'product', label: '제품' \}/);
-  assert.match(settings, /if \(destination === 'product'\) void refreshUniqueInstalls\(\)/);
+  assert.doesNotMatch(settings, /'product'/);
   assert.match(settingsCss, /\.ag-settings-section-title/);
-  assert.match(settingsCss, /\.ag-unique-install-count/);
 });
 
 test('복구 간격은 복구용 자동 저장을 켰 때만 보인다', () => {
@@ -189,7 +187,7 @@ test('저장 설정은 짧은 라벨만 보이고 PDF 안내는 기본값을 쓴
 });
 
 test('한컴용 Git 토글은 기본 이력과 Git 버전 관리 진입을 전환한다', () => {
-  assert.match(settings, /createToggleRow\('한컴용 Git 사용하기 \(beta\)'\)/);
+  assert.match(settings, /createToggleRow\('한컴용 Git 사용하기'\)/);
   assert.match(settings, /userSettings\.setUseHancomGit\(hancomGit\.input\.checked\)/);
   assert.match(settings, /instructionsSection\.body\.append\([\s\S]*hancomGit\.root/);
   assert.match(editingSettings, /userSettings\.tryApplyEditorScalarSettings\(next\)/);
@@ -215,7 +213,7 @@ test('사이드바 버전 버튼은 한컴 Git 설정을 따르고 상단 메뉴
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {
   assert.match(
     settings,
-    /aiContent\.append\(calibration\.root, instructionsSection\.root, defaults\.root, templatesSection\.root, aiFooter\)/,
+    /aiContent\.append\(defaults\.root, calibration\.root, instructionsSection\.root, templatesSection\.root, aiFooter\)/,
   );
   assert.doesNotMatch(editingSettings, /documentResources/);
   assert.match(settings, /requestTemplateName\('템플릿 추가'/);
@@ -227,22 +225,19 @@ test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공
   assert.match(settings, /bridge\.deleteTemplate\(id\)/);
 });
 
-test('연결 묶음은 허브 상태와 프로바이더 상태, 세 동작을 갖는다', () => {
+test('연결 묶음은 허브 재연결과 상태 새로고침을 제공하고 불필요한 하단 동작을 숨긴다', () => {
   assert.match(settings, /void bridge\.reconnectNow\(\)/);
   assert.doesNotMatch(settings, /ensureDesktopAgentHub/);
+  assert.match(settings, /hubReconnect\.hidden = connectionState === 'connected'/);
   assert.match(settings, /hubReconnect\.disabled = connectionState === 'connected'/);
-  assert.doesNotMatch(
-    settings,
-    /hubReconnect\.disabled = connectionState === 'connected' \|\| connectionState === 'connecting'/,
-  );
   assert.match(settings, /'상태 새로고침'/);
-  assert.match(settings, /void refreshProviders\(true\)/);
+  assert.match(settings, /Promise\.all\(\[refreshProviders\(true\), refreshSetupStatuses\(true\)\]\)/);
   assert.match(settings, /bridge\.requestProviderStatus\(refresh\)/);
-  assert.match(settings, /el\('button', 'ag-settings-btn', '세션 다시 시작'\)/);
-  assert.match(settings, /reconnectSession\(\)/);
-  // 프로바이더 행은 버전 또는 오류 사유를 그대로 말한다.
-  assert.match(settings, /health\.version \?\? '설치됨'/);
-  assert.match(settings, /health\.error \?\? '실행할 수 없어요'/);
+  assert.doesNotMatch(settings, /el\('button', 'ag-settings-btn', '세션 다시 시작'\)/);
+  assert.doesNotMatch(settings, /reconnectSession\(\)/);
+  // 접힌 행에는 계정을, 펼친 행에는 오류 사유를 표시한다.
+  assert.match(settings, /label = identity \|\| '연결됨'/);
+  assert.match(settings, /message = setup\?\.error \|\| health\?\.error \|\| '연결 상태를 확인해 주세요\.'/);
   assert.match(settingsCss, /\.ag-settings-dot\[data-state='connected'\]/);
 });
 
@@ -267,7 +262,7 @@ test('Rauhwpx 계정은 Cloud와 분리된 일반 브릿지와 설정 카드로 
   assert.match(accountCard, /'로그인'/);
   assert.match(accountCard, /'로그인 취소'/);
   assert.doesNotMatch(accountCard, /cloud|quota|allowance|크레딧|한도/i);
-  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, usageSection\.root\)/);
+  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, quotaSection\.root, browserbaseSection\.root, usageSection\.root\)/);
   assert.match(settings, /bridge\.requestAccountStatus\(\)/);
   assert.match(settings, /bridge\.loginAccount\(\)/);
   assert.match(settings, /bridge\.cancelAccountLogin\(accountAuthRunId\)/);
@@ -280,14 +275,16 @@ test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에
   assert.match(settings, /setupDialog\.setAttribute\('role', 'dialog'\)/);
   assert.match(settings, /setupDialog\.setAttribute\('aria-modal', 'true'\)/);
   assert.match(settings, /bridge\.installAgent\(setupAgent\)/);
-  assert.match(settings, /bridge\.authenticateAgent\(setupAgent, method/);
+  assert.match(settings, /bridge\.authenticateAgent\(authenticatingAgent, method/);
   assert.match(settings, /'브라우저로 로그인'/);
   assert.match(settings, /'API 키 입력'/);
   assert.match(settings, /const detected = health\?\.available === true \|\| setup\?\.available === true/);
-  assert.match(settings, /row\.setup\.textContent = \(agent === 'rau' \? configured : detected \|\| configured\) \? '재설정' : '설정'/);
+  assert.match(settings, /const connected = setup\?\.connected === true \|\| setup\?\.setupComplete === true\s*\|\| \(detected && setup\?\.authenticated === true\)/);
+  assert.match(settings, /row\.setup\.textContent = working \? '진행 상황 보기' : setup\?\.updateRequired \? '업데이트' : connected \? '계정 관리' : '연결하기'/);
+  assert.match(settings, /row\.setup\.disabled = !online \|\| \(!setup && !health\)/);
   assert.match(settings, /const detected = providers\?\.\[agent\]\?\.available === true/);
   assert.match(settings, /const available = detected \|\| status\?\.available === true \|\| status\?\.installed === true/);
-  assert.match(settings, /const connected = agent === 'rau' \? configured : detected \|\| configured/);
+  assert.match(settings, /const connected = configured \|\| \(available && status\?\.authenticated === true\)/);
   assert.match(settings, /CLI 연결이 확인되었습니다/);
   assert.doesNotMatch(settings, /필요한 CLI와 인증을 한 번에 설정합니다/);
   assert.match(settings, /piOauth\.addEventListener\('click', \(\) => void startSetupAuth\('oauth'\)\)/);
@@ -346,7 +343,7 @@ test('브라우저 로그인은 인증 주소와 기기 코드를 카드 안에 
   assert.match(settings, /setupCodeSubmit\.disabled = connectionState !== 'connected' \|\| !setupCode\.input\.value\.trim\(\);\s*restoreSetupFocus\(\);/);
   assert.match(settings, /renderPi\(\);\s*restoreSetupFocus\(\);/);
   // 상자는 oauth 로그인이 도는 동안에만 선다.
-  assert.match(settings, /const authorizing = setupOauthPending && setupBusy;\s*setupLoginBox\.hidden = !authorizing/);
+  assert.match(settings, /const authorizing = setupOauthPending && setupBusy && !supportsTerminalSetup\(setupAgent\);\s*setupLoginBox\.hidden = !authorizing/);
   assert.match(settings, /if \(ev\.authUrl\) setupAuthUrl = ev\.authUrl;\s*if \(ev\.userCode \|\| ev\.pairingCode\) setupUserCode = ev\.userCode \?\? ev\.pairingCode \?\? null;/);
   assert.match(settings, /if \(method === 'oauth' && started\.authUrl\) setupAuthUrl = started\.authUrl/);
   // 자동 열기 시도는 그대로 남는다.
@@ -354,7 +351,7 @@ test('브라우저 로그인은 인증 주소와 기기 코드를 카드 안에 
   // claude 인증 코드 입력칸은 로그인 상자 아래에 붙는다.
   assert.match(settings, /setupKeyBox,\s*setupLoginBox,\s*setupCodeBox,/);
   // 로그인이 끝나거나 실패하면 주소·코드를 지운다.
-  assert.match(settings, /function clearSetupAuthPrompt\(\): void \{\s*setupOauthPending = false;\s*setupAuthUrl = null;\s*setupUserCode = null;/);
+  assert.match(settings, /function clearSetupAuthPrompt\(\): void \{\s*setupTerminal\.close\(\);\s*setupOauthPending = false;\s*setupAuthUrl = null;\s*setupUserCode = null;/);
   assert.match(settings, /if \(ev\.state === 'done'\) clearSetupAuthPrompt\(\)/);
 });
 
@@ -365,20 +362,20 @@ test('자동 하네스 업데이트 실패는 프로바이더 카드에 조용�
 });
 
 test('AI 기본 설정은 Apply 전까지 초안이고 성공 후 사이드바에 알린다', () => {
-  assert.match(settings, /createSelect\(\s*'기본 제공자'/);
-  assert.match(settings, /createSelect\('기본 모델', \[\]\)/);
+  assert.match(settings, /createSelect\(\s*'제공자'/);
+  assert.match(settings, /createSelect\('모델', \[\]\)/);
   assert.match(settings, /createSelect\('추론 강도', \[\]\)/);
   assert.match(settings, /effortField\.field\.hidden = effortOptions\.length === 0/);
   assert.match(settings, /fillSelect\(effortField\.select, \[\.\.\.effortOptions\]\.reverse\(\)\)/);
   // 줄의 display:flex 가 기본 [hidden] 을 덮으므로 따로 눌러 준다 — 없으면
   // Cursor 처럼 추론 강도가 없는 프로바이더에서 빈 줄이 남는다.
   assert.match(settingsCss, /\.ag-settings-field\[hidden\]\s*\{[^}]*display:\s*none;/s);
-  assert.match(settings, /createSelect\('권한 프로필', PERMISSION_OPTIONS\)/);
+  assert.match(settings, /createSelect\('권한', PERMISSION_OPTIONS\.map\(option => \(\{/);
   assert.match(settings, /const select = el\('select', 'ag-settings-select'\)/);
   assert.match(settings, /prefsDraft = normalizeAgentPrefs\(\{ \.\.\.prefsDraft, \.\.\.partial \}\)/);
   assert.match(settings, /const result = trySaveAgentPrefs\(nextPrefs\)/);
   assert.match(settings, /applyDefaults\(result\.value\)/);
-  assert.match(settings, /'새 대화부터 적용돼요\.'/);
+  assert.match(settings, /aiStatus\.textContent = 'AI 설정을 적용했습니다\.'/);
   assert.match(settings, /nextPrefs\.defaultPermissionProfile === 'unrestricted'[\s\S]*window\.confirm\(UNRESTRICTED_DEFAULT_WARNING\)/);
   assert.match(settings, /saveAgentInstructions\(\)[\s\S]*persistPrefs\(nextPrefs\)/);
   assert.match(settings, /agentField\.select\.disabled = aiPrefsSaving/);
@@ -412,33 +409,22 @@ test('글쓰기 보정 상태와 진입 버튼', () => {
   assert.match(source, /openCalibration: \(\) => writingStyleCalibration\.open\(\)/);
 });
 
-test('현재 대화는 슬래시로 구분하고 Pi 목록 안내는 숫자만 남긴다', () => {
-  assert.match(settings, /현재 대화: \$\{AGENT_LABEL\[current\.agent\]\} \/ \$\{labelForModel\(current\.agent, current\.model\)\} \/ \$\{permission\}/);
+test('Pi 모델 목록은 검색 결과 수와 선택 한도를 표시한다', () => {
+  assert.match(settings, /piCatalogNote\.textContent = `\$\{matches\.length\}개 · 최대 \$\{PI_MODEL_MAX\}개`/);
+  assert.match(settings, /piCatalogNote\.textContent = `\$\{matches\.length\}개 중 \$\{visible\.length\}개`/);
   assert.doesNotMatch(settings, /검색으로 좁혀 보세요/);
 });
 
-test('요금제 선택값은 프로바이더별로 다르고 허브에 저장된다', () => {
-  assert.match(settings, /claude: \[\s*\{ id: 'pro', label: 'Pro' \},\s*\{ id: 'max5x', label: 'Max 5x' \},\s*\{ id: 'max20x', label: 'Max 20x' \},\s*\{ id: 'api', label: 'API' \},\s*\]/);
-  assert.match(settings, /codex: \[\s*\{ id: 'plus', label: 'Plus' \},\s*\{ id: 'pro', label: 'Pro' \},\s*\{ id: 'api', label: 'API' \},\s*\]/);
-  assert.match(settings, /bridge\.setUsagePlan\(agent, plan\.value\)/);
-  assert.match(settings, /usage = summary;\s*renderUsage\(\);/);
+test('구독 한도는 직접 조회하고 로컬 토큰 기록과 분리한다', () => {
+  assert.match(settings, /createProviderQuota/);
+  assert.doesNotMatch(settings, /setUsagePlan|buildMeter|USAGE_PLANS/);
+  assert.match(settings, /formatUsageWindow\('Session'/);
+  assert.match(settings, /formatUsageWindow\('Week'/);
 });
 
-test('사용량 미터는 5시간·주간·오늘·모델별을 보여주고 80%에서 경고로 넘어간다', () => {
-  assert.match(settings, /buildMeter\('5h'/);
-  assert.match(settings, /buildMeter\('Week'/);
-  assert.match(settings, /formatUsageWindow\('Today', providerUsage\.day\)/);
-  assert.match(settings, /'Models'/);
-  assert.match(settings, /const METER_WARN_PERCENT = 80;/);
-  assert.match(settings, /if \(percent >= METER_WARN_PERCENT\) row\.classList\.add\('ag-settings-meter-warn'\)/);
-  // 막대는 100% 를 넘겨도 가득 찬 상태로 멈춘다.
-  assert.match(settings, /Math\.min\(100, Math\.max\(0, percent\)\)/);
-  assert.match(settingsCss, /\.ag-settings-meter-warn \.ag-settings-meter-fill/);
-  assert.match(settingsCss, /color-mix\(in srgb, var\(--ag-err\)/);
-});
-
-test('모든 프로바이더 사용량은 영문 단위와 세로 구분자를 쓴다', () => {
-  assert.match(settings, /return `\$\{label\} \| \$\{window_\.turns\}calls \| \$\{formatCompactTokens/);
+test('프로바이더 사용량 표는 압축된 호출 수와 토큰을 표시한다', () => {
+  assert.match(settings, /return `\$\{prefix\}\$\{window_\.turns\}회 \/ \$\{formatCompactTokens/);
+  assert.match(settings, /const prefix = label === 'Session' \? '세션: ' : ''/);
   const modelRows = settings.match(/function buildModelRows[\s\S]*?return rows;/)?.[0] ?? '';
   assert.doesNotMatch(modelRows, /if \(agent === 'rau'\)/);
   assert.match(settings, /metrics\.join\('\ \| '\)/);
@@ -447,28 +433,15 @@ test('모든 프로바이더 사용량은 영문 단위와 세로 구분자를 �
   }
 });
 
-test('사용량 묶음에서 CLIProxyAPI 를 연결할 수 있다', () => {
-  assert.match(settings, /document\.createTextNode\('CLIProxyAPI'\)/);
-  assert.match(settings, /createTextField\('주소'/);
-  assert.match(settings, /createTextField\('관리 키'/);
-  assert.match(settings, /placeholder: 'http:\/\/127\.0\.0\.1:8317'/);
-  assert.match(settings, /bridge\.connectCliproxy\(cliproxyUrl\.input\.value, cliproxyKey\.input\.value\)/);
-  assert.match(settings, /bridge\.disconnectCliproxy\(\)/);
+test('직접 한도 새로고침은 기존 연결 목적지에 있고 프록시 설정을 제거한다', () => {
+  assert.doesNotMatch(settings, /connectCliproxy|disconnectCliproxy|CLIProxyAPI|remote-management/);
   assert.match(settings, /void refreshUsage\(true\)/);
-  assert.match(settings, /실제 사용량을 보여줘요/);
-  assert.match(settings, /remote-management\.secret-key/);
-  assert.match(settings, /ui\.plan\.hidden = actual/);
-  assert.match(settings, /actual \? 'Actual' : 'Estimated'/);
-  assert.match(settingsCss, /\.ag-settings-input/);
-  assert.match(settingsCss, /\.ag-settings-cliproxy-error/);
-  assert.ok(
-    settings.indexOf('usageSection.body.appendChild(cliproxyCard)')
-      > settings.indexOf('apiUsageBlocks.set(agent'),
-  );
+  assert.match(settings, /currentDestination !== 'connections'/);
+  assert.match(settings, /document.removeEventListener\('visibilitychange', syncUsagePolling\)/);
 });
 
 test('한도가 없으면 누적치만 말한다', () => {
-  assert.match(settings, /\$\{window_\.turns\}calls \| \$\{formatCompactTokens\(window_\.weightedTokens\)\}/);
+  assert.match(settings, /\$\{window_\.turns\}회 \/ \$\{formatCompactTokens\(window_\.weightedTokens\)\}/);
 });
 
 test('앱 전용 지시는 에이전트 변경안을 사용자 승인 전까지 분리한다', () => {
@@ -525,54 +498,34 @@ test('사이드바 버튼은 마지막에 불러온 얇고 반듯한 스타일�
   assert.match(buttonCss, /\.ag-root \.ag-send \{[\s\S]*height: var\(--ag-button-height\)/);
 });
 
-test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조색을 모두 갖춘다', () => {
-  // 연결 목록과 입력기 피커는 여섯 프로바이더를 같은 순서로 세운다.
-  assert.deepEqual([...PROVIDER_ORDER], ['rau', 'claude', 'codex', 'pi', 'grok', 'cursor']);
-  assert.equal(AGENT_LABEL.rau, 'Rau');
-  assert.equal(AGENT_LABEL.grok, 'Grok');
-  assert.equal(AGENT_LABEL.cursor, 'Cursor');
-  // 두 화면 모두 표를 다시 베끼지 않고 공용 모듈에서 가져다 쓴다.
+test('라이브 프로바이더는 Claude · Codex · Pi 이고 라벨 · 아이콘을 공유한다', () => {
+  assert.deepEqual([...PROVIDER_ORDER], ['claude', 'codex', 'pi']);
+  assert.equal(AGENT_LABEL.claude, 'Claude');
+  assert.equal(AGENT_LABEL.codex, 'Codex');
+  assert.equal(AGENT_LABEL.pi, 'Pi');
   for (const consumer of [settings, source]) {
     assert.match(consumer, /import \{ AGENT_LABEL, createProviderIcon, PROVIDER_ORDER \} from '\.\/providers\.ts'/);
     assert.doesNotMatch(consumer, /const AGENT_LABEL|const MASK_ICON_AGENTS|const PROVIDER_ICON_SRC/);
   }
   assert.match(settings, /for \(const agent of PROVIDER_ORDER\)/);
   assert.match(source, /for \(const agent of PROVIDER_ORDER\)/);
-  // cursor 표기는 언제나 "Cursor" 다.
-  assert.doesNotMatch(settings, /'Cursor Agent'|'cursor-agent'/);
-  // 단색 로고는 마스크로 그리므로 마스크 목록과 CSS 규칙이 함께 있어야 한다.
-  assert.deepEqual([...MASK_ICON_AGENTS], ['rau', 'codex', 'pi', 'grok', 'cursor']);
-  // 마스크가 아닌 프로바이더만 이미지 경로를 갖는다.
+  assert.deepEqual([...MASK_ICON_AGENTS], ['codex', 'pi']);
   assert.equal(PROVIDER_ICON_SRC.claude, '/icons/provider-claude.png');
-  assert.equal(PROVIDER_ICON_SRC.grok, undefined);
-  assert.equal(PROVIDER_ICON_SRC.cursor, undefined);
-  assert.match(css, /\.ag-provider-icon-mask\[data-agent='rau'\][\s\S]*?rau\.png/);
-  assert.match(css, /\.ag-provider-icon-mask\[data-agent='grok'\][\s\S]*?provider-grok\.svg/);
-  assert.match(css, /\.ag-provider-icon-mask\[data-agent='cursor'\][\s\S]*?provider-cursor\.svg/);
-  // 강조색은 라이트/다크 팔레트에 모두 있고 data-agent 로 갈린다.
-  assert.equal((css.match(/--ag-rau:/g) ?? []).length, 2);
-  assert.equal((css.match(/--ag-grok:/g) ?? []).length, 2);
-  assert.equal((css.match(/--ag-cursor:/g) ?? []).length, 2);
-  assert.equal((css.match(/--ag-rau-wash:/g) ?? []).length, 2);
-  assert.equal((css.match(/--ag-grok-wash:/g) ?? []).length, 2);
-  assert.equal((css.match(/--ag-cursor-wash:/g) ?? []).length, 2);
-  assert.match(css, /\.ag-root\[data-agent='grok'\] \{\s*--ag-accent: var\(--ag-grok\);/);
-  assert.match(css, /\.ag-root\[data-agent='cursor'\] \{\s*--ag-accent: var\(--ag-cursor\);/);
-  assert.match(css, /\.ag-plan-card\.ag-grok,\n\.ag-plan-card\.ag-cursor/);
-  assert.match(css, /\.ag-review-card\.ag-grok,\n\.ag-review-card\.ag-cursor/);
+  assert.equal(PROVIDER_ICON_SRC.codex, '/icons/provider-codex.png');
+  assert.match(css, /\.ag-provider-icon-mask\[data-agent='pi'\][\s\S]*?provider-pi\.svg/);
+  assert.match(css, /\.ag-root\[data-agent='codex'\] \{\s*--ag-accent: var\(--ag-codex\);/);
+  assert.match(css, /\.ag-root\[data-agent='pi'\] \{\s*--ag-accent: var\(--ag-pi\);/);
 });
 
-test('기본 제공자 선택은 다섯 프로바이더를 그대로 저장한다', () => {
-  // 예전 코드는 모르는 값을 claude 로 접어 Grok/Cursor 선택을 삼켰다.
+test('기본 제공자 선택은 라이브 프로바이더만 저장한다', () => {
   assert.match(settings, /const agent = PROVIDER_ORDER\.find\(\(name\) => name === value\) \?\? 'claude'/);
   assert.doesNotMatch(settings, /value === 'codex' \|\| value === 'pi' \? value : 'claude'/);
-  // 요금제 미터는 구독 한도가 있는 둘만 갖는다.
   assert.match(settings, /type PlanAgent = 'claude' \| 'codex'/);
   assert.match(settings, /const PLAN_AGENTS: readonly PlanAgent\[\] = \['claude', 'codex'\]/);
 });
 
-test('grok · cursor 사용량도 세션 · 오늘 · 주간 토큰으로 보인다', () => {
-  assert.match(settings, /const API_USAGE_AGENTS: readonly AgentName\[\] = \['grok', 'cursor'\]/);
+test('grok · cursor · opencode 사용량도 세션 · 오늘 · 주간 토큰으로 보인다', () => {
+  assert.match(settings, /const API_USAGE_AGENTS: readonly AgentName\[\] = \['grok', 'cursor', 'opencode'\]/);
   assert.match(settings, /function renderApiUsage\(\): void/);
   assert.match(settings, /renderPiUsage\(\);\s*\n\s*renderApiUsage\(\);/);
   assert.match(settings, /formatUsageWindow\('Session', providerUsage\.session\)/);
@@ -594,9 +547,9 @@ test('cursor 모델 선택은 구독/API 과금 풀로 나뉘어 보인다', () 
   assert.match(css, /\.ag-llm-group-label \{[\s\S]*?flex-basis: 100%/);
 });
 
-test('Rau 는 목록 맨 앞이고 흰 테두리 · 로그인 전용 설정 · $0 전송 잠금을 갖는다', () => {
-  assert.equal(PROVIDER_ORDER[0], 'rau');
-  assert.match(settingsCss, /\.ag-settings-provider-row\[data-agent='rau'\][\s\S]*?border-color:\s*#fff/);
+test('설정 목록은 Claude 가 맨 앞이고 공통 테두리를 갖는다', () => {
+  assert.equal(PROVIDER_ORDER[0], 'claude');
+  assert.match(settingsCss, /\.ag-settings-provider-row\[open\]\s*\{[^}]*border-color:\s*var\(--ag-border\)/);
   assert.match(settings, /if \(agent === 'rau'\) \{\s*\n\s*if \(oauthTitle\) oauthTitle\.textContent = 'Rau로 시작'/);
   assert.match(settings, /setupApiToggle\.hidden = true/);
   assert.match(settings, /setupKeyBox\.hidden = true/);
@@ -619,7 +572,7 @@ test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대
   assert.doesNotMatch(settings, /연결된 키 \*\*\*\*/);
   assert.match(settings, /체험 크레딧을 다 썼어요\. 다른 모델을 연결해 주세요\./);
   // 잔량 막대는 사용량 갱신마다 다시 그린다.
-  assert.match(settings, /renderUsage\(\): void \{\s*\n\s*renderCliproxy\(\);\s*\n\s*renderRauUsage\(\);\s*\n\s*renderRauAccount\(\);/);
+  assert.match(settings, /renderUsage\(\): void \{\s*\n\s*quotaCards.render\(usage\);\s*\n\s*renderRauUsage\(\);\s*\n\s*renderRauAccount\(\);/);
   assert.match(settingsCss, /\.ag-agent-setup-account \{[\s\S]*?border-radius: 12px/);
   assert.match(settingsCss, /\.ag-agent-setup-account-meter \.ag-settings-meter-track \{[\s\S]*?height: 8px/);
 });
@@ -650,10 +603,10 @@ test('Rau 재설정은 압축 동작만 두고 OAuth 완료를 잠깐 알린다'
 test('Rau 로그아웃 뒤 설치된 런타임을 연결 상태로 오인하지 않는다', () => {
   assert.match(
     settings,
-    /const configured = status\?\.connected === true \|\| status\?\.setupComplete === true;\s*\n\s*const connected = agent === 'rau' \? configured : detected \|\| configured/,
+    /const configured = status\?\.connected === true \|\| status\?\.setupComplete === true;\s*\n[\s\S]*const connected = configured \|\| \(available && status\?\.authenticated === true\)/,
   );
-  assert.match(settings, /row\.setup\.textContent = \(agent === 'rau' \? configured : detected \|\| configured\) \? '재설정' : '설정'/);
-  assert.match(settings, /if \(agent === 'rau' && !configured\) \{[\s\S]*row\.detail\.textContent = detected \? '로그인 필요'/);
+  assert.match(settings, /const connected = setup\?\.connected === true \|\| setup\?\.setupComplete === true\s*\|\| \(detected && setup\?\.authenticated === true\)/);
+  assert.match(settings, /label = detected \? '로그인 필요' : '연결하기'/);
   assert.match(settings, /const statuses = await bridge\.disconnectAgent\('rau'\)/);
   assert.match(settings, /if \(statuses\) setupStatuses = statuses;[\s\S]*renderAgentSetup\(\);/);
   assert.match(settings, /prefs\.defaultAgent === 'rau'[\s\S]*const fallback = selectableAgents\(\)\[0\][\s\S]*persistPrefs\(\{[\s\S]*\.\.\.prefs,[\s\S]*defaultAgent: fallback,[\s\S]*\}, \{ preserveDraft: true \}\)/);
@@ -661,14 +614,67 @@ test('Rau 로그아웃 뒤 설치된 런타임을 연결 상태로 오인하지 
   assert.match(settings, /function persistPrefs[\s\S]*preserveDraft[\s\S]*previousDraft[\s\S]*applyDefaults\(result\.value\)/);
 });
 
-test('설정 모달은 프로바이더별 설치 안내와 API 키 힌트를 갖는다', () => {
-  assert.match(settings, /const SETUP_INSTALL_NOTE: Record<AgentName, string>/);
-  assert.match(settings, /rau: '브라우저로 로그인하면 \$5 체험 크레딧이 바로 연결됩니다\.'/);
-  assert.match(settings, /cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다\.'/);
-  assert.match(settings, /grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다\.'/);
+test('설정 모달은 설치 진행 동작과 프로바이더별 API 키 힌트를 갖는다', () => {
+  assert.match(settings, /const setupInstall = el\('button', 'ag-agent-setup-primary', '설치하고 계속'\)/);
+  assert.match(settings, /setupInstallPane\.hidden = available/);
   assert.match(settings, /const API_KEY_PLACEHOLDER: Record<AgentName, string>/);
   assert.match(settings, /grok: 'xai-…'/);
   assert.match(settings, /cursor: 'API 키'/);
-  assert.match(settings, /setupInstallNote\.textContent = SETUP_INSTALL_NOTE\[agent\]/);
+  assert.match(settings, /opencode: 'API 키'/);
   assert.match(settings, /setupKey\.input\.placeholder = API_KEY_PLACEHOLDER\[agent\]/);
+});
+
+test('OpenCode 설정은 허브의 터미널 로그인 지원 여부를 따르고 인증을 확인한다', () => {
+  assert.match(settings, /setupOauth\.hidden = status\?\.terminalAuthSupported === false/);
+  assert.match(settingsCss, /\.ag-agent-auth-card\[hidden\] \{\s*display: none;/);
+  assert.match(
+    settings,
+    /refreshBtn\.addEventListener\('click',[\s\S]{0,160}Promise\.all\(\[refreshProviders\(true\), refreshSetupStatuses\(true\)\]\)/,
+  );
+  assert.match(bridgeSource, /requestAgentSetupStatus\(refresh = false\)/);
+  assert.match(bridgeSource, /type: 'agent-setup-status-request', \.\.\.\(refresh \? \{ refresh: true \} : \{\}\)/);
+  assert.match(settings, /agent === 'opencode'[\s\S]{0,80}'OpenCode CLI 자격 증명을 확인했습니다\.'/);
+  // 설치 감지만으로 완료하지 않고 허브가 확인한 인증 상태를 요구한다.
+  assert.match(settings, /const connected = configured \|\| \(available && status\?\.authenticated === true\)/);
+  assert.match(settings, /label = detected \? '로그인 필요' : '연결하기'/);
+  // 터미널 로그인을 지원하지 않는 런타임은 API 키 입력으로 이동한다.
+  assert.match(
+    settings,
+    /async function startPreferredSetupAuth\(agent: AgentName\): Promise<void> \{\s*setupReauth = true;\s*if \(setupStatuses\?\.\[agent\]\?\.terminalAuthSupported === false\) \{\s*setupKeyBox\.hidden = false;\s*renderAgentSetup\(\);\s*setupKey\.input\.focus\(\);\s*return;\s*\}\s*await startSetupAuth\('oauth'\);/,
+  );
+  assert.match(settings, /return agent !== null && !\['rau', 'pi'\]\.includes\(agent\)\s*&& setupStatuses\?\.\[agent\]\?\.terminalAuthSupported !== false/);
+  assert.match(settings, /if \(supportsTerminalSetup\(setupAgent\) && method === 'oauth'\) void setupTerminal\.open\(AGENT_LABEL\[setupAgent\]\)/);
+  assert.match(settings, /case 'agent-setup-terminal':[\s\S]*if \(setupAuthRunId && ev\.authRunId !== setupAuthRunId\) break;/);
+});
+
+test('원격 브라우저 구역은 사용량 아래 서고, 키는 앱 수명 동안만 허브를 덮는다', () => {
+  const bridge = readSource('../src/agent/bridge.ts');
+  assert.match(settings, /createSection\('원격 브라우저'\)/);
+  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, quotaSection\.root, browserbaseSection\.root, usageSection\.root\)/);
+  // 키 칸은 비밀번호 칸이고 자동완성에 걸리지 않는다.
+  assert.match(settings, /createTextField\('Browserbase 키', \{\s*type: 'password',\s*placeholder: 'bb_live_…',\s*autocomplete: 'new-password',\s*\}\)/);
+  assert.match(settings, /createTextField\('Gemini 키', \{\s*type: 'password',\s*placeholder: 'AIza…',\s*autocomplete: 'new-password',\s*\}\)/);
+  assert.match(settings, /createTextField\('프로젝트 ID', \{ placeholder: '비우면 계정에서 골라요' \}\)/);
+  // 적용은 허브 검증을 거치고, 성공한 if (status) 안에서만 보관·칸 비우기가 일어난다.
+  const submit = settings.match(
+    /async function submitBrowserbase\(\): Promise<void> \{[\s\S]*?\n  async function resetBrowserbase/,
+  )?.[0] ?? '';
+  const success = submit.match(/if \(status\) \{[\s\S]*?\n    \} else if \(!browserbaseMessage\)/)?.[0] ?? '';
+  assert.match(success, /saveBrowserbaseOverride\(\{ \.\.\.override,/);
+  assert.match(success, /browserbaseKey\.input\.value = '';/);
+  assert.match(success, /browserbaseGemini\.input\.value = '';/);
+  assert.doesNotMatch(submit.slice(0, submit.indexOf(success)), /saveBrowserbaseOverride/);
+  assert.doesNotMatch(submit.slice(submit.indexOf(success) + success.length), /saveBrowserbaseOverride/);
+  // 자동으로 채워진 옛 프로젝트 ID는 새 키와 섞지 않는다.
+  assert.match(settings, /browserbaseKey\.input\.addEventListener\('input',[\s\S]*if \(browserbaseProjectAutoFilled\) \{[\s\S]*browserbaseProject\.input\.value = '';/);
+  // 되돌리기는 허브가 성공한 뒤에만 브리지와 탭 보관소를 함께 비운다.
+  assert.match(settings, /const status = await bridge\.clearBrowserbaseCredentials\(\);[\s\S]*if \(status\) \{\s*clearBrowserbaseOverride\(\);/);
+  assert.match(bridge, /const status = await this\.request<BrowserbaseStatus>\([\s\S]*browserbase-credentials-set[\s\S]*if \(status\) this\.browserbaseOverride = candidate;/);
+  // 새로고침 뒤에는 보관소의 키를 허브에 다시 심고, 브리지는 연결마다 재전송한다.
+  assert.match(settings, /const storedBrowserbase = loadBrowserbaseOverride\(\);\s*if \(storedBrowserbase\) \{[\s\S]*bridge\.setBrowserbaseCredentials\(storedBrowserbase\)/);
+  assert.match(bridge, /if \(this\.browserbaseOverride !== null\) \{\s*this\.sendJson\(\{ v: AGENT_PROTOCOL_VERSION, type: 'browserbase-credentials-set', \.\.\.this\.browserbaseOverride \}\);/);
+  // 상태 줄은 키 꼬리만 보여 준다 — 키 본문은 허브가 애초에 보내지 않는다.
+  assert.match(settings, /키 ····\$\{status\.keyTail \?\? ''\}/);
+  assert.match(settings, /case 'browserbase-status':\s*browserbaseStatus = ev\.status;\s*renderBrowserbase\(\);/);
+  assert.match(settingsCss, /\.ag-settings-status\.ag-settings-status-warn \{/);
 });

@@ -3,6 +3,7 @@
 @import './styles/toolbar.css';
 @import './styles/style-bar.css';
 @import './styles/editor.css';
+@import './styles/cloud-workspace.css';
 @import './styles/status-bar.css';
 @import './styles/dialogs.css';
 @import './styles/char-shape-dialog.css';
@@ -18,6 +19,7 @@
 @import './styles/find-dialog.css';
 @import './styles/symbols-dialog.css';
 @import './styles/bookmark-dialog.css';
+@import './styles/hyperlink-dialog.css';
 @import './styles/shape-picker.css';
 @import './styles/command-palette.css';
 @import './styles/compare-dialog.css';

@@ -152,6 +152,9 @@ pub struct DocProperties {
 /// 문서 정보 (DocInfo 스트림의 ID 매핑 데이터)
 #[derive(Debug, Clone, Default)]
 pub struct DocInfo {
+    /// Runtime style-resolution input, never written to HWP/HWPX. Kept with
+    /// font tables so all edit-time style rebuilds use the same metrics.
+    pub font_metrics_policy: crate::model::provenance::FontMetricsPolicy,
     /// 바이너리 데이터 목록
     pub bin_data_list: Vec<BinData>,
     /// 글꼴 목록 (언어별: 한글, 영어, 한자, 일어, 기타, 기호, 사용자)
@@ -210,6 +213,9 @@ pub struct Section {
     /// 원본 BodyText 레코드 스트림 바이트 (직렬화 시 원본 복원용)
     /// 편집 시 None으로 초기화하여 재직렬화 유도
     pub raw_stream: Option<Vec<u8>>,
+    /// 로드 시 raw_stream 과 함께 세운 봉인. 편집은 raw_stream 만 지운다.
+    /// 이 포크는 업스트림 다이제스트 봉인(#4488)이 없어 존재 여부만 편집 세션 신호로 쓴다.
+    pub raw_provenance: Option<()>,
 }
 
 /// 구역 정의 (HWPTAG_CTRL_HEADER - 'secd')
@@ -301,6 +307,19 @@ impl Document {
             self.provenance.format == SourceFormat::Hwp5
                 && !self.provenance.hwp3_lineage
                 && !self.provenance.hwpx_lineage,
+        )
+        // native HWP5 는 로드 시 raw_stream 을 보유한 섹션을 raw_provenance 로
+        // 봉인한다. 편집 명령은 raw_stream 만 None 으로 지우고 봉인은 남기므로,
+        // "봉인은 있는데 raw_stream 이 사라짐" = 이 세션의 문서 변조 신호다.
+        // 합성·신규 문서(Document::default 직접 구성)는 봉인 자체가 없어 편집이
+        // 아니어도 raw_stream 이 없으므로, raw_stream 부재만으로 판정하면
+        // 오탐이다. 봉인 존재를 함께 요구해 실제 로드된 문서의 편집만 잡는다.
+        .with_session_edited(
+            self.provenance.format == SourceFormat::Hwp5
+                && self
+                    .sections
+                    .iter()
+                    .any(|s| s.raw_provenance.is_some() && s.raw_stream.is_none()),
         )
     }
 
@@ -512,16 +531,9 @@ impl Document {
         new_id
     }
 
-    /// [Task #741 후속] 외부 file path 그림 (HWP3 영역 영역 절대 경로 영역 저장된 image)
-    /// 영역 의 binary 영역 영역 base_dir 영역 영역 자동 load.
-    ///
-    /// HWP3 파일 영역 의 image 영역 영역 영역 원본 절대 경로 (예: "D:\\Work\\...\\rdb02.gif")
-    /// 영역 저장 영역. 본 환경 영역 영역 영역 path 영역 영역 access 부재 영역 영역 영역,
-    /// 본 helper 영역 영역 path 영역 영역 basename 영역 영역 추출 (`rdb02.gif`) → `base_dir`
-    /// 영역 영역 영역 file 영역 load → `bin_data_content` 영역 push 영역 → 기존 renderer
-    /// 영역 (svg / web_canvas / skia) 영역 영역 영역 image 영역 표시 영역.
-    ///
-    /// 반환: load 영역 image 영역.
+    /// 외부 그림 경로의 파일명을 `base_dir`에서 찾아 문서의 그림 데이터에 추가한다.
+    /// HWP3에 저장된 원본 절대 경로를 사용할 수 없어도 같은 이름의 로컬 그림을
+    /// 렌더러에서 표시할 수 있다. 반환값은 읽어 들인 그림 수다.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn populate_external_images_from_dir(&mut self, base_dir: &std::path::Path) -> usize {
         use crate::model::control::Control;
@@ -529,7 +541,7 @@ impl Document {
         use std::collections::BTreeMap;
 
         let mut loaded = 0;
-        // (storage_id, basename, extension) 영역 영역 image 영역 수집
+        // 저장소 ID별로 파일명과 확장자를 모은다.
         let mut to_load: BTreeMap<u16, (String, String)> = BTreeMap::new();
         for section in &self.sections {
             for para in &section.paragraphs {
@@ -544,12 +556,12 @@ impl Document {
                     };
                     if let Some(ref path) = pic.image_attr.external_path {
                         let id = pic.image_attr.bin_data_id;
-                        // 이미 load 영역 (bin_data_content 영역 영역 entry 보유) 영역 skip
+                        // 이미 읽어 들인 그림은 건너뛴다.
                         if self.external_image_loaded(id) {
                             continue;
                         }
 
-                        // path 영역 영역 basename 추출 (Windows / Unix 영역 모두 대응)
+                        // Windows와 Unix 경로에서 파일명을 추출한다.
                         let basename = path
                             .rsplit(|c| c == '/' || c == '\\')
                             .next()
@@ -574,9 +586,7 @@ impl Document {
 
                 loaded += 1;
 
-                // [한컴 viewer 정합] 원본 절대 경로 영역 영역 access 부재 시 HWP file 영역
-                // 영역 같은 dir 영역 image 영역 발견 영역 영역 dialog 영역 영역 영역 의 path 영역
-                // resolved local path 영역 영역 갱신 (basename 영역만 부재 영역).
+                // 한컴 뷰어처럼 그림 대화상자에 실제로 읽은 로컬 경로를 표시한다.
                 let resolved = full_path.to_string_lossy().to_string();
                 self.update_external_image_display_path(id, &resolved);
             }

@@ -13,6 +13,15 @@ use crate::model::shape::{
 };
 use crate::model::table::{Table, TablePageBreak};
 
+struct CellResizeUpdate {
+    cell_idx: usize,
+    width_delta: i32,
+    height_delta: i32,
+    local_resize: bool,
+    render_width: Option<u32>,
+    render_height: Option<u32>,
+}
+
 /// Format-neutral table properties exposed to Studio and agent callers.
 ///
 /// HWP5 keeps an encoded copy of these values in `raw_ctrl_data`, while HWPX does not.
@@ -161,6 +170,93 @@ impl DocumentCore {
         }
     }
 
+    fn sync_tac_table_host_line_seg_by_cell_path(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        old_height: u32,
+    ) {
+        if path.len() == 1 {
+            self.sync_tac_table_host_line_seg(section_idx, parent_para_idx, path[0].0, old_height);
+            return;
+        }
+        let Some(&(control_idx, _, _)) = path.last() else {
+            return;
+        };
+        let Ok(para) = self.get_cell_paragraph_mut_by_path(
+            section_idx,
+            parent_para_idx,
+            &path[..path.len() - 1],
+        ) else {
+            return;
+        };
+        let Some(Control::Table(table)) = para.controls.get(control_idx) else {
+            return;
+        };
+        if !table.common.treat_as_char || !table.raw_ctrl_data.is_empty() {
+            return;
+        }
+        let new_height = table.common.height;
+        if new_height == 0 || new_height == old_height {
+            return;
+        }
+        let (old_lh, new_lh) = (old_height as i32, new_height as i32);
+        for seg in &mut para.line_segs {
+            if seg.line_height != old_lh {
+                continue;
+            }
+            if seg.text_height == old_lh {
+                seg.text_height = new_lh;
+            }
+            seg.line_height = new_lh;
+            seg.baseline_distance = ((new_lh as i64 * 17 + 10) / 20).min(i32::MAX as i64) as i32;
+            break;
+        }
+    }
+
+    /// Complete a structural table edit through the outer document address shared by
+    /// flat and nested paths. Recomposition recalculates the containing cell/shape sizes;
+    /// the outer control is marked dirty so serialization does not reuse stale bytes.
+    fn finish_table_structure_edit(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        old_table_height: Option<u32>,
+        auto_page_split: bool,
+    ) -> Result<usize, HwpError> {
+        let outer_control_idx = path
+            .first()
+            .map(|entry| entry.0)
+            .ok_or_else(|| HwpError::RenderError("경로가 비어있습니다".to_string()))?;
+
+        for depth in 1..=path.len() {
+            if let Ok(table) =
+                self.resolve_table_mut_by_cell_path(section_idx, parent_para_idx, &path[..depth])
+            {
+                table.dirty = true;
+            }
+        }
+        if let Some(old_height) = old_table_height {
+            self.sync_tac_table_host_line_seg_by_cell_path(
+                section_idx,
+                parent_para_idx,
+                path,
+                old_height,
+            );
+        }
+        if path.len() == 1 {
+            if auto_page_split {
+                self.auto_enable_table_page_split(section_idx, parent_para_idx, outer_control_idx);
+            }
+        }
+        self.document.sections[section_idx].raw_stream = None;
+        self.recompose_section(section_idx);
+        self.paginate_if_needed();
+        Ok(outer_control_idx)
+    }
+
     /// 표에 행을 삽입한다 (네이티브).
     pub fn insert_table_row_native(
         &mut self,
@@ -170,7 +266,24 @@ impl DocumentCore {
         row_idx: u16,
         below: bool,
     ) -> Result<String, HwpError> {
-        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        self.insert_table_row_by_cell_path_native(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, 0, 0)],
+            row_idx,
+            below,
+        )
+    }
+
+    pub fn insert_table_row_by_cell_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        row_idx: u16,
+        below: bool,
+    ) -> Result<String, HwpError> {
+        let table = self.resolve_table_mut_by_cell_path(section_idx, parent_para_idx, path)?;
         let old_table_height = table.common.height;
         table
             .insert_row(row_idx, below)
@@ -188,23 +301,18 @@ impl DocumentCore {
         table.local_resize_cell_widths.clear();
         table.local_resize_cell_heights.clear();
 
-        self.sync_tac_table_host_line_seg(
+        let outer_control_idx = self.finish_table_structure_edit(
             section_idx,
             parent_para_idx,
-            control_idx,
-            old_table_height,
-        );
-        // 행 삽입으로 본문보다 커진 쪽나눔=None 표는 자동으로 "나눔"으로 승격해
-        // 다음 쪽으로 이어지게 한다 (쪽 하단 잘림/겹침 방지).
-        self.auto_enable_table_page_split(section_idx, parent_para_idx, control_idx);
-        self.document.sections[section_idx].raw_stream = None;
-        self.recompose_section(section_idx);
-        self.paginate_if_needed();
+            path,
+            Some(old_table_height),
+            true,
+        )?;
 
         self.event_log.push(DocumentEvent::TableRowInserted {
             section: section_idx,
             para: parent_para_idx,
-            ctrl: control_idx,
+            ctrl: outer_control_idx,
         });
         Ok(super::super::helpers::json_ok_with(&format!(
             "\"rowCount\":{},\"colCount\":{}",
@@ -221,7 +329,24 @@ impl DocumentCore {
         col_idx: u16,
         right: bool,
     ) -> Result<String, HwpError> {
-        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        self.insert_table_column_by_cell_path_native(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, 0, 0)],
+            col_idx,
+            right,
+        )
+    }
+
+    pub fn insert_table_column_by_cell_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        col_idx: u16,
+        right: bool,
+    ) -> Result<String, HwpError> {
+        let table = self.resolve_table_mut_by_cell_path(section_idx, parent_para_idx, path)?;
         table
             .insert_column(col_idx, right)
             .map_err(|e| HwpError::RenderError(e))?;
@@ -235,14 +360,13 @@ impl DocumentCore {
         table.local_resize_cell_widths.clear();
         table.local_resize_cell_heights.clear();
 
-        self.document.sections[section_idx].raw_stream = None;
-        self.recompose_section(section_idx);
-        self.paginate_if_needed();
+        let outer_control_idx =
+            self.finish_table_structure_edit(section_idx, parent_para_idx, path, None, false)?;
 
         self.event_log.push(DocumentEvent::TableColumnInserted {
             section: section_idx,
             para: parent_para_idx,
-            ctrl: control_idx,
+            ctrl: outer_control_idx,
         });
         Ok(super::super::helpers::json_ok_with(&format!(
             "\"rowCount\":{},\"colCount\":{}",
@@ -258,7 +382,22 @@ impl DocumentCore {
         control_idx: usize,
         row_idx: u16,
     ) -> Result<String, HwpError> {
-        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        self.delete_table_row_by_cell_path_native(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, 0, 0)],
+            row_idx,
+        )
+    }
+
+    pub fn delete_table_row_by_cell_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        row_idx: u16,
+    ) -> Result<String, HwpError> {
+        let table = self.resolve_table_mut_by_cell_path(section_idx, parent_para_idx, path)?;
         let old_table_height = table.common.height;
         table
             .delete_row(row_idx)
@@ -276,20 +415,18 @@ impl DocumentCore {
         table.local_resize_cell_widths.clear();
         table.local_resize_cell_heights.clear();
 
-        self.sync_tac_table_host_line_seg(
+        let outer_control_idx = self.finish_table_structure_edit(
             section_idx,
             parent_para_idx,
-            control_idx,
-            old_table_height,
-        );
-        self.document.sections[section_idx].raw_stream = None;
-        self.recompose_section(section_idx);
-        self.paginate_if_needed();
+            path,
+            Some(old_table_height),
+            false,
+        )?;
 
         self.event_log.push(DocumentEvent::TableRowDeleted {
             section: section_idx,
             para: parent_para_idx,
-            ctrl: control_idx,
+            ctrl: outer_control_idx,
         });
         Ok(super::super::helpers::json_ok_with(&format!(
             "\"rowCount\":{},\"colCount\":{}",
@@ -305,7 +442,22 @@ impl DocumentCore {
         control_idx: usize,
         col_idx: u16,
     ) -> Result<String, HwpError> {
-        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        self.delete_table_column_by_cell_path_native(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, 0, 0)],
+            col_idx,
+        )
+    }
+
+    pub fn delete_table_column_by_cell_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        col_idx: u16,
+    ) -> Result<String, HwpError> {
+        let table = self.resolve_table_mut_by_cell_path(section_idx, parent_para_idx, path)?;
         table
             .delete_column(col_idx)
             .map_err(|e| HwpError::RenderError(e))?;
@@ -321,14 +473,13 @@ impl DocumentCore {
         table.local_resize_cell_widths.clear();
         table.local_resize_cell_heights.clear();
 
-        self.document.sections[section_idx].raw_stream = None;
-        self.recompose_section(section_idx);
-        self.paginate_if_needed();
+        let outer_control_idx =
+            self.finish_table_structure_edit(section_idx, parent_para_idx, path, None, false)?;
 
         self.event_log.push(DocumentEvent::TableColumnDeleted {
             section: section_idx,
             para: parent_para_idx,
-            ctrl: control_idx,
+            ctrl: outer_control_idx,
         });
         Ok(super::super::helpers::json_ok_with(&format!(
             "\"rowCount\":{},\"colCount\":{}",
@@ -347,7 +498,29 @@ impl DocumentCore {
         end_row: u16,
         end_col: u16,
     ) -> Result<String, HwpError> {
-        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        self.merge_table_cells_by_cell_path_native(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, 0, 0)],
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_table_cells_by_cell_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        start_row: u16,
+        start_col: u16,
+        end_row: u16,
+        end_col: u16,
+    ) -> Result<String, HwpError> {
+        let table = self.resolve_table_mut_by_cell_path(section_idx, parent_para_idx, path)?;
         table
             .merge_cells(start_row, start_col, end_row, end_col)
             .map_err(|e| HwpError::RenderError(e))?;
@@ -363,14 +536,13 @@ impl DocumentCore {
         table.local_resize_cell_widths.clear();
         table.local_resize_cell_heights.clear();
 
-        self.document.sections[section_idx].raw_stream = None;
-        self.recompose_section(section_idx);
-        self.paginate_if_needed();
+        let outer_control_idx =
+            self.finish_table_structure_edit(section_idx, parent_para_idx, path, None, false)?;
 
         self.event_log.push(DocumentEvent::CellsMerged {
             section: section_idx,
             para: parent_para_idx,
-            ctrl: control_idx,
+            ctrl: outer_control_idx,
         });
         Ok(super::super::helpers::json_ok_with(&format!(
             "\"cellCount\":{}",
@@ -386,7 +558,24 @@ impl DocumentCore {
         row: u16,
         col: u16,
     ) -> Result<String, HwpError> {
-        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        self.split_table_cell_by_cell_path_native(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, 0, 0)],
+            row,
+            col,
+        )
+    }
+
+    pub fn split_table_cell_by_cell_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        row: u16,
+        col: u16,
+    ) -> Result<String, HwpError> {
+        let table = self.resolve_table_mut_by_cell_path(section_idx, parent_para_idx, path)?;
         table
             .split_cell(row, col)
             .map_err(|e| HwpError::RenderError(e))?;
@@ -399,14 +588,13 @@ impl DocumentCore {
         table.local_resize_cell_widths.clear();
         table.local_resize_cell_heights.clear();
 
-        self.document.sections[section_idx].raw_stream = None;
-        self.recompose_section(section_idx);
-        self.paginate_if_needed();
+        let outer_control_idx =
+            self.finish_table_structure_edit(section_idx, parent_para_idx, path, None, false)?;
 
         self.event_log.push(DocumentEvent::CellSplit {
             section: section_idx,
             para: parent_para_idx,
-            ctrl: control_idx,
+            ctrl: outer_control_idx,
         });
         Ok(super::super::helpers::json_ok_with(&format!(
             "\"cellCount\":{}",
@@ -427,7 +615,33 @@ impl DocumentCore {
         equal_row_height: bool,
         merge_first: bool,
     ) -> Result<String, HwpError> {
-        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        self.split_table_cell_into_by_cell_path_native(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, 0, 0)],
+            row,
+            col,
+            n_rows,
+            m_cols,
+            equal_row_height,
+            merge_first,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_table_cell_into_by_cell_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        row: u16,
+        col: u16,
+        n_rows: u16,
+        m_cols: u16,
+        equal_row_height: bool,
+        merge_first: bool,
+    ) -> Result<String, HwpError> {
+        let table = self.resolve_table_mut_by_cell_path(section_idx, parent_para_idx, path)?;
         table
             .split_cell_into(row, col, n_rows, m_cols, equal_row_height, merge_first)
             .map_err(|e| HwpError::RenderError(e))?;
@@ -439,14 +653,13 @@ impl DocumentCore {
         table.local_resize_cell_widths.clear();
         table.local_resize_cell_heights.clear();
 
-        self.document.sections[section_idx].raw_stream = None;
-        self.recompose_section(section_idx);
-        self.paginate_if_needed();
+        let outer_control_idx =
+            self.finish_table_structure_edit(section_idx, parent_para_idx, path, None, false)?;
 
         self.event_log.push(DocumentEvent::CellSplit {
             section: section_idx,
             para: parent_para_idx,
-            ctrl: control_idx,
+            ctrl: outer_control_idx,
         });
         Ok(super::super::helpers::json_ok_with(&format!(
             "\"cellCount\":{}",
@@ -468,7 +681,35 @@ impl DocumentCore {
         m_cols: u16,
         equal_row_height: bool,
     ) -> Result<String, HwpError> {
-        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        self.split_table_cells_in_range_by_cell_path_native(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, 0, 0)],
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            n_rows,
+            m_cols,
+            equal_row_height,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_table_cells_in_range_by_cell_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        start_row: u16,
+        start_col: u16,
+        end_row: u16,
+        end_col: u16,
+        n_rows: u16,
+        m_cols: u16,
+        equal_row_height: bool,
+    ) -> Result<String, HwpError> {
+        let table = self.resolve_table_mut_by_cell_path(section_idx, parent_para_idx, path)?;
         table
             .split_cells_in_range(
                 start_row,
@@ -489,14 +730,13 @@ impl DocumentCore {
         table.local_resize_cell_widths.clear();
         table.local_resize_cell_heights.clear();
 
-        self.document.sections[section_idx].raw_stream = None;
-        self.recompose_section(section_idx);
-        self.paginate_if_needed();
+        let outer_control_idx =
+            self.finish_table_structure_edit(section_idx, parent_para_idx, path, None, false)?;
 
         self.event_log.push(DocumentEvent::CellSplit {
             section: section_idx,
             para: parent_para_idx,
-            ctrl: control_idx,
+            ctrl: outer_control_idx,
         });
         Ok(super::super::helpers::json_ok_with(&format!(
             "\"cellCount\":{}",
@@ -967,6 +1207,27 @@ impl DocumentCore {
             }
         };
 
+        self.cell_properties_json(table, cell_idx, use_effective_border_fill)
+    }
+
+    /// 크기 변경과 같은 cellPath의 표에서 셀 속성을 읽는다.
+    pub fn get_cell_properties_by_cell_path_native(
+        &self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        cell_idx: usize,
+    ) -> Result<String, HwpError> {
+        let table = self.resolve_table_by_path(section_idx, parent_para_idx, path)?;
+        self.cell_properties_json(table, cell_idx, true)
+    }
+
+    fn cell_properties_json(
+        &self,
+        table: &crate::model::table::Table,
+        cell_idx: usize,
+        use_effective_border_fill: bool,
+    ) -> Result<String, HwpError> {
         let cell = table
             .cells
             .get(cell_idx)
@@ -1606,85 +1867,16 @@ impl DocumentCore {
             crate::renderer::style_resolver::resolve_styles(&self.document.doc_info, self.dpi);
     }
 
-    /// 여러 셀의 width/height를 한 번에 조절한다 (네이티브).
+    /// 셀 크기 갱신을 표에 반영하고, 폭이 바뀐 셀의 `(셀 번호, 문단 수)` 를 돌려준다.
     ///
-    /// json 형식: `[{"cellIdx":0,"widthDelta":150},{"cellIdx":2,"heightDelta":-100}]`
-    pub(crate) fn resize_table_cells_native(
-        &mut self,
-        section_idx: usize,
-        parent_para_idx: usize,
-        control_idx: usize,
-        json: &str,
-    ) -> Result<String, HwpError> {
+    /// Hangul 3모드 local_resize / renderWidth / renderHeight 도 여기서 반영한다.
+    fn apply_cell_resize_updates(
+        table: &mut Table,
+        updates: &[CellResizeUpdate],
+        force_local_resize: bool,
+    ) -> Vec<(usize, usize)> {
         const MIN_CELL_SIZE: u32 = 200; // 최소 셀 크기 (HWPUNIT)
 
-        // JSON 배열을 수동 파싱: [{"cellIdx":N,"widthDelta":D,"heightDelta":D}, ...]
-        let trimmed = json.trim();
-        if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
-            return Err(HwpError::RenderError("잘못된 JSON 배열 형식".to_string()));
-        }
-        let inner = &trimmed[1..trimmed.len() - 1];
-
-        // 각 {} 객체를 추출
-        struct CellUpdate {
-            cell_idx: usize,
-            width_delta: i32,
-            height_delta: i32,
-            local_resize: bool,
-            render_width: Option<u32>,
-            render_height: Option<u32>,
-        }
-        let mut updates: Vec<CellUpdate> = Vec::new();
-        let mut force_local_resize = false;
-
-        let mut depth = 0i32;
-        let mut start = 0usize;
-        for (i, ch) in inner.char_indices() {
-            match ch {
-                '{' => {
-                    if depth == 0 {
-                        start = i;
-                    }
-                    depth += 1;
-                }
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        let obj = &inner[start..=i];
-                        // cellIdx 파싱
-                        let cell_idx = Self::parse_json_i32(obj, "cellIdx").unwrap_or(-1);
-                        if cell_idx < 0 {
-                            continue;
-                        }
-                        let width_delta = Self::parse_json_i32(obj, "widthDelta").unwrap_or(0);
-                        let height_delta = Self::parse_json_i32(obj, "heightDelta").unwrap_or(0);
-                        let local_resize = obj.contains("\"localResize\":true")
-                            || obj.contains("\"localResize\": true");
-                        force_local_resize |= local_resize;
-                        let render_width = Self::parse_json_i32(obj, "renderWidth")
-                            .and_then(|v| (v > 0).then_some(v as u32));
-                        let render_height = Self::parse_json_i32(obj, "renderHeight")
-                            .and_then(|v| (v > 0).then_some(v as u32));
-                        updates.push(CellUpdate {
-                            cell_idx: cell_idx as usize,
-                            width_delta,
-                            height_delta,
-                            local_resize,
-                            render_width,
-                            render_height,
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if updates.is_empty() {
-            return Ok("{\"ok\":true}".to_string());
-        }
-
-        // 셀 업데이트 적용
-        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
         let original_width = table.common.width;
         let original_height = table.common.height;
         let original_row_height_sum: u32 = table.get_row_heights().iter().sum();
@@ -1694,7 +1886,7 @@ impl DocumentCore {
         let mut height_delta_by_col = std::collections::BTreeMap::<u16, (usize, i64)>::new();
         let mut local_resize_rows = std::collections::BTreeSet::<u16>::new();
         let mut local_resize_cols = std::collections::BTreeSet::<u16>::new();
-        for upd in &updates {
+        for upd in updates {
             if let Some(cell) = table.cells.get_mut(upd.cell_idx) {
                 if upd.width_delta != 0 {
                     let old_w = cell.width;
@@ -1847,22 +2039,158 @@ impl DocumentCore {
         }
         table.dirty = true;
 
-        // 너비가 변경된 셀의 모든 문단에 대해 line_segs 재계산 (텍스트 리플로우)
-        let reflow_cells: Vec<(usize, usize)> = {
-            let para = &self.document.sections[section_idx].paragraphs[parent_para_idx];
-            if let Some(Control::Table(table)) = para.controls.get(control_idx) {
-                updates
-                    .iter()
-                    .filter(|u| u.width_delta != 0)
-                    .filter_map(|u| {
-                        let pc = table.cells.get(u.cell_idx)?.paragraphs.len();
-                        Some((u.cell_idx, pc))
-                    })
-                    .collect()
-            } else {
-                Vec::new()
+        updates
+            .iter()
+            .filter(|u| u.width_delta != 0)
+            .filter_map(|u| Some((u.cell_idx, table.cells.get(u.cell_idx)?.paragraphs.len())))
+            .collect()
+    }
+
+    /// 셀 크기 조절 갱신 목록을 파싱한다 — `[{"cellIdx":N,"widthDelta":D,"heightDelta":D}, ...]`.
+    fn parse_cell_resize_updates(json: &str) -> Result<(Vec<CellResizeUpdate>, bool), HwpError> {
+        let trimmed = json.trim();
+        if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+            return Err(HwpError::RenderError("잘못된 JSON 배열 형식".to_string()));
+        }
+        let inner = &trimmed[1..trimmed.len() - 1];
+
+        let mut updates: Vec<CellResizeUpdate> = Vec::new();
+        let mut force_local_resize = false;
+        let mut depth = 0i32;
+        let mut start = 0usize;
+        for (i, ch) in inner.char_indices() {
+            match ch {
+                '{' => {
+                    if depth == 0 {
+                        start = i;
+                    }
+                    depth += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let obj = &inner[start..=i];
+                        let cell_idx = Self::parse_json_i32(obj, "cellIdx").unwrap_or(-1);
+                        if cell_idx < 0 {
+                            continue;
+                        }
+                        let width_delta = Self::parse_json_i32(obj, "widthDelta").unwrap_or(0);
+                        let height_delta = Self::parse_json_i32(obj, "heightDelta").unwrap_or(0);
+                        let local_resize = obj.contains("\"localResize\":true")
+                            || obj.contains("\"localResize\": true");
+                        force_local_resize |= local_resize;
+                        let render_width = Self::parse_json_i32(obj, "renderWidth")
+                            .and_then(|v| (v > 0).then_some(v as u32));
+                        let render_height = Self::parse_json_i32(obj, "renderHeight")
+                            .and_then(|v| (v > 0).then_some(v as u32));
+                        updates.push(CellResizeUpdate {
+                            cell_idx: cell_idx as usize,
+                            width_delta,
+                            height_delta,
+                            local_resize,
+                            render_width,
+                            render_height,
+                        });
+                    }
+                }
+                _ => {}
             }
+        }
+        Ok((updates, force_local_resize))
+    }
+
+    /// [#7189] 셀 경로가 가리키는 표를 가변으로 돌려준다.
+    ///
+    /// 읽기 전용 쌍둥이 `resolve_table_by_path` 와 같은 계약이다 — 경로의 **마지막** 항목이
+    /// 표여야 하고 그 표를 돌려준다. 앞부분 순회는 이미 검증된
+    /// `get_cell_paragraph_mut_by_path` 를 그대로 쓴다.
+    pub(crate) fn resolve_table_mut_by_cell_path(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+    ) -> Result<&mut Table, HwpError> {
+        let Some(&(control_idx, _, _)) = path.last() else {
+            return Err(HwpError::RenderError("경로가 비어있습니다".to_string()));
         };
+        if path.len() == 1 {
+            return self.get_table_mut(section_idx, parent_para_idx, control_idx);
+        }
+        let depth = path.len() - 1;
+        let para =
+            self.get_cell_paragraph_mut_by_path(section_idx, parent_para_idx, &path[..depth])?;
+        match para.controls.get_mut(control_idx) {
+            Some(Control::Table(table)) => Ok(table),
+            _ => Err(HwpError::RenderError(format!(
+                "경로[{}]: controls[{}]가 표가 아닙니다",
+                depth, control_idx
+            ))),
+        }
+    }
+
+    /// 중첩 표의 셀 크기를 셀 경로로 조절한다. 깊이 1 경로는 평면 경로에 위임한다.
+    pub fn resize_table_cells_by_cell_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        json: &str,
+    ) -> Result<String, HwpError> {
+        let Some(&(control_idx, _, _)) = path.last() else {
+            return Err(HwpError::RenderError("경로가 비어있습니다".to_string()));
+        };
+        if path.len() == 1 {
+            return self.resize_table_cells_native(section_idx, parent_para_idx, control_idx, json);
+        }
+
+        let (updates, force_local_resize) = Self::parse_cell_resize_updates(json)?;
+        if updates.is_empty() {
+            return Ok("{\"ok\":true}".to_string());
+        }
+
+        let table = self.resolve_table_mut_by_cell_path(section_idx, parent_para_idx, path)?;
+        let reflow_cells = Self::apply_cell_resize_updates(table, &updates, force_local_resize);
+
+        let depth = path.len() - 1;
+        let mut inner_path: Vec<(usize, usize, usize)> = path[..depth].to_vec();
+        inner_path.push((control_idx, 0, 0));
+        for (cell_idx, para_count) in reflow_cells {
+            for cell_para_idx in 0..para_count {
+                inner_path[depth] = (control_idx, cell_idx, cell_para_idx);
+                self.reflow_cell_paragraph_by_path(
+                    section_idx,
+                    parent_para_idx,
+                    &inner_path,
+                    cell_para_idx,
+                );
+            }
+        }
+
+        self.document.sections[section_idx].raw_stream = None;
+        self.recompose_section(section_idx);
+        self.paginate_if_needed();
+
+        Ok("{\"ok\":true}".to_string())
+    }
+
+    /// 여러 셀의 width/height를 한 번에 조절한다 (네이티브).
+    ///
+    /// json 형식: `[{"cellIdx":0,"widthDelta":150},{"cellIdx":2,"heightDelta":-100}]`
+    pub(crate) fn resize_table_cells_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        json: &str,
+    ) -> Result<String, HwpError> {
+        let (updates, force_local_resize) = Self::parse_cell_resize_updates(json)?;
+        if updates.is_empty() {
+            return Ok("{\"ok\":true}".to_string());
+        }
+
+        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        let reflow_cells = Self::apply_cell_resize_updates(table, &updates, force_local_resize);
+
         for (cell_idx, para_count) in reflow_cells {
             for cell_para_idx in 0..para_count {
                 self.reflow_cell_paragraph(

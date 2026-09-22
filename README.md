@@ -10,11 +10,11 @@
 
 <p align="center">
   An HWP/HWPX editor with an AI agent that edits the document you have open.<br />
-  Rust → WebAssembly engine, desktop app and web editor, everything local.
+  Rust and WebAssembly document engine, desktop app and web editor.
 </p>
 
 <p align="center">
-  Rauhwpx is a fork of Edward Kim's <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a>.
+  A fork of Edward Kim's <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a>.
 </p>
 
 <p align="center">
@@ -23,97 +23,73 @@
 
 ## What this is
 
-Korean office work runs on HWP/HWPX, and no AI tool can actually open those files and work inside them. Rauhwpx is a real HWP editor — parsing, layout, rendering and editing all written in Rust and compiled to WASM — with a Claude, Codex or Pi CLI wired directly into the open document through MCP.
+Rauhwpx opens and edits Korean HWP/HWPX documents. The Rust engine handles parsing, layout, rendering and editing; the agent sidebar connects supported AI providers to the open document through MCP tools.
 
-The agent reads structure, text ranges, tables, fields and rendered pages, then makes edits you can see and undo. Nothing leaves the machine: the document lives in the browser engine, and the agent hub is a localhost router with no document logic.
+Document editing runs on your machine. AI requests send prompts and any document content read by the agent to your selected provider. Web research and the optional Browserbase integration also use external services. The local agent hub manages provider sessions, permissions, downloads and tool routing.
 
 ## Editor
 
-- **Formats** — HWPX is the default save/export format for new work. HWP 5.0, HWPX and HML read/write, HWP3 read; opened `.hwp` files keep binary HWP on Save. Roundtrip fidelity is a core contract, backed by ~430 real documents in `rhwp/samples/`.
-- **Layout and rendering** — full pagination, 어울림 wrap, tables with page splitting, footnotes/endnotes, equations, shapes, charts and embedded objects, drawn to Canvas2D/CanvasKit in the browser and Skia natively.
-- **Editing** — character/paragraph/style dialogs, tables, list numbering, fields and forms, page setup, find/replace, document compare, revision history, undo throughout.
-- **Portable history** — save the document and its complete revision graph as one cross-platform `.rhwpx` archive. Older folder bundles remain available through the separate legacy import command.
-- **Export** — SVG, PNG, PDF, text, Markdown, table dumps, plus HWPX/HML conversion from the CLI.
+- HWPX is the default format for new documents. HWP 5.0, HWPX and HML support reading and writing; HWP3 is read-only. Opened `.hwp` files keep binary HWP on Save. The documents in `rhwp/samples/` provide round-trip and rendering regression coverage; compatibility varies by document and feature.
+- Layout and rendering include pagination, 어울림 wrap, tables with page splitting, footnotes/endnotes, equations, shapes, charts and embedded objects, drawn to Canvas2D/CanvasKit in the browser and Skia natively.
+- Editing includes character/paragraph/style dialogs, tables, list numbering, fields and forms, page setup, find/replace, document compare, revision history, undo throughout.
+- Save the document and its complete revision graph as one cross-platform `.rhwpx` archive. Older folder bundles remain available through the separate legacy import command.
+- Export to SVG, PNG, PDF, text, Markdown, table dumps, plus HWPX/HML conversion from the CLI.
 
-## Agent sidebar
+## Agent
 
-- **69 MCP tools** — semantic reads and writes for the common work, a batched write that applies up to 32 edits in one atomic call, path-independent live-document snapshots and downloadable generated artifacts, plus registry-generated engine batches that cover every classified mutation, so the agent is never blocked on a capability the editor has.
-- **Live staged edits** — changes render in place as you watch, commit as one undo step when the turn succeeds, and restore the exact prior snapshot when it fails.
-- **Two permission modes** — 안전 keeps edits behind review and files inside the project; 전체 lets the agent work uninterrupted.
-- **Planning before implementation** — the agent can research with web, subagents and Browserbase while the document stays read-only, then presents a plan that only executes on your approval.
-- **Revision contract** — every read returns a revision, every write requires it. Stale writes fail loudly instead of corrupting the document.
+Claude, Codex, Pi, Grok, Cursor, and OpenCode can each drive the open document. Semantic reads and writes cover common work. `apply_edits` applies up to 32 changes in one atomic call. Registry-generated engine batches cover classified mutations.
+
+Staged edits appear in the document. **안전** holds successful edits for review. **전체 접근** commits them as one undo step. A failed turn restores the prior snapshot. In plan mode the document stays read-only until you approve.
+
+Every read returns a `revision`. Every write requires it. Stale writes fail instead of corrupting the document.
+
+The live tool list lives in `rhwp/rhwp-agent/tools.mjs`. `rhwp/rhwp-agent/tests/tools.test.mjs` pins the count.
 
 ## Install
 
-Download a build from [Releases](https://github.com/ghandhitechnology/Rauhwpx/releases): macOS arm64 DMG/ZIP (signed), Windows x64 installer (unsigned for now — SmartScreen warns until we get a certificate).
+Download a build from [Releases](https://github.com/ghandhitechnology/Rauhwpx/releases): macOS arm64 DMG/ZIP, Windows x64 installer, or Linux x64/arm64 AppImage and Debian package. macOS builds are signed. Windows builds are currently unsigned and can trigger SmartScreen warnings.
 
 Windows installs per user by default. The installer detects an older all-users installation and requests elevation to upgrade it instead of creating a second copy.
 
-Saving over an existing desktop file uses a crash-safe compare-and-swap and
-requires hard-link support on that volume. FAT/exFAT, some SMB shares, and some
-cloud-synced volumes may reject the save without changing the original; use a
-local APFS or NTFS volume, or Save As to a supported destination. On Windows,
-preserving the original file's access rules also requires the built-in
-System32 Windows PowerShell. If both publication and rollback fail, Rauhwpx
-keeps an openable recovery copy and reports its exact path.
+Saving over an existing desktop file uses a crash-safe compare-and-swap and requires hard-link support on that volume. FAT/exFAT, some SMB shares, and some cloud-synced volumes may reject the save without changing the original; use a local APFS or NTFS volume, or Save As to a supported destination. On Windows, preserving the original file's access rules also requires the built-in System32 Windows PowerShell. If both publication and rollback fail, Rauhwpx keeps an openable recovery copy and reports its exact path.
 
-Testers can download the current pre-release from the [nightly tag](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly).
+Testers on macOS and Windows can use the [nightly](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly) pre-release. Artifact names use `<version>-nightly.<date>.<sha>`, with a UTC `YYYYMMDD` date and the first seven SHA characters.
 
-You supply your own agent CLI. Claude, Codex and Pi can each be installed and signed in from **Settings → Connection** inside the app.
+Connect a provider from **Settings → Connection**. Claude, Codex, Pi, Grok, Cursor, and OpenCode can be installed there, and the app offers each provider's supported sign-in method. OpenCode can also reuse credentials created by `opencode auth login`.
 
 ## Development
 
+Install Node 22.18 or newer, Rust via rustup, and wasm-pack 0.15.0. From the repository root:
+
 ```sh
-cd rhwp && wasm-pack build --target web    # build the engine
-cd rhwp-studio && npm install && npm run dev
+npm run setup
+npm run build:wasm
+npm run dev:studio
 ```
 
-Studio runs at http://127.0.0.1:7700 and owns its own authenticated hub on an ephemeral port, so parallel worktrees never collide. `npm run dev:desktop` from the repo root attaches the Electron shell to that dev server.
+Open http://127.0.0.1:7700. Studio starts its own authenticated agent hub on an ephemeral port. To attach Electron to that dev server, run `npm run dev:desktop` in another terminal.
 
-For standalone hub work, `npm start` from the root runs it on http://127.0.0.1:5175, logs to `.run/rhwp-agent.log` and returns once ready — `npm stop`, `npm run status`, `npm run start:fg`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for native builds, focused tests and prerequisites. Maintainers can find signing and publishing instructions in [docs/releasing.md](docs/releasing.md).
 
-Rust: `cargo test`, `cargo clippy`, `cargo fmt`. Studio: `npm test`, `npm run build`, `npm run e2e:*`.
+### Sidebar design preview
 
-## 기여하기
-
-[CONTRIBUTING.md](CONTRIBUTING.md)에서 로컬 설정, PR 전에 실행할 검사, [AGENTS.md](AGENTS.md)의 설명 형식을 확인하세요.
-
-## Releasing
-
-Push a `v*` tag matching `package.json` and GitHub Actions builds and attaches the installers.
-
-```bash
-git tag v1.2.2
-git push origin v1.2.2
-```
-
-macOS signing uses the `macos-release` environment: `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`. Local Windows build: `npm run dist:win` on Windows.
-
-### Nightly
-
-GitHub Actions builds nightly desktop installers at 4:00am KST (`0 19 * * *` UTC). Run it manually from **Actions → Nightly desktop release**. A manual run publishes only from `main`.
-
-Testers download the current build from the [nightly pre-release](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly). Each successful run replaces that pre-release and moves the `nightly` tag.
-
-The workflow builds signed and notarized macOS arm64 DMG and ZIP installers. It also builds an unsigned Windows x64 NSIS installer, matching tagged releases. There is no Linux desktop nightly.
-
-`.github/workflows/nightly.yml` remains the Linux engine and Studio verification workflow. It does not publish installers.
-
-macOS uses the same `macos-release` environment as tagged releases. The required secrets are `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_SPECIFIC_PASSWORD`. If any secret is missing, the macOS job fails and GitHub does not publish a partial nightly. If `macos-release` requires a reviewer, the scheduled run waits for approval.
-
-The nightly app version and artifact names use `<version>-nightly.<date>.<sha>`. `<date>` is the UTC `YYYYMMDD` date, and `<sha>` is the first seven commit SHA characters.
+Run `npm --prefix rhwp/rhwp-studio ci` once, then `npm run dev:sidebar` and open
+http://127.0.0.1:7715. This mounts the production sidebar with local service fixtures;
+Node is the only runtime prerequisite. `npm run test:sidebar` checks its interactions
+in headless Chrome and saves sidebar screenshots. See the
+[preview guide](rhwp/rhwp-studio/sidebar-preview/README.md) for scenarios and design editing.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `rhwp/src/` | Rust engine — parser, model, document_core, renderer, serializer, wasm_api |
-| `rhwp/rhwp-studio/` | Web editor (TypeScript, no framework) and the agent sidebar |
-| `rhwp/rhwp-agent/` | Local WS hub bridging the agent CLIs to the open tab |
-| `desktop/` | Electron shell — multi-window, per-window agent sessions |
-| `rhwp/rhwp-{chrome,firefox,safari,vscode}/` | Browser and VS Code viewer extensions |
+| `rhwp/src/` | Rust engine |
+| `rhwp/rhwp-studio/` | Web editor and agent sidebar |
+| `rhwp/rhwp-agent/` | Local WS hub |
+| `desktop/` | Electron shell |
+| `rhwp/rhwp-{chrome,firefox,safari,vscode}/` | Viewer extensions |
 | `rhwp/npm/editor/` | Embeddable editor package |
 
 ## License
 
-[MIT](rhwp/LICENSE). Independent project — 한글, 한컴, HWP and HWPX are Hancom trademarks, and this is not affiliated with or endorsed by Hancom.
+[MIT](rhwp/LICENSE). 한글, 한컴, HWP, and HWPX are Hancom trademarks. This project is not affiliated with Hancom.

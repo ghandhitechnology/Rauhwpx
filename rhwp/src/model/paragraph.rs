@@ -1,12 +1,12 @@
 //! 문단 (Paragraph, CharRun, LineSeg, RangeTag)
 
-use super::control::Control;
+use super::control::{Control, FieldType};
 use serde::{Deserialize, Serialize};
 
 /// 문단 (HWPTAG_PARA_HEADER + 하위 레코드)
 #[derive(Debug, Default, Clone)]
 pub struct Paragraph {
-    /// 문자 수 (제어 문자 포함)
+    /// UTF-16 코드 유닛 수 (제어 문자와 문단 끝 마커 포함).
     pub char_count: u32,
     /// 컨트롤 마스크
     pub control_mask: u32,
@@ -52,6 +52,11 @@ pub struct Paragraph {
     /// TAB 확장 데이터 (라운드트립 보존용)
     /// 각 탭 문자의 7 code unit (탭 너비, 종류 등) — text 내 '\t' 순서와 1:1 대응
     pub tab_extended: Vec<[u16; 7]>,
+    /// [#6956] 형광펜 표시 (`<hp:t>` 안의 `<hp:markpenBegin/>`·`<hp:markpenEnd/>`)
+    ///
+    /// 글자 축을 소비하지 않는다. 한컴 원본의 `hp:lineseg/@textpos` 가 이 표지를 세지
+    /// 않으므로 `text` 에도, 유닛 계산에도 넣지 않고 위치와 색만 보존한다.
+    pub markpen_marks: Vec<MarkpenMark>,
     /// 문단 번호 시작 방식 오버라이드
     /// None = 앞 번호 목록에 이어 (기본)
     /// Some(NumberingRestart) = 이전 번호 이어 / 새 번호 시작
@@ -151,6 +156,15 @@ pub struct CharShapeRef {
     /// 글자 모양이 바뀌는 시작 위치
     pub start_pos: u32,
     /// 글자 모양 ID
+    pub char_shape_id: u32,
+}
+
+/// 문자 offset 범위의 균일 글자 모양 구간. JSON 키는 camelCase (WASM/Studio 계약).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharShapeRun {
+    pub start_offset: usize,
+    pub end_offset: usize,
     pub char_shape_id: u32,
 }
 
@@ -286,6 +300,37 @@ pub struct RangeTag {
     pub tag: u32,
 }
 
+/// [#6956] 형광펜 표시 한 개.
+///
+/// 한컴은 여는 표지에 색을 싣고 닫는 표지는 속성이 없다. 둘 다 텍스트 원소 안 글자
+/// 사이에 오며 글자 축을 소비하지 않는다.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MarkpenMark {
+    /// `text` 문자열 내 삽입 위치 (이 인덱스의 문자 **앞**에 놓인다)
+    pub char_idx: usize,
+    /// 여는 표지의 색. `None` 이면 닫는 표지다.
+    pub color: Option<String>,
+    /// 확장 제어를 포함한 HWP5 UTF-16 위치. 표 앞뒤의 같은 char_idx를 구분한다.
+    pub utf16_pos: Option<u32>,
+}
+
+impl MarkpenMark {
+    pub(crate) fn stream_position(&self, para: &Paragraph) -> u32 {
+        self.utf16_pos.unwrap_or_else(|| {
+            para.char_offsets
+                .get(self.char_idx)
+                .copied()
+                .unwrap_or_else(|| {
+                    para.text
+                        .chars()
+                        .take(self.char_idx)
+                        .map(|c| c.len_utf16() as u32)
+                        .sum()
+                })
+        })
+    }
+}
+
 /// 필드 텍스트 범위 (0x03 FIELD_BEGIN ~ 0x04 FIELD_END 사이 텍스트)
 #[derive(Debug, Clone, Default)]
 pub struct FieldRange {
@@ -317,9 +362,71 @@ pub struct OrphanFieldEnd {
     pub begin_id_ref: u32,
     /// `<hp:fieldEnd fieldid="..">` — 필드 인스턴스 id.
     pub field_id: u32,
+    /// 짝 필드의 HWP5 `ctrl_id`(`%clk` 등). HWP5 저장기가 종료 마커를 쓸 때 쓴다.
+    ///
+    /// 0 이면 모른다는 뜻이고, 그때는 HWP5 저장에서 마커를 내지 않는다. 필드 종류를
+    /// 지어내면 한글이 짝을 못 맞춘다. HWPX 에서 들어온 고아 마커가 이 경우다.
+    pub begin_ctrl_id: u32,
 }
 
 impl Paragraph {
+    /// 한컴 2022 실측: 종류 2, 하위 24비트는 COLORREF(BGR), 끝 위치는 exclusive.
+    pub(crate) fn import_markpen_range_tags(&mut self) {
+        self.markpen_marks = self
+            .range_tags
+            .iter()
+            .filter(|r| r.tag >> 24 == 2)
+            .flat_map(|r| {
+                let color = format!(
+                    "#{:02X}{:02X}{:02X}",
+                    r.tag & 255,
+                    (r.tag >> 8) & 255,
+                    (r.tag >> 16) & 255
+                );
+                [(r.start, Some(color)), (r.end, None)]
+            })
+            .map(|(pos, color)| MarkpenMark {
+                char_idx: self.char_offsets.partition_point(|&offset| offset < pos),
+                color,
+                utf16_pos: Some(pos),
+            })
+            .collect();
+        self.markpen_marks.sort_by_key(|m| m.utf16_pos);
+    }
+
+    pub(crate) fn effective_markpen_range_tags(&self) -> Vec<RangeTag> {
+        if self.markpen_marks.is_empty() {
+            return self.range_tags.clone();
+        }
+        let mut ranges: Vec<_> = self
+            .range_tags
+            .iter()
+            .filter(|r| r.tag >> 24 != 2)
+            .cloned()
+            .collect();
+        let mut open = Vec::new();
+        for mark in &self.markpen_marks {
+            let pos = mark.stream_position(self);
+            if let Some(color) = &mark.color {
+                let rgb = color
+                    .strip_prefix('#')
+                    .filter(|s| s.len() == 6)
+                    .and_then(|s| u32::from_str_radix(s, 16).ok());
+                open.push((pos, rgb));
+            } else if let Some((start, Some(rgb))) = open.pop() {
+                if pos >= start {
+                    let bgr = ((rgb & 255) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 255);
+                    ranges.push(RangeTag {
+                        start,
+                        end: pos,
+                        tag: 0x0200_0000 | bgr,
+                    });
+                }
+            }
+        }
+        ranges
+    }
+
     /// 문단 분할 때 위치에 따라 앞/뒤 문단으로 이동해야 하는 zero-width 컨트롤.
     ///
     /// `is_split_movable_control`은 커서의 logical offset을 한 칸 소비하는 인라인
@@ -486,12 +593,22 @@ impl Paragraph {
     }
 
     /// 문자의 UTF-16 코드 유닛 수를 반환한다.
-    fn char_utf16_len(c: char) -> u32 {
+    pub(crate) fn char_utf16_len(c: char) -> u32 {
         if (c as u32) > 0xFFFF {
             2
         } else {
             1
         }
+    }
+
+    /// 마지막 본문 글자 바로 뒤의 UTF-16 코드 유닛 인덱스.
+    ///
+    /// 보조 평면 글자는 2 유닛이다. 끝 앵커 컨트롤을 `last + 1` 로 자르면
+    /// `LineSeg::text_start` 비교가 앞 줄을 집을 수 있다.
+    pub(crate) fn utf16_pos_after_last_char(&self) -> Option<u32> {
+        let last = *self.char_offsets.last()?;
+        let last_ch = self.text.chars().last()?;
+        Some(last + Self::char_utf16_len(last_ch))
     }
 
     /// char_offset 위치에 텍스트를 삽입한다.
@@ -618,10 +735,58 @@ impl Paragraph {
             (self.controls.len() as u32) * 8
         };
         let char_offset = effective_char_offset;
+        let hyperlink_starts = self
+            .field_ranges
+            .iter()
+            .filter(|range| {
+                range.start_char_idx < range.end_char_idx
+                    && range.start_char_idx == char_offset
+                    && matches!(
+                        self.controls.get(range.control_idx),
+                        Some(Control::Field(field)) if field.field_type == FieldType::Hyperlink
+                    )
+            })
+            .count() as u32;
+        let at_hyperlink_start = hyperlink_starts > 0;
+        let at_hyperlink_end = self.field_ranges.iter().any(|range| {
+            range.start_char_idx < range.end_char_idx
+                && range.end_char_idx == char_offset
+                && matches!(
+                    self.controls.get(range.control_idx),
+                    Some(Control::Field(field)) if field.field_type == FieldType::Hyperlink
+                )
+        });
+
+        // 범위뿐 아니라 FIELD_BEGIN의 raw 슬롯도 새 글자 뒤에 있어야 한다.
+        // 그렇지 않으면 HWPX 저장 시 기존 선행 갭에서 BEGIN을 먼저 방출해
+        // 링크 밖에 입력한 글자가 다시 링크에 포함된다.
+        let preceding_text_end = if char_offset == 0 {
+            0
+        } else {
+            self.char_offsets[char_offset - 1] + Self::char_utf16_len(text_chars[char_offset - 1])
+        };
+        let begin_units = hyperlink_starts * 8;
+        let utf16_insert_pos =
+            if at_hyperlink_start && utf16_insert_pos >= preceding_text_end + begin_units {
+                utf16_insert_pos - begin_units
+            } else {
+                utf16_insert_pos
+            };
 
         // 새 텍스트의 UTF-16 총 길이
         let new_chars: Vec<char> = new_text.chars().collect();
         let utf16_delta: u32 = new_chars.iter().map(|c| Self::char_utf16_len(*c)).sum();
+
+        for mark in &mut self.markpen_marks {
+            if mark.char_idx >= char_offset {
+                mark.char_idx += new_chars.len();
+            }
+            if let Some(pos) = &mut mark.utf16_pos {
+                if *pos >= utf16_insert_pos {
+                    *pos += utf16_delta;
+                }
+            }
+        }
 
         // 1. 텍스트 삽입
         self.text.insert_str(byte_offset, new_text);
@@ -650,7 +815,10 @@ impl Paragraph {
         for cs in &mut self.char_shapes {
             if cs.start_pos > utf16_insert_pos {
                 cs.start_pos += utf16_delta;
-            } else if cs.start_pos == utf16_insert_pos && cs.start_pos > 0 {
+            } else if cs.start_pos == utf16_insert_pos
+                && cs.start_pos > 0
+                && (!at_hyperlink_end || at_hyperlink_start)
+            {
                 cs.start_pos += utf16_delta;
             }
         }
@@ -674,19 +842,29 @@ impl Paragraph {
             }
         }
 
+        super::hyperlink_format::text_edit(self, char_offset, char_offset, new_chars.len());
         // 5-1. field_ranges: 삽입 지점 이후의 char 인덱스 시프트
         let inserted_len = new_chars.len();
         for fr in &mut self.field_ranges {
-            if fr.start_char_idx > char_offset {
+            let is_hyperlink = matches!(
+                self.controls.get(fr.control_idx),
+                Some(Control::Field(field)) if field.field_type == FieldType::Hyperlink
+            );
+            if fr.start_char_idx > char_offset
+                || (is_hyperlink
+                    && fr.start_char_idx == char_offset
+                    && fr.start_char_idx < fr.end_char_idx)
+            {
                 fr.start_char_idx += inserted_len;
             }
-            if fr.end_char_idx >= char_offset {
+            if fr.end_char_idx > char_offset || (fr.end_char_idx == char_offset && !is_hyperlink) {
                 fr.end_char_idx += inserted_len;
             }
         }
 
-        // 6. char_count 갱신
-        self.char_count += new_chars.len() as u32;
+        // The paragraph header and stored line/style positions use UTF-16
+        // units. Selection offsets and the return value remain codepoints.
+        self.char_count += utf16_delta;
 
         effective_char_offset
     }
@@ -727,6 +905,21 @@ impl Paragraph {
             .map(|c| Self::char_utf16_len(*c))
             .sum();
         let utf16_end = utf16_start + utf16_delta;
+
+        for mark in &mut self.markpen_marks {
+            mark.char_idx = if mark.char_idx >= del_end {
+                mark.char_idx - (del_end - char_offset)
+            } else {
+                mark.char_idx.min(char_offset)
+            };
+            if let Some(pos) = &mut mark.utf16_pos {
+                *pos = if *pos >= utf16_end {
+                    *pos - utf16_delta
+                } else {
+                    (*pos).min(utf16_start)
+                };
+            }
+        }
 
         // 1. 텍스트 삭제
         self.text.drain(byte_start..byte_end);
@@ -776,6 +969,7 @@ impl Paragraph {
             }
         }
 
+        super::hyperlink_format::text_edit(self, char_offset, del_end, 0);
         // 5-1. field_ranges: 삭제 범위에 따라 축소/조정
         for fr in &mut self.field_ranges {
             if fr.start_char_idx >= del_end {
@@ -794,8 +988,8 @@ impl Paragraph {
         self.field_ranges
             .retain(|fr| fr.start_char_idx <= fr.end_char_idx);
 
-        // 6. char_count 갱신
-        self.char_count -= actual_count as u32;
+        // Match the UTF-16 delta used for offsets, including surrogate pairs.
+        self.char_count -= utf16_delta;
 
         actual_count
     }
@@ -838,7 +1032,7 @@ impl Paragraph {
         let text_chars: Vec<char> = self.text.chars().collect();
 
         // 분할 지점의 UTF-16 위치
-        let utf16_split: u32 = if split_pos < self.char_offsets.len() {
+        let mut utf16_split: u32 = if split_pos < self.char_offsets.len() {
             self.char_offsets[split_pos]
         } else if !self.char_offsets.is_empty() {
             let last = self.char_offsets.len() - 1;
@@ -846,6 +1040,29 @@ impl Paragraph {
         } else {
             split_pos as u32
         };
+        // At an object boundary, the next text offset lies AFTER the object's
+        // eight-unit slot. If the object moves to the new paragraph, split
+        // before that slot so its leading gap survives Enter and merge undo.
+        if split_pos < self.char_offsets.len() {
+            let text_positions = self.control_text_positions();
+            let moved_at_boundary = self
+                .controls
+                .iter()
+                .enumerate()
+                .filter(|(ci, control)| {
+                    Self::is_split_positioned_control(control)
+                        && text_positions.get(*ci) == Some(&split_pos)
+                        && control_positions.get(*ci).copied().unwrap_or(usize::MAX) >= char_offset
+                })
+                .count() as u32;
+            let preceding_text_end = if split_pos == 0 {
+                0
+            } else {
+                self.char_offsets[split_pos - 1] + Self::char_utf16_len(text_chars[split_pos - 1])
+            };
+            let encoded_slots = utf16_split.saturating_sub(preceding_text_end) / 8;
+            utf16_split -= moved_at_boundary.min(encoded_slots) * 8;
+        }
 
         // === 새 문단 구성 ===
 
@@ -982,6 +1199,19 @@ impl Paragraph {
         }
         self.range_tags = kept_range_tags;
 
+        for fr in &self.field_ranges {
+            if fr.start_char_idx < split_pos && split_pos < fr.end_char_idx {
+                if let Some(Control::Field(f)) = self.controls.get_mut(fr.control_idx) {
+                    if let Some(format) = &mut f.hyperlink_format {
+                        format.replace(
+                            split_pos - fr.start_char_idx,
+                            fr.end_char_idx - fr.start_char_idx,
+                            0,
+                        );
+                    }
+                }
+            }
+        }
         // 5-1. field_ranges 분할
         let mut new_field_ranges: Vec<FieldRange> = Vec::new();
         let mut new_orphan_field_ends: Vec<OrphanFieldEnd> = Vec::new();
@@ -1011,6 +1241,7 @@ impl Paragraph {
                         char_idx: fr.end_char_idx - split_pos,
                         begin_id_ref: field.field_id,
                         field_id: fr.end_field_id,
+                        begin_ctrl_id: field.ctrl_id,
                     });
                 }
             }
@@ -1029,6 +1260,18 @@ impl Paragraph {
             }
         }
         self.orphan_field_ends = kept_orphan_field_ends;
+
+        let new_markpen_marks: Vec<MarkpenMark> = self
+            .markpen_marks
+            .iter()
+            .filter(|m| m.char_idx >= split_pos)
+            .map(|m| MarkpenMark {
+                char_idx: m.char_idx - split_pos,
+                color: m.color.clone(),
+                utf16_pos: m.utf16_pos.map(|pos| pos.saturating_sub(utf16_split)),
+            })
+            .collect();
+        self.markpen_marks.retain(|m| m.char_idx < split_pos);
 
         // Field는 보이는 문자 오프셋에서 한 글자를 차지하지 않는다. 다만 새 문단으로
         // 이관되는 FieldRange가 참조하는 Field control은 범위와 함께 이동해야 한다.
@@ -1077,11 +1320,11 @@ impl Paragraph {
 
         // 6. char_count 갱신
         //    원본 문단에 남은 controls는 각각 8 code unit을 차지하므로 반영 필요
-        let new_text_char_count = new_text.chars().count() as u32;
+        let new_text_char_count = new_text.encode_utf16().count() as u32;
         let ctrl_code_units: u32 =
             (self.controls.len() + self.field_ranges.len() + self.orphan_field_ends.len()) as u32
                 * 8;
-        self.char_count = split_pos as u32 + ctrl_code_units + 1; // +1 for paragraph end marker
+        self.char_count = self.text.encode_utf16().count() as u32 + ctrl_code_units + 1;
         let new_char_count = new_text_char_count
             + (new_controls.len() + new_field_ranges.len() + new_orphan_field_ends.len()) as u32
                 * 8
@@ -1142,6 +1385,7 @@ impl Paragraph {
             raw_header_extra: Vec::new(),
             has_para_text: new_has_para_text,
             tab_extended: new_tab_extended,
+            markpen_marks: new_markpen_marks,
             numbering_restart: None,
         }
     }
@@ -1157,6 +1401,7 @@ impl Paragraph {
             && other.field_ranges.is_empty()
             && other.orphan_field_ends.is_empty()
             && other.range_tags.is_empty()
+            && other.markpen_marks.is_empty()
         {
             return self.text.chars().count();
         }
@@ -1263,6 +1508,13 @@ impl Paragraph {
             });
         }
 
+        self.markpen_marks
+            .extend(other.markpen_marks.iter().map(|m| MarkpenMark {
+                char_idx: m.char_idx + self_text_len,
+                color: m.color.clone(),
+                utf16_pos: m.utf16_pos.map(|pos| pos + utf16_end),
+            }));
+
         // 5-1. field_ranges 결합 (other의 char 인덱스에 self_text_len 추가)
         //      ctrl_offset은 병합 전 self.controls.len() — 5-2의 controls 병합보다 먼저 캡처
         let ctrl_offset = self.controls.len();
@@ -1313,6 +1565,7 @@ impl Paragraph {
                     char_idx: self_text_len + orphan.char_idx,
                     begin_id_ref: orphan.begin_id_ref,
                     field_id: orphan.field_id,
+                    begin_ctrl_id: orphan.begin_ctrl_id,
                 });
             }
         }
@@ -1343,7 +1596,7 @@ impl Paragraph {
         // 6. char_count 갱신: 텍스트 + 컨트롤(각 8 code unit) + 문단끝(1)
         //    split_at의 ctrl_code_units 계산과 정합. HWPX 직렬화가 char_count에서
         //    컨트롤 수를 역산하므로 컨트롤 유닛 포함 필수.
-        self.char_count = (self_text_len + other.text.chars().count()) as u32
+        self.char_count = self.text.encode_utf16().count() as u32
             + (self.controls.len() + self.field_ranges.len() + self.orphan_field_ends.len()) as u32
                 * 8
             + 1;
@@ -1422,6 +1675,29 @@ impl Paragraph {
         }
         runs.push((run_start, end_char_offset, run_id));
         runs
+    }
+
+    /// `char_shape_runs_in_range` 를 WASM/JSON 계약용 구간 목록으로 감싼다.
+    pub fn char_shape_runs(
+        &self,
+        start_char_offset: usize,
+        end_char_offset: usize,
+    ) -> Vec<CharShapeRun> {
+        self.char_shape_runs_in_range(start_char_offset, end_char_offset)
+            .into_iter()
+            .map(|(start_offset, end_offset, char_shape_id)| CharShapeRun {
+                start_offset,
+                end_offset,
+                char_shape_id,
+            })
+            .collect()
+    }
+
+    /// 검증된 구간 목록을 문단에 순서대로 복원한다. 호출측이 범위·ID를 검사한다.
+    pub fn restore_char_shape_runs(&mut self, runs: &[CharShapeRun]) {
+        for run in runs {
+            self.apply_char_shape_range(run.start_offset, run.end_offset, run.char_shape_id);
+        }
     }
 
     /// 인라인 컨트롤이 텍스트의 어느 character 인덱스에 위치하는지 반환한다.
@@ -1579,13 +1855,32 @@ impl Paragraph {
             });
         }
 
+        // 링크 서식은 마지막 표시 글자까지만 적용한다. FIELD_END와 다음
+        // FIELD_BEGIN 사이의 갭까지 칠하면 인접 링크 사이의 일반 서식이 사라진다.
+        let ends_hyperlink = self.field_ranges.iter().any(|range| {
+            range.end_char_idx == end_char_offset
+                && matches!(
+                    self.controls.get(range.control_idx),
+                    Some(Control::Field(field)) if field.field_type == FieldType::Hyperlink
+                )
+        });
         // char offset → UTF-16 위치 변환
         let utf16_start = if start_char_offset < self.char_offsets.len() {
             self.char_offsets[start_char_offset]
         } else {
             return;
         };
-        let utf16_end = if end_char_offset < self.char_offsets.len() {
+        let utf16_end = if ends_hyperlink && end_char_offset > 0 {
+            let last_idx = end_char_offset - 1;
+            let Some(&raw) = self.char_offsets.get(last_idx) else {
+                return;
+            };
+            raw + self
+                .text
+                .chars()
+                .nth(last_idx)
+                .map_or(1, Self::char_utf16_len)
+        } else if end_char_offset < self.char_offsets.len() {
             self.char_offsets[end_char_offset]
         } else if !self.char_offsets.is_empty() {
             let last = *self.char_offsets.last().unwrap();
@@ -1618,6 +1913,13 @@ impl Paragraph {
                 .sum()
         };
 
+        let preserve_link_end = self.field_ranges.iter().any(|range| {
+            range.end_char_idx == end_char_offset
+                && matches!(
+                    self.controls.get(range.control_idx),
+                    Some(Control::Field(field)) if field.field_type == FieldType::Hyperlink
+                )
+        });
         // 새 CharShapeRef 배열을 구축
         let mut new_refs: Vec<CharShapeRef> = Vec::new();
 
@@ -1670,7 +1972,7 @@ impl Paragraph {
                 }
 
                 // 범위 뒷부분 복원 (utf16_end < seg_end, 텍스트 범위 내일 때만)
-                if utf16_end < seg_end && utf16_end < text_utf16_end {
+                if utf16_end < seg_end && (utf16_end < text_utf16_end || preserve_link_end) {
                     new_refs.push(CharShapeRef {
                         start_pos: utf16_end,
                         char_shape_id: csr.char_shape_id,

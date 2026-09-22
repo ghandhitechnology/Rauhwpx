@@ -111,6 +111,10 @@ pub(crate) struct HeightCursor {
     pub prev_item_content_bottom_y: Option<f64>,
     /// 직전 `vpos_adjust`에서 새 미주 제목 gap을 저장 end_y보다 위로 compact했는지.
     pub(crate) last_compacted_endnote_title_gap: bool,
+    /// [편집 세션] 저장 사다리의 전방 점프가 쪽 말미(하단 15%)로 향하면 기각한다.
+    /// 편집으로 앞 내용이 밀린 뒤의 저장 좌표는 이 쪽의 물리 상태와 무관해,
+    /// 점프하면 후속 분할 조각이 쪽 밖으로 밀린다(셀 Enter 재현).
+    pub session_edited: bool,
 }
 
 impl HeightCursor {
@@ -143,6 +147,7 @@ impl HeightCursor {
             endnote_between_notes_hu: 0,
             prev_item_content_bottom_y: None,
             last_compacted_endnote_title_gap: false,
+            session_edited: false,
         }
     }
 
@@ -1353,6 +1358,14 @@ impl HeightCursor {
                     item_para, prev_pi, y_offset, result,
                 );
             }
+            return y_offset;
+        }
+        // [편집 세션] 전방 점프 목적지가 쪽 말미(하단 15%)면 낡은 저장 좌표다 —
+        // fresh 흐름을 유지한다. 같은 쪽 소폭 재동기화(상단·중단)는 종전대로.
+        if self.session_edited
+            && result > y_offset
+            && result > self.col_area_y + self.col_area_height * 0.85
+        {
             return y_offset;
         }
         result

@@ -1,0 +1,187 @@
+#workspace-stack {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+#workspace-stack > #editor-area,
+#workspace-stack > #cloud-workspace {
+  grid-area: 1 / 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+#cloud-workspace {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--doc-workspace);
+  color: var(--ui-text);
+}
+
+.cloud-workspace-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.cloud-workspace-zoom {
+  position: absolute;
+  z-index: 3;
+  top: 12px;
+  right: 12px;
+  box-shadow: var(--shadow-light);
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--radius-sm);
+  background: var(--ui-surface);
+}
+
+.cloud-workspace-zoom button {
+  min-width: 28px;
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-right: 1px solid var(--ui-border);
+  background: transparent;
+  color: var(--ui-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.cloud-workspace-zoom button:last-child { border-right: 0; }
+.cloud-workspace-zoom button[aria-pressed="true"] { background: var(--ui-hover); color: var(--ui-text); }
+.cloud-workspace-zoom button:hover:not(:disabled) { background: var(--ui-hover); color: var(--ui-text); }
+.cloud-workspace-zoom button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.cloud-workspace-zoom button:disabled { opacity: 0.42; cursor: default; }
+
+.cloud-workspace-viewport {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  background: var(--doc-workspace);
+  overscroll-behavior: contain;
+}
+
+.cloud-workspace-canvas {
+  position: relative;
+  flex: 0 0 auto;
+  min-width: 1px;
+  min-height: 1px;
+  margin: auto;
+  background: var(--ui-surface);
+  box-shadow: var(--shadow-paper);
+  cursor: default;
+  touch-action: none;
+}
+
+.cloud-workspace-canvas:focus-within {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.cloud-workspace-image[hidden] { display: none; }
+
+.cloud-workspace-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  user-select: none;
+}
+
+.cloud-workspace-connection-notice {
+  position: absolute;
+  z-index: 2;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100% - 32px);
+  box-sizing: border-box;
+  padding: 12px 18px;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: var(--ui-surface);
+  color: var(--ui-text-secondary);
+  box-shadow: var(--shadow-light);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.cloud-workspace-connection-notice[hidden] { display: none; }
+
+#cloud-workspace[data-display-state='stalled'] .cloud-workspace-image,
+#cloud-workspace[data-display-state='unavailable'] .cloud-workspace-image {
+  opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cloud-workspace-image { transition: opacity 180ms ease; }
+}
+
+.cloud-workspace-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  inset: 0 auto auto 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+  resize: none;
+}
+
+body.ag-sidebar-open #cloud-workspace {
+  margin-right: var(--ag-sidebar-width);
+}
+
+body.ag-fullscreen-open #cloud-workspace {
+  margin-right: 0;
+}
+
+body.ag-sidebar-resizing #cloud-workspace {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  #cloud-workspace {
+    transition: margin-right var(--ag-sidebar-duration) var(--ag-sidebar-ease);
+  }
+}
+
+@media (max-width: 767px) {
+  body.ag-sidebar-open #cloud-workspace {
+    margin-right: 0;
+  }
+}
+
+/* Local receipt of a press is visible before the network responds. */
+.cloud-workspace-click-feedback {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--focus-ring);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--focus-ring) 18%, transparent);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.cloud-workspace-click-feedback[hidden] { display: none; }

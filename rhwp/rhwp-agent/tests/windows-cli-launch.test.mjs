@@ -7,14 +7,17 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { buildClaudeArgv, createClaudeSession } from '../agents/claude.mjs';
-import { buildGrokArgv } from '../agents/grok.mjs';
-import { buildPiArgv } from '../agents/pi.mjs';
+import { createCodexSession } from '../agents/codex.mjs';
+import { createPersistentAcpSession } from '../agents/acp-session.mjs';
+import { buildPiArgv, createPiSession } from '../agents/pi.mjs';
 import {
+  applyManagedCliLaunch,
   applyNpmCliLaunch,
   parseNpmCmdShimScript,
   resolveNpmCliLaunch,
   WINDOWS_CMD_LINE_LIMIT,
   windowsCmdExeCommandLineLength,
+  writeNodeHostShim,
 } from '../npm-cli-launch.mjs';
 
 const sessionId = '00000000-0000-4000-8000-000000000000';
@@ -81,18 +84,7 @@ test('realistic Claude argv exceeds the Windows cmd.exe ceiling through a .cmd s
   );
 });
 
-test('Grok unrestricted and Pi node_modules/.bin shims also overflow cmd.exe', () => {
-  const grok = buildGrokArgv(
-    { ...claudeOpts, permissionProfile: 'unrestricted' },
-    sessionId,
-    false,
-    '/tmp/prompt.txt',
-  );
-  assert.ok(
-    windowsCmdExeCommandLineLength('grok.cmd', grok) > WINDOWS_CMD_LINE_LIMIT,
-    'unrestricted grok should overflow cmd.exe',
-  );
-
+test('Pi node_modules/.bin shims also overflow cmd.exe', () => {
   const pi = [...buildPiArgv({ ...claudeOpts, piRoot: '/tmp/pi', model: 'x' }, sessionId), 'review'];
   assert.ok(
     windowsCmdExeCommandLineLength(
@@ -266,6 +258,7 @@ class FakeStream extends EventEmitter {
     callback?.();
     return true;
   }
+  pipe(dest) { return dest; }
   end() {}
 }
 
@@ -363,4 +356,121 @@ test('native Claude SDK launch unwraps Windows .cmd and merges Electron env', as
   assert.equal(sdkOptions[0].pathToClaudeCodeExecutable, scriptPath);
   assert.equal(sdkOptions[0].env.ELECTRON_RUN_AS_NODE, '1');
   assert.equal(/\.(?:cmd|bat)$/i.test(sdkOptions[0].pathToClaudeCodeExecutable), false);
+});
+
+test('managed launch without env does not replace process.env with an empty object', () => {
+  const launched = applyManagedCliLaunch('claude', ['--version'], {
+    platform: 'linux',
+    nodeCommand: '/usr/bin/node',
+  });
+  assert.equal(launched.command, 'claude');
+  assert.deepEqual(launched.argv, ['--version']);
+  assert.equal(launched.env, undefined);
+});
+
+test('managed launch without env still injects ELECTRON_RUN_AS_NODE onto process.env', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-managed-inherit-env-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { cmdPath, scriptPath } = writeNpmCmdShim(root, 'claude', 'cli.js');
+  const electron = path.join(root, 'Rauhwpx.exe');
+  const launched = applyManagedCliLaunch(cmdPath, ['--version'], {
+    platform: 'win32',
+    nodeCommand: electron,
+  });
+  assert.equal(launched.command, electron);
+  assert.deepEqual(launched.argv, [scriptPath, '--version']);
+  assert.equal(launched.env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(launched.env.PATH, process.env.PATH);
+});
+
+test('managed launch prepends the Node-host PATH and unwraps a .cmd', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-managed-launch-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { cmdPath, scriptPath } = writeNpmCmdShim(root, 'codex', 'cli.js');
+  const electron = path.join(root, 'Rauhwpx.exe');
+  const shimDir = path.join(root, 'node-host');
+  await writeNodeHostShim(shimDir, electron, { platform: 'win32' });
+  const launched = applyManagedCliLaunch(cmdPath, ['exec', '--json'], {
+    platform: 'win32',
+    nodeCommand: electron,
+    env: { PATH: 'C:\\Windows\\System32' },
+    shimDir,
+  });
+  assert.equal(launched.command, electron);
+  assert.deepEqual(launched.argv, [scriptPath, 'exec', '--json']);
+  assert.equal(launched.env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(launched.env.npm_node_execpath, electron);
+  assert.equal(launched.env.PATH.startsWith(`${shimDir};`), true);
+  assert.equal(/\.(?:cmd|bat)$/i.test(launched.command), false);
+});
+
+test('createCodexSession unwraps a Windows .cmd bin before spawn', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-codex-session-unwrap-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { cmdPath, scriptPath } = writeNpmCmdShim(root, 'codex', 'cli.js');
+  const spawns = [];
+  const events = [];
+  const session = createCodexSession({
+    ...claudeOpts,
+    codexBin: cmdPath,
+    codexHome: path.join(root, '.codex'),
+    onEvent: (event) => events.push(event),
+  }, {
+    platform: 'win32',
+    nodeCommand: process.execPath,
+    spawnProcess(command, argv, options) {
+      const proc = new FakeProcess();
+      spawns.push({ command, argv, options, proc });
+      return proc;
+    },
+    terminateProcess() { return true; },
+    waitForExit: async () => true,
+    closeGraceMs: 1,
+    createRolloutWatcher() {
+      return { drain() {}, stop() {} };
+    },
+  });
+  t.after(() => session.dispose());
+  session.sendUserMessage('review');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].command, process.execPath);
+  assert.equal(spawns[0].argv[0], scriptPath);
+  assert.equal(spawns[0].argv.includes('exec'), true);
+  assert.equal(/\.(?:cmd|bat)$/i.test(spawns[0].command), false);
+  assert.equal(events.some((event) => event.type === 'turn-start'), true);
+});
+
+test('createPiSession unwraps a Windows .cmd bin before spawn', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-pi-session-unwrap-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { cmdPath, scriptPath } = writeNpmCmdShim(root, 'pi', 'cli.js');
+  const spawns = [];
+  const events = [];
+  const session = createPiSession({
+    ...claudeOpts,
+    piBin: cmdPath,
+    piRoot: root,
+    model: 'x',
+    onEvent: (event) => events.push(event),
+  }, {
+    platform: 'win32',
+    nodeCommand: process.execPath,
+    spawnProcess(command, argv, options) {
+      const proc = new FakeProcess();
+      spawns.push({ command, argv, options, proc });
+      return proc;
+    },
+    terminateProcess() { return true; },
+    waitForExit: async () => true,
+    closeGraceMs: 1,
+  });
+  t.after(() => session.dispose());
+  session.sendUserMessage('review');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].command, process.execPath);
+  assert.equal(spawns[0].argv[0], scriptPath);
+  assert.equal(/\.(?:cmd|bat)$/i.test(spawns[0].command), false);
+  assert.equal(events.some((event) => event.type === 'turn-start'), true);
 });

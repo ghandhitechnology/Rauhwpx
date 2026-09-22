@@ -44,6 +44,7 @@ pub(crate) fn into_document(mut source: HmlSource) -> Result<Document, HmlError>
             section_def,
             paragraphs,
             raw_stream: None,
+            raw_provenance: None,
         });
     }
     document.doc_properties.section_count = document.sections.len() as u16;

@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { applyManagedCliLaunch } from './npm-cli-launch.mjs';
 import { openRouterReady } from './agents/title.mjs';
 import {
   isolatedProcessEnv,
@@ -40,10 +41,16 @@ function run(command, args, stdin, timeoutMs = 90_000, spawnOptions = {}, deps =
   return new Promise((resolve, reject) => {
     const spawnProcess = deps.spawnProcess ?? spawn;
     const terminateProcess = deps.terminateProcess ?? terminateProcessTree;
-    const child = spawnProcess(command, args, {
+    const spawnEnv = isolatedProcessEnv(deps, { ...process.env, ...(spawnOptions.env ?? {}) });
+    const launched = applyManagedCliLaunch(command, args, {
+      platform: deps.platform,
+      nodeCommand: deps.nodeCommand,
+      env: spawnEnv,
+    });
+    const child = spawnProcess(launched.command, launched.argv, {
       ...spawnOptions,
       ...processTreeSpawnOptions(),
-      env: isolatedProcessEnv(deps, { ...process.env, ...(spawnOptions.env ?? {}) }),
+      env: launched.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';

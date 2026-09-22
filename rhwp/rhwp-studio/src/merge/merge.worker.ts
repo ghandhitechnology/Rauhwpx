@@ -7,6 +7,8 @@ import type { MergeWorkerRequest, MergeWorkerResponse } from './worker-protocol.
 import type { MergeManifestEntrySeed } from '../versioning/types.ts';
 
 interface StructuralMergeExports {
+  structuralMergeReviewDocument?(base: Uint8Array, current: Uint8Array, incoming: Uint8Array, baseManifest: string, currentManifest: string, incomingManifest: string): string;
+  structuralMergeMaterializeReviewDocument?(base: Uint8Array, current: Uint8Array, incoming: Uint8Array, baseManifest: string, currentManifest: string, incomingManifest: string, resolutions: string): Uint8Array;
   structuralMergeAnalyze(base: string, current: string, incoming: string): string;
   structuralMergeMaterialize(analysis: string, resolutions: string): string;
   structuralMergeVirtualBase?(bases: string): string;
@@ -218,6 +220,14 @@ scope.addEventListener('message', (event: MessageEvent<MergeWorkerRequest>) => {
     }
     if (request.operation === 'analyze-document') {
       const exports = await exportsReady();
+      if (request.review) {
+        if (!exports.structuralMergeReviewDocument) throw new Error('변경 검토를 지원하는 문서 엔진으로 업데이트하세요.');
+        const manifests = request.manifests;
+        const value = parseAnalysis(exports.structuralMergeReviewDocument(request.base, request.current, request.incoming,
+          JSON.stringify(manifests?.base ?? { entries: [] }), JSON.stringify(manifests?.current ?? { entries: [] }), JSON.stringify(manifests?.incoming ?? { entries: [] })));
+        post({ id: request.id, type: 'analysis', value });
+        return;
+      }
       if (typeof exports.structuralMergeAnalyzeDocument !== 'function') {
         throw new Error('This RHWP WebAssembly build does not include document-byte merge analysis.');
       }
@@ -250,6 +260,14 @@ scope.addEventListener('message', (event: MessageEvent<MergeWorkerRequest>) => {
     }
     if (request.operation === 'materialize-document') {
       const exports = await exportsReady();
+      if (request.review) {
+        if (!exports.structuralMergeMaterializeReviewDocument) throw new Error('변경 검토를 지원하는 문서 엔진으로 업데이트하세요.');
+        const manifests = request.manifests;
+        const bytes = exports.structuralMergeMaterializeReviewDocument(request.base, request.current, request.incoming,
+          JSON.stringify(manifests?.base ?? { entries: [] }), JSON.stringify(manifests?.current ?? { entries: [] }), JSON.stringify(manifests?.incoming ?? { entries: [] }), JSON.stringify(request.resolutions));
+        post({ id: request.id, type: 'materialized-document', bytes, validation: pendingHostValidation(bytes) }, [bytes.buffer]);
+        return;
+      }
       if (typeof exports.structuralMergeMaterializeDocument !== 'function') {
         throw new Error('This RHWP WebAssembly build does not include document-byte merge materialization.');
       }

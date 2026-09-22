@@ -117,9 +117,18 @@ export class CommandHistory {
       command.reuseCurrentSnapshot?.(wasm, this.currentSnapshotId);
     }
     this.currentSnapshotId = null;
-    const cursorAfter = command.execute(wasm);
+    let cursorAfter: DocumentPosition;
+    try {
+      cursorAfter = command.execute(wasm);
+    } catch (error) {
+      if (command.retainOnFailure?.()) this.recordWithoutExecute(command, wasm);
+      throw error;
+    }
     this.currentSnapshotId = command.currentSnapshotId?.() ?? null;
     this.captureExecutionEffects(command);
+    if (command.isNoOp?.()) {
+      return cursorAfter;
+    }
 
     // 직전 명령과 병합 시도
     if (this.undoStack.length > 0) {
@@ -172,6 +181,7 @@ export class CommandHistory {
     try {
       cursorAfter = command.undo(wasm);
     } catch (e) {
+      if (command.retainOnFailure?.()) throw e;
       this.undoStack.pop();
       command.discard?.(wasm);
       throw e;
@@ -185,6 +195,7 @@ export class CommandHistory {
   /** Redo — 성공 시 커서 위치 반환, 스택 비었으면 null */
   redo(wasm: WasmBridge): DocumentPosition | null {
     this.lastExecutionEffects = NO_TEXT_MUTATION_EFFECTS;
+    if (this.peekUndoTop()?.retainOnFailure?.()) return null;
     const command = this.redoStack[this.redoStack.length - 1];
     if (!command) return null;
 
@@ -195,7 +206,11 @@ export class CommandHistory {
       cursorAfter = command.execute(wasm);
     } catch (e) {
       this.redoStack.pop();
-      command.discard?.(wasm);
+      if (command.retainOnFailure?.()) {
+        this.undoStack.push(command);
+      } else {
+        command.discard?.(wasm);
+      }
       throw e;
     }
     this.currentSnapshotId = command.currentSnapshotId?.() ?? null;
@@ -240,7 +255,7 @@ export class CommandHistory {
   }
 
   canUndo(): boolean { return this.undoStack.length > 0; }
-  canRedo(): boolean { return this.redoStack.length > 0; }
+  canRedo(): boolean { return this.redoStack.length > 0 && !this.peekUndoTop()?.retainOnFailure?.(); }
 
   /** 실패한 시험적 편집을 되돌린 뒤 해당 이력을 폐기한다. */
   discardRedo(wasm: WasmBridge): void {

@@ -58,6 +58,13 @@ function roundUsd(value) {
   return Math.round(value * 1e6) / 1e6;
 }
 
+function creditAmount(value) {
+  if ((typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '' || !Number.isFinite(Number(value))) {
+    throw openRouterError('OPENROUTER_CREDITS_INVALID', 'OpenRouter 잔액 응답을 확인할 수 없어요');
+  }
+  return Number(value);
+}
+
 /**
  * 한도가 있는 키의 잔액. 한도가 없으면 null — 그때는 계정 /credits 를 쓴다.
  *
@@ -68,15 +75,16 @@ function roundUsd(value) {
 function creditsFromKeyLimit(data, checkedAt) {
   const limit = data?.limit === null || data?.limit === undefined ? null : Number(data.limit);
   if (!Number.isFinite(limit)) return null;
-  const usage = toUsd(data?.usage);
+  const usage = creditAmount(data?.usage);
   const remaining = data?.limit_remaining === null || data?.limit_remaining === undefined
     ? Math.max(0, limit - usage)
-    : toUsd(data.limit_remaining);
+    : creditAmount(data.limit_remaining);
   return {
     balanceUsd: roundUsd(remaining),
     totalCreditsUsd: limit,
     totalUsageUsd: usage,
     checkedAt,
+    scope: 'key',
   };
 }
 
@@ -384,13 +392,14 @@ export function createOpenRouter({
         }
         if (!result.ok) throw httpError(result, '잔액');
         const data = result.parsed?.data ?? {};
-        const totalCreditsUsd = toUsd(data.total_credits);
-        const totalUsageUsd = toUsd(data.total_usage);
+        const totalCreditsUsd = creditAmount(data.total_credits);
+        const totalUsageUsd = creditAmount(data.total_usage);
         const credits = {
           balanceUsd: roundUsd(totalCreditsUsd - totalUsageUsd),
           totalCreditsUsd,
           totalUsageUsd,
           checkedAt: now(),
+          scope: 'account',
         };
         creditsCache.delete(keyId);
         creditsCache.set(keyId, { credits, fetchedAt: now() });

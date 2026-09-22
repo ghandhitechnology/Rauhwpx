@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Continue'
-$root = 'C:\Users\planet\rhwp'
+$root = Split-Path -Parent $PSScriptRoot
 $srcRoot = Join-Path $root 'samples'
 $outRoot = Join-Path $root 'pdf'
 $log = Join-Path $outRoot '_convert.log'
@@ -36,10 +36,7 @@ $files = Get-ChildItem -LiteralPath $srcRoot -Recurse -File |
 
 Log ("TOTAL " + $files.Count + " files")
 
-# Skip files that are already converted (resume support)
-$alreadyOk = @{}
-# (intentionally empty - this run forces full reconvert per user request)
-
+# Rebuild every reference PDF in the selected corpus.
 $hwp = New-HwpInstance
 $ok = 0; $fail = 0; $skip = 0; $i = 0; $crashes = 0
 $failures = @()

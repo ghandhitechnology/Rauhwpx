@@ -6,9 +6,10 @@
  */
 
 import {
-  IDB_OPERATION_TIMEOUT_MS,
   openIndexedDatabase,
-  withTimeout,
+  requestResult,
+  transactionDone,
+  withDatabase,
 } from '../core/idb-open.ts';
 
 const DB_NAME = 'rhwpStudioAutosave';
@@ -50,10 +51,6 @@ type DraftRow = Omit<AutosaveDraft, 'data'> & { data?: ArrayBuffer };
 const memory = new Map<string, AutosaveDraft>();
 const memorySessions = new Map<string, AutosaveSessionHeartbeat>();
 
-function idbAvailable() {
-  return typeof indexedDB !== 'undefined';
-}
-
 function cloneBytes(bytes: Uint8Array) {
   return new Uint8Array(bytes);
 }
@@ -85,7 +82,6 @@ function draftToRow(draft: AutosaveDraft): DraftRow {
 }
 
 function openDb() {
-  if (!idbAvailable()) return Promise.resolve(null);
   return openIndexedDatabase(DB_NAME, DB_VER, (db) => {
     if (!db.objectStoreNames.contains(DRAFTS)) {
       db.createObjectStore(DRAFTS, { keyPath: 'id' });
@@ -96,32 +92,8 @@ function openDb() {
   });
 }
 
-async function withDb<T>(fn: (db: IDBDatabase) => Promise<T>, fallback: () => Promise<T>): Promise<T> {
-  const db = await openDb();
-  if (!db) return fallback();
-  try {
-    return await withTimeout(fn(db), IDB_OPERATION_TIMEOUT_MS, DB_NAME);
-  } catch (error) {
-    console.warn('[autosave] IndexedDB 지연, 메모리 폴백:', error);
-    return fallback();
-  } finally {
-    db.close();
-  }
-}
-
-function transactionDone(tx: IDBTransaction) {
-  return new Promise<void>((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
-  });
-}
-
-function requestResult<T>(request: IDBRequest<T>) {
-  return new Promise<T>((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+function withDb<T>(fn: (db: IDBDatabase) => Promise<T>, fallback: () => Promise<T>) {
+  return withDatabase(openDb, DB_NAME, fn, fallback);
 }
 
 function activeSessionIds(

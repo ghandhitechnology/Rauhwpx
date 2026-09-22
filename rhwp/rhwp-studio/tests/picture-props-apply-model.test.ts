@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { codeOnly, functionBodyFrom } from './support/source-guard.ts';
 import type { CellPathLike, PictureProperties, ShapeProperties } from '../src/core/types.ts';
 import {
   buildPicturePropsPatch,
@@ -663,5 +665,82 @@ for (const fixture of targetFixtures) {
     if (actual.kind === 'cell-shape' || actual.kind === 'cell-picture') {
       assert.equal(actual.cellPath, cellPath, 'cell path identity must be preserved');
     }
+  });
+}
+
+// [#6769] 다이얼로그가 오프셋을 mm 2자리로 보여주고 되돌려 쓰면 저장 단위가 사라진다.
+// 8554 HWPUNIT 은 "30.18" 로 보이고 되돌리면 8555, -1 HWPUNIT 은 "-0.00" 으로 보이고
+// 되돌리면 0 이라, 종전 판정(되돌린 값 vs 모델 값)은 **사용자가 아무것도 안 고쳐도**
+// 변경으로 보고 패치에 실었다. 한글 2024 는 같은 조작에서 값을 그대로 둔다(#6769 실측 —
+// 설정만 누르고 저장한 파일이 원본과 필드 동일).
+
+const studioSource = (rel: string) => codeOnly(readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8'));
+
+test('[#6769] 건드리지 않은 위치 오프셋은 패치에 실리지 않는다', () => {
+  // group-box.hwp 의 가로선 실측값.
+  const props = pictureProps({ horzOffset: 8554, vertOffset: 16620 });
+  const form = applyForm();
+  form.common.horzOffset = '30.18';
+  form.common.vertOffset = '58.63';
+
+  const patch = buildPicturePropsPatch('shape', props, shapeProps(), form);
+
+  assert.equal('horzOffset' in patch, false, '표시값 그대로 돌아온 가로 오프셋은 무변경이다');
+  assert.equal('vertOffset' in patch, false, '표시값 그대로 돌아온 세로 오프셋은 무변경이다');
+});
+
+test('[#6769] 실제로 고친 오프셋은 그대로 실린다', () => {
+  const props = pictureProps({ horzOffset: 8554, vertOffset: 16620 });
+  const form = applyForm();
+  form.common.horzOffset = '40.00';
+  form.common.vertOffset = '58.63';
+
+  const patch = buildPicturePropsPatch('shape', props, shapeProps(), form);
+
+  assert.equal(patch.horzOffset, Math.round(40 * (7200 / 25.4)), '고친 값은 보낸다');
+  assert.equal('vertOffset' in patch, false, '안 고친 칸은 함께 실리지 않는다');
+});
+
+test('[#6769] 오프셋 판정은 크기의 0 클램프를 물려받지 않는다', () => {
+  // 크기는 `Math.max(0, ...)` 로 음수를 막지만 오프셋에 음수는 정당하다.
+  // 클램프를 함께 복사하면 왼쪽/위쪽으로 나간 개체를 0 으로 끌어당긴다.
+  const body = functionBodyFrom(studioSource('src/ui/picture-props-apply-model.ts'), 'function addChangedOffset');
+  assert.match(body, /untouchedMm\(raw, current\)/, '판정은 표시값 소유자(untouchedMm)를 쓴다');
+  assert.doesNotMatch(body, /Math\.max\(/, '오프셋에 0 클램프를 두지 않는다');
+});
+
+test('[#6769] 다이얼로그가 오프셋 칸을 공용 서식으로 채운다', () => {
+  // `untouchedMm` 은 입력값을 **표시값과 견줘** 판정한다. 다이얼로그가 칸을 채우는 서식과
+  // apply-model 의 서식이 갈라지면 판정이 늘 "바뀌었다"가 된다.
+  const dialog = studioSource('src/ui/picture-props-dialog.ts');
+  assert.match(dialog, /this\.horzOffsetInput\.value = displayedMm\(this\.props\.horzOffset\);/,
+    '가로 오프셋 칸을 공용 서식으로 채우지 않는다');
+  assert.match(dialog, /this\.vertOffsetInput\.value = displayedMm\(this\.props\.vertOffset\);/,
+    '세로 오프셋 칸을 공용 서식으로 채우지 않는다');
+});
+
+for (const objectType of ['image', 'shape', 'line', 'group', 'ole'] as const) {
+  test(`[#6769] ${objectType}: 표시 정밀도에서 음의 0이 된 위치는 그대로 보존한다`, () => {
+    const props = pictureProps({ horzOffset: -1, vertOffset: -1 });
+    const form = applyForm();
+    form.common.horzOffset = '-0.00';
+    form.common.vertOffset = '0.00';
+
+    const patch = buildPicturePropsPatch(objectType, props, shapeProps(), form);
+
+    assert.equal('horzOffset' in patch, false, '음의 0을 재입력해도 원본 -1을 보존한다');
+    assert.equal('vertOffset' in patch, false, '같은 표시 정밀도의 양의 0도 무변경이다');
+  });
+
+  test(`[#6769] ${objectType}: 실제 음수 위치 편집은 클램프 없이 전달한다`, () => {
+    const props = pictureProps({ horzOffset: -1, vertOffset: -365 });
+    const form = applyForm();
+    form.common.horzOffset = '-40.00';
+    form.common.vertOffset = '-1.29';
+
+    const patch = buildPicturePropsPatch(objectType, props, shapeProps(), form);
+
+    assert.equal(patch.horzOffset, Math.round(-40 * (7200 / 25.4)));
+    assert.equal('vertOffset' in patch, false, '바꾸지 않은 음수 세로 위치는 보존한다');
   });
 }

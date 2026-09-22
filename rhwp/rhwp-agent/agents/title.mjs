@@ -1,5 +1,6 @@
 import spawn from 'cross-spawn';
 
+import { applyManagedCliLaunch } from '../npm-cli-launch.mjs';
 import {
   isolatedProcessEnv,
   PROCESS_TREE_CLEANUP_OUTCOME,
@@ -77,7 +78,8 @@ export function generateChatTitle(preview, deps = {}) {
 
     let proc;
     try {
-      proc = spawnProcess(
+      const spawnEnv = isolatedProcessEnv(deps);
+      const launched = applyManagedCliLaunch(
         'codex',
         [
           'exec',
@@ -95,9 +97,18 @@ export function generateChatTitle(preview, deps = {}) {
           '-',
         ],
         {
+          platform: deps.platform,
+          nodeCommand: deps.nodeCommand,
+          env: spawnEnv,
+        },
+      );
+      proc = spawnProcess(
+        launched.command,
+        launched.argv,
+        {
           ...processTreeSpawnOptions(),
           ...(deps.cwd ? { cwd: deps.cwd } : {}),
-          env: isolatedProcessEnv(deps),
+          env: launched.env,
           stdio: ['pipe', 'pipe', 'pipe'],
         },
       );

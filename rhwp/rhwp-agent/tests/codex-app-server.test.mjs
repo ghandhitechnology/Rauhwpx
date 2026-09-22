@@ -5,6 +5,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 import {
   CODEX_RPC_LINE_LIMIT_BYTES,
@@ -799,6 +802,60 @@ test('mode changes restart app-server while idle, resume the thread, and select 
   h.session.interrupt();
   await settle();
   await h.session.dispose();
+});
+
+test('approved Plan restarts advertise mutation tools and returning to planning removes them', async (t) => {
+  const h = harness(t, { workflow: 'plan', phase: 'planning' });
+  t.after(() => h.session.dispose());
+
+  async function advertisedTools() {
+    const config = h.spawns.at(-1).argv.find((value) => value.startsWith('mcp_servers.rhwp.env='));
+    assert.ok(config);
+    const env = Object.fromEntries([...config.matchAll(/([A-Z_]+) = ("(?:\\.|[^"\\])*")/g)]
+      .map(([, key, value]) => [key, JSON.parse(value)]));
+    assert.equal(env.RHWP_AGENT_PHASE, h.opts.phase);
+    assert.equal(env.RHWP_TOOL_PROFILE, undefined, 'chat profile must follow the current phase');
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [fileURLToPath(new URL('../mcp-stdio.mjs', import.meta.url))],
+      env: { ...env, RHWP_SESSION_ID: 'plan-profile-regression' },
+      stderr: 'ignore',
+    });
+    const client = new Client({ name: 'plan-profile-regression', version: '1' });
+    try {
+      await client.connect(transport);
+      return (await client.listTools()).tools.map((tool) => tool.name);
+    } finally {
+      await client.close();
+    }
+  }
+
+  async function finishTurn(prompt) {
+    h.session.sendUserMessage(prompt);
+    await settle(24);
+    h.spawns.at(-1).process.send({
+      method: 'turn/completed',
+      params: { threadId: 'thread-native', turn: { id: 'turn-native', status: 'completed' } },
+    });
+    await settle();
+  }
+
+  await finishTurn('Plan the document edit');
+  const planningTools = await advertisedTools();
+  assert.ok(planningTools.includes('present_implementation_plan'));
+  assert.equal(planningTools.includes('insert_text'), false);
+
+  await h.session.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 2 });
+  await finishTurn('Implement the approved plan');
+  assert.ok(h.spawns.at(-1).process.frames.some((frame) => frame.method === 'thread/resume'));
+  const implementationTools = await advertisedTools();
+  assert.ok(implementationTools.includes('insert_text'));
+  assert.equal(implementationTools.includes('present_implementation_plan'), false);
+
+  await h.session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 3 });
+  const replanningTools = await advertisedTools();
+  assert.ok(replanningTools.includes('present_implementation_plan'));
+  assert.equal(replanningTools.includes('insert_text'), false);
 });
 
 test('setExecutionMode rejects before ACK when native Plan readiness is absent', async (t) => {

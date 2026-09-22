@@ -66,14 +66,16 @@ def hangul_row_heights(src: Path, table_index: int = 0) -> list[float] | None:
     return heights
 
 
-def rhwp_cut_rows(src: Path, exe: str) -> list[float] | None:
+def rhwp_cut_rows(src: Path, exe: str, pi: int | None = None) -> list[float] | None:
     """RHWP_TABLE_DRIFT 의 cut_rows(px) 첫 표."""
     import os
 
     env = dict(os.environ, RHWP_TABLE_DRIFT="1")
     r = subprocess.run([exe, "dump-pages", str(src)], capture_output=True, text=True,
                        encoding="utf-8", errors="replace", env=env, timeout=180)
-    m = re.search(r"cut_rows=\[([^\]]*)\]", r.stdout + r.stderr)
+    pattern = (rf"TABLE_CUT_DRIFT: pi={pi} .*?cut_rows=\[([^\]]*)\]" if pi is not None
+               else r"cut_rows=\[([^\]]*)\]")
+    m = re.search(pattern, r.stdout + r.stderr)
     if not m:
         return None
     return [float(x) for x in m.group(1).split(",") if x.strip()]
@@ -82,8 +84,8 @@ def rhwp_cut_rows(src: Path, exe: str) -> list[float] | None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("src", type=Path)
-    ap.add_argument("--exe", default="C:/Users/planet/rhwp/target/release/rhwp.exe"
-                    if sys.platform == "win32" else "target/release/rhwp")
+    ap.add_argument("--exe", default=str(Path(__file__).resolve().parents[1] / "target" / "release"
+                    / ("rhwp.exe" if sys.platform == "win32" else "rhwp")))
     ap.add_argument("--table-index", type=int, default=0)
     a = ap.parse_args()
 

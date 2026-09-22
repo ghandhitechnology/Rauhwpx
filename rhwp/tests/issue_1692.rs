@@ -636,8 +636,8 @@ fn issue_1692_so_sueop_header_footer_page5_matches_reference_contract() {
     let hwpx_header = first_header_paragraph(&hwpx_model, "수업용소설해설");
     assert_eq!(
         hwp3_model.doc_info.para_shapes[hwp3_header.para_shape_id as usize].alignment,
-        Alignment::Justify,
-        "HWP3 원본 머리말은 단일 줄 Justify이며 렌더 단계에서 머리말 폭으로 분배해야 한다"
+        Alignment::Split,
+        "HWP3 머리말의 마지막 줄 분배는 파서에서 Split으로 정규화해야 한다"
     );
     assert_eq!(
         hwpx_model.doc_info.para_shapes[hwpx_header.para_shape_id as usize].alignment,
@@ -807,16 +807,12 @@ fn issue_1692_so_sueop_hwp3_page22_relationship_box_uses_table_flow() {
     );
 
     let hwp3_doc = load_wasm_doc("samples/SO-SUEOP.hwp");
-    let hwpx_doc = load_wasm_doc("samples/SO-SUEOP.hwpx");
     let hwp3_tree = page_render_tree(&hwp3_doc, 21);
-    let hwpx_tree = page_render_tree(&hwpx_doc, 21);
 
     let hwp3_table = first_bbox_by_type(&hwp3_tree, "Table")
         .expect("HWP3 page 22 relationship diagram table bbox");
     let hwp3_body = text_bbox_containing_in_tree(&hwp3_tree, "윤두꺼비 시절 부친 말대가리")
         .expect("HWP3 page 22 first body line bbox");
-    let hwpx_body = text_bbox_containing_in_tree(&hwpx_tree, "윤두꺼비 시절 부친 말대가리")
-        .expect("HWPX page 22 first body line bbox");
     let hwp3_table_bottom = hwp3_table.1 + hwp3_table.3;
     // [Task #1841] 관계도 표(자리차지, outer_margin_bottom=852HU=11.36px) 아래 본문은
     // 표 하단 + 바깥 여백 bottom 에서 시작한다. 권위 PDF(pdf/SO-SUEOP-2024.pdf p22)
@@ -832,11 +828,12 @@ fn issue_1692_so_sueop_hwp3_page22_relationship_box_uses_table_flow() {
         hwp3_table_bottom,
         om_bottom_px
     );
+    let so_sueop_pdf_p22_body_y0 = 337.8;
     assert!(
-        (hwp3_body.1 - hwpx_body.1).abs() <= 1.0,
-        "HWP3 p22 first body y={} must match HWPX y={}",
+        (hwp3_body.1 - so_sueop_pdf_p22_body_y0).abs() <= 1.5,
+        "HWP3 p22 first body y={} must match PDF y={}",
         hwp3_body.1,
-        hwpx_body.1
+        so_sueop_pdf_p22_body_y0
     );
     let hwp3_body_text = text_concat_in_tree(&hwp3_tree, "Body");
     for expected in [

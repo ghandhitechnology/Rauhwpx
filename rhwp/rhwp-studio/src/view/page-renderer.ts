@@ -1,9 +1,10 @@
-import { WasmBridge } from '@/core/wasm-bridge';
+import type { WasmBridge } from '@/core/wasm-bridge';
 import type { LayerRenderProfile, PageInfo } from '@/core/types';
 import { layerPaintOpReplayPlane } from './canvaskit/replay-plane';
 import type { CanvasKitLayerRenderer, CanvasKitRenderDiagnostics } from './canvaskit-renderer';
 import { assertBase64EncodedImageDecodeDimensions } from './canvaskit/image-header';
 import { collectVectorRawSvgDataUrls } from './raw-svg-prefetch';
+import { ImagePrefetcher } from './image-prefetch';
 import {
   collectFlowImagePaintOps,
   planFlowImageClip,
@@ -47,6 +48,7 @@ interface LayerSummaryCacheEntry {
 }
 
 interface ReRenderJob {
+  prefetchAbort: AbortController;
   fallbackTimer: ReturnType<typeof setTimeout>;
   earlyRawSvgTimers: ReturnType<typeof setTimeout>[];
   completed: boolean;
@@ -59,6 +61,7 @@ const RAW_SVG_EARLY_RE_RENDER_DELAYS_MS = [0, 32, 96, 240] as const;
 const HWP_UNITS_PER_CSS_PIXEL = 75;
 
 export class PageRenderer {
+  private readonly imagePrefetcher = new ImagePrefetcher();
   private reRenderJobs = new Map<number, ReRenderJob>();
   private imageRetryCounts = new Map<number, string>();
   private layerSummaryCache = new Map<number, LayerSummaryCacheEntry>();
@@ -876,6 +879,7 @@ export class PageRenderer {
     this.imageRetryCounts.set(pageIdx, retryKey);
 
     const job: ReRenderJob = {
+      prefetchAbort: new AbortController(),
       fallbackTimer: 0 as unknown as ReturnType<typeof setTimeout>,
       earlyRawSvgTimers: [],
       completed: false,
@@ -883,6 +887,7 @@ export class PageRenderer {
     const finish = () => {
       if (job.completed || this.reRenderJobs.get(pageIdx) !== job) return;
       job.completed = true;
+      job.prefetchAbort.abort();
       clearTimeout(job.fallbackTimer);
       for (const timer of job.earlyRawSvgTimers) clearTimeout(timer);
       this.reRenderJobs.delete(pageIdx);
@@ -907,7 +912,8 @@ export class PageRenderer {
 
     // 자체 prefetch로 실제 decode를 마친 경우에만 fallback보다 먼저 다시 그린다.
     queueMicrotask(() => {
-      this.prefetchLayerImages(pageIdx)
+      if (job.completed || this.reRenderJobs.get(pageIdx) !== job) return;
+      this.prefetchLayerImages(pageIdx, job.prefetchAbort.signal)
         .then((decoded) => {
           if (decoded) finish();
         })
@@ -983,30 +989,17 @@ export class PageRenderer {
    * 자체 prefetch 하여 모든 이미지가 브라우저에 디코드 완료될 때까지 대기.
    * Task #1154 — IMAGE_CACHE 의 비동기 디코드 누락 안전망.
    */
-  private async prefetchLayerImages(pageIdx: number): Promise<boolean> {
+  private async prefetchLayerImages(pageIdx: number, signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return false;
     let json: string;
     try {
       json = this.wasm.getPageLayerTree(pageIdx);
     } catch {
       return false;
     }
-    const tasks: Promise<unknown>[] = [];
     const seen = new Set<string>();
     const enqueueValidated = (dataUrl: string) => {
-      if (seen.has(dataUrl)) return;
       seen.add(dataUrl);
-      tasks.push(
-        new Promise<void>((resolve) => {
-          const img = new Image();
-          img.onload = () => resolve();
-          img.onerror = () => resolve();
-          img.src = dataUrl;
-          // decode() 이 더 정확하지만 일부 브라우저 미지원
-          if (typeof img.decode === 'function') {
-            img.decode().then(() => resolve()).catch(() => resolve());
-          }
-        }),
-      );
     };
     const enqueueRaster = (mime: string, base64: string) => {
       try {
@@ -1044,12 +1037,12 @@ export class PageRenderer {
         // 파싱 실패 시 raster 프리페치 결과만 사용한다.
       }
     }
-    if (tasks.length === 0) {
+    if (seen.size === 0) {
       // URL을 수집하지 못한 순수 rawSvg는 upstream의 조기 재렌더 경로를 사용한다.
       return true;
     }
-    await Promise.all(tasks);
-    return true;
+    await this.imagePrefetcher.prefetch([...seen], signal);
+    return !signal.aborted;
   }
 
   /** 특정 페이지의 지연 재렌더링을 취소한다 */
@@ -1057,6 +1050,7 @@ export class PageRenderer {
     const job = this.reRenderJobs.get(pageIdx);
     if (job) {
       job.completed = true;
+      job.prefetchAbort.abort();
       clearTimeout(job.fallbackTimer);
       for (const timer of job.earlyRawSvgTimers) clearTimeout(timer);
       this.reRenderJobs.delete(pageIdx);
@@ -1065,12 +1059,10 @@ export class PageRenderer {
 
   /** 모든 지연 재렌더링을 취소한다 */
   cancelAll(): void {
-    for (const job of this.reRenderJobs.values()) {
-      job.completed = true;
-      clearTimeout(job.fallbackTimer);
-      for (const timer of job.earlyRawSvgTimers) clearTimeout(timer);
-    }
-    this.reRenderJobs.clear();
+    // 모든 요청을 먼저 취소해 다른 오래된 페이지의 대기 디코드를 시작하지 않는다.
+    for (const job of this.reRenderJobs.values()) job.completed = true;
+    this.imagePrefetcher.cancelAll();
+    for (const pageIdx of this.reRenderJobs.keys()) this.cancelReRender(pageIdx);
   }
 
   resetImageRetryState(): void {

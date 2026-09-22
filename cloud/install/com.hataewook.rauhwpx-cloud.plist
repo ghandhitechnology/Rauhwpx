@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hataewook.rauhwpx-cloud</string>
+  <key>ProgramArguments</key>
+  <array><string>__LAUNCHER__</string></array>
+  <key>UserName</key>
+  <string>__SERVICE_USER__</string>
+  <key>WorkingDirectory</key>
+  <string>__SERVICE_HOME__/Library/Application Support/Rauhwpx Cloud</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>__SERVICE_HOME__</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>__SERVICE_HOME__/Library/Application Support/Rauhwpx Cloud/logs/service.log</string>
+  <key>StandardErrorPath</key><string>__SERVICE_HOME__/Library/Application Support/Rauhwpx Cloud/logs/service-error.log</string>
+  <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

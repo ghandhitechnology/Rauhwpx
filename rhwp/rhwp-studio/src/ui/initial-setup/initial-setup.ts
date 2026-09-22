@@ -113,6 +113,8 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   let setupStatuses: AgentSetupStatusMap | null = null;
   let accountStatus: AccountSessionStatus | null = null;
   let rauFailureActive = false;
+  /** closeAgentSetup 이 abandoned 로 다시 들어오면 모달을 닫지 않는다. 재시도 실패는 다시 닫는다. */
+  let closingSetupForRecovery = false;
   let lastFocus: HTMLElement | null = null;
 
   const overlay = el('div', 'rhwp-setup-overlay');
@@ -162,17 +164,17 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     if (isByokAgent(agent)) card.dataset.byok = 'true';
     const logo = el('div', 'rhwp-setup-card-logo');
     logo.appendChild(createProviderIcon(agent));
-    const artwork = agent === 'rau' ? createPixelCloudArtwork() : null;
+    const artwork = null;
     const name = el('h2', 'rhwp-setup-card-name', AGENT_LABEL[agent]);
     const vendor = el('p', 'rhwp-setup-card-vendor', PROVIDER_VENDOR[agent]);
     const models = el('ul', 'rhwp-setup-card-models');
     for (const label of previewModelLabels(agent)) {
       models.appendChild(el('li', '', label));
     }
-    const action = el('button', 'rhwp-setup-card-action', agent === 'rau' ? 'Rau로 시작' : '설정');
+    const action = el('button', 'rhwp-setup-card-action', '설정');
     action.type = 'button';
     action.addEventListener('click', () => {
-      if (agent === 'rau' && isProviderConfigured('rau', setupStatuses)) {
+      if (false) {
         goNext();
         return;
       }
@@ -233,7 +235,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
 
   function connectActionLabel(agent: AgentName, configured: boolean): string {
     if (configured) return '연결됨';
-    if (agent === 'rau') return rauFailureActive ? RAU_FAILURE_FORWARD_COPY.retry : 'Rau로 시작';
+    if (false) return rauFailureActive ? RAU_FAILURE_FORWARD_COPY.retry : 'Rau로 시작';
     return '설정';
   }
 
@@ -251,7 +253,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
       const card = cards.get(agent);
       if (!card) continue;
       const configured = isProviderConfigured(agent, setupStatuses);
-      const rauFeedback = agent === 'rau'
+      const rauFeedback = false
         ? rauSignInFeedback(
           accountStatus,
           connectActionLabel(agent, configured),
@@ -328,9 +330,15 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   function enterRauFailureRecovery(): void {
     if (disposed || !overlay.isConnected) return;
     if (stage !== 'providers') showStage('providers');
-    const already = rauFailureActive;
     rauFailureActive = true;
-    if (!already) closeAgentSetup?.();
+    if (!closingSetupForRecovery) {
+      closingSetupForRecovery = true;
+      try {
+        closeAgentSetup?.();
+      } finally {
+        closingSetupForRecovery = false;
+      }
+    }
     renderCards();
     window.requestAnimationFrame(() => skip.focus());
   }
@@ -454,7 +462,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
       }
       if (event.type !== 'agent-setup-status') return;
       setupStatuses = event.statuses;
-      if (isProviderConfigured('rau', setupStatuses)) rauFailureActive = false;
+      if (false) rauFailureActive = false;
       if (stage === 'providers') renderCards();
     },
     notifyCalibrationClosed(completed: boolean): void {

@@ -12,7 +12,7 @@ import {
   saveAgentPrefs,
   trySaveAgentPrefs,
 } from '../src/agent/agent-prefs.ts';
-import { setCursorModels, setPiModels } from '../src/agent/models.ts';
+import { setPiModels } from '../src/agent/models.ts';
 import type { PiModelConfig } from '../src/agent/types.ts';
 
 /** localStorage 대역 — 테스트는 브라우저 없이 돌아간다. */
@@ -32,16 +32,16 @@ function makeStorage(seed?: unknown) {
   };
 }
 
-test('빈 저장소는 Rau/GLM Flash/Medium/안전 기본값을 준다', () => {
+test('빈 저장소는 Claude/Sonnet/High/안전 기본값을 준다', () => {
   const prefs = loadAgentPrefs(makeStorage());
   assert.deepEqual(prefs, {
-    defaultAgent: 'rau',
-    defaultModel: 'z-ai/glm-5.3-flash',
-    defaultEffort: 'medium',
+    defaultAgent: 'claude',
+    defaultModel: 'sonnet',
+    defaultEffort: 'high',
     defaultPermissionProfile: 'safe',
   });
   assert.deepEqual(prefs, defaultAgentPrefs());
-  assert.equal(DEFAULT_CHAT_AGENT, 'rau');
+  assert.equal(DEFAULT_CHAT_AGENT, 'claude');
 });
 
 test('모르는 모델은 프로바이더 기본 모델로 접힌다', () => {
@@ -71,9 +71,9 @@ test('지원되는 조합은 그대로 살아남는다', () => {
   assert.equal(prefs.defaultEffort, 'xhigh');
 });
 
-test('모르는 프로바이더는 rau, 모르는 권한 프로필은 safe', () => {
+test('모르는 프로바이더는 claude, 모르는 권한 프로필은 safe', () => {
   const prefs = normalizeAgentPrefs({ defaultAgent: 'gemini', defaultPermissionProfile: 'root' });
-  assert.equal(prefs.defaultAgent, 'rau');
+  assert.equal(prefs.defaultAgent, 'claude');
   assert.equal(prefs.defaultPermissionProfile, 'safe');
 });
 
@@ -185,74 +185,50 @@ test('결과형 저장 API는 쓰기 실패를 호출자에게 남긴다', () =>
   if (!result.ok) assert.match(result.error, /quota/);
 });
 
-test('grok 기본값은 저장되고 모르는 모델/강도는 grok 기준으로 접힌다', () => {
-  const prefs = normalizeAgentPrefs({
-    defaultAgent: 'grok',
-    defaultModel: 'gpt-5.6-sol',
-    defaultEffort: 'max',
-  });
-  assert.equal(prefs.defaultAgent, 'grok');
-  assert.equal(prefs.defaultModel, 'grok-4.6');
-  assert.equal(prefs.defaultEffort, 'high');
-
-  const kept = normalizeAgentPrefs({
-    defaultAgent: 'grok',
-    defaultModel: 'grok-4.5',
-    defaultEffort: 'low',
-  });
-  assert.equal(kept.defaultModel, 'grok-4.5');
-  assert.equal(kept.defaultEffort, 'low');
-});
-
-test('cursor 기본값은 auto 로 접히고 추론 강도는 비어 있다', () => {
-  setCursorModels([]);
-  try {
-    // CLI 목록이 아직 없으면 저장된 모델을 지킨다.
-    const pending = normalizeAgentPrefs({ defaultAgent: 'cursor', defaultModel: 'composer-1' });
-    assert.equal(pending.defaultAgent, 'cursor');
-    assert.equal(pending.defaultModel, 'composer-1');
-    assert.equal(pending.defaultEffort, '');
-
-    setCursorModels(['composer-1']);
-    const known = normalizeAgentPrefs({ defaultAgent: 'cursor', defaultModel: 'composer-1' });
-    assert.equal(known.defaultModel, 'composer-1');
-    const unknown = normalizeAgentPrefs({ defaultAgent: 'cursor', defaultModel: 'no-such-model' });
-    assert.equal(unknown.defaultModel, 'auto');
-  } finally {
-    setCursorModels([]);
+test('저장된 rau/grok/cursor/opencode 는 라이브 기본값으로 접힌다', () => {
+  for (const agent of ['rau', 'grok', 'cursor', 'opencode'] as const) {
+    const prefs = normalizeAgentPrefs({
+      defaultAgent: agent,
+      defaultModel: 'composer-1',
+      defaultEffort: 'unknown',
+    });
+    assert.equal(prefs.defaultAgent, 'claude');
+    assert.equal(prefs.defaultModel, 'sonnet');
+    assert.equal(prefs.defaultEffort, 'high');
   }
-});
 
-test('저장된 grok 기본값은 다시 읽어도 살아남는다', () => {
   const storage = makeStorage();
-  const saved = saveAgentPrefs({ defaultAgent: 'grok', defaultEffort: 'medium' }, storage);
-  assert.equal(saved.defaultAgent, 'grok');
-  assert.equal(saved.defaultModel, 'grok-4.6');
-  assert.equal(saved.defaultEffort, 'medium');
+  const saved = saveAgentPrefs({ defaultAgent: 'grok', defaultEffort: 'unknown' }, storage);
+  assert.equal(saved.defaultAgent, 'claude');
+  assert.equal(saved.defaultModel, 'sonnet');
+  assert.equal(saved.defaultEffort, 'high');
   assert.deepEqual(loadAgentPrefs(storage), saved);
 });
 
-test('이미 고른 Codex 기본값은 첫 실행이 끝나도 그대로 둔다', () => {
-  const storage = makeStorage({
-    defaultAgent: 'codex',
-    defaultModel: 'gpt-5.6-terra',
-    defaultEffort: 'high',
+for (const model of ['gpt-5.6-terra', 'gpt-6-astra']) {
+  test(`saved Codex ${model} survives first-run setup and reload`, () => {
+    const storage = makeStorage({
+      defaultAgent: 'codex',
+      defaultModel: model,
+      defaultEffort: 'high',
+    });
+    assert.equal(hasExplicitDefaultAgent(storage), true);
+    const kept = applyFirstRunDefaultAgent(['claude'], storage);
+    assert.equal(kept.defaultAgent, 'codex');
+    assert.equal(kept.defaultModel, model);
+    assert.equal(loadAgentPrefs(storage).defaultAgent, 'codex');
+    assert.equal(loadAgentPrefs(storage).defaultModel, model);
   });
-  assert.equal(hasExplicitDefaultAgent(storage), true);
-  const kept = applyFirstRunDefaultAgent(['rau'], storage);
-  assert.equal(kept.defaultAgent, 'codex');
-  assert.equal(kept.defaultModel, 'gpt-5.6-terra');
-  assert.equal(loadAgentPrefs(storage).defaultAgent, 'codex');
-});
+}
 
-test('첫 실행을 마친 빈 프로필은 Rau 가 기본값이 된다', () => {
+test('첫 실행을 마친 빈 프로필은 Claude 가 기본값이 된다', () => {
   const storage = makeStorage();
   assert.equal(hasExplicitDefaultAgent(storage), false);
-  assert.equal(firstRunDefaultAgent([]), 'rau');
+  assert.equal(firstRunDefaultAgent([]), 'claude');
   const seeded = applyFirstRunDefaultAgent([], storage);
-  assert.equal(seeded.defaultAgent, 'rau');
-  assert.equal(seeded.defaultModel, 'z-ai/glm-5.3-flash');
-  assert.equal(loadAgentPrefs(storage).defaultAgent, 'rau');
+  assert.equal(seeded.defaultAgent, 'claude');
+  assert.equal(seeded.defaultModel, 'sonnet');
+  assert.equal(loadAgentPrefs(storage).defaultAgent, 'claude');
 });
 
 test('첫 실행에서 BYOK 만 연결하면 그 프로바이더가 기본값이 된다', () => {

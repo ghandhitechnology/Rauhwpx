@@ -1,0 +1,20 @@
+{
+  "claude": {
+    "kind": "npm",
+    "package": "@anthropic-ai/claude-code",
+    "version": "2.1.241",
+    "bin": "claude"
+  },
+  "codex": {
+    "kind": "npm",
+    "package": "@openai/codex",
+    "version": "0.149.0",
+    "bin": "codex"
+  },
+  "pi": {
+    "kind": "npm",
+    "package": "@earendil-works/pi-coding-agent",
+    "version": "0.84.2",
+    "bin": "pi"
+  }
+}

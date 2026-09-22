@@ -52,6 +52,9 @@ const REVEAL_START_DELAY_MS = 50;
 const REVEAL_GAP_MS = 70;
 /** 공개가 끝난 뒤 에이전트 캐럿이 머무는 시간. */
 const CARET_LINGER_MS = 260;
+/** 대량 편집에서는 오래된 공개를 완료하고 최근 항목만 애니메이션한다. */
+const MAX_REVEAL_ITEMS = 8;
+const MAX_REVEAL_AGE_MS = 2000;
 /** 카메라 추적: 캐럿을 뷰포트의 이 밴드 안에 유지한다. */
 const FOLLOW_BAND_TOP = 0.3;
 const FOLLOW_BAND_BOTTOM = 0.72;
@@ -101,6 +104,8 @@ export class AgentTypewriterReveal {
   private caretAgent: AgentName | null = null;
   private rafId: number | null = null;
   private lastFrameTs: number | null = null;
+  private enqueueGeneration = 0;
+  private enqueueScheduled = false;
   private caretHideTimer: ReturnType<typeof setTimeout> | null = null;
   private followBroken = false;
   private scrollHost: HTMLElement | null = null;
@@ -178,16 +183,29 @@ export class AgentTypewriterReveal {
         cachedRects: null,
       });
     }
-    // 같은 틱 안에서 커버를 먼저 세워 새 텍스트가 repaint 에 팝으로 나타나지 않게 한다.
-    this.renderFrame(now, 0);
-    if (this.rafId === null) {
-      this.lastFrameTs = null;
-      this.rafId = requestAnimationFrame(this.onFrame);
+    if (this.queue.length > MAX_REVEAL_ITEMS) {
+      this.queue.splice(0, this.queue.length - MAX_REVEAL_ITEMS);
     }
+    // 배치의 최종 조판 이후, 브라우저 paint 이전에 한 번만 커버를 배치한다.
+    // 항목마다 전체 큐를 프로브하면 N개 편집이 N²번 geometry 조회를 만든다.
+    if (this.enqueueScheduled) return;
+    this.enqueueScheduled = true;
+    const generation = this.enqueueGeneration;
+    queueMicrotask(() => {
+      if (generation !== this.enqueueGeneration) return;
+      this.enqueueScheduled = false;
+      this.renderFrame(performance.now(), 0);
+      if (this.queue.length > 0 && this.rafId === null) {
+        this.lastFrameTs = null;
+        this.rafId = requestAnimationFrame(this.onFrame);
+      }
+    });
   }
 
   /** 모든 공개를 즉시 완료한다 (approve/reject/무효화/문서 교체). */
   finishAll(): void {
+    this.enqueueGeneration++;
+    this.enqueueScheduled = false;
     this.queue = [];
     this.hideCovers();
     this.hideCaretSoon(0);
@@ -198,7 +216,7 @@ export class AgentTypewriterReveal {
   dispose(): void {
     for (const un of this.unsubs) un();
     this.unsubs = [];
-    this.stopLoop();
+    this.finishAll();
     if (this.caretHideTimer !== null) clearTimeout(this.caretHideTimer);
     this.detachScrollHost();
     for (const cover of this.covers) cover.remove();
@@ -238,6 +256,10 @@ export class AgentTypewriterReveal {
       return;
     }
 
+    // 백그라운드 탭 복귀 시 이미 오래된 편집을 다시 가리지 않는다.
+    while (this.queue.length > 0 && now - this.queue[0].enqueuedAt >= MAX_REVEAL_AGE_MS) {
+      this.queue.shift();
+    }
     // 현재 항목의 진행도를 계산하고, 완료된 항목은 큐에서 내린다.
     let current = this.queue[0];
     while (current) {

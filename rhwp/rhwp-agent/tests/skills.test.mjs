@@ -132,6 +132,69 @@ test('SkillRegistry restores the previous skill when post-rename verification fa
   assert.ok(trash.some((entry) => entry.includes('-rollback-skill-failed-')));
 });
 
+function failOnceRename() {
+  let failed = false;
+  return async (from, to) => {
+    if (!failed) {
+      failed = true;
+      throw Object.assign(new Error('busy'), { code: 'EPERM' });
+    }
+    return fs.rename(from, to);
+  };
+}
+
+test('SkillRegistry retries a briefly locked Windows skill replace', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-win-replace-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const bundledRoot = path.join(temp, 'bundled');
+  const userRoot = path.join(temp, 'user');
+  await fs.mkdir(bundledRoot, { recursive: true });
+  const registry = await new SkillRegistry({
+    bundledRoot,
+    userRoot,
+    platform: 'win32',
+    lockRetryDelays: [0],
+  }).init();
+  await registry.save({
+    name: 'locked-skill',
+    files: [{ path: 'SKILL.md', content: MARKDOWN('locked-skill', 'Original version') }],
+  });
+
+  registry.fileOperations.rename = failOnceRename();
+  await registry.save({
+    name: 'locked-skill',
+    files: [{ path: 'SKILL.md', content: MARKDOWN('locked-skill', 'Replacement version') }],
+  });
+
+  const replaced = await registry.read('locked-skill');
+  const markdown = replaced.skill.files.find((file) => file.path === 'SKILL.md').content;
+  assert.match(markdown, /Replacement version/);
+  assert.doesNotMatch(markdown, /Original version/);
+});
+
+test('SkillRegistry retries a briefly locked Windows skill delete', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-win-delete-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const bundledRoot = path.join(temp, 'bundled');
+  const userRoot = path.join(temp, 'user');
+  await fs.mkdir(bundledRoot, { recursive: true });
+  const registry = await new SkillRegistry({
+    bundledRoot,
+    userRoot,
+    platform: 'win32',
+    lockRetryDelays: [0],
+  }).init();
+  await registry.save({
+    name: 'locked-skill',
+    files: [{ path: 'SKILL.md', content: MARKDOWN('locked-skill') }],
+  });
+
+  registry.fileOperations.rename = failOnceRename();
+  const deleted = await registry.delete('locked-skill');
+  assert.equal(deleted.name, 'locked-skill');
+  assert.equal((await registry.list()).skills.some((skill) => skill.name === 'locked-skill'), false);
+});
+
 test('SkillRegistry serializes concurrent catalog mutations and recovers Windows state', async (t) => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-mutation-test-'));
   t.after(() => fs.rm(temp, { recursive: true, force: true }));
@@ -224,10 +287,10 @@ test('promptContext appends provider tool notes only for a known activated agent
 
   // 스킬 본문은 provider 중립 카탈로그 텍스트다 — 활성 시점에 각 provider 의
   // 실제 협업/수거 수단이 한 문장으로 보정된다.
-  const grok = await registry.promptContext('복사', 'starter', { agent: 'grok' });
-  assert.match(grok, /<provider_tool_notes agent="grok">/);
-  assert.match(grok, /get_command_or_subagent_output/);
-  assert.match(grok, /<activated_product_skill name="starter"/);
+  const claude = await registry.promptContext('복사', 'starter', { agent: 'claude' });
+  assert.match(claude, /<provider_tool_notes agent="claude">/);
+  assert.match(claude, /never poll or wait for them/);
+  assert.match(claude, /<activated_product_skill name="starter"/);
 
   const pi = await registry.promptContext('복사', 'starter', { agent: 'pi' });
   assert.match(pi, /<provider_tool_notes agent="pi">/);
@@ -235,7 +298,7 @@ test('promptContext appends provider tool notes only for a known activated agent
   assert.match(pi, /Background hub jobs .* are not collaboration agents/);
 
   // 미활성·미지정·미지 에이전트에는 주석이 붙지 않는다 — 기존 프롬프트 모양 유지.
-  const noSkill = await registry.promptContext('복사', undefined, { agent: 'grok' });
+  const noSkill = await registry.promptContext('복사', undefined, { agent: 'claude' });
   assert.doesNotMatch(noSkill, /provider_tool_notes/);
   const neutral = await registry.promptContext('복사', 'starter');
   assert.doesNotMatch(neutral, /provider_tool_notes/);

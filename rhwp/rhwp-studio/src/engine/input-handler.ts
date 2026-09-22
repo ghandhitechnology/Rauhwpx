@@ -1,7 +1,9 @@
 import { WasmBridge } from '@/core/wasm-bridge';
+import { isCharFormatError, CharFormatRecoveryError } from '@/core/char-format-error';
 import { EventBus } from '@/core/event-bus';
 import { CursorState } from './cursor';
 import { CaretRenderer } from './caret-renderer';
+import { resolveGlyphStartRect, isCompositionBoxRepresentable } from './line-start-affinity';
 import { FieldMarkerRenderer } from './field-marker-renderer';
 import { SelectionRenderer } from './selection-renderer';
 import { CommandHistory } from './history';
@@ -22,6 +24,7 @@ import type {
   LayerTextRunOp,
   PageInfo,
   DocumentInfo,
+  ObjectRef,
 } from '@/core/types';
 import type { CommandDispatcher } from '@/command/dispatcher';
 import type { EditorEditMode } from '@/command/types';
@@ -39,11 +42,13 @@ import * as _keyboard from './input-handler-keyboard';
 import { getBodySelectionSegments } from './body-selection-range';
 import * as _text from './input-handler-text';
 import * as _picture from './input-handler-picture';
+import type { PictureResizeJournal } from './picture-resize-journal';
 import * as _connector from './input-handler-connector';
 import { computeHangingIndentPx } from './hanging-indent';
 import { isPageLocalTextEditCommand, type PageLocalTextEditOptions } from './input-edit-invalidation';
 import type { NavigationKeyInput } from './navigation-keymap';
 import { isPointNearBoxBorder } from './table-border-hit';
+import { isBodyControl } from './picture-hit-policy';
 import { DeferredPaginationRunner } from './deferred-pagination-runner';
 import { ImeSession } from './ime-session';
 import { CaretLayoutReveal } from './caret-layout-reveal';
@@ -423,6 +428,8 @@ export class InputHandler {
     rotationAngle: number;
     /** 다중 선택 리사이즈 시 각 개체의 원래 크기/위치 */
     multiRefs?: { sec: number; ppi: number; ci: number; type: string; origWidth: number; origHeight: number; origHorzOffset: number; origVertOffset: number; bboxX: number; bboxY: number }[];
+    /** [#6806] 뮤테이션 직전에 보관한 그림 원본 변환 — 기록되면 null, 남아 있으면 cleanup 이 되돌린다. */
+    resizeTransformJournal?: PictureResizeJournal | null;
   } | null = null;
 
   // 그림/글상자 이동 드래그 상태
@@ -647,6 +654,7 @@ export class InputHandler {
     container.addEventListener('dblclick', this.onDblClickBound);
     container.addEventListener('contextmenu', this.onContextMenuBound);
     container.addEventListener('mousemove', this.onMouseMoveBound);
+    this.textarea.dataset.rhwpEditorInput = 'true';
     this.textarea.addEventListener('keydown', this.onKeyDownBound);
     this.textarea.addEventListener('keyup', this.onKeyUpBound);
     this.textarea.addEventListener('input', this.onInputBound);
@@ -747,7 +755,7 @@ export class InputHandler {
       this.clearTableResizeRuntimeCache();
       this.clearPendingCharFormat();
     });
-    eventBus.on('open-document-bytes', () => {
+    eventBus.on('document-swapped', () => {
       this.clearTableResizeRuntimeCache();
       this.clearPendingCharFormat();
     });
@@ -843,6 +851,7 @@ export class InputHandler {
     this.cachedTableRef = null;
     this.cachedCellBboxes = null;
     this.tableBboxFetchFailures.clear();
+    this.lastCellKey = null;
     this.tableResizeRenderer?.clear();
   }
 
@@ -920,6 +929,7 @@ export class InputHandler {
           desc,
           undefined,
           undefined,
+          'inline',
         );
         if (!result.ok) {
           insertError = (result as any).error || '삽입 위치 또는 이미지 정보를 확인할 수 없습니다.';
@@ -929,7 +939,7 @@ export class InputHandler {
         const logicalOffset = typeof result.logicalOffset === 'number'
           ? result.logicalOffset
           : hit.charOffset + 1;
-        const cursorAfter: DocumentPosition = inTextBox
+        const cursorAfter: DocumentPosition = inCell || inTextBox
           ? { ...hit, charOffset: logicalOffset }
           : {
               sectionIndex: sec,
@@ -1810,7 +1820,7 @@ export class InputHandler {
     sec: number, paragraphIndex: number,
   ): { sec: number; ppi: number; ci: number } | null {
     try {
-      const layout = this.wasm.getPageControlLayout(pageIdx);
+      const layout = { controls: this.wasm.getPageControlLayout(pageIdx).controls.filter(isBodyControl) };
       const isNearBorder = (x: number, y: number, w: number, h: number): boolean => {
         return isPointNearBoxBorder(pageX, pageY, { x, y, width: w, height: h });
       };
@@ -1877,10 +1887,16 @@ export class InputHandler {
       { type: 'command', commandId: 'edit:paste' },
       { type: 'separator' },
     ];
-    // 수식 객체: "수식 편집..." 항목 추가
-    if (ref?.type === 'equation') {
+    // 수식 객체: "수식 편집..." 항목 추가. OLE 레거시 수식은 먼저 native 로 전환한다.
+    // 본문 슬롯만 promoteOleEquation 이 받는다 — 셀/머리말·꼬리말 OLE 는 범위 밖.
+    const bodyOle = ref?.type === 'ole' && !(ref.cellPath?.length) && !ref.headerFooter;
+    if (ref?.type === 'equation' || bodyOle) {
       items.push(
-        { type: 'command', commandId: 'insert:equation-edit', label: '수식 편집...' },
+        {
+          type: 'command',
+          commandId: 'insert:equation-edit',
+          label: ref.type === 'ole' ? '수식으로 변환하여 편집...' : '수식 편집...',
+        },
         { type: 'separator' },
       );
     }
@@ -2876,7 +2892,9 @@ export class InputHandler {
   /** Undo 처리 */
   private handleUndo(): void {
     this.flushDeferredPaginationIfNeeded('before-undo', false);
-    const newPos = this.history.undo(this.wasm);
+    let newPos: DocumentPosition | null;
+    try { newPos = this.history.undo(this.wasm); }
+    catch (error) { this.handleCharFormatError(error); return; }
     if (newPos) {
       this.prepareTextMutationBeforeCursor(IMMEDIATE_TEXT_MUTATION_EFFECTS);
       this.clearTableResizeRuntimeCache();
@@ -2892,7 +2910,9 @@ export class InputHandler {
   /** Redo 처리 */
   private handleRedo(): void {
     this.flushDeferredPaginationIfNeeded('before-redo', false);
-    const newPos = this.history.redo(this.wasm);
+    let newPos: DocumentPosition | null;
+    try { newPos = this.history.redo(this.wasm); }
+    catch (error) { this.handleCharFormatError(error); return; }
     if (newPos) {
       const boundaryHandled = this.prepareTextMutationBeforeCursor(
         this.history.consumeLastExecutionEffects(),
@@ -3046,6 +3066,17 @@ export class InputHandler {
     }
   }
 
+  private handleCharFormatError(error: unknown): void {
+    if (!isCharFormatError(error)) throw error;
+    console.error(error);
+    if (error instanceof CharFormatRecoveryError) {
+      this.prepareTextMutationBeforeCursor(IMMEDIATE_TEXT_MUTATION_EFFECTS);
+      this.resetDerivedStateAfterHistoryJump();
+      this.afterEdit();
+    }
+    alert(error.message);
+  }
+
   /**
    * 편집 작업 통합 라우터.
    * 호출부는 OperationDescriptor로 "무엇을 하려는가"만 서술하고,
@@ -3065,7 +3096,9 @@ export class InputHandler {
         if (keepFieldStartOutside) {
           this.wasm.clearActiveField();
         }
-        const newPos = this.history.execute(desc.command, this.wasm);
+        let newPos: DocumentPosition;
+        try { newPos = this.history.execute(desc.command, this.wasm); }
+        catch (error) { this.handleCharFormatError(error); return; }
         const boundaryHandled = this.prepareTextMutationBeforeCursor(
           this.history.consumeLastExecutionEffects(),
         );
@@ -3133,6 +3166,10 @@ export class InputHandler {
           desc.meta?.scroll === 'preserve',
         );
         break;
+      }
+      default: {
+        const _exhaustive: never = desc;
+        void _exhaustive;
       }
     }
   }
@@ -3694,8 +3731,15 @@ export class InputHandler {
         this.caret.update(caretRect, zoom);
         if (this.isComposing && this.compositionAnchor && this.compositionLength > 0) {
           const startRect = this.compositionStartRect();
-          if (startRect) this.caret.showCompositionUnderline(startRect, caretRect, zoom);
-          else this.caret.hideComposition();
+          if (startRect && isCompositionBoxRepresentable(startRect, caretRect)) {
+            this.caret.showCompositionUnderline(startRect, caretRect, zoom);
+          } else {
+            // [Issue #6738] 줄 affinity 를 물을 수 없는 문맥(머리말/꼬리말·각주·2단계 이상 중첩 셀)
+            // 에서는 조합 글자가 줄이나 쪽을 넘어가도 시작 좌표를 바로잡을 수 없다. 틀린 자리에
+            // 밑줄을 긋는 대신 조회 실패와 같은 경로로 일반 캐럿만 보여준다.
+            this.caret.hideComposition();
+            this.caret.update(caretRect, zoom);
+          }
         } else {
           this.caret.hideComposition();
         }
@@ -3758,6 +3802,7 @@ export class InputHandler {
         );
       }
       if (!startRect) return null;
+      startRect = this.compositionOverlayStartRect(anchor, startRect);
       this.compositionAnchorRect = {
         ...startRect,
         cellBounds: startRect.cellBounds ? { ...startRect.cellBounds } : undefined,
@@ -3766,6 +3811,49 @@ export class InputHandler {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * IME 조합 밑줄의 원점 rect 를 돌려준다.
+   *
+   * [Issue #6553] 조합 중인 글자가 soft-wrap 으로 다음 줄로 넘어가면 `anchor.charOffset` 이
+   * 줄 경계 offset 이 되고, 줄 affinity 인자가 없는 exact 조회는 이전 줄 끝을 돌려준다.
+   * 밑줄은 글자가 실제로 그려지는 줄에 놓여야 하므로 시각 줄을 명시해 다시 조회한다.
+   * 머리말/꼬리말·각주와 2단 이상 중첩 셀은 `getCursorRectOnLine` 이 대상 문단을 지목할 수
+   * 없어 제외한다(exact 유지).
+   */
+  private compositionOverlayStartRect(anchor: DocumentPosition, exact: CursorRect): CursorRect {
+    if (this.cursor.isInHeaderFooter() || this.cursor.isInFootnote()) return exact;
+    if ((anchor.cellPath?.length ?? 0) > 1) return exact;
+    const inCell = anchor.parentParaIndex !== undefined;
+    // 두 질의 모두 실패를 null 로 알린다 — 여기서 예외가 새면 compositionStartRect 의 바깥
+    // catch 가 조합 밑줄을 통째로 접어버려, exact 로 물러나는 것보다 나쁜 결과가 된다.
+    return resolveGlyphStartRect(anchor.charOffset, exact, {
+      lineInfoAt: (charOffset) => {
+        try {
+          return inCell
+            ? this.wasm.getLineInfoInCell(
+                anchor.sectionIndex, anchor.parentParaIndex!, anchor.controlIndex!,
+                anchor.cellIndex!, anchor.cellParaIndex!, charOffset,
+              )
+            : this.wasm.getLineInfo(anchor.sectionIndex, anchor.paragraphIndex, charOffset);
+        } catch {
+          return null;
+        }
+      },
+      rectAtLineStart: (lineIndex) => {
+        try {
+          return this.wasm.getCursorRectOnLine(
+            anchor.sectionIndex, anchor.paragraphIndex, lineIndex, false,
+            anchor.parentParaIndex ?? 0xFFFFFFFF, anchor.controlIndex ?? 0xFFFFFFFF,
+            anchor.cellIndex ?? 0xFFFFFFFF, anchor.cellParaIndex ?? 0xFFFFFFFF,
+          );
+        } catch {
+          // getCursorRectOnLine 을 내보내지 않는 wasm 빌드 — 기존 exact 동작을 유지한다.
+          return null;
+        }
+      },
+    });
   }
 
   /** 네이티브 IME 후보창이 실제 캐럿 근처에 열리도록 숨은 입력을 배치한다. */
@@ -4765,10 +4853,10 @@ export class InputHandler {
   isInPictureObjectSelection(): boolean { return this.cursor.isInPictureObjectSelection(); }
 
   /** 선택된 그림/글상자 참조 반환 ([Task #825] headerFooter 동반 시 머리말/꼬리말 picture marker) */
-  getSelectedPictureRef(): { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; outerTableControlIdx?: number; cellPath?: Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }>; noteRef?: any; memoRef?: any; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } } | null { return this.cursor.getSelectedPictureRef(); }
+  getSelectedPictureRef(): ObjectRef | null { return this.cursor.getSelectedPictureRef(); }
 
   /** 다중 선택된 개체 목록 */
-  getSelectedPictureRefs(): { sec: number; ppi: number; ci: number; type: string; cellPath?: CellPathLike; noteRef?: unknown; memoRef?: unknown; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } }[] { return this.cursor.getSelectedPictureRefs(); }
+  getSelectedPictureRefs(): ObjectRef[] { return this.cursor.getSelectedPictureRefs(); }
 
   /** 다중 선택 상태인가? */
   isMultiPictureSelection(): boolean { return this.cursor.isMultiPictureSelection(); }
@@ -4776,6 +4864,12 @@ export class InputHandler {
   /** 지정 개체를 선택 상태로 진입 */
   selectPictureObject(sec: number, ppi: number, ci: number, type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'): void {
     this.cursor.enterPictureObjectSelectionDirect(sec, ppi, ci, type);
+    this.renderPictureObjectSelection();
+    this.eventBus.emit('picture-object-selection-changed', true);
+  }
+
+  selectPictureObjectRef(ref: ObjectRef): void {
+    this.cursor.enterPictureObjectSelectionRef(ref as Parameters<CursorState['enterPictureObjectSelectionRef']>[0]);
     this.renderPictureObjectSelection();
     this.eventBus.emit('picture-object-selection-changed', true);
   }
@@ -4847,6 +4941,12 @@ export class InputHandler {
 
   /** 현재 커서 위치를 반환한다 */
   getCursorPosition(): DocumentPosition { return this.cursor.getPosition(); }
+
+  canEditHyperlink(): boolean {
+    return !this.cursor.isInHeaderFooter() && !this.cursor.isInFootnote()
+      && !this.cursor.isInCellSelectionMode() && !this.cursor.isInPictureObjectSelection()
+      && !this.cursor.isInTableObjectSelection();
+  }
 
   /** 커서를 지정 위치로 이동하고 캐럿을 표시한다. 성공하면 true 반환. */
   moveCursorTo(pos: DocumentPosition): boolean {
@@ -5514,16 +5614,8 @@ export class InputHandler {
         this.cursor.moveOutOfSelectedPicture();
         this.pictureObjectRenderer?.clear();
         this.eventBus.emit('picture-object-selection-changed', false);
-        this.executeOperation({ kind: 'snapshot', operationType: 'cutObject', operation: (wasm: WasmBridge) => {
-          if (ref.type === 'image' && ref.cellPath && ref.cellPath.length > 0) {
-            wasm.deleteCellPictureControlByPath(ref.sec, ref.ppi, ref.cellPath, ref.ci);
-          } else if (ref.type === 'image') {
-            wasm.deletePictureControl(ref.sec, ref.ppi, ref.ci);
-          } else if (ref.type === 'equation') {
-            wasm.deleteEquationControl(ref.sec, ref.ppi, ref.ci);
-          } else {
-            wasm.deleteShapeControl(ref.sec, ref.ppi, ref.ci);
-          }
+        this.executeOperation({ kind: 'snapshot', operationType: 'cutObject', operation: () => {
+          this.deleteObjectControl(ref);
           return this.cursor.getPosition();
         }});
       }

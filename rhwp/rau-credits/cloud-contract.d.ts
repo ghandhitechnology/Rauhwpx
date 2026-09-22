@@ -1,0 +1,166 @@
+export type RaucloudRunStatus =
+  | 'allocating'
+  | 'ready'
+  | 'active'
+  | 'checkpointing'
+  | 'checkpointed'
+  | 'completed'
+  | 'stopped'
+  | 'failed';
+
+export interface RauAccountSnapshot {
+  id: string;
+  email: string | null;
+  loggedIn: true;
+  timezone: string | null;
+  pendingTimezone: string | null;
+  timezoneEffectiveAt: number | null;
+  timezoneChangeAvailableAt: number | null;
+}
+
+export interface CloudQuotaSnapshot {
+  limitMs: 3_600_000;
+  usedMs: number;
+  debtAppliedMs: number;
+  remainingMs: number;
+  resetsAt: number | null;
+  timezone: string | null;
+  grace: {
+    active: boolean;
+    usedMs: number;
+    limitMs: 1_800_000;
+    remainingMs: number;
+    debtMs: number;
+  };
+  coldStarts: {
+    usedToday: number;
+    dailyLimit: 12;
+    recent: number;
+    recentLimit: 3;
+  };
+}
+
+export interface RaucloudReceipt {
+  endpoint: string;
+  serverPublicKey: string;
+  pairingCode: string;
+}
+
+export interface CloudRunSummary {
+  id: string;
+  status: RaucloudRunStatus;
+  ownerDeviceId: string;
+  createdAt: number;
+  allocatedAt: number | null;
+  completedAt: number | null;
+  checkpointId: string | null;
+  inputBlocked: boolean;
+  graceDeadlineAt: number | null;
+  failureCode: string | null;
+  message: string | null;
+  /** True while no turn has claimed the prewarmed worker. */
+  prewarm: boolean;
+  /** True when this run claimed an existing warm worker instead of provisioning. */
+  reused: boolean;
+  /** Present only when the requesting token is bound to ownerDeviceId and the run is claimed. */
+  receipt: RaucloudReceipt | null;
+}
+
+export interface RaucloudGate {
+  state: 'ready' | 'timezone_required' | 'quota_exhausted' | 'owned_elsewhere' | 'grace_active' | 'unavailable';
+  canStart: boolean;
+  canTakeover: boolean;
+  reason: string | null;
+}
+
+export interface CloudStatusEnvelope {
+  account: RauAccountSnapshot;
+  quota: CloudQuotaSnapshot;
+  worker: null | {
+    id: string;
+    status: string;
+    ownerDeviceId: string;
+    runId: string;
+    warmUntil: number | null;
+    /** True while the worker holds an unclaimed reservation. */
+    prewarm: boolean;
+    receipt: RaucloudReceipt | null;
+  };
+  activeRun: CloudRunSummary | null;
+  takeoverRun: CloudRunSummary | null;
+  /** Present when GET /v1/cloud/status includes a runId query. */
+  run?: CloudRunSummary;
+  gate: RaucloudGate;
+  /** Present on POST /v1/cloud/prewarm responses: true while the reservation is unclaimed. */
+  prewarm?: boolean;
+}
+
+export interface CloudReceiptEnvelope {
+  receipt: RaucloudReceipt;
+}
+
+export interface CloudRunEnvelope extends CloudStatusEnvelope {
+  run: CloudRunSummary;
+  coldStart?: boolean;
+}
+
+export interface CloudMergeMetadata {
+  sessionId: string;
+  documentId: string;
+  threadId: string;
+  cloudStartId: string;
+  operationId: string;
+  revision: number;
+  turn: number;
+  kind: 'turn';
+  fileName: string;
+  sha256: string;
+  size: number;
+  chunkCount: number;
+}
+
+export interface CloudMergeChunkUpload extends CloudMergeMetadata {
+  chunkIndex: number;
+  bytesBase64: string;
+}
+
+export interface CloudMergeRequest extends CloudMergeMetadata {
+  id: string;
+  runId: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface CloudMergeUploadReceipt {
+  /** Only true after every chunk and the complete SHA-256 have been verified. */
+  complete: boolean;
+  mergeRequest: CloudMergeRequest;
+}
+
+export interface CloudMergeRequestList {
+  accountId: string;
+  mergeRequests: CloudMergeRequest[];
+}
+
+export interface CloudConversationSnapshot extends Omit<CloudMergeRequest, 'kind'> {
+  kind: 'conversation';
+  /** Snapshot generation, independent of document revision. */
+  revision: number;
+  state: 'staged' | 'queued' | 'running' | 'suspended' | 'completed' | 'cancelled' | 'failed' | 'purged';
+  retentionUntil: number;
+  /** False for an idle completed room; result retrieval needs no replacement worker. */
+  pendingWork: boolean;
+}
+
+export interface CloudConversationList {
+  accountId: string;
+  conversations: CloudConversationSnapshot[];
+}
+
+export interface CloudConversationRestoreReceipt<Session> {
+  session: Session;
+  restored: true;
+  /** Reset the client watch cursor here after replacing a worker. */
+  sourceEventSeq: number;
+  restoredEventSeq: number;
+}

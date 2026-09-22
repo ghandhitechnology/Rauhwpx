@@ -12,21 +12,18 @@ import {
   prepareClaudeHome,
 } from './agents/claude.mjs';
 import {
+  claudeCredentialExpiry,
+  parseClaudeOAuthCredential,
+  readClaudeCredentialFile,
+  readClaudeOAuthCredential,
+  writeClaudeCredentialFile,
+} from './claude-credentials.mjs';
+import {
   createCodexSession,
   flushCodexCredentialMirror,
   prepareCodexHome,
 } from './agents/codex.mjs';
-import { createPiSession, isOpenRouterCreditError } from './agents/pi.mjs';
-import {
-  createGrokSession,
-  flushGrokCredentialMirror,
-  prepareGrokHome,
-} from './agents/grok.mjs';
-import {
-  createCursorSession,
-  flushCursorCredentialMirrors,
-  prepareCursorHome,
-} from './agents/cursor.mjs';
+import { createPiSession } from './agents/pi.mjs';
 import { generateChatTitle } from './agents/title.mjs';
 import {
   CHECKPOINT_TITLE_OVERALL_TIMEOUT_MS,
@@ -41,6 +38,7 @@ import { AgentInstructionsStore } from './agent-instructions.mjs';
 import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS } from './tools.mjs';
+import { takeEnvironmentScreenshot } from './environment-screenshot.mjs';
 import { replayMissedTurnEnd } from './turn-outcome-replay.mjs';
 import {
   PlanningState,
@@ -53,18 +51,15 @@ import {
 import { DownloadManager } from './download-manager.mjs';
 import { DocumentSnapshotManager } from './document-snapshot-manager.mjs';
 import { ArtifactStore } from './artifact-store.mjs';
-import { BrowserbaseSession } from './browserbase-session.mjs';
+import { BrowserbaseFleet, normalizeBrowserbaseOverride, validateBrowserbaseCredentials } from './browserbase-session.mjs';
 import { createProviderHealth } from './provider-health.mjs';
 import { createUsageStore } from './usage-store.mjs';
-import { createCliproxyClient } from './cliproxy.mjs';
+import { createProviderLimitsClient } from './provider-limits.mjs';
 import {
   createPiManager,
   defaultPiRoot,
-  defaultRauRoot,
-  RAU_LOCKED_MODELS,
-  RAU_SECRET_ID,
 } from './pi-manager.mjs';
-import { createRauCreditsClient, storeRauApiKey } from './rau-credits-client.mjs';
+import { createRauCreditsClient } from './rau-credits-client.mjs';
 import { createAccountSession } from './account-session.mjs';
 import { AuthRunRegistry } from './auth-run-registry.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
@@ -224,10 +219,8 @@ const SOURCE_CLAUDE_CONFIG_DIR = typeof process.env.CLAUDE_CONFIG_DIR === 'strin
   && process.env.CLAUDE_CONFIG_DIR.trim()
   ? path.resolve(process.env.CLAUDE_CONFIG_DIR)
   : path.join(HOST_PROFILE_HOME, '.claude');
-const sourceClaudeAuth = {
-  credentialsPath: path.join(SOURCE_CLAUDE_CONFIG_DIR, '.credentials.json'),
-  configPath: path.join(HOST_PROFILE_HOME, '.claude.json'),
-};
+const SOURCE_CLAUDE_CREDENTIALS = path.join(SOURCE_CLAUDE_CONFIG_DIR, '.credentials.json');
+const SOURCE_CLAUDE_CONFIG = path.join(HOST_PROFILE_HOME, '.claude.json');
 const sourceCodexHomes = [...new Set([
   process.env.CODEX_HOME,
   path.join(HOST_PROFILE_HOME, '.codex'),
@@ -249,9 +242,7 @@ const writingStyleStore = await new WritingStyleStore().init();
 const agentInstructionsStore = await new AgentInstructionsStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
 const PI_ROOT = defaultPiRoot();
-const RAU_ROOT = defaultRauRoot();
 const openRouter = createOpenRouter({ cacheDir: PI_ROOT });
-const rauOpenRouter = createOpenRouter({ cacheDir: RAU_ROOT });
 const secretStore = createIpcSecretStore();
 if (process.env.RHWP_AGENT_MODE === 'production' && !secretStore.available) {
   throw Object.assign(new Error('The packaged hub requires the desktop secure-secret broker.'), {
@@ -259,19 +250,9 @@ if (process.env.RHWP_AGENT_MODE === 'production' && !secretStore.available) {
   });
 }
 const piManager = await createPiManager({ rootDir: PI_ROOT, openRouter, secretStore }).init();
-const rauManager = await createPiManager({
-  rootDir: RAU_ROOT,
-  prefixDir: piManager.prefixDir,
-  openRouter: rauOpenRouter,
-  secretStore,
-  secretId: RAU_SECRET_ID,
-  lockedModels: RAU_LOCKED_MODELS,
-  skipLegacyKey: true,
-}).init();
-const rauCredits = createRauCreditsClient();
 const accountSession = createAccountSession({
   secretStore,
-  creditsClient: rauCredits,
+  creditsClient: createRauCreditsClient(),
 });
 const authRuns = new AuthRunRegistry();
 let npmPrefixMutationQueue = Promise.resolve();
@@ -281,6 +262,48 @@ function mutateSharedNpmPrefix(operation) {
   return running;
 }
 const cliSetup = await createCliSetupManager({ secretStore }).init();
+const CLAUDE_CREDENTIAL_SEED_FILE = path.join(
+  cliSetup.rootDir,
+  'claude-source-credentials',
+  '.credentials.json',
+);
+/**
+ * Codex is usable the moment its profile holds an `auth.json`, because that
+ * file is copied into every isolated home. Claude's login can instead live only
+ * in the macOS Keychain, where the same seeding path cannot reach it, so a
+ * Keychain-only profile is materialized once into a hub-owned file.
+ *
+ * The profile's own credential file always wins, and a previously materialized
+ * seed is kept while it is at least as fresh as the Keychain — an isolated
+ * session refreshes its token through copy-back, and that refreshed value must
+ * not be replaced by the older Keychain copy.
+ */
+async function resolveSourceClaudeAuth() {
+  const fallback = {
+    credentialsPath: SOURCE_CLAUDE_CREDENTIALS,
+    configPath: SOURCE_CLAUDE_CONFIG,
+  };
+  const resolved = await readClaudeOAuthCredential({
+    homeDir: HOST_PROFILE_HOME,
+    configDir: SOURCE_CLAUDE_CONFIG_DIR,
+    env: process.env,
+    platform: process.platform,
+  }).catch(() => null);
+  if (!resolved) return fallback;
+  if (resolved.source === 'file') return { credentialsPath: resolved.file, configPath: SOURCE_CLAUDE_CONFIG };
+  const fromKeychain = parseClaudeOAuthCredential(resolved.text);
+  const seeded = await readClaudeCredentialFile(CLAUDE_CREDENTIAL_SEED_FILE);
+  if (seeded && claudeCredentialExpiry(seeded) >= claudeCredentialExpiry(fromKeychain)) {
+    return { credentialsPath: CLAUDE_CREDENTIAL_SEED_FILE, configPath: SOURCE_CLAUDE_CONFIG };
+  }
+  const written = await writeClaudeCredentialFile(CLAUDE_CREDENTIAL_SEED_FILE, resolved.text)
+    .then(() => true, () => false);
+  return {
+    credentialsPath: written ? CLAUDE_CREDENTIAL_SEED_FILE : SOURCE_CLAUDE_CREDENTIALS,
+    configPath: SOURCE_CLAUDE_CONFIG,
+  };
+}
+let sourceClaudeAuth = await resolveSourceClaudeAuth();
 function claudeRuntimeEnv(isolatedHome) {
   return {
     ...cliSetup.envFor('claude'),
@@ -293,48 +316,30 @@ function claudeRuntimeEnv(isolatedHome) {
 // 허브가 관리하는 API 키는 process.env 에 올리지 않는다 — npm lifecycle 스크립트,
 // 설치 스크립트 등 무관한 자식 프로세스까지 상속받는 누수 지점이 된다.
 // 키는 auxSpawnProcess 가 해당 CLI 자식에게만 env 로 얹어 준다.
-process.env.PATH = `${cliSetup.binDir}${path.delimiter}${process.env.PATH ?? ''}`;
-const [initialClaudeSetup, initialCodexSetup, initialGrokSetup, initialCursorSetup] = await Promise.all([
+process.env.PATH = [cliSetup.nodeHostDir(), cliSetup.binDir, process.env.PATH]
+  .filter(Boolean)
+  .join(path.delimiter);
+const [initialClaudeSetup, initialCodexSetup] = await Promise.all([
   cliSetup.status('claude'),
   cliSetup.status('codex'),
-  cliSetup.status('grok'),
-  cliSetup.status('cursor'),
 ]);
 let cliSetupStatus = {
   claude: initialClaudeSetup,
   codex: initialCodexSetup,
-  grok: initialGrokSetup,
-  cursor: initialCursorSetup,
 };
-// grok 세션 시딩용 auth.json 원본 — 발견 순서는 cli-setup-manager 와 같다
-// (env GROK_HOME → ~/.grok → 관리형 홈, 심볼릭 링크 원본은 제외).
-let sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
-/** cursor-agent 가 보고한 모델 id 목록 — 인증된 setup-status 갱신 때 채워진다. */
-let cursorModelIds = [];
 /** pi 상태는 동기 경로(resolveModel/startSession)에서도 필요해 캐시해 둔다. */
 let piStatus = await piManager.status();
-let rauStatus = await rauManager.status();
 /** OpenRouter 잔액. 키가 있을 때만 채워지고 사용량 리포트에 얹힌다. */
 let openRouterCredits = null;
-let rauCreditsBalance = null;
-if (piStatus.installed || rauStatus.installed) {
+let openRouterCreditsKey = null;
+if (piStatus.installed) {
   // 저장소가 갱신되면 확장/스킬도 따라와야 한다 — 실패해도 허브는 그대로 뜬다.
   await piManager.syncAssets().catch((error) => log(`pi asset sync failed: ${error?.message ?? error}`));
-  await rauManager.syncAssets().catch((error) => log(`rau asset sync failed: ${error?.message ?? error}`));
 }
 const providerHealth = createProviderHealth({
   piBin: () => (piStatus.installed ? piManager.piBin : null),
   cliBin: (agent) => (cliSetupStatus[agent]?.installed ? cliSetup.binPath(agent) : null),
-  // Version probes can write provider config. Keep both Cursor and Claude in
-  // app-owned probe homes instead of inheriting a live profile override.
   probeEnv: (agent) => {
-    if (agent === 'cursor') {
-      return {
-        ...process.env,
-        HOME: cliSetup.cursorHomeDir,
-        CURSOR_CONFIG_DIR: path.join(cliSetup.cursorHomeDir, '.cursor-probe'),
-      };
-    }
     if (agent === 'claude') {
       const probeHome = path.join(cliSetup.rootDir, 'claude-probe');
       return claudeRuntimeEnv(probeHome);
@@ -343,7 +348,13 @@ const providerHealth = createProviderHealth({
   },
 });
 const usageStore = await createUsageStore().init();
-const cliproxy = await createCliproxyClient({ rootDir: usageStore.rootDir }).init();
+const providerLimits = createProviderLimitsClient({
+  homeDir: HOST_PROFILE_HOME,
+  resetLedgerPath: path.join(usageStore.rootDir, 'codex-reset-ledger.json'),
+  getProviderEnv: (agent) => cliSetup.envFor(agent),
+  getAuthMethod: (agent) => cliSetupStatus[agent]?.authMethod,
+  getCodexBin: () => cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
+});
 const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
 const templateStore = await new TemplateStore().init();
 // .hwp/.hwpx/.hml 텍스트 추출은 rhwp 바이너리에 기댄다 — 없으면 첫 업로드가 아니라 기동 시점에 알린다.
@@ -372,14 +383,10 @@ const sessions = new HubSessionRegistry({
     const hubStorageDir = path.join(recordRoot, 'hub-storage');
     const isolatedHome = path.join(recordRoot, 'home');
     const codexHome = path.join(isolatedHome, '.codex');
-    const grokHome = path.join(isolatedHome, '.grok');
-    const cursorHome = path.join(isolatedHome, '.cursor');
     mkdirSync(workDir, { recursive: true, mode: 0o700 });
     mkdirSync(hubStorageDir, { recursive: true, mode: 0o700 });
     prepareCodexHome(codexHome, sourceCodexAuthPath);
     prepareClaudeHome(isolatedHome, sourceClaudeAuth);
-    prepareGrokHome(grokHome, sourceGrokAuthPath);
-    prepareCursorHome(cursorHome, cliSetup.cursorSourceDir);
     const downloadManager = new DownloadManager({ rootDir: hubStorageDir, writableRoot: workDir });
     const documentSnapshotManager = new DocumentSnapshotManager({
       rootDir: hubStorageDir,
@@ -424,7 +431,7 @@ const sessions = new HubSessionRegistry({
       copyLayoutStorageUncertain: false,
       pendingTemplateCompletions: [],
       pendingDocumentSaved: null,
-      browserbaseSession: new BrowserbaseSession({ log }),
+      browserbaseSession: new BrowserbaseFleet({ log }),
       downloadManager,
       documentSnapshotManager,
       artifactStore: new ArtifactStore({ rootDir: workDir, trustedReadRoots: hubReadOnlyRoots }),
@@ -435,8 +442,6 @@ const sessions = new HubSessionRegistry({
       copyLayoutGeneratedRoot,
       isolatedHome,
       codexHome,
-      grokHome,
-      cursorHome,
     };
   },
 });
@@ -552,8 +557,6 @@ function refreshSessionCredentials(agent) {
   for (const record of sessions.values()) {
     if (agent === 'codex') prepareCodexHome(record.codexHome, sourceCodexAuthPath);
     if (agent === 'claude') prepareClaudeHome(record.isolatedHome, sourceClaudeAuth);
-    if (agent === 'grok') prepareGrokHome(record.grokHome, sourceGrokAuthPath);
-    if (agent === 'cursor') prepareCursorHome(record.cursorHome, cliSetup.cursorSourceDir);
   }
 }
 
@@ -563,8 +566,6 @@ function flushProviderCredentialHomes(homes) {
   const flushes = [
     ['claude', () => flushClaudeCredentialMirrors(homes.isolatedHome)],
     ['codex', () => flushCodexCredentialMirror(homes.codexHome)],
-    ['grok', () => flushGrokCredentialMirror(homes.grokHome)],
-    ['cursor', () => flushCursorCredentialMirrors(homes.cursorHome)],
   ];
   let settled = true;
   for (const [agent, flush] of flushes) {
@@ -579,47 +580,32 @@ function flushProviderCredentialHomes(homes) {
 }
 
 /** CLI 설치·인증을 cli-setup-manager 가 관리하는 에이전트들. */
-const CLI_SETUP_AGENTS = ['claude', 'codex', 'grok', 'cursor'];
-const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi', 'rau']);
-const OPENROUTER_AGENTS = new Set(['pi', 'rau']);
+const CLI_SETUP_AGENTS = ['claude', 'codex'];
+const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi']);
+const OPENROUTER_AGENTS = new Set(['pi']);
 const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
 
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
-const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
-const GROK_MODELS = new Set(['grok-4.6', 'grok-4.5']);
-const DEFAULT_MODEL = { claude: 'sonnet', codex: 'gpt-5.6-sol', grok: 'grok-4.6', cursor: 'auto' };
+const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra']);
+const DEFAULT_MODEL = {
+  claude: 'sonnet',
+  codex: 'gpt-5.6-sol',
+};
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const CLAUDE_EFFORTS_HAIKU = new Set(['low', 'medium', 'high']);
 const CODEX_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-const GROK_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh']);
-const DEFAULT_EFFORT = { claude: 'high', codex: 'medium', grok: 'high' };
+const DEFAULT_EFFORT = { claude: 'high', codex: 'medium' };
 
 /** 알 수 없는 에이전트가 코덱스/클로드로 조용히 넘어가지 않도록 명시 테이블로 찾는다. */
 const SESSION_FACTORIES = {
   claude: createClaudeSession,
   codex: createCodexSession,
   pi: createPiSession,
-  rau: createPiSession,
-  grok: createGrokSession,
-  cursor: createCursorSession,
 };
 
-function openRouterManager(agent) {
-  if (agent === 'rau') return rauManager;
-  if (agent === 'pi') return piManager;
-  return null;
-}
+function openRouterManager(agent) { return agent === 'pi' ? piManager : null; }
 
-function openRouterStatus(agent) {
-  if (agent === 'rau') return rauStatus;
-  if (agent === 'pi') return piStatus;
-  return null;
-}
-
-function rauTrialEmpty() {
-  if (!rauStatus.setupComplete) return false;
-  return creditBalanceEmpty(rauCreditsBalance);
-}
+function openRouterStatus(agent) { return agent === 'pi' ? piStatus : null; }
 
 function unknownAgentError(agent) {
   return Object.assign(new Error(`unknown agent: ${String(agent)}`), { code: 'INVALID_REQUEST' });
@@ -635,10 +621,6 @@ async function refreshPiStatus() {
   return piStatus;
 }
 
-async function refreshRauStatus() {
-  rauStatus = await rauManager.status();
-  return rauStatus;
-}
 
 function openRouterAgentSetupStatus(agent) {
   const status = openRouterStatus(agent);
@@ -665,12 +647,6 @@ function piAgentSetupStatus() {
   return openRouterAgentSetupStatus('pi');
 }
 
-function rauAgentSetupStatus() {
-  const status = openRouterAgentSetupStatus('rau');
-  if (status.authenticated) status.authMethod = 'oauth';
-  if (rauTrialEmpty()) status.exhausted = true;
-  return status;
-}
 
 function withAuthRunStatus(statuses, ownerSessionId = null) {
   return Object.fromEntries(Object.entries(statuses).map(([agent, status]) => {
@@ -693,33 +669,12 @@ function broadcastAgentSetupStatuses(statuses) {
   }
 }
 
-/** 모델 목록 조회가 상태 응답을 붙잡아 둘 수 있는 상한. */
-const CURSOR_MODELS_SOFT_DEADLINE_MS = 2_500;
 
-/**
- * cursor 모델 목록을 짧은 상한 안에서만 기다린다. 늦거나 실패하면 null 을 돌려주고
- * 이번 응답은 직전 목록으로 넘어간다 — 뒤늦게 도착한 결과는 cursorModels 의 TTL
- * 캐시에 남아 다음 집계에서 즉시 쓰인다.
- */
-function cursorModelsSoon() {
-  const probe = cliSetup.cursorModels().catch(() => null);
-  const deadline = new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(null), CURSOR_MODELS_SOFT_DEADLINE_MS);
-    timer.unref?.();
-  });
-  return Promise.race([probe, deadline]);
-}
-
-async function agentSetupStatuses(ownerSessionId = null) {
-  // cursor 프로브(status + --list-models)는 CLI 를 스폰해 초 단위로 걸린다 —
-  // 클로드/코덱스 설정 UI 가 그만큼 늦지 않도록 전부 병렬로 돌린다.
-  const [claudeSetup, codexSetup, grokSetup, cursorSetup, health, cursorModelProbe] = await Promise.all([
+async function agentSetupStatuses(ownerSessionId = null, refresh = false) {
+  const [claudeSetup, codexSetup, health] = await Promise.all([
     cliSetup.status('claude'),
     cliSetup.status('codex'),
-    cliSetup.status('grok'),
-    cliSetup.status('cursor'),
-    providerHealth.check(),
-    cursorModelsSoon(),
+    providerHealth.check(refresh),
   ]);
   const withDetectedHarness = (status, provider) => {
     const available = provider?.available === true;
@@ -734,14 +689,9 @@ async function agentSetupStatuses(ownerSessionId = null) {
   };
   const claude = withDetectedHarness(claudeSetup, health.claude);
   const codex = withDetectedHarness(codexSetup, health.codex);
-  const grok = withDetectedHarness(grokSetup, health.grok);
-  const cursor = withDetectedHarness(cursorSetup, health.cursor);
-  // cursor 모델 목록은 인증된 CLI 에서만 나온다 — 실패해도 상태 응답은 막지 않는다.
-  cursorModelIds = cursor.authenticated ? (cursorModelProbe ?? cursorModelIds) : [];
-  cursor.models = [...cursorModelIds];
-  cliSetupStatus = { claude, codex, grok, cursor };
+  cliSetupStatus = { claude, codex };
   return withAuthRunStatus(
-    { claude, codex, grok, cursor, pi: piAgentSetupStatus(), rau: rauAgentSetupStatus() },
+    { claude, codex, pi: piAgentSetupStatus() },
     typeof ownerSessionId === 'string' ? ownerSessionId : null,
   );
 }
@@ -771,15 +721,11 @@ async function runAutomaticHarnessUpdates() {
   const before = {
     claude: cliSetupStatus.claude?.version ?? null,
     codex: cliSetupStatus.codex?.version ?? null,
-    grok: cliSetupStatus.grok?.version ?? null,
-    cursor: cliSetupStatus.cursor?.version ?? null,
     pi: piStatus.version ?? null,
   };
   try {
     cliSetupStatus.claude = await cliSetup.automaticUpdate('claude', { canActivate });
     cliSetupStatus.codex = await cliSetup.automaticUpdate('codex', { canActivate });
-    cliSetupStatus.grok = await cliSetup.automaticUpdate('grok', { canActivate });
-    cliSetupStatus.cursor = await cliSetup.automaticUpdate('cursor', { canActivate });
     piStatus = await mutateSharedNpmPrefix(() => piManager.automaticUpdate({ canActivate }));
     const statuses = await agentSetupStatuses();
     if (Object.values(statuses).some((status) => status.updateRequired)) {
@@ -788,8 +734,6 @@ async function runAutomaticHarnessUpdates() {
     broadcastAgentSetupStatuses(statuses);
     const changed = before.claude !== statuses.claude.version
       || before.codex !== statuses.codex.version
-      || before.grok !== statuses.grok.version
-      || before.cursor !== statuses.cursor.version
       || before.pi !== statuses.pi.version;
     if (changed) {
       const providers = await providerHealth.check(true);
@@ -894,12 +838,24 @@ function decorateAccountStatus(status, ownerSessionId = null) {
 
 async function broadcastAccountStatus() {
   const status = await accountSession.status();
+  if (typeof process.send === 'function' && process.connected) {
+    process.send({ type: 'rhwp-account-status-changed' }, () => {});
+  }
   for (const record of sessions.values()) {
     sendJson(record.studioSocket, {
       v: 1,
       type: 'account-status',
       status: decorateAccountStatus(status, record.sessionId),
     });
+  }
+}
+
+async function logoutAccount() {
+  try {
+    return await accountSession.logout();
+  } finally {
+    await broadcastFreshAgentSetupStatuses().catch(() => {});
+    await broadcastAccountStatus().catch(() => {});
   }
 }
 
@@ -934,6 +890,11 @@ function beginAccountLogin(record, sock, requestId) {
     if (authRun?.accountLoginId) void accountSession.cancelLogin(authRun.accountLoginId);
   };
   try {
+    if (authRuns.get('rau')) {
+      throw Object.assign(new Error('진행 중인 Rau 로그인을 먼저 마쳐 주세요.'), {
+        code: 'ACCOUNT_AUTH_BUSY',
+      });
+    }
     authRun = authRuns.begin({
       agent: 'account',
       ownerSessionId: record.sessionId,
@@ -1033,13 +994,14 @@ function beginAccountLogin(record, sock, requestId) {
   })().then(
     async () => {
       authRuns.finish(authRun);
+      await broadcastFreshAgentSetupStatuses().catch(() => {});
       await broadcastAccountStatus().catch((error) => {
         log(`account status refresh failed: ${error?.message ?? error}`);
       });
     },
     async (error) => {
       authRuns.finish(authRun);
-      if (!['AGENT_AUTH_CANCELLED', 'ACCOUNT_LOGIN_CANCELLED', 'RAU_LOGIN_CANCELLED'].includes(error?.code)) {
+      if (!['AGENT_AUTH_CANCELLED', 'ACCOUNT_LOGIN_CANCELLED'].includes(error?.code)) {
         sendAccountRunError(authRun, error);
       }
       await broadcastAccountStatus().catch((statusError) => {
@@ -1056,26 +1018,13 @@ function resolveModel(agent, requested) {
     if (status.defaultModelId && piModelConfig(status.defaultModelId, agent)) return status.defaultModelId;
     return status.models[0]?.id ?? null;
   }
-  if (agent === 'cursor') {
-    // auto 는 CLI 기본 모델. 캐시된 목록의 id 는 그대로 받고, 목록이 아직 비어
-    // 있으면(미인증/미조회) 요청값을 신뢰한다 — 단, 다른 프로바이더의 모델 id 는 거른다.
-    if (requested === 'auto') return 'auto';
-    const foreignModel = typeof requested === 'string'
-      && (CLAUDE_MODELS.has(requested) || CODEX_MODELS.has(requested) || GROK_MODELS.has(requested));
-    if (typeof requested === 'string' && requested && !foreignModel
-      && (cursorModelIds.length === 0 || cursorModelIds.includes(requested))) {
-      return requested;
-    }
-    return DEFAULT_MODEL.cursor;
-  }
-  const tables = { claude: CLAUDE_MODELS, codex: CODEX_MODELS, grok: GROK_MODELS };
+  const tables = { claude: CLAUDE_MODELS, codex: CODEX_MODELS };
   const allowed = tables[agent];
   if (!allowed) throw unknownAgentError(agent);
   if (typeof requested === 'string' && allowed.has(requested)) return requested;
   const envDefaults = {
     claude: process.env.RHWP_CLAUDE_MODEL,
     codex: process.env.RHWP_CODEX_MODEL,
-    grok: process.env.RHWP_GROK_MODEL,
   };
   const envDefault = envDefaults[agent];
   if (typeof envDefault === 'string' && allowed.has(envDefault)) return envDefault;
@@ -1091,11 +1040,8 @@ function resolveEffort(agent, model, requested) {
     const preferred = piModelConfig(model, agent)?.defaultEffort;
     return efforts.includes(preferred) ? preferred : efforts[0];
   }
-  // cursor CLI 에는 reasoning effort 선택이 없다.
-  if (agent === 'cursor') return null;
   const tables = {
     codex: CODEX_EFFORTS,
-    grok: GROK_EFFORTS,
     claude: model === 'haiku' ? CLAUDE_EFFORTS_HAIKU : CLAUDE_EFFORTS,
   };
   const allowed = tables[agent];
@@ -1517,7 +1463,6 @@ function writingStyleCatalog(record) {
   return buildWritingStyleCatalog({
     health: providerHealth.cached(),
     piStatus,
-    rauStatus,
     currentSelection: activeSession ? { agent: activeSession.agent, model: activeSession.model, effort: activeSession.effort } : null,
   });
 }
@@ -1546,9 +1491,24 @@ function replyToStudio(record, sock, obj) {
 }
 
 function usageSnapshot() {
-  const usage = cliproxy.applyToSummary(usageStore.summary());
-  if (openRouterCredits) usage.openrouter = openRouterCredits;
-  if (rauCreditsBalance) usage.rau = rauCreditsBalance;
+  const usage = usageStore.summary();
+  usage.limits = providerLimits.snapshot();
+  const currentKey = piManager.apiKey();
+  const keyId = currentKey ? crypto.createHash('sha256').update(currentKey).digest('hex') : null;
+  const credits = keyId && keyId === openRouterCreditsKey ? openRouterCredits : null;
+  if (credits) usage.openrouter = credits;
+  usage.balances = {
+    openrouter: {
+      status: credits ? (credits.error ? 'error' : 'ok') : 'unavailable',
+      balanceUsd: credits && !credits.error ? credits.balanceUsd : null,
+      totalCreditsUsd: credits && !credits.error ? credits.totalCreditsUsd : null,
+      totalUsageUsd: credits && !credits.error ? credits.totalUsageUsd : null,
+      updatedAt: credits && !credits.error ? credits.checkedAt : null,
+      source: credits?.scope === 'key' ? 'OpenRouter 키 한도' : 'OpenRouter 크레딧',
+      error: credits?.error ? 'OpenRouter 잔액을 조회하지 못했어요. 키와 조회 권한을 확인해 주세요.'
+        : !credits ? (currentKey ? '잔액을 새로고침해 주세요.' : 'Pi에서 OpenRouter 계정을 연결해 주세요.') : null,
+    },
+  };
   return usage;
 }
 
@@ -1564,29 +1524,29 @@ function emptyCreditsError(error) {
 
 /** 잔액 조회는 5분 캐시된다 — refresh 일 때만 실제로 다시 부른다. */
 async function refreshOpenRouterCredits(refresh = false) {
-  if (!piStatus.keyConfigured) {
+  const key = piManager.apiKey();
+  if (!key) {
     openRouterCredits = null;
+    openRouterCreditsKey = null;
   } else {
+    let result;
     try {
-      openRouterCredits = await piManager.credits(refresh === true);
+      result = await piManager.credits(refresh === true);
     } catch (error) {
-      openRouterCredits = emptyCreditsError(error);
+      result = emptyCreditsError(error);
     }
-  }
-  if (!rauStatus.keyConfigured) {
-    rauCreditsBalance = null;
-    return;
-  }
-  try {
-    rauCreditsBalance = await rauManager.credits(refresh === true);
-  } catch (error) {
-    rauCreditsBalance = emptyCreditsError(error);
+    if (piManager.apiKey() === key) {
+      openRouterCredits = result;
+      openRouterCreditsKey = crypto.createHash('sha256').update(key).digest('hex');
+    }
   }
 }
 
 async function usageSnapshotRefreshing(refresh = false) {
-  if (cliproxy.configured()) await cliproxy.refresh(refresh === true);
-  await refreshOpenRouterCredits(refresh);
+  await Promise.all([
+    providerLimits.refresh(refresh === true),
+    refreshOpenRouterCredits(refresh),
+  ]);
   return usageSnapshot();
 }
 
@@ -1677,9 +1637,6 @@ function checkpointTitleDeps(record, health, signal) {
   const codex = resolveCheckpointTitleCliRoute(
     'codex', health?.codex, cliSetupStatus.codex, cliSetup.binPath('codex'),
   );
-  const grok = resolveCheckpointTitleCliRoute(
-    'grok', health?.grok, cliSetupStatus.grok, cliSetup.binPath('grok'),
-  );
   const claude = resolveCheckpointTitleCliRoute(
     'claude', health?.claude, cliSetupStatus.claude, cliSetup.binPath('claude'),
   );
@@ -1695,7 +1652,6 @@ function checkpointTitleDeps(record, health, signal) {
         model: deepSeek?.id ?? '',
       },
       codex: { ready: codex.ready, model: 'gpt-5.6-luna' },
-      grok: { ready: grok.ready, model: 'grok-4.6' },
       claude: { ready: claude.ready, model: 'haiku' },
     },
     piManager,
@@ -1705,17 +1661,10 @@ function checkpointTitleDeps(record, health, signal) {
     sessionId: record.sessionId,
     commands: {
       codex: codex.command,
-      grok: grok.command,
       claude: claude.command,
     },
     providerEnvs: {
       codex: { ...cliSetup.envFor('codex'), CODEX_HOME: record.codexHome },
-      grok: {
-        ...cliSetup.envFor('grok'),
-        GROK_HOME: record.grokHome,
-        GROK_DISABLE_AUTOUPDATER: '1',
-        GROK_MEMORY: '0',
-      },
       claude: claudeRuntimeEnv(record.isolatedHome),
     },
     spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
@@ -1726,18 +1675,17 @@ function checkpointTitleDeps(record, health, signal) {
 }
 
 function auxDeps(record, requestedAgent, cliAgent) {
-  const agent = requestedAgent === 'pi' || requestedAgent === 'rau'
+  const agent = requestedAgent === 'pi'
     || requestedAgent === 'claude' || requestedAgent === 'codex'
     ? requestedAgent
     : (record.agentSession?.agent ?? null);
-  const manager = agent === 'rau' ? rauManager : piManager;
-  const router = agent === 'rau' ? rauOpenRouter : openRouter;
+  const manager = piManager;
+  const router = openRouter;
   const health = providerHealth.cached();
   // 프로브 전이면 CLI 가 있다고 보고 기존 경로를 먼저 태운다.
   const cliAvailable = health ? health[cliAgent]?.available !== false : true;
   return {
-    useOpenRouter: (agent === 'rau' && rauStatus.setupComplete)
-      || (piStatus.setupComplete && (agent === 'pi' || !cliAvailable)),
+    useOpenRouter: (piStatus.setupComplete && (agent === 'pi' || !cliAvailable)),
     piManager: manager,
     openRouter: router,
     workDir: record.workDir,
@@ -2163,16 +2111,12 @@ async function launchTemplateJob(record, job) {
   const providerRoot = path.join(record.recordRoot, 'copy-layout-providers', job.jobId);
   const isolatedHome = path.join(providerRoot, 'home');
   const codexHome = path.join(isolatedHome, '.codex');
-  const grokHome = path.join(isolatedHome, '.grok');
-  const cursorHome = path.join(isolatedHome, '.cursor');
-  job.providerHomes = { isolatedHome, codexHome, grokHome, cursorHome };
+  job.providerHomes = { isolatedHome, codexHome };
   job.providerRoot = providerRoot;
   await fs.mkdir(jobDir, { recursive: true, mode: 0o700 });
   await fs.mkdir(providerRoot, { recursive: true, mode: 0o700 });
   prepareCodexHome(codexHome, sourceCodexAuthPath);
   prepareClaudeHome(isolatedHome, sourceClaudeAuth);
-  prepareGrokHome(grokHome, sourceGrokAuthPath);
-  prepareCursorHome(cursorHome, cliSetup.cursorSourceDir);
   job.jobDir = jobDir;
   job.generatedRoot = jobGeneratedRoot;
   job.snapshotRoot = jobSnapshotRoot;
@@ -2196,13 +2140,8 @@ async function launchTemplateJob(record, job) {
     isolatedHome,
     codexHome,
     codexAuthPath: sourceCodexAuthPath,
-    grokHome,
-    grokAuthPath: sourceGrokAuthPath,
-    cursorSourceDir: cliSetup.cursorSourceDir,
     codexBin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
     claudeBin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
-    grokBin: cliSetupStatus.grok?.installed ? cliSetup.binPath('grok') : 'grok',
-    cursorBin: cliSetupStatus.cursor?.installed ? cliSetup.binPath('cursor') : 'cursor-agent',
     providerEnv: job.agent === 'claude'
       ? claudeRuntimeEnv(isolatedHome)
       : (CLI_SETUP_AGENTS.includes(job.agent) ? cliSetup.envFor(job.agent) : {}),
@@ -2217,8 +2156,8 @@ async function launchTemplateJob(record, job) {
       binding: job.binding,
       jobDir,
     }),
-    piBin: (job.agent === 'rau' ? rauManager : piManager).piBin,
-    piRoot: job.agent === 'rau' ? rauManager.rootDir : piManager.rootDir,
+    piBin: piManager.piBin,
+    piRoot: piManager.rootDir,
     openRouterApiKey: openRouterManager(job.agent)?.apiKey() ?? undefined,
     agentName: OPENROUTER_AGENTS.has(job.agent) ? job.agent : 'pi',
     reasoning: OPENROUTER_AGENTS.has(job.agent)
@@ -2348,16 +2287,6 @@ function makeBackendEventHandler(record, generation) {
       sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
       return;
     }
-    if (evt.type === 'error' && activeSession.agent === 'rau' && isOpenRouterCreditError(evt.message)) {
-      rauCreditsBalance = {
-        balanceUsd: 0,
-        totalCreditsUsd: Number(rauCreditsBalance?.totalCreditsUsd) || 5,
-        totalUsageUsd: Number(rauCreditsBalance?.totalUsageUsd) || 5,
-        checkedAt: Date.now(),
-        error: null,
-      };
-      sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
-    }
     const providerTurnId = activeSession.turnId;
     if (evt.type === 'turn-start') {
       // Backends emit this only after their lifecycle has released the prior
@@ -2370,7 +2299,11 @@ function makeBackendEventHandler(record, generation) {
       ? { ...evt, turnId: providerTurnId }
       : evt;
     if (evt.type === 'turn-start') record.missedTurnEnd = null;
-    if (evt.type === 'turn-end') settleAgentTurn(record, activeSession, evt);
+    if (evt.type === 'turn-end') {
+      settleAgentTurn(record, activeSession, evt);
+      // 서브에이전트 브라우저는 턴과 함께 끝난다 — 메인 브라우저만 다음 턴까지 산다.
+      record.browserbaseSession.cleanupExtras('turn ended');
+    }
     const delivered = sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: studioEvent });
     if (evt.type === 'turn-end' && !delivered) record.missedTurnEnd = studioEvent;
     if (evt.type === 'turn-end') {
@@ -2703,6 +2636,12 @@ async function startSession(
     currentSession.documentName = documentName;
     return currentSession;
   }
+  // A settings change must never interrupt a turn or its pending question.
+  if (!force && currentSession?.status === 'running') {
+    throw workflowError('AGENT_BUSY', 'Provider settings can only change between turns.');
+  }
+  const continuing = !force && currentSession
+    && currentSession.threadId === threadId && currentSession.documentId === documentId;
   if (!await disposeSession(record)) throw agentProcessCleanupUncertain();
   const sessionReferenceScopes = referenceScopesForSession({ threadId, documentId });
   await referenceStore.activateScopes(sessionReferenceScopes);
@@ -2711,6 +2650,10 @@ async function startSession(
     initialCapabilityEpoch: record.nextCapabilityEpoch++,
     allocateEpoch: () => record.nextCapabilityEpoch++,
   });
+  if (continuing && currentSession.planning.workflow === workflow) {
+    planning.phase = currentSession.planning.phase;
+    planning.latestPlan = currentSession.planning.latestPlan;
+  }
   const generation = ++record.sessionGeneration;
   const providerRole = 'chat';
   const providerCapabilityResource = mcpProviderResource({
@@ -2736,13 +2679,8 @@ async function startSession(
     isolatedHome: record.isolatedHome,
     codexHome: record.codexHome,
     codexAuthPath: sourceCodexAuthPath,
-    grokHome: record.grokHome,
-    grokAuthPath: sourceGrokAuthPath,
-    cursorSourceDir: cliSetup.cursorSourceDir,
     codexBin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
     claudeBin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
-    grokBin: cliSetupStatus.grok?.installed ? cliSetup.binPath('grok') : 'grok',
-    cursorBin: cliSetupStatus.cursor?.installed ? cliSetup.binPath('cursor') : 'cursor-agent',
     providerEnv: agent === 'claude'
       ? claudeRuntimeEnv(record.isolatedHome)
       : (CLI_SETUP_AGENTS.includes(agent) ? cliSetup.envFor(agent) : {}),
@@ -2756,11 +2694,10 @@ async function startSession(
     workflow,
     phase: workflow === 'direct' ? 'implementing' : planning.phase,
     capabilityEpoch: planning.capabilityEpoch,
-    toolProfile: planning.mcpEnvironment().RHWP_TOOL_PROFILE,
-    mcpEnvironment: planning.mcpEnvironment(),
-    // pi · rau 전용 — 설치 경로와 영속 루트, 그리고 선택한 모델의 추론 지원 여부.
-    piBin: (agent === 'rau' ? rauManager : piManager).piBin,
-    piRoot: agent === 'rau' ? rauManager.rootDir : piManager.rootDir,
+    // Chat tool profiles follow the current workflow/phase after each provider
+    // restart. A fixed toolProfile would keep approved plans read-only.
+    piBin: piManager.piBin,
+    piRoot: piManager.rootDir,
     openRouterApiKey: openRouterManager(agent)?.apiKey() ?? undefined,
     agentName: OPENROUTER_AGENTS.has(agent) ? agent : 'pi',
     reasoning: OPENROUTER_AGENTS.has(agent) ? Boolean(piModelConfig(model, agent)?.reasoning) : false,
@@ -2788,17 +2725,22 @@ async function startSession(
     // Legacy download/browser code uses chatId. It is now the stable Studio
     // thread identity rather than an unrelated hub-generated UUID.
     chatId: threadId,
-    activeTemplateId: null,
-    lastDocumentInfo: null,
+    activeTemplateId: continuing ? currentSession.activeTemplateId : null,
+    lastDocumentInfo: continuing ? currentSession.lastDocumentInfo : null,
     bootstrapHistory: normalizeChatHistory(requestedHistory),
     planning,
     workflowTransition: Promise.resolve(),
     pendingTransitions: 0,
     releaseReferenceScopes: referenceStore.retainScopes(sessionReferenceScopes),
   };
-  if (workflow === 'plan') {
-    requireWorkflowSwitchBackend(record.agentSession);
-    await record.agentSession.backend.setExecutionMode(providerModeRequest(record.agentSession, 'planning'));
+  try {
+    if (workflow === 'plan') {
+      requireWorkflowSwitchBackend(record.agentSession);
+      await backend.setExecutionMode(providerModeRequest(record.agentSession, planning.phase));
+    }
+  } catch (error) {
+    const cleaned = await disposeSession(record);
+    throw cleaned ? error : agentProcessCleanupUncertain(error);
   }
   queueMicrotask(() => drainTemplateCompletion(record));
   queueMicrotask(() => drainPlanningDocumentSaved(record));
@@ -2823,6 +2765,40 @@ function sendPiError(record, sock, requestId, error, fallbackCode) {
     code: error?.code ?? fallbackCode,
     message: String(error?.message ?? error),
   });
+}
+
+function sendBrowserbaseError(record, sock, requestId, error) {
+  replyToStudio(record, sock, {
+    v: 1,
+    type: 'browserbase-error',
+    requestId,
+    code: error?.code ?? 'BROWSERBASE_CREDENTIALS_REJECTED',
+    message: String(error?.message ?? error),
+  });
+}
+
+/**
+ * 스튜디오가 입력한 Browserbase 자격 증명 — 앱이 도는 동안만 환경 변수를 덮고 디스크에는
+ * 남기지 않는다. 키가 들어오면 Browserbase API 에 먼저 확인하고, 프로젝트 id 가 비어
+ * 있으면 그 계정의 프로젝트를 골라 채운다 (환경 변수의 프로젝트 id 는 다른 계정일 수
+ * 있어 섞지 않는다). 턴이 도는 중이면 떠 있는 브라우저는 두고 다음 호출부터 새 키를 쓴다.
+ */
+async function applyBrowserbaseOverride(record, msg) {
+  const revision = record.browserbaseSession.beginCredentialChange();
+  const override = normalizeBrowserbaseOverride({
+    apiKey: msg.apiKey,
+    projectId: msg.projectId,
+    geminiApiKey: msg.geminiApiKey,
+  });
+  if (override?.apiKey) {
+    const verified = await validateBrowserbaseCredentials({ apiKey: override.apiKey, projectId: override.projectId ?? null });
+    override.projectId = verified.projectId;
+  }
+  return record.browserbaseSession.applyVerifiedOverride(
+    override,
+    { restart: record.agentSession?.status !== 'running' },
+    revision,
+  );
 }
 
 function providerModeRequest(activeSession, phase) {
@@ -3067,30 +3043,21 @@ async function handleStudioMessage(record, sock, msg) {
       if (record.agentSession?.workflowTransition) {
         await record.agentSession.workflowTransition;
       }
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      const rejectStart = (error, fallbackCode = 'INVALID_REQUEST') => sendJson(sock, {
+        v: 1, type: 'chat-error', requestId, session: sessionInfo(record),
+        code: error?.code ?? fallbackCode, message: String(error?.message ?? error),
+      });
       const agent = msg.agent;
       if (!KNOWN_AGENTS.has(agent)) {
-        sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: `unknown agent: ${String(agent)}` });
+        rejectStart(new Error(`unknown agent: ${String(agent)}`));
         return;
       }
       // 설정이 끝나지 않은 pi/rau 로는 세션을 열지 않는다 — 살아 있는 세션도 건드리지 않는다.
       if (agent === 'pi' && !piStatus.setupComplete) {
         sendJson(sock, {
-          v: 1, type: 'chat-error', code: 'PI_NOT_CONFIGURED',
+          v: 1, type: 'chat-error', requestId, session: sessionInfo(record), code: 'PI_NOT_CONFIGURED',
           message: 'Pi 설정을 먼저 끝내 주세요 (설치 · OpenRouter 키 · 모델 선택).',
-        });
-        return;
-      }
-      if (agent === 'rau' && !rauStatus.setupComplete) {
-        sendJson(sock, {
-          v: 1, type: 'chat-error', code: 'RAU_NOT_CONFIGURED',
-          message: 'Rau 연결을 먼저 끝내 주세요.',
-        });
-        return;
-      }
-      if (agent === 'rau' && rauTrialEmpty()) {
-        sendJson(sock, {
-          v: 1, type: 'chat-error', code: 'RAU_CREDITS_EMPTY',
-          message: 'Rau 체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.',
         });
         return;
       }
@@ -3112,6 +3079,7 @@ async function handleStudioMessage(record, sock, msg) {
         sendJson(sock, {
           v: 1,
           type: 'chat-started',
+          requestId,
           agent: s.agent,
           model: s.model,
           effort: s.effort,
@@ -3124,14 +3092,7 @@ async function handleStudioMessage(record, sock, msg) {
           ...s.planning.snapshot(),
         });
       } catch (e) {
-        const cleaned = await disposeSession(record);
-        const reported = cleaned ? e : agentProcessCleanupUncertain(e);
-        sendJson(sock, {
-          v: 1,
-          type: 'chat-error',
-          code: reported?.code ?? 'AGENT_SPAWN_FAILED',
-          message: String(reported?.message ?? reported),
-        });
+        rejectStart(e, 'AGENT_SPAWN_FAILED');
       }
       return;
     }
@@ -3535,7 +3496,6 @@ async function handleStudioMessage(record, sock, msg) {
         sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'INVALID_REQUEST', message: 'Skill goal is required.' });
         return;
       }
-      // grok/cursor 는 스킬 초안 러너가 아니다 — claude 가 없으면 codex 로 내려보낸다.
       const skillHealth = providerHealth.cached();
       const agent = msg.agent === 'codex' || msg.agent === 'pi' || msg.agent === 'claude'
         ? msg.agent
@@ -3638,7 +3598,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'account-logout': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      if (authRuns.get('account')) {
+      if (authRuns.get('account') || authRuns.get('rau')) {
         replyToStudio(record, sock, {
           v: 1,
           type: 'account-error',
@@ -3648,7 +3608,7 @@ async function handleStudioMessage(record, sock, msg) {
         });
         return;
       }
-      void accountSession.logout()
+      void logoutAccount()
         .then(async () => {
           const status = await accountStatusForOwner(record.sessionId);
           replyToStudio(record, sock, { v: 1, type: 'account-status', requestId, status });
@@ -3665,7 +3625,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'agent-setup-status-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      void agentSetupStatuses(record.sessionId)
+      void agentSetupStatuses(record.sessionId, msg.refresh === true)
         .then((statuses) => replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses }))
         .catch((e) => sendAgentSetupError(record, sock, requestId, null, e));
       return;
@@ -3693,13 +3653,7 @@ async function handleStudioMessage(record, sock, msg) {
       const installing = agent === 'pi'
         ? mutateSharedNpmPrefix(() => piManager.install(progress)).then(async (status) => {
           piStatus = status;
-          rauStatus = await rauManager.status();
         })
-        : agent === 'rau'
-          ? mutateSharedNpmPrefix(() => rauManager.install(progress)).then(async (status) => {
-            rauStatus = status;
-            piStatus = await piManager.status();
-          })
         : cliSetup.install(agent, progress).then((status) => { cliSetupStatus[agent] = status; });
       void installing
         .then(() => agentSetupStatuses(record.sessionId))
@@ -3727,7 +3681,6 @@ async function handleStudioMessage(record, sock, msg) {
         rejectProof?.(agentAuthCancelled());
         rejectProof = null;
         if (agent === 'pi') void piManager.cancelSetup();
-        else if (agent === 'rau') void rauManager.cancelSetup();
         else if (CLI_SETUP_AGENTS.includes(agent)) void cliSetup.cancel(agent);
       };
       try {
@@ -3757,6 +3710,13 @@ async function handleStudioMessage(record, sock, msg) {
 
       const progress = (entry) => {
         if (!isLiveAuthRun()) return;
+        if (entry.terminalData !== undefined || entry.terminalReady) {
+          sendAuthRunFrame(authRun, { type: 'agent-setup-terminal',
+            ...(entry.terminalData !== undefined ? { data: entry.terminalData } : {}),
+            ...(entry.terminalReady ? { ready: true } : {}),
+          });
+          return;
+        }
         const replayableUi = {
           ...(entry.authUrl ? { authUrl: entry.authUrl } : {}),
           ...(entry.userCode ? { userCode: entry.userCode } : {}),
@@ -3792,89 +3752,13 @@ async function handleStudioMessage(record, sock, msg) {
         authRuns.finish(authRun);
         if (error && credentialsCommitted) {
           log(`post-auth ${agent} refresh failed: ${error?.message ?? error}`);
-        } else if (error && !['AGENT_AUTH_CANCELLED', 'RAU_LOGIN_CANCELLED'].includes(error?.code)) {
+        } else if (error && error?.code !== 'AGENT_AUTH_CANCELLED') {
           sendAuthRunError(authRun, error);
         }
         await broadcastFreshAgentSetupStatuses().catch((statusError) => {
           log(`agent setup status refresh failed: ${statusError?.message ?? statusError}`);
         });
       };
-
-      if (agent === 'rau' && method === 'oauth') {
-        void (async () => {
-          const callbackState = crypto.randomBytes(24).toString('base64url');
-          const redirectUri = `http://127.0.0.1:${hubPort}/oauth/rau/callback`;
-          const session = await rauCredits.createDeviceSessionV2({
-            signal: abort.signal,
-            redirectUri,
-            callbackState,
-            returnMode: 'hybrid',
-            clientVersion: `hub-protocol-${PROTOCOL_VERSION}`,
-          });
-          if (!isLiveAuthRun()) throw agentAuthCancelled();
-          authRun.deviceSessionId = session.id;
-          authRun.codeVerifier = session.codeVerifier;
-          authRun.callbackState = callbackState;
-          const authDetails = {
-            authUrl: session.loginUrl,
-            pairingCode: session.pairingCode,
-            expiresAt: session.expiresAt,
-          };
-          started(authDetails);
-          progress({ state: 'authorizing', ...authDetails });
-
-          let redeemed;
-          while (!redeemed) {
-            const proof = await new Promise((resolve, reject) => {
-              rejectProof = reject;
-              authRun.submitProof = (candidate) => {
-                rejectProof = null;
-                authRun.submitProof = null;
-                resolve(candidate);
-              };
-            });
-            if (!isLiveAuthRun()) throw agentAuthCancelled();
-            authRuns.update(authRun, { phase: 'redeeming' });
-            try {
-              redeemed = await rauCredits.redeemDeviceSessionV2(
-                session.id,
-                session.codeVerifier,
-                proof,
-                { signal: abort.signal },
-              );
-              if (!isLiveAuthRun()) throw agentAuthCancelled();
-              authRun.acceptedProof = proof;
-            } catch (error) {
-              if (error?.code !== 'DEVICE_PROOF_INVALID') throw error;
-              if (!isLiveAuthRun()) throw agentAuthCancelled();
-              authRuns.update(authRun, { phase: 'authorizing' });
-              sendAuthRunError(authRun, error, 'DEVICE_PROOF_INVALID');
-              progress({ state: 'authorizing', ...authDetails });
-            }
-          }
-          rauStatus = await storeRauApiKey(rauManager.setApiKey.bind(rauManager), redeemed.apiKey, {
-            signal: abort.signal,
-            account: redeemed.email,
-            onCommitted: commitAuthRun,
-          });
-          await rauCredits.acknowledgeDeviceSessionV2(
-            session.id,
-            session.codeVerifier,
-            authRun.acceptedProof,
-            { signal: abort.signal },
-          ).catch((error) => {
-            if (error?.code === 'RAU_LOGIN_CANCELLED') throw error;
-            log(`Rau v2 acknowledgement failed after local key storage: ${error?.message ?? error}`);
-          });
-          if (!rauStatus.installed) {
-            rauStatus = await mutateSharedNpmPrefix(() => rauManager.install(progress));
-            piStatus = await piManager.status();
-          }
-          await refreshOpenRouterCredits(true);
-          sendAuthRunFrame(authRun, { type: 'usage-report', usage: usageSnapshot() });
-        })().then(() => finish(), finish);
-        return;
-      }
 
       let run;
       if (agent === 'pi' && method === 'oauth') {
@@ -3897,14 +3781,22 @@ async function handleStudioMessage(record, sock, msg) {
           .then((status) => { piStatus = status; });
       } else {
         run = cliSetup.authenticate(agent, method, msg.key, progress, {
+          terminal: msg.terminal === true,
           signal: abort.signal,
           onCommitted: commitAuthRun,
         })
           .then(async (status) => {
             cliSetupStatus[agent] = status;
             if (agent === 'codex') sourceCodexAuthPath = await findSourceCodexAuthPath();
-            if (agent === 'grok') sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
+            if (agent === 'claude') sourceClaudeAuth = await resolveSourceClaudeAuth();
             refreshSessionCredentials(agent);
+            if (agent === 'claude' || agent === 'codex') {
+              providerLimits.invalidate();
+              broadcastToStudios({ v: 1, type: 'usage-report', usage: usageSnapshot() });
+              void providerLimits.refresh(true).then(() => {
+                broadcastToStudios({ v: 1, type: 'usage-report', usage: usageSnapshot() });
+              }).catch(() => log('provider usage refresh after sign-in failed'));
+            }
           });
       }
       void run.then(async () => {
@@ -3912,6 +3804,28 @@ async function handleStudioMessage(record, sock, msg) {
         const providers = await providerHealth.check(true);
         sendAuthRunFrame(authRun, { type: 'provider-status', providers });
       }).then(() => finish(), finish);
+      return;
+    }
+    case 'agent-setup-terminal-resume':
+    case 'agent-setup-terminal-input':
+    case 'agent-setup-terminal-resize': {
+      try {
+        const run = authRuns.requireOwned({ agent: msg.agent, runId: msg.authRunId,
+          ownerSessionId: record.sessionId });
+        if (!CLI_SETUP_AGENTS.includes(msg.agent) || run.method !== 'oauth') throw new Error('진행 중인 CLI 로그인이 없어요.');
+        if (msg.type === 'agent-setup-terminal-resume') {
+          const data = cliSetup.terminalSnapshot(msg.agent);
+          if (data !== null) sendAuthRunFrame(run, { type: 'agent-setup-terminal', data, ready: true, reset: true });
+        } else if (msg.type === 'agent-setup-terminal-input') {
+          if (typeof msg.data !== 'string' || Buffer.byteLength(msg.data) > 4096) throw new Error('입력 크기를 확인해 주세요.');
+          cliSetup.terminalInput(msg.agent, msg.data);
+        } else {
+          if (!Number.isInteger(msg.cols) || !Number.isInteger(msg.rows)) throw new Error('터미널 크기를 확인해 주세요.');
+          cliSetup.terminalResize(msg.agent, msg.cols, msg.rows);
+        }
+      } catch (error) {
+        sendAgentSetupError(record, sock, null, msg.agent, error, 'AGENT_AUTH_FAILED');
+      }
       return;
     }
     case 'agent-setup-auth-code': {
@@ -3927,10 +3841,6 @@ async function handleStudioMessage(record, sock, msg) {
         code = boundedAgentAuthCode(msg.code);
       } catch (error) {
         sendAgentSetupError(record, sock, null, agent, error, 'AGENT_AUTH_FAILED');
-        return;
-      }
-      if (agent === 'rau' && typeof authRun.submitProof === 'function') {
-        authRun.submitProof({ kind: 'manual', code });
         return;
       }
       if (agent !== 'claude' && agent !== 'codex') {
@@ -3956,23 +3866,7 @@ async function handleStudioMessage(record, sock, msg) {
       return;
     }
     case 'agent-setup-disconnect': {
-      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      if (msg.agent !== 'rau') {
-        sendAgentSetupError(record, sock, requestId, msg.agent, new Error('연결 해제 요청을 확인하지 못했어요.'));
-        return;
-      }
-      const rauSessions = [...sessions.values()]
-        .filter((session) => session.agentSession?.agent === 'rau');
-      void rauManager.clearApiKey()
-        .then(async (status) => {
-          rauStatus = status;
-          await Promise.all(rauSessions.map(disposeSession));
-          await refreshOpenRouterCredits(true);
-          const statuses = await agentSetupStatuses(record.sessionId);
-          replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses });
-          replyToStudio(record, sock, { v: 1, type: 'usage-report', usage: usageSnapshot() });
-        })
-        .catch((e) => sendAgentSetupError(record, sock, requestId, 'rau', e, 'AGENT_SETUP_FAILED'));
+      sendAgentSetupError(record, sock, msg.requestId ?? null, msg.agent, new Error('Provider disconnect is not supported.'));
       return;
     }
     case 'usage-request': {
@@ -3981,8 +3875,23 @@ async function handleStudioMessage(record, sock, msg) {
         .then((usage) => replyToStudio(record, sock, { v: 1, type: 'usage-report', requestId, usage }))
         .catch((e) => replyToStudio(record, sock, {
           v: 1, type: 'usage-error', requestId,
-          code: e?.code ?? 'CLIPROXY_FAILED', message: String(e?.message ?? e),
+          code: e?.code ?? 'USAGE_FETCH_FAILED', message: String(e?.message ?? e),
         }));
+      return;
+    }
+    case 'codex-reset-consume': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void providerLimits.consumeCodexReset({
+        idempotencyKey: msg.idempotencyKey, accountKey: msg.accountKey,
+      }).then(({ outcome }) => {
+        const usage = usageSnapshot();
+        replyToStudio(record, sock, { v: 1, type: 'codex-reset-result', requestId, outcome, usage });
+        broadcastToStudios({ v: 1, type: 'usage-report', usage });
+      }).catch((error) => replyToStudio(record, sock, {
+        v: 1, type: 'codex-reset-error', requestId,
+        code: error?.code ?? 'CODEX_RESET_FAILED',
+        message: error?.message ?? '초기화에 실패했어요.',
+      }));
       return;
     }
     case 'usage-plan-set': {
@@ -3995,6 +3904,26 @@ async function handleStudioMessage(record, sock, msg) {
           v: 1, type: 'usage-error', requestId,
           code: e?.code ?? 'INVALID_PLAN', message: String(e?.message ?? e),
         }));
+      return;
+    }
+    case 'browserbase-status-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      replyToStudio(record, sock, { v: 1, type: 'browserbase-status', requestId, status: record.browserbaseSession.status() });
+      return;
+    }
+    case 'browserbase-credentials-set': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void applyBrowserbaseOverride(record, msg)
+        .then((status) => replyToStudio(record, sock, { v: 1, type: 'browserbase-status', requestId, status }))
+        .catch((e) => sendBrowserbaseError(record, sock, requestId, e));
+      return;
+    }
+    case 'browserbase-credentials-clear': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      record.browserbaseSession.beginCredentialChange();
+      void record.browserbaseSession.setOverride(null, { restart: record.agentSession?.status !== 'running' })
+        .then((status) => replyToStudio(record, sock, { v: 1, type: 'browserbase-status', requestId, status }))
+        .catch((e) => sendBrowserbaseError(record, sock, requestId, e));
       return;
     }
     case 'pi-status-request': {
@@ -4057,34 +3986,6 @@ async function handleStudioMessage(record, sock, msg) {
         .catch((e) => sendPiError(record, sock, requestId, e, 'PI_MODELS_INVALID'));
       return;
     }
-    case 'cliproxy-connect': {
-      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      void cliproxy.connect({ url: msg.url, key: msg.key })
-        .then((status) => replyToStudio(record, sock, {
-          v: 1, type: 'usage-report', requestId, usage: cliproxy.applyToSummary(usageStore.summary()),
-        }))
-        .catch((e) => {
-          const usage = cliproxy.applyToSummary(usageStore.summary());
-          usage.cliproxy = {
-            ...usage.cliproxy,
-            configured: false,
-            connected: false,
-            error: String(e?.message ?? e),
-          };
-          replyToStudio(record, sock, { v: 1, type: 'usage-report', requestId, usage });
-        });
-      return;
-    }
-    case 'cliproxy-disconnect': {
-      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      void cliproxy.disconnect()
-        .then(() => replyToStudio(record, sock, { v: 1, type: 'usage-report', requestId, usage: usageSnapshot() }))
-        .catch((e) => replyToStudio(record, sock, {
-          v: 1, type: 'usage-error', requestId,
-          code: e?.code ?? 'CLIPROXY_DISCONNECT_FAILED', message: String(e?.message ?? e),
-        }));
-      return;
-    }
     case 'writing-style-status-request': {
       void writingStyleStore.status()
         .then((status) => sendJson(sock, { v: 1, type: 'writing-style-status', requestId: msg.requestId ?? null, status }))
@@ -4120,7 +4021,6 @@ async function handleStudioMessage(record, sock, msg) {
           {
             health: providerHealth.cached(),
             piStatus,
-            rauStatus,
             currentSelection: record.agentSession ? { agent: record.agentSession.agent, model: record.agentSession.model, effort: record.agentSession.effort } : null,
           },
         );
@@ -4163,9 +4063,9 @@ async function handleStudioMessage(record, sock, msg) {
               effort: selection.effort,
             },
             {
-              useOpenRouter: selection.agent === 'pi' || selection.agent === 'rau',
-              piManager: selection.agent === 'rau' ? rauManager : piManager,
-              openRouter: selection.agent === 'rau' ? rauOpenRouter : openRouter,
+              useOpenRouter: selection.agent === 'pi',
+              piManager,
+              openRouter,
               projectRoot: ROOT,
               workDir: record.workDir,
               isolatedHome: record.isolatedHome,
@@ -4950,6 +4850,12 @@ function handleMcpMessage(record, sock, msg) {
           .catch((error) => sendError(error, 'DOWNLOAD_FAILED'));
         return;
       }
+      if (tool === 'environment_screenshot') {
+        void takeEnvironmentScreenshot({ workDir: record.workDir })
+          .then((result) => sendResult(result))
+          .catch((error) => sendError(error, error?.code || 'SCREENSHOT_FAILED'));
+        return;
+      }
       if (tool === 'publish_artifact') {
         let workerCandidate = null;
         let workerPublishClaimed = false;
@@ -5014,7 +4920,8 @@ function handleMcpMessage(record, sock, msg) {
       }
       if (definition.category === 'browser') {
         const sidecarTool = tool.replace(/^browserbase_/, '');
-        void record.browserbaseSession.call(record.agentSession.chatId, sidecarTool, args)
+        const { browserId, ...sidecarArgs } = args;
+        void record.browserbaseSession.call(record.agentSession.chatId, browserId, sidecarTool, sidecarArgs)
           .then(sendResult)
           .catch((error) => {
             if (error?.processCleanupUncertain) {
@@ -5994,11 +5901,6 @@ httpServer.on('upgrade', (req, socket, head) => {
         void refreshOpenRouterCredits(false)
           .then(() => replyToStudio(record, ws, { v: 1, type: 'usage-report', usage: usageSnapshot() }));
       }
-      if (cliproxy.configured()) {
-        void cliproxy.refresh(false).then((status) => {
-          if (status.connected || status.error) replyToStudio(record, ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });
-        });
-      }
       log(`studio connected (session=${record.sessionId})`);
       return;
     }
@@ -6062,7 +5964,7 @@ httpServer.listen(REQUESTED_PORT, '127.0.0.1', () => {
   hubPort = address.port;
   process.stdout.write(`RHWP_HUB_READY ${JSON.stringify({ port: hubPort, pid: process.pid, launchId: LAUNCH_ID })}\n`);
   log(`rhwp-agent hub listening on ws://127.0.0.1:${hubPort} (protocol v${PROTOCOL_VERSION})`);
-  log('claude/codex/pi/grok/cursor can be installed and authenticated from Studio settings');
+  log('claude/codex/pi can be installed and authenticated from Studio settings');
   scheduleHarnessUpdates(HARNESS_UPDATE_INITIAL_DELAY_MS);
 });
 

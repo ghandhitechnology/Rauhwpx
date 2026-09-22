@@ -284,6 +284,13 @@ export interface CellInfo {
   colSpan: number;
 }
 
+/** Structural table edits use this model target to remap the caret without render geometry. */
+export interface TableCellTarget {
+  cellIndex: number;
+  cellParaIndex: number;
+  charCount: number;
+}
+
 /** WASM getTableCellBboxes() 반환 타입 */
 export interface CellBbox {
   cellIdx: number;
@@ -561,6 +568,8 @@ export interface ControlLayoutItem {
   cellIdx?: number;
   /** 표 셀 내 수식인 경우: 셀 내 문단 인덱스 */
   cellParaIdx?: number;
+  /** 컨테이너 문단 안에서 수식 자체의 컨트롤 인덱스 */
+  innerControlIdx?: number;
   /** 각주/미주 내부 컨트롤인 경우 원본 위치 */
   noteRef?: NoteControlRef;
   /** 메모 내부 컨트롤인 경우 원본 위치 (현재 편집 API는 미지원). */
@@ -568,6 +577,7 @@ export interface ControlLayoutItem {
   outerTableControlIdx?: number;
   /** 표 셀/글상자/캡션 내부 컨트롤의 전체 컨테이너 경로. */
   cellPath?: CellPathLike;
+  /** HF 원본 서브리스트. secIdx는 표시 페이지 절이 아니라 소유 원본 절. */
   headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
   /**
    * [Task #1280 v2] 렌더 정렬키 — 겹침 클릭 시 "최상단 개체" 판정용.
@@ -588,6 +598,18 @@ export interface ControlLayoutItem {
   missing?: boolean;
 }
 
+export interface CaptionOwner {
+  secIdx: number;
+  paraIdx: number;
+  controlIdx: number;
+  controlKind: 'table' | 'image' | 'shape';
+  captionOrdinal: number;
+}
+
+export interface TextLine {
+  captionOwner?: CaptionOwner;
+}
+
 /** 개체 참조 (그림/글상자 공용) */
 export interface ObjectRef {
   sec: number;
@@ -598,10 +620,16 @@ export interface ObjectRef {
   cellIdx?: number;
   /** 표 셀 내 수식인 경우: 셀 내 문단 인덱스 */
   cellParaIdx?: number;
+  /** 컨테이너 문단 안에서 수식 자체의 컨트롤 인덱스 */
+  innerControlIdx?: number;
+  /** 중첩 셀 개체의 최상위 표 컨트롤 인덱스. */
+  outerTableControlIdx?: number;
   noteRef?: NoteControlRef;
   memoRef?: unknown;
   cellPath?: CellPathLike;
   headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
+  /** 이미지 데이터가 없는 placeholder 개체. */
+  missing?: boolean;
 }
 
 /** WASM getShapeProperties() 반환 타입 */
@@ -1235,6 +1263,7 @@ export interface LayerEquationOp {
   svgContent?: string;
   color?: string;
   fontSize?: number;
+  fontName?: string;
   layoutBox?: LayerEquationLayoutBox;
 }
 
@@ -1600,4 +1629,11 @@ export interface LayerSvgGlyphPayload {
   externalResourcesAllowed?: boolean;
   interactivityAllowed?: boolean;
   transformToRun?: LayerAffineTransform;
+}
+
+/** 글자 모양 history 구간. offset은 문단 기준 문자 단위(UTF-16 아님). */
+export interface CharShapeRun {
+  startOffset: number;
+  endOffset: number;
+  charShapeId: number;
 }

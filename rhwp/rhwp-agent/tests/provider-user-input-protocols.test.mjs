@@ -13,17 +13,6 @@ import {
   encodeCodexRequestUserInputFrame,
   selectCodexUserInputTransport,
 } from '../agents/codex.mjs';
-import {
-  decodeCursorAskQuestionFrame,
-  encodeCursorAskQuestionFrame,
-  handleCursorAskQuestionFrame,
-  selectCursorUserInputTransport,
-} from '../agents/cursor.mjs';
-import {
-  decodeGrokAskUserQuestionFrame,
-  encodeGrokAskUserQuestionFrame,
-  selectGrokUserInputTransport,
-} from '../agents/grok.mjs';
 
 const baseOpts = {
   rootDir: '/tmp/rhwp',
@@ -595,62 +584,6 @@ test('Claude retries through the legacy MCP transport when SDK startup fails bef
   await session.dispose();
 });
 
-const CURSOR_FRAME = {
-  jsonrpc: '2.0',
-  id: 41,
-  method: 'cursor/ask_question',
-  params: {
-    toolCallId: 'tool-cursor-1',
-    title: 'Deployment target',
-    questions: [{
-      id: 'target',
-      prompt: 'Where should this deploy?',
-      options: [
-        { id: 'preview', label: 'Preview' },
-        { id: 'production', label: 'Production' },
-      ],
-      allowMultiple: false,
-    }],
-  },
-};
-
-test('Cursor ACP cursor/ask_question codec preserves protocol IDs', () => {
-  const decoded = decodeCursorAskQuestionFrame(CURSOR_FRAME);
-  assert.equal(decoded.request.providerRequestId, 'tool-cursor-1');
-  assert.equal(decoded.request.questions[0].allowOther, false);
-  assert.equal(decoded.request.questions[0].header, 'Deployment t');
-  assert.deepEqual(
-    encodeCursorAskQuestionFrame(decoded, {
-      status: 'answered',
-      answers: { target: { selectedOptionIds: ['production'] } },
-    }),
-    {
-      jsonrpc: '2.0',
-      id: 41,
-      result: {
-        outcome: {
-          outcome: 'answered',
-          answers: [{ questionId: 'target', selectedOptionIds: ['production'] }],
-        },
-      },
-    },
-  );
-});
-
-test('Cursor ACP handler passes through the transport abort signal', async () => {
-  const controller = new AbortController();
-  let receivedSignal;
-  const response = await handleCursorAskQuestionFrame({
-    ...baseOpts,
-    requestUserInput: async (_request, signal) => {
-      receivedSignal = signal;
-      return { status: 'cancelled', reason: 'user-stop' };
-    },
-  }, CURSOR_FRAME, controller.signal);
-  assert.equal(receivedSignal, controller.signal);
-  assert.deepEqual(response.result, { outcome: { outcome: 'cancelled' } });
-});
-
 const CODEX_FRAME = {
   jsonrpc: '2.0',
   id: 'rpc-7',
@@ -705,72 +638,6 @@ test('Codex native selection requires app-server and detects the default-mode fe
   assert.equal(selectCodexUserInputTransport({ ...baseOpts, agentRole: 'copy-layout-worker:1' }, capabilities), 'legacy-mcp');
 });
 
-function grokFrame(method) {
-  return {
-    jsonrpc: '2.0',
-    id: 99,
-    method,
-    params: {
-      sessionId: 'session-grok',
-      toolCallId: 'tool-grok',
-      mode: 'plan',
-      questions: [{
-        id: 'scope',
-        question: 'Which scope?',
-        options: [
-          { id: 'small', label: 'Small', description: 'Small scope' },
-          { id: 'large', label: 'Large', description: 'Large scope' },
-        ],
-        multiSelect: false,
-      }],
-    },
-  };
-}
-
-test('Grok ACP accepts both ask-user-question spellings and encodes Other annotations', () => {
-  for (const method of ['x.ai/ask_user_question', '_x.ai/ask_user_question']) {
-    const decoded = decodeGrokAskUserQuestionFrame(grokFrame(method));
-    const response = encodeGrokAskUserQuestionFrame(decoded, {
-      status: 'answered',
-      answers: { scope: { selectedOptionIds: [], otherText: 'Medium' } },
-    });
-    assert.deepEqual(response, {
-      jsonrpc: '2.0',
-      id: 99,
-      result: {
-        outcome: 'accepted',
-        answers: { 'Which scope?': ['Other'] },
-        annotations: { 'Which scope?': { notes: 'Medium' } },
-      },
-    });
-  }
-});
-
-test('Grok codec accepts the 1.0.x wrapped private-extension payload', () => {
-  const frame = grokFrame('_x.ai/ask_user_question');
-  const decoded = decodeGrokAskUserQuestionFrame({
-    ...frame,
-    params: { method: 'x.ai/ask_user_question', params: frame.params },
-  });
-  assert.equal(decoded.request.providerRequestId, 'tool-grok');
-  assert.equal(decoded.request.questions[0].id, 'scope');
-});
-
-test('Grok native selection fails closed until the ACP timeout is disabled', () => {
-  const capabilities = {
-    transport: 'acp',
-    methods: ['_x.ai/ask_user_question'],
-  };
-  assert.deepEqual(selectGrokUserInputTransport(baseOpts, capabilities), { transport: 'legacy-mcp' });
-  assert.deepEqual(
-    selectGrokUserInputTransport(baseOpts, { ...capabilities, askUserTimeoutDisabled: true }),
-    { transport: 'native-acp', method: '_x.ai/ask_user_question' },
-  );
-  assert.equal(selectCursorUserInputTransport(baseOpts, {
-    transport: 'acp', methods: ['cursor/ask_question'],
-  }), 'native-acp');
-});
-
 test('captured provider frames fail closed on unsupported card shapes', () => {
   assert.throws(
     () => decodeCodexRequestUserInputFrame({
@@ -781,16 +648,6 @@ test('captured provider frames fail closed on unsupported card shapes', () => {
       },
     }),
     /secret questions are not supported/,
-  );
-  assert.throws(
-    () => decodeCursorAskQuestionFrame({
-      ...CURSOR_FRAME,
-      params: {
-        ...CURSOR_FRAME.params,
-        questions: [{ ...CURSOR_FRAME.params.questions[0], options: [{ id: 'only', label: 'Only' }] }],
-      },
-    }),
-    /must contain 2-4 options/,
   );
 });
 
@@ -806,7 +663,4 @@ test('question-text keyed native codecs reject collisions', async () => {
     ),
     /duplicate question text/,
   );
-  const duplicateGrok = grokFrame('x.ai/ask_user_question');
-  duplicateGrok.params.questions.push({ ...duplicateGrok.params.questions[0], id: 'scope-2' });
-  assert.throws(() => decodeGrokAskUserQuestionFrame(duplicateGrok), /duplicate question text/);
 });

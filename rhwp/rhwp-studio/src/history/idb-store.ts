@@ -5,6 +5,12 @@
  */
 
 import type { CompareDocumentSnapshot } from '@/compare/types';
+import {
+  openIndexedDatabase,
+  requestResult,
+  transactionDone,
+  withDatabase,
+} from '../core/idb-open.ts';
 import type { DocHistoryEntryMeta } from './types';
 
 const DB_NAME = 'rhwpStudioDocHistory';
@@ -27,32 +33,26 @@ export type HistoryPayload =
   | { kind: 'ir'; snapshot: CompareDocumentSnapshot }
   | { kind: 'legacy'; bytes: Uint8Array };
 
-function idbAvailable(): boolean {
-  return typeof indexedDB !== 'undefined';
-}
-
 function openDb(): Promise<IDBDatabase | null> {
-  if (!idbAvailable()) return Promise.resolve(null);
-  return new Promise((resolve) => {
-    const req = indexedDB.open(DB_NAME, DB_VER);
-    req.onerror = () => resolve(null);
-    req.onsuccess = () => resolve(req.result);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(META)) db.createObjectStore(META, { keyPath: 'id' });
-      if (!db.objectStoreNames.contains(BLOBS)) db.createObjectStore(BLOBS, { keyPath: 'id' });
-    };
+  return openIndexedDatabase(DB_NAME, DB_VER, (db) => {
+    if (!db.objectStoreNames.contains(META)) db.createObjectStore(META, { keyPath: 'id' });
+    if (!db.objectStoreNames.contains(BLOBS)) db.createObjectStore(BLOBS, { keyPath: 'id' });
   });
 }
 
-async function withDb<T>(fn: (db: IDBDatabase) => Promise<T>, fallback: () => Promise<T>): Promise<T> {
-  const db = await openDb();
-  if (!db) return fallback();
-  try {
-    return await fn(db);
-  } finally {
-    db.close();
-  }
+function withDb<T>(fn: (db: IDBDatabase) => Promise<T>, fallback: () => Promise<T>) {
+  return withDatabase(openDb, DB_NAME, fn, fallback);
+}
+
+function getAllMeta(db: IDBDatabase): Promise<MetaRow[]> {
+  return requestResult(db.transaction(META, 'readonly').objectStore(META).getAll() as IDBRequest<MetaRow[]>);
+}
+
+function deleteEntry(db: IDBDatabase, id: string): Promise<void> {
+  const tx = db.transaction([META, BLOBS], 'readwrite');
+  tx.objectStore(META).delete(id);
+  tx.objectStore(BLOBS).delete(id);
+  return transactionDone(tx);
 }
 
 async function listMetaMemory(): Promise<MetaRow[]> {
@@ -63,16 +63,7 @@ async function listMetaMemory(): Promise<MetaRow[]> {
 
 export async function listHistoryMeta(): Promise<MetaRow[]> {
   return withDb(
-    async (db) =>
-      new Promise((resolve, reject) => {
-        const tx = db.transaction(META, 'readonly');
-        const req = tx.objectStore(META).getAll();
-        req.onsuccess = () => {
-          const rows = (req.result as MetaRow[]) ?? [];
-          resolve(rows.sort((a, b) => b.createdAt - a.createdAt));
-        };
-        req.onerror = () => reject(req.error);
-      }),
+    async (db) => (await getAllMeta(db)).sort((a, b) => b.createdAt - a.createdAt),
     listMetaMemory,
   );
 }
@@ -87,54 +78,31 @@ export async function getHistoryPayload(id: string): Promise<HistoryPayload | nu
     return null;
   }
   return withDb(
-    async (db) =>
-      new Promise<HistoryPayload | null>((resolve, reject) => {
-        const tx = db.transaction(BLOBS, 'readonly');
-        const req = tx.objectStore(BLOBS).get(id);
-        req.onsuccess = () => {
-          const v = req.result as BlobRow | undefined;
-          if (!v) {
-            resolve(null);
-            return;
-          }
-          if (typeof v.snapshotJson === 'string' && v.snapshotJson.length > 0) {
-            try {
-              resolve({ kind: 'ir', snapshot: JSON.parse(v.snapshotJson) as CompareDocumentSnapshot });
-            } catch {
-              resolve(null);
-            }
-            return;
-          }
-          if (v.data) {
-            resolve({ kind: 'legacy', bytes: new Uint8Array(v.data) });
-            return;
-          }
-          resolve(null);
-        };
-        req.onerror = () => reject(req.error);
-      }),
+    async (db) => {
+      const v = await requestResult(
+        db.transaction(BLOBS, 'readonly').objectStore(BLOBS).get(id) as IDBRequest<BlobRow | undefined>,
+      );
+      if (!v) return null;
+      if (typeof v.snapshotJson === 'string' && v.snapshotJson.length > 0) {
+        try {
+          return { kind: 'ir', snapshot: JSON.parse(v.snapshotJson) as CompareDocumentSnapshot };
+        } catch {
+          return null;
+        }
+      }
+      if (v.data) return { kind: 'legacy', bytes: new Uint8Array(v.data) };
+      return null;
+    },
     async () => null,
   );
 }
 
 async function deleteOldestIfOverLimit(db: IDBDatabase): Promise<void> {
-  const meta: MetaRow[] = await new Promise((resolve, reject) => {
-    const tx = db.transaction(META, 'readonly');
-    const req = tx.objectStore(META).getAll();
-    req.onsuccess = () => resolve((req.result as MetaRow[]) ?? []);
-    req.onerror = () => reject(req.error);
-  });
+  const meta = await getAllMeta(db);
   if (meta.length < MAX_SNAPSHOTS) return;
   meta.sort((a, b) => a.createdAt - b.createdAt);
-  const remove = meta.slice(0, meta.length - MAX_SNAPSHOTS + 1);
-  for (const m of remove) {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction([META, BLOBS], 'readwrite');
-      tx.objectStore(META).delete(m.id);
-      tx.objectStore(BLOBS).delete(m.id);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
+  for (const m of meta.slice(0, meta.length - MAX_SNAPSHOTS + 1)) {
+    await deleteEntry(db, m.id);
   }
 }
 
@@ -180,60 +148,43 @@ export async function saveHistoryIrSnapshot(
     storageKind: 'ir',
   };
 
-  const db = await openDb();
-  if (!db) {
-    while (memory.size >= MAX_SNAPSHOTS) {
-      const oldest = [...memory.entries()].sort((a, b) => a[1].meta.createdAt - b[1].meta.createdAt)[0];
-      if (oldest) memory.delete(oldest[0]);
-    }
-    memory.set(id, {
-      meta,
-      irSnapshot: JSON.parse(json) as CompareDocumentSnapshot,
-    });
-    return meta;
-  }
-
-  try {
-    await deleteOldestIfOverLimit(db);
-    await new Promise<void>((resolve, reject) => {
+  return withDb(
+    async (db) => {
+      await deleteOldestIfOverLimit(db);
       const tx = db.transaction([META, BLOBS], 'readwrite');
       tx.objectStore(META).put(meta);
       tx.objectStore(BLOBS).put({ id, snapshotJson: json });
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-    return meta;
-  } finally {
-    db.close();
-  }
+      await transactionDone(tx);
+      return meta;
+    },
+    async () => {
+      while (memory.size >= MAX_SNAPSHOTS) {
+        const oldest = [...memory.entries()].sort((a, b) => a[1].meta.createdAt - b[1].meta.createdAt)[0];
+        if (oldest) memory.delete(oldest[0]);
+      }
+      memory.set(id, {
+        meta,
+        irSnapshot: JSON.parse(json) as CompareDocumentSnapshot,
+      });
+      return meta;
+    },
+  );
 }
 
 export async function deleteHistorySnapshot(id: string): Promise<void> {
   memory.delete(id);
-  await withDb(
-    async (db) =>
-      new Promise<void>((resolve, reject) => {
-        const tx = db.transaction([META, BLOBS], 'readwrite');
-        tx.objectStore(META).delete(id);
-        tx.objectStore(BLOBS).delete(id);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      }),
-    async () => {},
-  );
+  await withDb((db) => deleteEntry(db, id), async () => {});
 }
 
 export async function clearHistory(): Promise<void> {
   memory.clear();
   await withDb(
-    async (db) =>
-      new Promise<void>((resolve, reject) => {
-        const tx = db.transaction([META, BLOBS], 'readwrite');
-        tx.objectStore(META).clear();
-        tx.objectStore(BLOBS).clear();
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      }),
+    async (db) => {
+      const tx = db.transaction([META, BLOBS], 'readwrite');
+      tx.objectStore(META).clear();
+      tx.objectStore(BLOBS).clear();
+      await transactionDone(tx);
+    },
     async () => {},
   );
 }

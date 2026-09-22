@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -r /etc/rauhwpx-cloud.env ]]; then
+  set -a
+  source /etc/rauhwpx-cloud.env
+  set +a
+fi
+
+run=(/opt/rauhwpx-node/bin/node /opt/rauhwpx-cloud/current/src/cli.mjs "$@")
+if [[ ${EUID} -eq 0 ]]; then
+  cd /var/lib/rauhwpx-cloud
+  exec /usr/sbin/runuser --user rauhwpx-cloud --preserve-environment -- "${run[@]}"
+fi
+exec "${run[@]}"

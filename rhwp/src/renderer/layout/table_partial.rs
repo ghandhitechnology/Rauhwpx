@@ -13,7 +13,8 @@ use super::table_layout::{calc_nested_split_rows, NestedTableSplit};
 use super::text_measurement::{estimate_text_width, resolved_to_text_style};
 use super::utils::find_bin_data;
 use super::{
-    repeats_native_empty_host_rowbreak_fragment_margin, CellContext, CellPathEntry, LayoutEngine,
+    repeats_native_empty_host_rowbreak_fragment_margin, stored_float_anchor_offset_px, CellContext,
+    CellPathEntry, LayoutEngine,
 };
 use crate::document_core::queries::rendering::is_projected_cell_stack_picture_paragraph;
 use crate::model::bin_data::BinDataContent;
@@ -408,47 +409,17 @@ impl LayoutEngine {
                 };
                 Some(pair)
             } else if is_rowbreak_straddle {
-                // [Task #1748] 높이 기반 유닛 컷. 이전 프래그먼트 소비 높이(prior_h)는
-                // 2b 오버라이드와 동일한 식으로 재계산 — 온전 행은 컷 측정
-                // (row_cut_content_height), 분할 행(start_row)은 start_cut 이전 유닛
-                // 높이. 컷 페이지가 end_cut 으로 계산한 값과 같은 식이라 경계 유닛
-                // 인덱스(컷 페이지 eu == 연속 페이지 su)가 산술적으로 일치한다.
-                let mut prior_h = 0.0f64;
-                if straddles_fragment_start {
-                    for r in cell_row..start_row {
-                        let has_single_row_cells = table
-                            .cells
-                            .iter()
-                            .any(|c| c.row as usize == r && c.row_span == 1);
-                        let h = if has_single_row_cells {
-                            let h = self.row_cut_content_height(table, r, &[], &[], styles);
-                            if h > 0.0 {
-                                h
-                            } else {
-                                resolved_row_heights.get(r).copied().unwrap_or(0.0)
-                            }
-                        } else {
-                            resolved_row_heights.get(r).copied().unwrap_or(0.0)
-                        };
-                        prior_h += h + cell_spacing;
-                    }
-                    if !start_cut.is_empty() {
-                        prior_h +=
-                            self.row_cut_content_height(table, start_row, &[], start_cut, styles);
-                    }
-                }
-                let su = if prior_h > 0.0 {
-                    self.cell_units_fitting_height(cell, table, styles, prior_h - pad_top)
-                } else {
-                    0
-                };
-                let eu = if straddles_fragment_end {
-                    self.cell_units_fitting_height(cell, table, styles, prior_h + cell_h - pad_top)
-                        .max(su)
-                } else {
-                    usize::MAX
-                };
-                Some((su, eu))
+                Some(self.rowbreak_straddle_cut_units(
+                    table,
+                    cell,
+                    start_row,
+                    render_range_end,
+                    start_cut,
+                    end_cut.is_empty(),
+                    cell_h,
+                    resolved_row_heights,
+                    styles,
+                ))
             } else {
                 None
             };
@@ -1215,15 +1186,19 @@ impl LayoutEngine {
                                     super::super::equation::parser::EqParser::new(tokens).parse();
                                 let font_size_px = hwpunit_to_px(eq.font_size as i32, self.dpi);
                                 let layout_box =
-                                    super::super::equation::layout::EqLayout::new(font_size_px)
-                                        .layout(&ast);
+                                    super::super::equation::layout::EqLayout::with_font(
+                                        font_size_px,
+                                        &eq.font_name,
+                                    )
+                                    .layout(&ast);
                                 let color_str =
                                     super::super::equation::svg_render::eq_color_to_svg(eq.color);
                                 let svg_content =
-                                    super::super::equation::svg_render::render_equation_svg(
+                                    super::super::equation::svg_render::render_equation_svg_with_font(
                                         &layout_box,
                                         &color_str,
                                         font_size_px,
+                                        Some(&eq.font_name),
                                     );
 
                                 let eq_node = RenderNode::new(
@@ -1234,9 +1209,11 @@ impl LayoutEngine {
                                         color_str,
                                         color: eq.color,
                                         font_size: font_size_px,
+                                        font_name: eq.font_name.clone(),
                                         section_index: Some(section_index),
                                         para_index: Some(para_index),
-                                        control_index: Some(ctrl_idx),
+                                        control_index: Some(control_index),
+                                        inner_control_index: Some(ctrl_idx),
                                         cell_index: Some(cell_idx),
                                         cell_para_index: Some(cp_idx),
                                         note_ref: None,
@@ -1586,13 +1563,20 @@ impl LayoutEngine {
             // (부동 RowBreak 표 91.2px 오버플로우). 표의 참 상단 = para_start+vert_off =
             // y_start+(vert_off−host_h). typeset 예산도 동일 감액을 적용한다.
             // host pre-emit 이 아니면 host_h=0 → 종전과 동일(회귀 없음).
-            let host_h = self
-                .pre_emitted_host_heights
-                .borrow()
-                .get(&para_index)
-                .copied()
-                .unwrap_or(0.0);
-            (hwpunit_to_px(vert_off_signed, self.dpi) - host_h).max(0.0)
+            // [#6860] pre-emit 경로는 layout 의 `para_start_y + 앵커` 블록을 건너뛰므로
+            // 앵커 간격을 여기서 더한다. 아니면 `para_start_y` 와 이중 적용된다.
+            let (host_h, host_pre_emitted) = {
+                let heights = self.pre_emitted_host_heights.borrow();
+                (
+                    heights.get(&para_index).copied().unwrap_or(0.0),
+                    heights.contains_key(&para_index),
+                )
+            };
+            let mut raw = hwpunit_to_px(vert_off_signed, self.dpi);
+            if host_pre_emitted {
+                raw += stored_float_anchor_offset_px(para, table, control_index, self.dpi);
+            }
+            (raw - host_h).max(0.0)
         } else {
             0.0
         };
@@ -1892,6 +1876,39 @@ impl LayoutEngine {
                     }
                 }
             }
+
+            // [#6981] per-row 경로에는 위 블록-합 보정이 없다. 조각 경계가 rowspan
+            // 블록 안쪽에 떨어지면 이어받는 걸침 셀은 #1748 높이-컷으로 남은 유닛
+            // 전부를 받는데, 덮는 행 높이는 row_span==1 셀만 보고 정해진다. 어긋난
+            // 만큼 clip이 글자를 지운다. 요구 높이는 조판과 같은
+            // straddle_continuation_demand에서 낸다.
+            if !is_block_split {
+                for r in start_row..end_row.min(row_count) {
+                    let Some(need) = self.straddle_continuation_demand(
+                        table,
+                        r,
+                        start_row,
+                        start_cut,
+                        &resolved_row_heights,
+                        styles,
+                        (end_row, end_cut.is_empty()),
+                    ) else {
+                        continue;
+                    };
+                    let have: f64 = (start_row..=r)
+                        .map(|rr| row_heights.get(rr).copied().unwrap_or(0.0))
+                        .sum::<f64>()
+                        + cell_spacing * (r - start_row) as f64;
+                    if std::env::var("RHWP_DIAG_6981").is_ok() {
+                        eprintln!(
+                            "D6981R r={r} start_row={start_row} end_row={end_row} need={need:.1} have={have:.1}"
+                        );
+                    }
+                    if need > have + 0.5 {
+                        row_heights[r] += need - have;
+                    }
+                }
+            }
         }
 
         // Native HWP's saved page-reset contract can split the otherwise indivisible single row
@@ -2181,6 +2198,12 @@ impl LayoutEngine {
                     &mut self.auto_counter.borrow_mut(),
                     bin_data_content,
                     cap_cell_ctx.clone(),
+                    CaptionOwner::new(
+                        Some(section_index),
+                        Some(para_index),
+                        Some(control_index),
+                        CaptionControlKind::Table,
+                    ),
                 );
             }
         }
@@ -2205,6 +2228,12 @@ impl LayoutEngine {
                     &mut self.auto_counter.borrow_mut(),
                     bin_data_content,
                     cap_cell_ctx.clone(),
+                    CaptionOwner::new(
+                        Some(section_index),
+                        Some(para_index),
+                        Some(control_index),
+                        CaptionControlKind::Table,
+                    ),
                 );
             }
         }
@@ -2237,6 +2266,12 @@ impl LayoutEngine {
                     &mut self.auto_counter.borrow_mut(),
                     bin_data_content,
                     cap_cell_ctx.clone(),
+                    CaptionOwner::new(
+                        Some(section_index),
+                        Some(para_index),
+                        Some(control_index),
+                        CaptionControlKind::Table,
+                    ),
                 );
             }
         }

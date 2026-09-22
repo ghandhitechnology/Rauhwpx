@@ -53,7 +53,7 @@ export default defineConfig({
       },
     } : undefined,
     fs: {
-      // [Task #741 후속] 외부 file path 그림 영역 영역 samples/ dir 영역 영역 fetch 가능 영역.
+      // Allow the editor and fixture assets used by linked-image development checks.
       allow: [
         __dirname,
         resolve(__dirname, '..', 'pkg'),
@@ -76,8 +76,7 @@ export default defineConfig({
         }
       },
     },
-    // [Task #741 후속] dev 서버 영역 영역 /samples/* 경로 영역 영역 parent samples/ dir 영역
-    // 영역 정적 serve 영역 — wasm-bridge.ts 영역 영역 외부 image fetch 영역 영역 영역.
+    // Serve linked fixture images at /samples/ for wasm-bridge.ts.
     {
       name: 'serve-samples-dir',
       configureServer(server) {
@@ -98,8 +97,7 @@ export default defineConfig({
               '.png': 'image/png', '.bmp': 'image/bmp', '.webp': 'image/webp',
             };
             res.setHeader('Content-Type', mime[ext] ?? 'application/octet-stream');
-            // [Task #741 후속] OS 영역 절대 경로 영역 영역 response header 영역 노출 — JS
-            // 영역 영역 dialog 영역 영역 한컴 viewer 정합 (D:\\... 영역 영역 영역 의 영역 영역) 영역.
+            // The image dialog displays the resolved local path supplied by this dev server.
             res.setHeader('X-File-Path', encodeURI(full));
             res.setHeader('Access-Control-Expose-Headers', 'X-File-Path');
             res.end(data);
@@ -112,9 +110,9 @@ export default defineConfig({
       injectRegister: false,
       includeAssets: ['favicon.ico', 'icons/*.png'],
       manifest: {
-        name: 'rhwp-studio',
-        short_name: 'rhwp',
-        description: 'HWP/HWPX/HML 뷰어·에디터 — 알(R), 모두의 한글',
+        name: 'Rauhwpx',
+        short_name: 'Rauhwpx',
+        description: 'Rauhwpx HWP/HWPX/HML 문서 편집기',
         lang: 'ko',
         theme_color: '#2b6cb0',
         background_color: '#ffffff',

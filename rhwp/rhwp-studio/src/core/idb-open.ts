@@ -79,3 +79,40 @@ export function openIndexedDatabase(
     }
   });
 }
+
+/**
+ * 연결을 열어 작업을 실행하고 닫는다. 연결 실패면 조용히 폴백, 작업 실패·지연이면
+ * 경고 후 폴백. 폴백은 원인 오류를 받아 다시 던질 수 있다.
+ */
+export async function withDatabase<T>(
+  open: () => Promise<IDBDatabase | null>,
+  label: string,
+  operation: (db: IDBDatabase) => Promise<T>,
+  fallback: (error?: unknown) => Promise<T>,
+): Promise<T> {
+  const db = await open();
+  if (!db) return fallback();
+  try {
+    return await withTimeout(operation(db), IDB_OPERATION_TIMEOUT_MS, label);
+  } catch (error) {
+    console.warn(`[${label}] IndexedDB 작업 실패, 폴백:`, error);
+    return fallback(error);
+  } finally {
+    db.close();
+  }
+}
+
+export function transactionDone(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+export function requestResult<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}

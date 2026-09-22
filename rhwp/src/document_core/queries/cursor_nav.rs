@@ -1024,6 +1024,7 @@ impl DocumentCore {
         char_range: (usize, usize),
         preferred_x: f64,
     ) -> Result<LineCursorHit, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 
@@ -1736,6 +1737,7 @@ impl DocumentCore {
         cell_ctx: Option<SelCellAddr>,
         page_hints: Option<(u32, u32)>,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 

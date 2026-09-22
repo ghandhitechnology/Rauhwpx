@@ -33,10 +33,24 @@ export async function retryLockedOperation(operation, {
   throw lastError;
 }
 
-async function targetIsDirectory(targetPath, fsApi) {
+function replacementBackupPath(targetPath) {
+  return `${targetPath}.previous-write`;
+}
+
+async function exists(filePath, fsApi) {
+  try {
+    await fsApi.access(filePath);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function isDirectory(filePath, fsApi) {
   const lstat = typeof fsApi.lstat === 'function' ? fsApi.lstat.bind(fsApi) : fs.lstat;
   try {
-    const stats = await lstat(targetPath);
+    const stats = await lstat(filePath);
     return typeof stats?.isDirectory === 'function' ? stats.isDirectory() : false;
   } catch (error) {
     if (error?.code === 'ENOENT') return false;
@@ -44,10 +58,34 @@ async function targetIsDirectory(targetPath, fsApi) {
   }
 }
 
-function directoryReplaceError(targetPath) {
-  const error = new Error(`Refusing to replace directory ${targetPath}`);
+function directoryReplaceError(pathValue, action = 'replace') {
+  const error = new Error(`Refusing to ${action} directory ${pathValue}`);
   error.code = 'EISDIR';
   return error;
+}
+
+function rollbackFailedError(error, restoreError, backupPath, tempPath) {
+  const failure = new AggregateError(
+    [error, restoreError],
+    `Windows file replacement failed; the previous value remains at ${backupPath}`,
+  );
+  failure.code = 'FILE_REPLACE_ROLLBACK_FAILED';
+  failure.backupPath = backupPath;
+  failure.tempPath = tempPath;
+  return failure;
+}
+
+async function removeReplacementBackup(backupPath, deps) {
+  if (await isDirectory(backupPath, deps.fsApi)) throw directoryReplaceError(backupPath, 'delete');
+  await retryLockedOperation(() => deps.fsApi.rm(backupPath, { force: true }), deps);
+}
+
+async function restoreMovedTarget(error, { targetPath, backupPath, tempPath }, deps) {
+  try {
+    await retryLockedOperation(() => deps.fsApi.rename(backupPath, targetPath), deps);
+  } catch (restoreError) {
+    throw rollbackFailedError(error, restoreError, backupPath, tempPath);
+  }
 }
 
 /** Replace a file without relying on Windows rename-over-existing behavior. */
@@ -57,53 +95,32 @@ export async function replaceFileAtomically(
   { platform = process.platform, fsApi = fs } = {},
 ) {
   if (platform !== 'win32') return fsApi.rename(tempPath, targetPath);
+  const deps = { platform, fsApi };
+  const paths = { tempPath, targetPath, backupPath: replacementBackupPath(targetPath) };
   // The two-step Windows replace moves the live target aside. POSIX
   // rename(file, dir) fails; without this check a directory named like the
   // target would be renamed to `.previous-write` and the write would publish.
-  if (await targetIsDirectory(targetPath, fsApi)) {
-    throw directoryReplaceError(targetPath);
-  }
-  const previousPath = `${targetPath}.previous-write`;
-  await recoverInterruptedFileReplacement(targetPath, { platform, fsApi });
-  // Recovery can restore a directory that was left at `.previous-write`.
-  // Re-check before the two-step rename so that directory is not moved aside.
-  if (await targetIsDirectory(targetPath, fsApi)) {
-    throw directoryReplaceError(targetPath);
-  }
-  await retryLockedOperation(() => fsApi.rm(previousPath, { force: true }), { platform });
+  if (await isDirectory(targetPath, fsApi)) throw directoryReplaceError(targetPath);
+  await recoverInterruptedFileReplacement(targetPath, deps);
+  if (await isDirectory(targetPath, fsApi)) throw directoryReplaceError(targetPath);
+  await removeReplacementBackup(paths.backupPath, deps);
   let moved = false;
   try {
-    await retryLockedOperation(() => fsApi.rename(targetPath, previousPath), { platform });
+    await retryLockedOperation(() => fsApi.rename(targetPath, paths.backupPath), deps);
     moved = true;
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
   try {
-    await retryLockedOperation(() => fsApi.rename(tempPath, targetPath), { platform });
+    // A directory created between the lstat guards and the aside rename moved
+    // with it; inspect what actually moved before publishing over it.
+    if (moved && await isDirectory(paths.backupPath, fsApi)) throw directoryReplaceError(targetPath);
+    await retryLockedOperation(() => fsApi.rename(tempPath, targetPath), deps);
   } catch (error) {
-    let restoreError = null;
-    if (moved) {
-      try {
-        await retryLockedOperation(() => fsApi.rename(previousPath, targetPath), { platform });
-      } catch (candidate) {
-        restoreError = candidate;
-      }
-    }
-    if (restoreError) {
-      const recoveryError = new Error('File replacement failed and the previous file could not be restored');
-      recoveryError.code = 'FILE_REPLACE_RECOVERY_FAILED';
-      recoveryError.cause = new AggregateError([error, restoreError]);
-      throw recoveryError;
-    }
+    if (moved) await restoreMovedTarget(error, paths, deps);
     throw error;
   }
-  // The commit boundary is the temp -> target rename. A locked stale backup is
-  // safe to clean up on the next write/startup and must not turn a committed
-  // state change into a reported failure.
-  if (moved) {
-    await retryLockedOperation(() => fsApi.rm(previousPath, { force: true }), { platform })
-      .catch(() => {});
-  }
+  if (moved) await removeReplacementBackup(paths.backupPath, deps).catch(() => {});
 }
 
 /** Restore the old target after a process died between the two Windows renames. */
@@ -112,23 +129,14 @@ export async function recoverInterruptedFileReplacement(
   { platform = process.platform, fsApi = fs } = {},
 ) {
   if (platform !== 'win32') return false;
-  const previousPath = `${targetPath}.previous-write`;
-  const exists = async (filePath) => {
-    try {
-      await fsApi.access(filePath);
-      return true;
-    } catch (error) {
-      if (error?.code === 'ENOENT') return false;
-      throw error;
-    }
-  };
-  if (!await exists(previousPath)) return false;
-  if (await exists(targetPath)) {
-    await retryLockedOperation(() => fsApi.rm(previousPath, { force: true }), { platform })
-      .catch(() => {});
+  const deps = { platform, fsApi };
+  const backupPath = replacementBackupPath(targetPath);
+  if (!await exists(backupPath, fsApi)) return false;
+  if (await exists(targetPath, fsApi)) {
+    await removeReplacementBackup(backupPath, deps).catch(() => {});
     return false;
   }
-  await retryLockedOperation(() => fsApi.rename(previousPath, targetPath), { platform });
+  await retryLockedOperation(() => fsApi.rename(backupPath, targetPath), deps);
   return true;
 }
 
@@ -137,18 +145,11 @@ export async function removeFileAndReplacementBackup(
   targetPath,
   { platform = process.platform, fsApi = fs, delays } = {},
 ) {
+  const deps = { platform, fsApi, delays };
   if (platform === 'win32') {
-    // Removing the backup first makes a crash conservative: before the target
-    // removal the old live value remains, and after it no recovery copy exists.
-    await retryLockedOperation(
-      () => fsApi.rm(`${targetPath}.previous-write`, { force: true }),
-      { platform, ...(delays ? { delays } : {}) },
-    );
+    await removeReplacementBackup(replacementBackupPath(targetPath), deps);
   }
-  await retryLockedOperation(
-    () => fsApi.rm(targetPath, { force: true }),
-    { platform, ...(delays ? { delays } : {}) },
-  );
+  await retryLockedOperation(() => fsApi.rm(targetPath, { force: true }), deps);
 }
 
 /** registry 가 준 version 문자열이 npm 인자로 안전한 semver 인지 확인한다. */

@@ -54,6 +54,8 @@ import {
 } from './render-backend';
 import {
   canvasKitImageCacheKey,
+  canvasKitImageContainRect,
+  canvasKitImageFillModeContains,
   canvasKitImageFillModeTiles,
   canvasKitImageFillModeStretches,
   canvasKitImagePlacement,
@@ -1500,6 +1502,11 @@ export class CanvasKitLayerRenderer {
       drawImage(op.bbox.x, op.bbox.y, op.bbox.width, op.bbox.height);
       return;
     }
+    if (canvasKitImageFillModeContains(fillMode)) {
+      const fit = canvasKitImageContainRect(op.bbox, imageWidth, imageHeight);
+      drawImage(fit.x, fit.y, fit.width, fit.height);
+      return;
+    }
 
     let tileWidth = op.originalSize?.width ?? imageWidth;
     let tileHeight = op.originalSize?.height ?? imageHeight;
@@ -2597,6 +2604,7 @@ export class CanvasKitLayerRenderer {
       recordingCanvas.translate(op.bbox.x, op.bbox.y);
       if (Math.abs(scaleX - 1) > 0.01) recordingCanvas.scale(scaleX, 1);
       try {
+        const equationTypeface = this.findPreparedTypeface(op.fontName)?.typeface ?? this.defaultTypeface;
         replayed = this.renderEquationBox(
           recordingCanvas,
           op.layoutBox,
@@ -2604,6 +2612,7 @@ export class CanvasKitLayerRenderer {
           0,
           op.color ?? '#000000',
           Math.max(1, op.fontSize ?? op.bbox.height),
+          equationTypeface,
           false,
           false,
           0,
@@ -2640,6 +2649,7 @@ export class CanvasKitLayerRenderer {
     parentY: number,
     color: string,
     fontSize: number,
+    typeface: Typeface | null,
     italic: boolean,
     bold: boolean,
     depth: number,
@@ -2656,7 +2666,7 @@ export class CanvasKitLayerRenderer {
     const x = parentX + layout.x;
     const y = parentY + layout.y;
     const child = (box: LayerEquationLayoutBox, size = fontSize, childItalic = italic, childBold = bold) => (
-      this.renderEquationBox(canvas, box, x, y, color, size, childItalic, childBold, depth + 1, budget)
+      this.renderEquationBox(canvas, box, x, y, color, size, typeface, childItalic, childBold, depth + 1, budget)
     );
 
     switch (layout.kind.type) {
@@ -2679,6 +2689,7 @@ export class CanvasKitLayerRenderer {
           bold,
           layout.width,
           layout.kind.type === 'symbol',
+          typeface,
         );
       case 'function':
         return this.drawEquationText(
@@ -2693,6 +2704,7 @@ export class CanvasKitLayerRenderer {
           bold,
           layout.width,
           false,
+          typeface,
         );
       case 'fraction':
         return child(layout.kind.numer)
@@ -2751,6 +2763,7 @@ export class CanvasKitLayerRenderer {
           false,
           layout.width,
           true,
+          typeface,
         );
         const supDrawn = layout.kind.sup
           ? child(layout.kind.sup, fontSize * 0.7, false, false)
@@ -2776,6 +2789,7 @@ export class CanvasKitLayerRenderer {
           false,
           layout.width,
           false,
+          typeface,
         );
         return limitDrawn && (layout.kind.sub
           ? child(layout.kind.sub, fontSize * 0.7, false, false)
@@ -2789,8 +2803,8 @@ export class CanvasKitLayerRenderer {
             : layout.kind.style === 'bracket'
               ? ['[', ']']
               : ['|', '|'];
-          rendered = this.drawEquationBracket(canvas, brackets[0], x, y, layout.height, color, fontSize)
-            && this.drawEquationBracket(canvas, brackets[1], x + layout.width, y, layout.height, color, fontSize);
+          rendered = this.drawEquationBracket(canvas, brackets[0], x, y, layout.height, color, fontSize, typeface)
+            && this.drawEquationBracket(canvas, brackets[1], x + layout.width, y, layout.height, color, fontSize, typeface);
         }
         for (const row of layout.kind.cells) {
           for (const cell of row) rendered = child(cell) && rendered;
@@ -2805,11 +2819,11 @@ export class CanvasKitLayerRenderer {
         return layout.kind.rows.every((row) => child(row.left) && child(row.right));
       case 'paren':
         return (layout.kind.left
-          ? this.drawEquationBracket(canvas, layout.kind.left, x, y, layout.height, color, fontSize)
+          ? this.drawEquationBracket(canvas, layout.kind.left, x, y, layout.height, color, fontSize, typeface)
           : true)
           && child(layout.kind.body)
           && (layout.kind.right
-            ? this.drawEquationBracket(canvas, layout.kind.right, x + layout.width, y, layout.height, color, fontSize)
+            ? this.drawEquationBracket(canvas, layout.kind.right, x + layout.width, y, layout.height, color, fontSize, typeface)
             : true);
       case 'decoration':
         return child(layout.kind.body)
@@ -2865,6 +2879,7 @@ export class CanvasKitLayerRenderer {
     bold: boolean,
     targetWidth: number,
     centered: boolean,
+    typeface: Typeface | null,
   ): boolean {
     if (
       !text
@@ -2876,7 +2891,7 @@ export class CanvasKitLayerRenderer {
     let font: Font | null = null;
     let paint: SkPaint | null = null;
     try {
-      font = new this.canvasKit.Font(this.defaultTypeface, Math.max(1, fontSize));
+      font = new this.canvasKit.Font(typeface, Math.max(1, fontSize));
       paint = this.makeFillPaint(color);
       const glyphIds = font.getGlyphIDs(text, Array.from(text).length);
       if (!glyphIds || glyphIds.some((glyphId) => glyphId === 0)) return false;
@@ -2927,6 +2942,7 @@ export class CanvasKitLayerRenderer {
     height: number,
     color: string,
     fontSize: number,
+    typeface: Typeface | null,
   ): boolean {
     const width = Math.max(fontSize * 0.3, 1);
     if (bracket === '|') {
@@ -2943,6 +2959,7 @@ export class CanvasKitLayerRenderer {
       false,
       width,
       true,
+      typeface,
     );
   }
 

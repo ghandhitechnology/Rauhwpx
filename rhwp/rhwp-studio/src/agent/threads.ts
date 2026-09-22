@@ -1,7 +1,8 @@
 import {
-  IDB_OPERATION_TIMEOUT_MS,
   openIndexedDatabase,
-  withTimeout,
+  requestResult,
+  transactionDone,
+  withDatabase,
 } from '../core/idb-open.ts';
 import { isAgentWorkflow, isStructuredPlan } from './types.ts';
 import type {
@@ -15,6 +16,7 @@ import type {
   UserQuestionInteraction,
   UserQuestionOutcome,
 } from './types.ts';
+import type { InlineObjectAddress, InlinePromptItem } from './inline-prompt-context.ts';
 
 const STORAGE_KEY = 'rhwp-agent-threads';
 const NOTIFY_KEY = 'rhwp-agent-threads-notify';
@@ -33,9 +35,41 @@ interface ThreadMessageBase {
   /** 호출 당시 선택된 아이콘. 이후 skill 설정이 바뀌어도 기록 모양을 유지한다. */
   skillIcon?: ProductSkillIcon;
   messageId?: string;
+  /** Cloud messages stay visible while waiting for the next remote turn boundary. */
+  delivery?: 'queued-cloud' | 'accepted-cloud';
   attachments?: ThreadAttachment[];
   /** 인라인 프롬프트로 보낸 메시지에 붙는 문서 선택 컨텍스트 (표시용). */
-  selection?: { label: string; excerpt: string };
+  selection?: {
+    label: string;
+    excerpt: string;
+    items?: InlinePromptItem[];
+    documentId?: string | null;
+    revision?: number;
+  };
+}
+
+export interface ThreadToolRecord {
+  callId: string;
+  tool: string;
+  argsJson: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  resultPreview: string;
+  elapsedMs: number | null;
+}
+
+export interface ThreadTaskRecord {
+  taskId: string;
+  taskKind: 'agent' | 'workflow';
+  title: string;
+  role: string;
+  workflowName: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  activity: string;
+  summary: string;
+  totalTokens: number | null;
+  toolUses: number | null;
+  durationMs: number | null;
+  tools: ThreadToolRecord[];
 }
 
 export interface PendingUserQuestionDraftSnapshot {
@@ -67,6 +101,24 @@ export type ThreadMessage =
       planId: string;
       /** The plan has left the approval surface and started execution. */
       planState?: 'executed';
+    })
+  | (ThreadMessageBase & {
+      role: 'assistant';
+      kind: 'activity';
+      activityId: string;
+      status: 'running' | 'completed' | 'failed' | 'stopped';
+      startedAt: number;
+      completedAt: number | null;
+      tools: ThreadToolRecord[];
+      planId?: never;
+    })
+  | (ThreadMessageBase & {
+      role: 'assistant';
+      kind: 'tasks';
+      taskGroupId: string;
+      status: 'running' | 'completed' | 'failed' | 'stopped';
+      tasks: ThreadTaskRecord[];
+      planId?: never;
     })
   | (ThreadMessageBase & {
       role: 'user' | 'assistant' | 'system';
@@ -112,6 +164,13 @@ export interface ChatThread {
   plans?: StructuredPlan[];
   /** Draft state only. Provider authority remains in the live hub session. */
   pendingUserQuestion?: PendingUserQuestionDraftSnapshot;
+  /** Chat execution mode. Existing records default to local. */
+  executionMode?: 'local' | 'cloud';
+  cloudSessionId?: string;
+  cloudStartId?: string;
+  cloudRestartSourceSessionId?: string;
+  cloudRestartSourceStartId?: string;
+  firstMessageDelivery?: 'starting' | 'accepted' | 'failed';
   messages: ThreadMessage[];
 }
 
@@ -234,17 +293,70 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
     && typeof t.title === 'string'
     && typeof t.createdAt === 'number'
     && typeof t.updatedAt === 'number'
-    && (t.agent === 'claude' || t.agent === 'codex' || t.agent === 'pi'
-      || t.agent === 'grok' || t.agent === 'cursor' || t.agent === 'rau')
+    && (t.agent === 'claude' || t.agent === 'codex' || t.agent === 'pi')
     && typeof t.model === 'string'
     && typeof t.effort === 'string'
     && Array.isArray(t.messages)
   );
 }
 
+function parseAgentName(value: unknown): AgentName | undefined {
+  return isAgentName(value) ? value : undefined;
+}
+
+function parseTimelineStatus(value: unknown): 'running' | 'completed' | 'failed' | 'stopped' {
+  return value === 'completed' || value === 'failed' || value === 'stopped' ? value : 'running';
+}
+
+function parseFiniteNonNegative(value: unknown): number | null {
+  if (value === null) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function parseThreadTool(value: unknown): ThreadToolRecord | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const tool = value as Record<string, unknown>;
+  if (typeof tool.callId !== 'string' || !tool.callId
+    || typeof tool.tool !== 'string' || !tool.tool
+    || typeof tool.argsJson !== 'string') return null;
+  return {
+    callId: tool.callId,
+    tool: tool.tool,
+    argsJson: tool.argsJson,
+    status: parseTimelineStatus(tool.status),
+    resultPreview: typeof tool.resultPreview === 'string' ? tool.resultPreview : '',
+    elapsedMs: parseFiniteNonNegative(tool.elapsedMs),
+  };
+}
+
+function parseThreadTask(value: unknown): ThreadTaskRecord | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const task = value as Record<string, unknown>;
+  if (typeof task.taskId !== 'string' || !task.taskId
+    || (task.taskKind !== 'agent' && task.taskKind !== 'workflow')
+    || typeof task.title !== 'string') return null;
+  return {
+    taskId: task.taskId,
+    taskKind: task.taskKind,
+    title: task.title,
+    role: typeof task.role === 'string' ? task.role : '',
+    workflowName: typeof task.workflowName === 'string' ? task.workflowName : '',
+    status: parseTimelineStatus(task.status),
+    activity: typeof task.activity === 'string' ? task.activity : '',
+    summary: typeof task.summary === 'string' ? task.summary : '',
+    totalTokens: parseFiniteNonNegative(task.totalTokens),
+    toolUses: parseFiniteNonNegative(task.toolUses),
+    durationMs: parseFiniteNonNegative(task.durationMs),
+    tools: Array.isArray(task.tools) ? task.tools.flatMap((tool) => {
+      const parsed = parseThreadTool(tool);
+      return parsed ? [parsed] : [];
+    }) : [],
+  };
+}
+
 function isAgentName(value: unknown): value is AgentName {
-  return value === 'claude' || value === 'codex' || value === 'pi'
-    || value === 'grok' || value === 'cursor' || value === 'rau';
+  return value === 'claude' || value === 'codex' || value === 'pi';
 }
 
 function nonEmptyString(value: unknown): string | null {
@@ -409,6 +521,153 @@ function normalizePendingUserQuestionDraft(
   };
 }
 
+function storedInteger(value: unknown): number | undefined {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : undefined;
+}
+
+function storedString(value: unknown, limit: number): string | undefined {
+  return typeof value === 'string' ? value.slice(0, limit) : undefined;
+}
+
+function normalizeInlineAddress(value: unknown): InlineObjectAddress | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const sectionIdx = storedInteger(raw.sectionIdx);
+  const paraIdx = storedInteger(raw.paraIdx);
+  const controlIdx = storedInteger(raw.controlIdx);
+  if (sectionIdx === undefined || paraIdx === undefined || controlIdx === undefined) return undefined;
+  const cellPath = Array.isArray(raw.cellPath)
+    ? raw.cellPath.slice(0, 16).flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const path = entry as Record<string, unknown>;
+      const controlIndex = storedInteger(path.controlIndex);
+      const cellIndex = storedInteger(path.cellIndex);
+      const cellParaIndex = storedInteger(path.cellParaIndex);
+      return controlIndex === undefined || cellIndex === undefined || cellParaIndex === undefined
+        ? []
+        : [{ controlIndex, cellIndex, cellParaIndex }];
+    })
+    : undefined;
+  const optionalNumber = (key: string) => storedInteger(raw[key]);
+  return {
+    sectionIdx,
+    paraIdx,
+    controlIdx,
+    ...(cellPath?.length ? { cellPath } : {}),
+    ...(optionalNumber('cellIdx') !== undefined ? { cellIdx: optionalNumber('cellIdx') } : {}),
+    ...(optionalNumber('cellParaIdx') !== undefined ? { cellParaIdx: optionalNumber('cellParaIdx') } : {}),
+    ...(optionalNumber('endCellParaIdx') !== undefined ? { endCellParaIdx: optionalNumber('endCellParaIdx') } : {}),
+    ...(optionalNumber('innerControlIdx') !== undefined ? { innerControlIdx: optionalNumber('innerControlIdx') } : {}),
+    ...(optionalNumber('logicalOffset') !== undefined ? { logicalOffset: optionalNumber('logicalOffset') } : {}),
+  };
+}
+
+function normalizeSelectionPoint(value: unknown): { sectionIdx: number; paraIdx: number; charOffset: number } | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const sectionIdx = storedInteger(raw.sectionIdx);
+  const paraIdx = storedInteger(raw.paraIdx);
+  const charOffset = storedInteger(raw.charOffset);
+  return sectionIdx === undefined || paraIdx === undefined || charOffset === undefined
+    ? undefined
+    : { sectionIdx, paraIdx, charOffset };
+}
+
+function normalizeStoredInlineItem(value: unknown): InlinePromptItem | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  if (raw.kind === 'text') {
+    const selection = raw.selection as Record<string, unknown> | undefined;
+    const start = normalizeSelectionPoint(selection?.start);
+    const end = normalizeSelectionPoint(selection?.end);
+    const text = storedString(selection?.text, 4000);
+    if (!start || !end || text === undefined) return undefined;
+    const address = normalizeInlineAddress(raw.address);
+    return {
+      kind: 'text',
+      selection: { start, end, text, truncated: selection?.truncated === true },
+      ...(address ? { address } : {}),
+      ...(raw.offsetConvention === 'logical' || raw.offsetConvention === 'text'
+        ? { offsetConvention: raw.offsetConvention }
+        : {}),
+    };
+  }
+  const address = normalizeInlineAddress(raw.address);
+  if (!address) return undefined;
+  if (raw.kind === 'table') {
+    const rowCount = storedInteger(raw.rowCount);
+    const colCount = storedInteger(raw.colCount);
+    if (rowCount === undefined || colCount === undefined || !Array.isArray(raw.cells)) return undefined;
+    const cells = raw.cells.slice(0, 512).flatMap((value) => {
+      if (!value || typeof value !== 'object') return [];
+      const cell = value as Record<string, unknown>;
+      const row = storedInteger(cell.row);
+      const col = storedInteger(cell.col);
+      const rowSpan = storedInteger(cell.rowSpan);
+      const colSpan = storedInteger(cell.colSpan);
+      const text = storedString(cell.text, 4000);
+      return row === undefined || col === undefined || rowSpan === undefined || colSpan === undefined || text === undefined
+        ? []
+        : [{ row, col, rowSpan, colSpan, text }];
+    });
+    const range = raw.selectedRange as Record<string, unknown> | undefined;
+    const selectedRange = range ? {
+      startRow: storedInteger(range.startRow), startCol: storedInteger(range.startCol),
+      endRow: storedInteger(range.endRow), endCol: storedInteger(range.endCol),
+    } : undefined;
+    const validRange = selectedRange && Object.values(selectedRange).every(value => value !== undefined)
+      ? selectedRange as { startRow: number; startCol: number; endRow: number; endCol: number }
+      : undefined;
+    return { kind: 'table', address, rowCount, colCount, cells, truncated: raw.truncated === true,
+      ...(validRange ? { selectedRange: validRange } : {}) };
+  }
+  if (raw.kind === 'equation') {
+    const script = storedString(raw.script, 16384);
+    if (script === undefined) return undefined;
+    return { kind: 'equation', address, script,
+      ...(storedString(raw.fontName, 200) !== undefined ? { fontName: storedString(raw.fontName, 200) } : {}),
+      ...(storedInteger(raw.fontSize) !== undefined ? { fontSize: storedInteger(raw.fontSize) } : {}),
+      ...(storedString(raw.description, 1000) !== undefined ? { description: storedString(raw.description, 1000) } : {}),
+      ...(storedString(raw.attachmentName, 500) !== undefined ? { attachmentName: storedString(raw.attachmentName, 500) } : {}) };
+  }
+  if (raw.kind === 'object') {
+    const objectType = storedString(raw.objectType, 50);
+    if (!objectType) return undefined;
+    const number = (key: string) => typeof raw[key] === 'number' && Number.isFinite(raw[key])
+      ? raw[key] as number : undefined;
+    return { kind: 'object', objectType, address,
+      ...(storedString(raw.description, 1000) !== undefined ? { description: storedString(raw.description, 1000) } : {}),
+      ...(number('width') !== undefined ? { width: number('width') } : {}),
+      ...(number('height') !== undefined ? { height: number('height') } : {}),
+      ...(storedString(raw.attachmentName, 500) !== undefined ? { attachmentName: storedString(raw.attachmentName, 500) } : {}) };
+  }
+  return undefined;
+}
+
+function normalizeStoredSelection(value: unknown): ThreadMessageBase['selection'] {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const label = storedString(raw.label, 200);
+  const excerpt = storedString(raw.excerpt, 500);
+  if (label === undefined || excerpt === undefined) return undefined;
+  const items = Array.isArray(raw.items)
+    ? raw.items.slice(0, 32).flatMap(item => {
+      const normalized = normalizeStoredInlineItem(item);
+      return normalized ? [normalized] : [];
+    })
+    : undefined;
+  return {
+    label,
+    excerpt,
+    ...(items?.length ? { items } : {}),
+    ...(raw.documentId === null || typeof raw.documentId === 'string'
+      ? { documentId: raw.documentId as string | null }
+      : {}),
+    ...(storedInteger(raw.revision) !== undefined ? { revision: storedInteger(raw.revision) } : {}),
+  };
+}
+
 function normalizeStoredThread(thread: StoredChatThread): ChatThread {
   const latestPlan = isStructuredPlan(thread.latestPlan) ? thread.latestPlan : undefined;
   const plans = Array.isArray(thread.plans) ? thread.plans.filter(isStructuredPlan) : [];
@@ -446,11 +705,16 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
         }];
       })
       : undefined;
-    const agent: AgentName | undefined = isAgentName(message.agent) ? message.agent : undefined;
+    const agent = parseAgentName(message.agent);
     const skillIcon: ProductSkillIcon | undefined = message.skillIcon === 'pencil'
       || message.skillIcon === 'bot' || message.skillIcon === 'system'
       ? message.skillIcon
       : undefined;
+    const delivery: ThreadMessageBase['delivery'] = message.delivery === 'queued-cloud'
+      || message.delivery === 'accepted-cloud'
+      ? message.delivery
+      : undefined;
+    const selection = normalizeStoredSelection(message.selection);
     const metadata = {
       ...(agent ? { agent } : {}),
       ...(typeof message.skillName === 'string' && /^[a-z0-9-]+$/.test(message.skillName)
@@ -458,7 +722,9 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
         : {}),
       ...(skillIcon ? { skillIcon } : {}),
       ...(typeof message.messageId === 'string' ? { messageId: message.messageId } : {}),
+      ...(delivery ? { delivery } : {}),
       ...(attachments?.length ? { attachments } : {}),
+      ...(selection ? { selection } : {}),
     };
     if (message.kind === 'user-question') {
       if (message.role !== 'assistant') return [];
@@ -484,6 +750,40 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
         kind: 'plan',
         planId: message.planId,
         ...(message.planState === 'executed' ? { planState: 'executed' as const } : {}),
+        ...metadata,
+      }];
+    }
+    if (message.kind === 'activity') {
+      if (message.role !== 'assistant' || typeof message.activityId !== 'string' || !message.activityId) return [];
+      const tools = Array.isArray(message.tools) ? message.tools.flatMap((tool) => {
+        const parsed = parseThreadTool(tool);
+        return parsed ? [parsed] : [];
+      }) : [];
+      return [{
+        role: 'assistant',
+        text: message.text,
+        kind: 'activity',
+        activityId: message.activityId,
+        status: parseTimelineStatus(message.status),
+        startedAt: parseFiniteNonNegative(message.startedAt) ?? 0,
+        completedAt: parseFiniteNonNegative(message.completedAt),
+        tools,
+        ...metadata,
+      }];
+    }
+    if (message.kind === 'tasks') {
+      if (message.role !== 'assistant' || typeof message.taskGroupId !== 'string' || !message.taskGroupId) return [];
+      const tasks = Array.isArray(message.tasks) ? message.tasks.flatMap((task) => {
+        const parsed = parseThreadTask(task);
+        return parsed ? [parsed] : [];
+      }) : [];
+      return [{
+        role: 'assistant',
+        text: message.text,
+        kind: 'tasks',
+        taskGroupId: message.taskGroupId,
+        status: parseTimelineStatus(message.status),
+        tasks,
         ...metadata,
       }];
     }
@@ -514,7 +814,29 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
     ...(latestPlan ? { latestPlan } : {}),
     ...(plans.length ? { plans } : {}),
     ...(pendingUserQuestion && !pendingAlreadyArchived ? { pendingUserQuestion } : {}),
+    ...(thread.executionMode === 'cloud' ? { executionMode: 'cloud' as const } : {}),
+    ...(typeof thread.cloudSessionId === 'string' && thread.cloudSessionId
+      ? { cloudSessionId: thread.cloudSessionId }
+      : {}),
+    ...(typeof thread.cloudRestartSourceSessionId === 'string' && thread.cloudRestartSourceSessionId
+      ? { cloudRestartSourceSessionId: thread.cloudRestartSourceSessionId }
+      : {}),
+    ...(typeof thread.cloudRestartSourceStartId === 'string' && thread.cloudRestartSourceStartId
+      ? { cloudRestartSourceStartId: thread.cloudRestartSourceStartId }
+      : {}),
+    ...(typeof thread.cloudStartId === 'string' && thread.cloudStartId
+      ? { cloudStartId: thread.cloudStartId }
+      : {}),
+    ...(thread.firstMessageDelivery === 'starting'
+      || thread.firstMessageDelivery === 'accepted'
+      || thread.firstMessageDelivery === 'failed'
+      ? { firstMessageDelivery: thread.firstMessageDelivery }
+      : {}),
   };
+}
+
+export function parseChatThread(value: unknown): ChatThread | null {
+  return isStoredChatThread(value) ? normalizeStoredThread(value) : null;
 }
 
 function cloneThread(thread: ChatThread) {
@@ -529,29 +851,9 @@ function openDb() {
   });
 }
 
-async function runWithDb<T>(operation: (db: IDBDatabase) => Promise<T>) {
-  const db = await openDb();
-  if (!db) throw new Error(`${DB_NAME} unavailable`);
-  try {
-    return await withTimeout(operation(db), IDB_OPERATION_TIMEOUT_MS, DB_NAME);
-  } finally {
-    db.close();
-  }
-}
-
-function transactionDone(tx: IDBTransaction) {
-  return new Promise<void>((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
-  });
-}
-
-function requestResult<T>(request: IDBRequest<T>) {
-  return new Promise<T>((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+function runWithDb<T>(operation: (db: IDBDatabase) => Promise<T>) {
+  return withDatabase(openDb, DB_NAME, operation, (error) =>
+    Promise.reject(error ?? new Error(`${DB_NAME} unavailable`)));
 }
 
 function emitChanged() {
@@ -910,6 +1212,9 @@ export function serializeThreadMessagesForProviderHistory(
     }
     if ((message.role !== 'user' && message.role !== 'assistant')
       || message.kind === 'progress'
+      || message.kind === 'plan'
+      || message.kind === 'activity'
+      || message.kind === 'tasks'
       || (!message.text.trim() && !(message.role === 'user' && message.skillName))) return [];
     return [{
       role: message.role,
@@ -1037,10 +1342,13 @@ export function upsertThread(thread: ChatThread): void {
     removeThread(thread.id);
     return;
   }
+  const previousUpdatedAt = (idbAvailable()
+    ? cache.get(thread.id)
+    : readLegacyThreads().find((item) => item.id === thread.id))?.updatedAt ?? 0;
   const capped: ChatThread = {
     ...thread,
     messages: thread.messages.slice(-MAX_MESSAGES_PER_THREAD),
-    updatedAt: Date.now(),
+    updatedAt: Math.max(Date.now(), thread.updatedAt + 1, previousUpdatedAt + 1),
     title: thread.title.trim() || fallbackTitle(thread.messages),
     titleRequested: Boolean(thread.titleRequested),
     workflow: isAgentWorkflow(thread.workflow) ? thread.workflow : 'direct',

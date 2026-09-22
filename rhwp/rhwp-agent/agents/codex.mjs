@@ -39,6 +39,7 @@ import {
   terminateProcessTree,
   waitForProcessTreeExit,
 } from '../process-tree.mjs';
+import { applyManagedCliLaunch } from '../npm-cli-launch.mjs';
 
 const STDERR_TAIL_LIMIT = 16_000;
 const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
@@ -148,7 +149,12 @@ export function buildCodexArgv(opts, threadId) {
   ];
   const common = [
     '--json', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules',
-    '--disable', 'apps', '--disable', 'browser_use', '--disable', 'computer_use',
+    '--disable', 'apps',
+    // Cloud sessions with a ready SessionDisplay may drive the virtual desktop.
+    // Desktop and title/calibrator jobs keep computer use off.
+    ...(sessionDisplayReady(opts)
+      ? []
+      : ['--disable', 'browser_use', '--disable', 'computer_use']),
     '--disable', 'image_generation',
     // 네이티브 서브에이전트는 항상 켠다. `--disable multi_agent` 는 0.147.0 에서
     // 실제로 스폰을 막지 못하므로(프로브 확인) 토글할 이유가 없고, 명시적으로 켜 두면
@@ -167,6 +173,10 @@ export function buildCodexArgv(opts, threadId) {
   return threadId
     ? ['exec', 'resume', ...common, threadId, '-']
     : ['exec', ...common, '-C', opts.rootDir, '-'];
+}
+
+export function sessionDisplayReady(opts = {}, env = process.env) {
+  return (opts.sessionDisplay ?? env.RAUHWpx_SESSION_DISPLAY) === 'ready';
 }
 
 /**
@@ -204,6 +214,7 @@ export function createLegacyCodexSession(opts, {
   initialThreadId = null,
   closeGraceMs = 2_000,
   platform = process.platform,
+  nodeCommand = process.execPath,
 } = {}) {
   const onEvent = opts.onEvent;
 
@@ -493,13 +504,17 @@ export function createLegacyCodexSession(opts, {
       let proc;
       try {
         prepareCodexHome(codexHome, opts.codexAuthPath);
-        proc = spawnProcess(opts.codexBin ?? 'codex', argv, {
+        const spawnEnv = {
+          ...isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
+          CODEX_HOME: codexHome,
+        };
+        const launched = applyManagedCliLaunch(opts.codexBin ?? 'codex', argv, {
+          platform, nodeCommand, env: spawnEnv,
+        });
+        proc = spawnProcess(launched.command, launched.argv, {
           ...processTreeSpawnOptions(),
           cwd: opts.rootDir,
-          env: {
-            ...isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
-            CODEX_HOME: codexHome,
-          },
+          env: launched.env,
           stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (e) {

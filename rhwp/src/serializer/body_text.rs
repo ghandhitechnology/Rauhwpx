@@ -452,6 +452,9 @@ fn serialize_paragraph_with_msb(
         para.char_count
     };
 
+    // [#6956] 형광펜 표지는 PARA_RANGE_TAG 종류 2 로 되돌린다 — 헤더 count 와 같은 목록.
+    let range_tags = para.effective_markpen_range_tags();
+
     // PARA_HEADER (effective_char_shapes 길이 반영)
     // MSB는 모델 값이 아닌 위치 기반으로 결정: 마지막 문단만 MSB=true
     records.push(Record {
@@ -461,6 +464,7 @@ fn serialize_paragraph_with_msb(
         data: serialize_para_header_with_mask(
             para,
             effective_char_shapes.len(),
+            range_tags.len(),
             is_last,
             actual_control_mask,
             actual_char_count,
@@ -500,8 +504,8 @@ fn serialize_paragraph_with_msb(
     }
 
     // PARA_RANGE_TAG
-    if !para.range_tags.is_empty() {
-        let data = serialize_para_range_tag(&para.range_tags);
+    if !range_tags.is_empty() {
+        let data = serialize_para_range_tag(&range_tags);
         records.push(Record {
             tag_id: tags::HWPTAG_PARA_RANGE_TAG,
             level: base_level + 1,
@@ -557,9 +561,11 @@ fn serialize_paragraph_to_stream(
         para.char_count
     };
 
+    let range_tags = para.effective_markpen_range_tags();
     let header = serialize_para_header_with_mask(
         para,
         effective_char_shapes.len(),
+        range_tags.len(),
         is_last,
         actual_control_mask,
         actual_char_count,
@@ -578,8 +584,8 @@ fn serialize_paragraph_to_stream(
         output.append_record(tags::HWPTAG_PARA_LINE_SEG, base_level + 1, &line_segs)?;
     }
 
-    if !para.range_tags.is_empty() {
-        let range_tags = serialize_para_range_tag_limited(&para.range_tags, output.remaining())?;
+    if !range_tags.is_empty() {
+        let range_tags = serialize_para_range_tag_limited(&range_tags, output.remaining())?;
         output.append_record(tags::HWPTAG_PARA_RANGE_TAG, base_level + 1, &range_tags)?;
     }
 
@@ -744,7 +750,7 @@ fn preflight_paragraphs_into(
         budget.charge_slice(paragraph.char_offsets.len(), 8)?;
         budget.charge_slice(paragraph.char_shapes.len(), 16)?;
         budget.charge_slice(paragraph.line_segs.len(), 128)?;
-        budget.charge_slice(paragraph.range_tags.len(), 64)?;
+        budget.charge_slice(paragraph.effective_markpen_range_tags().len(), 64)?;
         budget.charge_slice(paragraph.field_ranges.len(), 128)?;
         budget.charge_slice(paragraph.orphan_field_ends.len(), 128)?;
         budget.charge_slice(paragraph.tab_extended.len(), 28)?;
@@ -1056,6 +1062,7 @@ fn compute_control_mask(para: &Paragraph) -> u32 {
 fn serialize_para_header_with_mask(
     para: &Paragraph,
     num_char_shapes: usize,
+    num_range_tags: usize,
     is_last: bool,
     control_mask: u32,
     char_count: u32,
@@ -1084,7 +1091,7 @@ fn serialize_para_header_with_mask(
 
     // count 필드는 실제 데이터 기반으로 항상 재생성 (편집 후 불일치 방지)
     w.write_u16(num_char_shapes as u16).unwrap();
-    w.write_u16(para.range_tags.len() as u16).unwrap();
+    w.write_u16(num_range_tags as u16).unwrap();
     w.write_u16(para.line_segs.len() as u16).unwrap();
 
     // instanceId + 추가 바이트: raw_header_extra에서 복원
@@ -1186,13 +1193,20 @@ fn serialize_para_text_limited(para: &Paragraph, max_bytes: usize) -> Result<Vec
             FieldEndMarker::default()
         };
         if fr.end_char_idx < text_len {
-            field_ends.push((fr.end_char_idx, order, marker));
+            field_ends.push((
+                fr.end_char_idx,
+                order,
+                marker,
+                fr.start_char_idx,
+                fr.control_idx,
+            ));
         } else {
             trailing_ends.push((fr.control_idx, marker, false));
         }
     }
-    field_ends.sort_unstable_by_key(|&(end, order, _)| (end, order));
+    field_ends.sort_unstable_by_key(|&(end, order, _, _, _)| (end, order));
     let mut field_end_cursor = 0usize;
+    let mut mid_end_emitted = vec![false; field_ends.len()];
 
     // Key trailing FIELD_ENDs by their control without allocating one map node
     // per entry. Linked indices retain declaration order for duplicate ranges,
@@ -1272,38 +1286,67 @@ fn serialize_para_text_limited(para: &Paragraph, max_bytes: usize) -> Result<Vec
         }
 
         // 갭에 컨트롤 문자 배치 (각 컨트롤 = 8 code unit)
-        // [#1795] 이 인덱스에 삽입될 FIELD_END(각 8 cu)의 공간을 먼저 예약한다.
-        // 예약 없이 갭을 컨트롤로 채우면 FIELD_END 전용 갭(8 cu)을 다음 컨트롤이
-        // 선점하여 이후 모든 char_offsets 가 시프트되고, 재파싱 시 lineseg
-        // text_start 매핑이 어긋나 줄바꿈 위치가 이동한다 (seoul_0043 글상자).
+        // 같은 문자 앞에 닫는 FIELD_END와 다음 FIELD_BEGIN이 같이 있으면
+        // END를 먼저 놓는다. HWP 파서는 LIFO라 BEGIN→END 순이면 인접 링크가
+        // 서로 비어 있는 중첩으로 다시 읽힌다. 빈 필드는 BEGIN 직후 END.
+        // [#1795] 닫는 END를 먼저 소비하면 다음 컨트롤이 END 갭을 선점하지 않는다.
         let field_end_start = field_end_cursor;
         while field_end_cursor < field_ends.len() && field_ends[field_end_cursor].0 == i {
             field_end_cursor += 1;
         }
-        let pending_field_end_cus = u64::try_from(field_end_cursor - field_end_start)
+        for idx in field_end_start..field_end_cursor {
+            let (_, _, marker, start, _) = field_ends[idx];
+            if start < i {
+                push_field_end_ctrl_bytes(&mut bytes, marker);
+                prev_end = prev_end
+                    .checked_add(8)
+                    .ok_or_else(|| "HWP paragraph character offset overflow".to_string())?;
+                mid_end_emitted[idx] = true;
+            }
+        }
+        while ctrl_idx < para.controls.len() {
+            let unpaired_empty = u64::try_from(
+                (field_end_start..field_end_cursor)
+                    .filter(|&idx| !mid_end_emitted[idx] && field_ends[idx].3 == i)
+                    .count(),
+            )
             .ok()
             .and_then(|count| count.checked_mul(8))
             .ok_or_else(|| "HWP paragraph field-end offset overflow".to_string())?;
-        while prev_end
-            .checked_add(8)
-            .and_then(|position| position.checked_add(pending_field_end_cus))
-            .is_some_and(|position| position <= offset)
-            && ctrl_idx < para.controls.len()
-        {
+            if !prev_end
+                .checked_add(8)
+                .and_then(|position| position.checked_add(unpaired_empty))
+                .is_some_and(|position| position <= offset)
+            {
+                break;
+            }
             let (ctrl_code, ctrl_id) = control_char_code_and_id(&para.controls[ctrl_idx]);
             push_extended_ctrl_bytes(&mut bytes, ctrl_code, ctrl_id);
+            let emitted_ctrl = ctrl_idx;
             ctrl_idx += 1;
             prev_end = prev_end
                 .checked_add(8)
                 .ok_or_else(|| "HWP paragraph character offset overflow".to_string())?;
+            for idx in field_end_start..field_end_cursor {
+                let (_, _, marker, start, control_idx) = field_ends[idx];
+                if !mid_end_emitted[idx] && start == i && control_idx == emitted_ctrl {
+                    push_field_end_ctrl_bytes(&mut bytes, marker);
+                    prev_end = prev_end
+                        .checked_add(8)
+                        .ok_or_else(|| "HWP paragraph character offset overflow".to_string())?;
+                    mid_end_emitted[idx] = true;
+                }
+            }
         }
-
-        // FIELD_END 삽입: 컨트롤(FIELD_BEGIN) 뒤, 텍스트 문자 앞
-        for &(_, _, marker) in &field_ends[field_end_start..field_end_cursor] {
-            push_field_end_ctrl_bytes(&mut bytes, marker);
+        for idx in field_end_start..field_end_cursor {
+            if mid_end_emitted[idx] {
+                continue;
+            }
+            push_field_end_ctrl_bytes(&mut bytes, field_ends[idx].2);
             prev_end = prev_end
                 .checked_add(8)
                 .ok_or_else(|| "HWP paragraph character offset overflow".to_string())?;
+            mid_end_emitted[idx] = true;
         }
 
         // 텍스트 문자 쓰기
@@ -2003,6 +2046,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2035,6 +2079,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2065,6 +2110,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2096,6 +2142,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2116,6 +2163,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2166,6 +2214,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para1, para2],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2205,6 +2254,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2246,6 +2296,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2286,6 +2337,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2573,6 +2625,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2593,6 +2646,73 @@ mod tests {
             "두 번째 필드 범위가 앞으로 당겨지면 안 된다"
         );
         assert_eq!(p.field_ranges[1].end_char_idx, 5);
+    }
+
+    #[test]
+    fn test_adjacent_hyperlink_fields_roundtrip_without_nesting() {
+        let make_field = || {
+            Control::Field(Field {
+                field_type: FieldType::Hyperlink,
+                ctrl_id: tags::FIELD_HYPERLINK,
+                ..Default::default()
+            })
+        };
+        // BEGIN0 가 END0 BEGIN1 나 END1. LIFO로 읽으면 [0,1)+[1,2) 가 유지되어야 한다.
+        let para = Paragraph {
+            char_count: 35,
+            text: "가나".to_string(),
+            char_offsets: vec![8, 25],
+            char_shapes: vec![CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 0,
+            }],
+            line_segs: vec![LineSeg {
+                text_start: 0,
+                ..Default::default()
+            }],
+            controls: vec![make_field(), make_field()],
+            field_ranges: vec![
+                crate::model::paragraph::FieldRange {
+                    start_char_idx: 0,
+                    end_char_idx: 1,
+                    control_idx: 0,
+                    ..Default::default()
+                },
+                crate::model::paragraph::FieldRange {
+                    start_char_idx: 1,
+                    end_char_idx: 2,
+                    control_idx: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let section = Section {
+            paragraphs: vec![para],
+            raw_stream: None,
+            raw_provenance: None,
+            ..Default::default()
+        };
+        let parsed = parse_body_text_section(&serialize_section(&section)).unwrap();
+        let p = &parsed.paragraphs[0];
+        assert_eq!(p.text, "가나");
+        assert_eq!(p.field_ranges.len(), 2);
+        assert_eq!(
+            (
+                p.field_ranges[0].start_char_idx,
+                p.field_ranges[0].end_char_idx,
+                p.field_ranges[0].control_idx
+            ),
+            (0, 1, 0)
+        );
+        assert_eq!(
+            (
+                p.field_ranges[1].start_char_idx,
+                p.field_ranges[1].end_char_idx,
+                p.field_ranges[1].control_idx
+            ),
+            (1, 2, 1)
+        );
     }
 
     /// 확장 컨트롤 포함 문단 라운드트립
@@ -2624,6 +2744,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2657,6 +2778,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 

@@ -31,7 +31,7 @@ fn nested_table_border_exam_social_p1_q4_outline_present() {
     // 박스 width: nested 6x3 표 측정 결과 — 390.65 (nested.common.width).
     // x 좌표: 549.88 (좌) ~ 940.53 (우) — body left margin + nested 표 위치.
     // y 좌표: 다른 PR 영역의 페이지네이션 변경에 따라 시프트 가능 영역으로 영역
-    // 좌표 hardcoded 영역 회피 영역 영역 — x 좌표 영역과 stroke 영역 본질 영역만 영역 검증 영역.
+    // 배치에 따라 바뀌는 절대 좌표 대신 x 좌표 관계와 선 속성을 검증한다.
     let lx = "549.8800000000001";
     let rx = "940.5333333333334";
 

@@ -69,13 +69,23 @@ fn cleanup_temp(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
     fn unique_temp_dir() -> PathBuf {
+        // Windows `SystemTime` often shares one tick across parallel tests in
+        // the same process, so pid+nanos alone can collide and cross-contaminate
+        // destination files. A monotonic seq keeps each test isolated.
+        let seq = TEMP_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        std::env::temp_dir().join(format!("rhwp_atomic_file_{}_{nonce}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "rhwp_atomic_file_{}_{nonce}_{seq}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -128,5 +138,12 @@ mod tests {
             "only the replaced destination should remain"
         );
         std::fs::remove_dir_all(directory).expect("remove temp directory");
+    }
+
+    #[test]
+    fn unique_temp_dirs_do_not_collide_when_created_together() {
+        let first = unique_temp_dir();
+        let second = unique_temp_dir();
+        assert_ne!(first, second);
     }
 }

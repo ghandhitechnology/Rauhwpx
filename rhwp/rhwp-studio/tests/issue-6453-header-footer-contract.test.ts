@@ -3,16 +3,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createServer } from 'vite';
+import { createTestModuleServer } from './support/module-server.ts';
 import { functionBodyFrom } from './support/source-guard.ts';
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const src = (rel: string): string => readFileSync(join(rootDir, rel), 'utf8');
 
 test('#6453 HF 커서 위치 API는 대표 편집 페이지를 바꾸지 않는다', async () => {
-  const vite = await createServer({
-    root: rootDir, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-  });
+  const vite = await createTestModuleServer(rootDir);
   try {
     const { CursorState } = await vite.ssrLoadModule('/src/engine/cursor.ts');
     const wasm = {

@@ -1017,3 +1017,101 @@ test('runAtomicBatch(apply_edits 경로): 혼합 서식 교체의 reject 복원�
   assert.equal(mgr.hasPending(), false);
   assert.equal(fake.snapshotCount(), 0, '거절 후 스냅샷 누수 없음');
 });
+
+test('atomic text previews notify only after final layout and retain shifted ranges', () => {
+  const { mgr, fake, eventBus } = makeManager([paraOf('hello')]);
+  const inserted: Array<{ range: DocRange }> = [];
+  eventBus.on('agent-text-inserted', (event) => {
+    assert.equal(fake.calls.filter((call) => call.m === 'refreshLayout').length, 1);
+    assert.equal(fake.text(0), 'BAhello');
+    inserted.push(event as { range: DocRange });
+  });
+  mgr.runAtomicBatch(() => {
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'A');
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'B');
+    assert.equal(inserted.length, 0);
+  });
+  assert.equal(inserted.length, 2);
+  assert.deepEqual(inserted.map((event) => event.range.startCharOffset), [1, 0]);
+});
+
+test('failed atomic text previews do not animate rolled-back insertions', () => {
+  const { mgr, fake, eventBus } = makeManager([paraOf('hello')]);
+  let inserted = 0;
+  eventBus.on('agent-text-inserted', () => inserted++);
+  assert.throws(() => mgr.runAtomicBatch(() => {
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'A');
+    throw new Error('abort batch');
+  }), /abort batch/);
+  assert.equal(fake.text(0), 'hello');
+  assert.equal(inserted, 0);
+  mgr.runAtomicBatch(() => {
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'B');
+  });
+  assert.equal(inserted, 1, 'the failed batch leaves no queued notification');
+});
+
+test('a nested rollback keeps outer insertion notifications bound to restored live ranges', () => {
+  const { mgr, fake, eventBus } = makeManager([paraOf('hello')]);
+  const inserted: Array<{ range: DocRange }> = [];
+  eventBus.on('agent-text-inserted', (event) => inserted.push(event as { range: DocRange }));
+  mgr.runAtomicBatch(() => {
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'A');
+    assert.throws(() => mgr.runAtomicBatch(() => {
+      mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'discard');
+      throw new Error('abort inner');
+    }), /abort inner/);
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'B');
+  });
+  assert.equal(fake.text(0), 'BAhello');
+  assert.deepEqual(inserted.map((event) => event.range.startCharOffset), [1, 0]);
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'C');
+  assert.deepEqual(inserted.map((event) => event.range.startCharOffset), [2, 1, 0]);
+});
+
+test('multiline body insertion closes one pagination batch before authoritative layout', () => {
+  const { mgr, fake } = makeManager([paraOf('hello')]);
+  const order: string[] = [];
+  Object.assign(fake.wasm, {
+    withBodyTextPaginationBatch: (sectionIdx: number, edit: () => void) => {
+      assert.equal(sectionIdx, 0);
+      order.push('begin');
+      try { edit(); } finally { order.push('end'); }
+    },
+    refreshLayout: () => order.push('refresh'),
+  });
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 5 }, 'A\n😀\nC');
+  assert.deepEqual(order, ['begin', 'end', 'refresh']);
+  assert.deepEqual([fake.text(0), fake.text(1), fake.text(2)], ['helloA', '😀', 'C']);
+  order.length = 0;
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 2, charOffset: 1 }, 'D');
+  assert.deepEqual(order, ['refresh'], 'single-line insertion adds no engine batching overhead');
+});
+
+test('failed multiline body insertion closes pagination before reversing its partial text', () => {
+  const { mgr, fake } = makeManager([paraOf('hello')]);
+  const order: string[] = [];
+  const insert = fake.wasm.insertText;
+  const remove = fake.wasm.deleteRange;
+  Object.assign(fake.wasm, {
+    withBodyTextPaginationBatch: (_sectionIdx: number, edit: () => void) => {
+      order.push('begin');
+      try { edit(); } finally { order.push('end'); }
+    },
+    insertText: (section: number, para: number, offset: number, text: string) => {
+      if (text === 'fail') throw new Error('insert failed');
+      return insert(section, para, offset, text);
+    },
+    deleteRange: (...args: Parameters<typeof remove>) => {
+      order.push('rollback');
+      return remove(...args);
+    },
+  });
+  assert.throws(() => mgr.insertText('claude', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 5,
+  }, 'A\nfail'), /insert failed/);
+  assert.deepEqual(order, ['begin', 'end', 'rollback']);
+  assert.equal(fake.text(0), 'hello');
+  assert.equal(fake.paraCount(), 1);
+  assert.equal(mgr.getChangeSets().length, 0);
+});

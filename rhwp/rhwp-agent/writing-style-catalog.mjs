@@ -1,6 +1,7 @@
 import { StyleCalibrationError } from './style-calibrator.mjs';
 
 const CODEX_MODELS = Object.freeze([
+  { id: 'gpt-6-astra', name: 'GPT-6 Astra', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
   { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
   { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
   { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
@@ -23,31 +24,25 @@ function piModels(piStatus) {
     pricing: model.pricing && typeof model.pricing === 'object' ? { ...model.pricing } : null,
   }));
 }
-function providerAvailable(id, health, piStatus, rauStatus) {
+function providerAvailable(id, health, piStatus) {
   if (id === 'pi') return Boolean(piStatus?.setupComplete);
-  if (id === 'rau') return Boolean(rauStatus?.setupComplete);
   return health?.[id]?.available !== false;
 }
 
 export function buildWritingStyleCatalog({
-  health = null, piStatus = null, rauStatus = null, currentSelection = null,
+  health = null, piStatus = null, currentSelection = null,
 } = {}) {
   const providers = [
     {
-      id: 'codex', name: 'Codex', available: providerAvailable('codex', health, piStatus, rauStatus),
+      id: 'codex', name: 'Codex', available: providerAvailable('codex', health, piStatus),
       error: health?.codex?.error ?? null, models: CODEX_MODELS.map((model) => ({ ...model, efforts: [...model.efforts] })),
     },
     {
-      id: 'claude', name: 'Claude', available: providerAvailable('claude', health, piStatus, rauStatus),
+      id: 'claude', name: 'Claude', available: providerAvailable('claude', health, piStatus),
       error: health?.claude?.error ?? null, models: CLAUDE_MODELS.map((model) => ({ ...model, efforts: [...model.efforts] })),
     },
     {
-      id: 'rau', name: 'Rau', available: providerAvailable('rau', health, piStatus, rauStatus),
-      error: rauStatus?.setupComplete ? null : 'Connect Rau to use trial credits.',
-      models: piModels(rauStatus),
-    },
-    {
-      id: 'pi', name: 'Pi · OpenRouter', available: providerAvailable('pi', health, piStatus, rauStatus),
+      id: 'pi', name: 'Pi · OpenRouter', available: providerAvailable('pi', health, piStatus),
       error: piStatus?.setupComplete ? null : 'Configure an OpenRouter key and at least one Pi model.',
       models: piModels(piStatus),
     },

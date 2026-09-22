@@ -2,6 +2,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { listPackage } from '@electron/asar';
 
+import { packagedStagedNativeExtractorPath } from '../desktop/native-rhwp-path.mjs';
 import { normalizeArchivePath } from './desktop-package-paths.mjs';
 import { smokePackagedAgentHub } from './packaged-agent-hub-smoke.mjs';
 
@@ -10,13 +11,6 @@ const resourcesDir = process.platform === 'darwin'
   ? join(releaseDir, 'mac-arm64', 'Rauhwpx.app', 'Contents', 'Resources')
   : join(releaseDir, 'win-unpacked', 'resources');
 const unpackedAgent = join(resourcesDir, 'app.asar.unpacked', 'rhwp', 'rhwp-agent');
-const unpackedCreditsCatalog = join(
-  resourcesDir,
-  'app.asar.unpacked',
-  'rhwp',
-  'rau-credits',
-  'catalog.mjs',
-);
 const extractor = join(resourcesDir, 'bin', process.platform === 'win32' ? 'rhwp.exe' : 'rhwp');
 const desktopExecutable = process.platform === 'darwin'
   ? join(releaseDir, 'mac-arm64', 'Rauhwpx.app', 'Contents', 'MacOS', 'Rauhwpx')
@@ -35,8 +29,8 @@ const required = [
   join(unpackedAgent, 'node_modules', '@browserbasehq', 'stagehand', 'package.json'),
   join(unpackedAgent, 'node_modules', '@browserbasehq', 'stagehand', 'dist', 'assets', 'stagehand-extension.zip'),
   join(unpackedAgent, 'node_modules', 'ws', 'package.json'),
-  unpackedCreditsCatalog,
   extractor,
+  packagedStagedNativeExtractorPath(resourcesDir, process.platform, process.arch),
   desktopExecutable,
 ];
 for (const path of required) {
@@ -48,6 +42,8 @@ const forbidden = [
   join(unpackedAgent, 'package-lock.json'),
   join(unpackedAgent, 'tsconfig.agents.json'),
   join(unpackedAgent, 'tests'),
+  join(unpackedAgent, 'node_modules', 'typescript'),
+  join(unpackedAgent, 'node_modules', '@typescript'),
 ];
 for (const path of forbidden) {
   if (existsSync(path)) throw new Error(`Development-only file was packaged: ${path}`);

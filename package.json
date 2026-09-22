@@ -1,9 +1,12 @@
 {
   "name": "rauhwpx",
   "productName": "Rauhwpx",
-  "version": "1.2.2",
-  "description": "HWP/HWPX editor with a local Claude/Codex agent sidebar.",
+  "version": "2.0.3",
+  "description": "HWP/HWPX editor with a local AI agent sidebar.",
   "author": "Hataewook",
+  "license": "MIT",
+  "homepage": "https://github.com/ghandhitechnology/Rauhwpx",
+  "desktopName": "rauhwpx.desktop",
   "private": true,
   "engines": {
     "node": ">=22.18.0"
@@ -15,17 +18,38 @@
     "stop": "node rhwp/rhwp-agent/ctl.mjs stop",
     "restart": "node rhwp/rhwp-agent/ctl.mjs restart",
     "status": "node rhwp/rhwp-agent/ctl.mjs status",
+    "check:docs": "node scripts/check-publish-docs.mjs && node --test scripts/check-publish-docs.test.mjs",
     "dev:desktop": "wait-on http://127.0.0.1:7700 && cross-env RHWP_DEV_URL=http://127.0.0.1:7700 electron .",
-    "build:wasm": "wasm-pack build rhwp --target web",
-    "build:native": "cargo build --locked --release --manifest-path rhwp/Cargo.toml --bin rhwp",
-    "build:studio:app": "npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
+    "build:wasm": "cd rhwp && wasm-pack build --target web",
+    "build:native": "cd rhwp && cargo build --locked --release --bin rhwp && node ../desktop/stage-native-rhwp.mjs",
+    "build:studio:app": "npm --prefix rhwp/rhwp-studio run build",
     "build:studio": "npm run build:wasm && npm run build:studio:app",
-    "build:agent": "npm --prefix rhwp/rhwp-agent ci --omit=dev",
-    "build:desktop": "npm run build:native && npm run build:studio && npm run build:agent",
-    "desktop": "npm run build:desktop && electron .",
-    "dist:mac": "npm run build:desktop && electron-builder --mac dmg zip --arm64 --publish never",
-    "dist:win": "npm run build:desktop && electron-builder --win --publish never",
-    "verify:package": "node scripts/verify-desktop-package.mjs"
+    "build:desktop": "npm run build:native && npm run build:studio",
+    "desktop": "electron .",
+    "dist:mac": "npm run build:desktop && npm run package:mac --",
+    "dist:win": "npm run build:desktop && npm run package:win --",
+    "verify:package": "node scripts/verify-desktop-package.mjs",
+    "check:provider-surface": "node scripts/check-provider-surface.mjs",
+    "setup": "npm ci && npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-agent ci",
+    "build:clean": "npm run setup && npm run build:desktop",
+    "package:mac": "electron-builder --mac dmg zip --arm64 --publish never",
+    "package:win": "electron-builder --win --publish never",
+    "test:ci": "node --test scripts/*.test.mjs",
+    "audit:production": "node scripts/audit-production.mjs",
+    "dev:studio": "npm --prefix rhwp/rhwp-studio run dev",
+    "test:cloud": "node --test tests/cloud-interaction-queue.test.mjs tests/seamless-cloud-experience.test.mjs tests/desktop-cloud.test.mjs tests/desktop-cloud-edit-drafts.test.mjs tests/desktop-cloud-continuity-triggers.test.mjs tests/desktop-cloud-conversation-recovery.test.mjs tests/desktop-cloud-display.test.mjs tests/desktop-cloud-protocol.test.mjs tests/desktop-cloud-client-reliability.test.mjs tests/desktop-cloud-connection-reliability.test.mjs tests/desktop-cloud-recovery.test.mjs tests/desktop-cloud-handoff-reliability.test.mjs tests/desktop-cloud-merge-recovery.test.mjs tests/desktop-cloud-provisioner-recovery.test.mjs tests/desktop-provider-auth.test.mjs tests/desktop-app-servers.test.mjs tests/desktop-app-server-live.test.mjs tests/desktop-cloud-broker.test.mjs && npm --prefix cloud test",
+    "check:cloud": "node --check desktop/cloud-*.mjs desktop/fs-replace.mjs && npm --prefix cloud run check",
+    "check:raucloud-branding": "node scripts/check-raucloud-branding.mjs",
+    "package:linux": "electron-builder --linux AppImage deb --publish never",
+    "dist:linux": "npm run build:desktop && npm run package:linux --",
+    "package:linux:x64": "electron-builder --linux AppImage deb --x64 --publish never",
+    "dist:linux:x64": "npm run build:desktop && npm run package:linux:x64 --",
+    "package:linux:arm64": "electron-builder --linux AppImage deb --arm64 --publish never",
+    "dist:linux:arm64": "npm run build:desktop && npm run package:linux:arm64 --",
+    "dev:sidebar": "npm --prefix rhwp/rhwp-studio run dev:sidebar",
+    "test:sidebar": "npm --prefix rhwp/rhwp-studio run test:sidebar",
+    "test:sidebar:audit": "npm --prefix rhwp/rhwp-studio run test:sidebar:audit",
+    "build:sidebar": "npm --prefix rhwp/rhwp-studio run build:sidebar"
   },
   "dependencies": {
     "electron-updater": "^6.8.9"
@@ -35,6 +59,7 @@
     "cross-env": "^10.1.0",
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
+    "js-yaml": "^4.3.2",
     "wait-on": "^9.1.0"
   },
   "build": {
@@ -44,6 +69,9 @@
     "asar": true,
     "files": [
       "desktop/**/*",
+      "cloud/install/install.sh",
+      "cloud/install/install-macos.sh",
+      "cloud/release/rauhwpx-cloud-bootstrap-linux-*.tar.gz",
       "rhwp/rhwp-studio/dist/**/*",
       "!rhwp/rhwp-studio/dist/samples/**",
       "rhwp/rhwp-agent/**/*",
@@ -51,11 +79,16 @@
       "!rhwp/rhwp-agent/README.md",
       "!rhwp/rhwp-agent/package-lock.json",
       "!rhwp/rhwp-agent/tsconfig.agents.json",
-      "rhwp/rau-credits/catalog.mjs"
+      "!rhwp/rhwp-agent/node_modules/.bin/tsc{,.cmd,.ps1}",
+      "!rhwp/rhwp-agent/node_modules/typescript/**",
+      "!rhwp/rhwp-agent/node_modules/@typescript/typescript-*/**"
     ],
     "asarUnpack": [
       "rhwp/rhwp-agent/**",
-      "rhwp/rau-credits/catalog.mjs"
+      "desktop/bin/**",
+      "cloud/install/install.sh",
+      "cloud/install/install-macos.sh",
+      "cloud/release/rauhwpx-cloud-bootstrap-linux-*.tar.gz"
     ],
     "extraResources": [
       {
@@ -177,6 +210,53 @@
             "x64"
           ]
         }
+      ]
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "rhwp/assets/logo/logo-512.png",
+      "category": "Office",
+      "synopsis": "HWP and HWPX document editor",
+      "description": "Open, edit, and save Hangul HWP, HWPX, and HML documents with an integrated agent sidebar.",
+      "executableName": "rauhwpx",
+      "maintainer": "Rauhwpx maintainers <noreply@github.com>",
+      "vendor": "ghandhitechnology",
+      "syncDesktopName": true,
+      "desktop": {
+        "entry": {
+          "StartupWMClass": "Rauhwpx",
+          "X-GNOME-UsesNotifications": "true"
+        }
+      }
+    },
+    "deb": {
+      "packageName": "rauhwpx",
+      "packageCategory": "editors",
+      "depends": [
+        "libgtk-3-0 | libgtk-3-0t64",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0 | libatspi2.0-0t64",
+        "libuuid1",
+        "libsecret-1-0"
       ]
     },
     "nsis": {

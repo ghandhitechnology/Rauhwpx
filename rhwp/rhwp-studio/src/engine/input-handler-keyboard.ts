@@ -1,6 +1,7 @@
 /** input-handler keyboard methods — extracted from InputHandler class */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { isBodyControl } from './picture-hit-policy';
 import { InsertTextCommand, InsertLineBreakCommand, InsertTabCommand, SplitParagraphCommand, SplitParagraphInCellCommand, InsertTextInHeaderFooterCommand, SplitParagraphInHeaderFooterCommand, SplitParagraphInFootnoteCommand, DeleteTextInFootnoteCommand, MergeParagraphInFootnoteCommand, deleteSelectionImmediate } from './command';
 import { matchShortcut, defaultShortcuts } from '@/command/shortcut-map';
 import * as _connector from './input-handler-connector';
@@ -11,7 +12,7 @@ import {
   type NavigationAction,
   type NavigationKeyInput,
 } from './navigation-keymap';
-import type { DocumentPosition, CellBbox, CellPathLike, CursorRect } from '@/core/types';
+import type { DocumentPosition, CellPathLike, CursorRect } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
 import { INSERTED_IMAGE_MAX_BYTES, readBlobBytesWithLimit } from '@/core/document-input-limits';
 import { canDeleteObjectControl } from './input-handler-picture';
@@ -22,6 +23,10 @@ import {
 import { emitHeaderFooterModeChanged } from './header-footer-mode';
 import { scrollByPageStep, type PageScrollDirection } from '@/view/page-scroll';
 import { caretRectForPageScroll as resolveCaretRectForPageScroll } from '@/view/page-scroll-caret';
+import { inlinePictureInsertionTarget } from './inline-picture-target';
+import { inlineOfficeClipboardImages, liftImagesToBlockLevel, needsRtfImageInlining } from './office-clipboard-images';
+import { extractHwpJsonModel, HWPJSON_PASTE_MAX_CHARS, sanitizeOfficeHtmlForCore } from './office-html-sanitize';
+import { isLastTableCell, remapTableCellPosition, tableModelPathJson } from '@/core/table-structural-cursor';
 
 const RHWP_CLIPBOARD_MARKER_RE = /<!--\s*rhwp-studio-clipboard:([A-Za-z0-9._:-]+)\s*-->/;
 const PAGINATION_BOUNDARY_KEYS = new Set([
@@ -105,42 +110,8 @@ function hasCurrentRhwpClipboardMarker(self: any, html: string): boolean {
   return !!token && token === self.rhwpClipboardToken;
 }
 
-/** Backspace/Delete로 생긴 캐럿 이동에만 짧은 완화를 허용한다. */
-function withEraseCaretMotion(self: any, erase: () => void): void {
-  self.caret.beginEraseMotion();
-  try {
-    erase();
-  } finally {
-    self.caret.endEraseMotion();
-  }
-}
-
 function isNestedCellPosition(pos: DocumentPosition): boolean {
   return pos.parentParaIndex !== undefined && (pos.cellPath?.length ?? 0) > 1;
-}
-
-function uniqueCellsInReadingOrder(bboxes: CellBbox[]): CellBbox[] {
-  const seen = new Set<number>();
-  const unique: CellBbox[] = [];
-  for (const bbox of bboxes) {
-    if (seen.has(bbox.cellIdx)) continue;
-    seen.add(bbox.cellIdx);
-    unique.push(bbox);
-  }
-  unique.sort((a, b) => a.row !== b.row ? a.row - b.row : a.col - b.col);
-  return unique;
-}
-
-function tableCellStartPosition(pos: DocumentPosition, cellIndex: number): DocumentPosition {
-  return {
-    sectionIndex: pos.sectionIndex,
-    paragraphIndex: 0,
-    charOffset: 0,
-    parentParaIndex: pos.parentParaIndex,
-    controlIndex: pos.controlIndex,
-    cellIndex,
-    cellParaIndex: 0,
-  };
 }
 
 function insertRowAfterLastTableCellByTab(this: any): boolean {
@@ -150,27 +121,28 @@ function insertRowAfterLastTableCellByTab(this: any): boolean {
   const ci = pos.controlIndex;
   const currentCellIdx = pos.cellIndex;
   if (ppi === undefined || ci === undefined || currentCellIdx === undefined) return false;
-  if (isNestedCellPosition(pos)) return false;
+  const pathJson = pos.cellPath?.length ? JSON.stringify(pos.cellPath) : null;
+  const modelPathJson = tableModelPathJson(pos);
 
   try {
-    const order = uniqueCellsInReadingOrder(this.wasm.getTableCellBboxes(sec, ppi, ci));
-    if (order.length === 0 || order[order.length - 1].cellIdx !== currentCellIdx) {
-      return false;
-    }
-
-    const info = this.wasm.getCellInfo(sec, ppi, ci, currentCellIdx);
+    const info = pathJson
+      ? this.wasm.getCellInfoByPath(sec, ppi, pathJson)
+      : this.wasm.getCellInfo(sec, ppi, ci, currentCellIdx);
+    const dims = pathJson
+      ? this.wasm.getTableDimensionsByPath(sec, ppi, pathJson)
+      : this.wasm.getTableDimensions(sec, ppi, ci);
+    if (!isLastTableCell(info, dims)) return false;
     const insertAfterRow = info.row + Math.max(1, info.rowSpan || 1) - 1;
     this.executeOperation({
       kind: 'snapshot',
       operationType: 'insertTableRow',
       operation: (wasm: WasmBridge) => {
-        wasm.insertTableRow(sec, ppi, ci, insertAfterRow, true);
-        const nextOrder = uniqueCellsInReadingOrder(wasm.getTableCellBboxes(sec, ppi, ci));
+        pathJson
+          ? wasm.insertTableRowByPath(sec, ppi, pathJson, insertAfterRow, true)
+          : wasm.insertTableRow(sec, ppi, ci, insertAfterRow, true);
         const insertedRow = insertAfterRow + 1;
-        const nextCell = nextOrder.find(cell => cell.row === insertedRow)
-          ?? nextOrder.find(cell => cell.row > insertAfterRow)
-          ?? nextOrder[nextOrder.length - 1];
-        return tableCellStartPosition(pos, nextCell?.cellIdx ?? currentCellIdx);
+        const nextCell = wasm.getTableCellTargetByPath(sec, ppi, modelPathJson, insertedRow, 0, 0);
+        return remapTableCellPosition(pos, nextCell, true);
       },
     });
     return true;
@@ -186,6 +158,9 @@ type PictureDeleteRef = {
   ci: number;
   type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole';
   cellPath?: CellPathLike;
+  cellIdx?: number;
+  cellParaIdx?: number;
+  innerControlIdx?: number;
   noteRef?: unknown;
   memoRef?: unknown;
   headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
@@ -200,7 +175,15 @@ function deleteSelectedObject(wasm: WasmBridge, ref: PictureDeleteRef): void {
       wasm.deletePictureControl(ref.sec, ref.ppi, ref.ci);
     }
   } else if (ref.type === 'equation') {
-    wasm.deleteEquationControl(ref.sec, ref.ppi, ref.ci);
+    if (ref.cellPath?.length && ref.innerControlIdx !== undefined) {
+      wasm.deleteEquationControlInCellByPath(ref.sec, ref.ppi, ref.cellPath, ref.innerControlIdx);
+    } else if (ref.cellIdx !== undefined && ref.cellParaIdx !== undefined && ref.innerControlIdx !== undefined) {
+      wasm.deleteEquationControlInCell(
+        ref.sec, ref.ppi, ref.ci, ref.cellIdx, ref.cellParaIdx, ref.innerControlIdx,
+      );
+    } else {
+      wasm.deleteEquationControl(ref.sec, ref.ppi, ref.ci);
+    }
   } else {
     wasm.deleteShapeControl(ref.sec, ref.ppi, ref.ci);
   }
@@ -435,7 +418,7 @@ async function convertToPngBlob(data: Uint8Array, mime: string): Promise<Blob> {
 /** [Task #1161] 선택된 picture ref 의 cellPath 를 native cellPathJson 인자로 변환.
  * 셀/글상자 밖 picture(본문)는 빈 문자열 → native 가 본문 경로로 처리. */
 export function pictureCellPathJson(
-  ref: { cellPath?: Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }> } | null,
+  ref: { cellPath?: CellPathLike } | null,
 ): string {
   return ref && ref.cellPath && ref.cellPath.length > 0 ? JSON.stringify(ref.cellPath) : '';
 }
@@ -458,6 +441,8 @@ export async function writeImageToClipboard(
 
 /** 코드 단축키 → 커맨드 ID 매핑 (Ctrl+K,? 형태) */
 const chordMapK: Record<string, string> = {
+  h: 'insert:hyperlink',
+  ㅗ: 'insert:hyperlink', // 한글 IME 상태
   b: 'insert:bookmark',
   ㅠ: 'insert:bookmark', // 한글 IME 상태
   n: 'format:para-num-shape',
@@ -655,7 +640,10 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
 
   if (this.readOnly || this.userEditingLocked) {
     const key = e.key.toLowerCase();
-    const primaryShortcut = (e.ctrlKey || e.metaKey) && ['a', 'c', 'f', 'p'].includes(key);
+    const commandId = matchShortcut(e, defaultShortcuts);
+    const primaryShortcut = commandId?.startsWith('view:')
+      || (commandId && ['edit:select-all', 'edit:find', 'file:print'].includes(commandId))
+      || ((e.ctrlKey || e.metaKey) && !e.altKey && (key === 'c' || e.code === 'KeyC'));
     const navigation = ['arrowleft', 'arrowright', 'arrowup', 'arrowdown', 'home', 'end', 'pageup', 'pagedown', 'escape']
       .includes(key);
     if (!primaryShortcut && !navigation) {
@@ -757,7 +745,9 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
   }
 
   // IME 조합 중 처리 (한국어 IME에서 e.key는 항상 'Process'이므로 e.code로 판별)
-  if (e.isComposing || e.keyCode === 229) {
+  const idleImeShortcut = !e.isComposing && !this.isComposing
+    && (e.ctrlKey || e.metaKey || e.altKey) && matchShortcut(e, defaultShortcuts);
+  if (e.isComposing || (e.keyCode === 229 && !idleImeShortcut)) {
     // [PR #786 후속] Ctrl+M chord 1번째/2번째 키는 IME 합성 중에도 활성화.
     // 한글 IME에서는 e.key === 'Process'이므로 e.code (KeyM/KeyN/KeyS/KeyF/KeyK 등)로 판별.
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === 'KeyM') {
@@ -911,14 +901,12 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
         this.deleteSelection();
         return;
       }
-      withEraseCaretMotion(this, () => {
-        const pos = this.cursor.getPosition();
-        if (e.key === 'Backspace') {
-          this.handleBackspace(pos, false);
-        } else {
-          this.handleDelete(pos, false);
-        }
-      });
+      const pos = this.cursor.getPosition();
+      if (e.key === 'Backspace') {
+        this.handleBackspace(pos, false);
+      } else {
+        this.handleDelete(pos, false);
+      }
       return;
     }
 
@@ -1502,20 +1490,18 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     case 'Delete': {
       e.preventDefault();
       if (this.isFormMode?.() && e.altKey) return;
-      withEraseCaretMotion(this, () => {
-        if (this.cursor.hasSelection()) {
-          this.deleteSelection();
-        } else if (e.altKey) {
-          // Alt/Option+Backspace/Delete: 단어 삭제 (macOS standard)
-          this.cursor.setAnchor();
-          this.cursor.moveToWordBoundary(e.key === 'Backspace' ? -1 : 1);
-          if (this.cursor.hasSelection()) this.deleteSelection();
-        } else if (e.key === 'Backspace') {
-          this.handleBackspace(pos, inCell);
-        } else {
-          this.handleDelete(pos, inCell);
-        }
-      });
+      if (this.cursor.hasSelection()) {
+        this.deleteSelection();
+      } else if (e.altKey) {
+        // Alt/Option+Backspace/Delete: 단어 삭제 (macOS standard)
+        this.cursor.setAnchor();
+        this.cursor.moveToWordBoundary(e.key === 'Backspace' ? -1 : 1);
+        if (this.cursor.hasSelection()) this.deleteSelection();
+      } else if (e.key === 'Backspace') {
+        this.handleBackspace(pos, inCell);
+      } else {
+        this.handleDelete(pos, inCell);
+      }
       break;
     }
     case 'Enter': {
@@ -1702,37 +1688,33 @@ export function handleCtrlKey(this: any, e: KeyboardEvent): void {
     case 'backspace': {
       e.preventDefault();
       if (this.isFormMode?.()) return;
-      withEraseCaretMotion(this, () => {
-        if (this.cursor.hasSelection()) {
-          this.deleteSelection();
-        } else if (e.metaKey && !e.ctrlKey) {
-          // Cmd+Backspace (macOS): 줄 시작까지 삭제
-          this.cursor.setAnchor();
-          this.cursor.moveToLineStart();
-          if (this.cursor.hasSelection()) this.deleteSelection();
-        } else {
-          // Ctrl+Backspace (Win/Linux): 이전 단어 경계까지 삭제
-          this.cursor.setAnchor();
-          this.cursor.moveToWordBoundary(-1);
-          if (this.cursor.hasSelection()) this.deleteSelection();
-        }
-      });
+      if (this.cursor.hasSelection()) {
+        this.deleteSelection();
+      } else if (e.metaKey && !e.ctrlKey) {
+        // Cmd+Backspace (macOS): 줄 시작까지 삭제
+        this.cursor.setAnchor();
+        this.cursor.moveToLineStart();
+        if (this.cursor.hasSelection()) this.deleteSelection();
+      } else {
+        // Ctrl+Backspace (Win/Linux): 이전 단어 경계까지 삭제
+        this.cursor.setAnchor();
+        this.cursor.moveToWordBoundary(-1);
+        if (this.cursor.hasSelection()) this.deleteSelection();
+      }
       break;
     }
     case 'delete': {
       if (!e.ctrlKey) break;
       e.preventDefault();
       if (this.isFormMode?.()) return;
-      withEraseCaretMotion(this, () => {
-        if (this.cursor.hasSelection()) {
-          this.deleteSelection();
-        } else {
-          // Ctrl+Delete (Win/Linux): 다음 단어 경계까지 삭제
-          this.cursor.setAnchor();
-          this.cursor.moveToWordBoundary(1);
-          if (this.cursor.hasSelection()) this.deleteSelection();
-        }
-      });
+      if (this.cursor.hasSelection()) {
+        this.deleteSelection();
+      } else {
+        // Ctrl+Delete (Win/Linux): 다음 단어 경계까지 삭제
+        this.cursor.setAnchor();
+        this.cursor.moveToWordBoundary(1);
+        if (this.cursor.hasSelection()) this.deleteSelection();
+      }
       break;
     }
     case 'home': {
@@ -2024,6 +2006,7 @@ export function onPaste(this: any, e: ClipboardEvent): void {
   const clipboardData = e.clipboardData;
   const html = clipboardData?.getData('text/html') || '';
   const text = clipboardData?.getData('text/plain') || '';
+  const rtf = clipboardData?.getData('text/rtf') || '';
   // HF는 이번 이슈에서 rich clipboard round-trip을 만들지 않는다. 내부 marker/HTML이
   // 있어도 시스템 plain text를 코어의 원자 범위 primitive로 삽입·치환한다.
   if (this.cursor.isInHeaderFooter()) {
@@ -2120,33 +2103,106 @@ export function onPaste(this: any, e: ClipboardEvent): void {
 
   // 외부 클립보드: HTML이 있으면 pasteHtml로 표/서식 보존 붙여넣기
   if (html) {
-    this.executeOperation({ kind: 'snapshot', operationType: 'pasteHtml', operation: (wasm: WasmBridge) => {
-      if (hasSelection) this.deleteSelection();
-      const p = this.cursor.getPosition();
-      let result: string;
-      if (isNestedCellPosition(p)) {
-        result = wasm.pasteHtmlInCellByPath(
-          p.sectionIndex, p.parentParaIndex!, JSON.stringify(p.cellPath), p.charOffset, html,
-        );
-      } else if (p.parentParaIndex !== undefined) {
-        result = wasm.pasteHtmlInCell(
-          p.sectionIndex, p.parentParaIndex, p.controlIndex!,
-          p.cellIndex!, p.cellParaIndex!, p.charOffset, html,
-        );
-      } else {
-        result = wasm.pasteHtml(p.sectionIndex, p.paragraphIndex, p.charOffset, html);
-      }
-      const parsed = JSON.parse(result);
-      if (parsed.ok) {
-        return positionAfterPasteResult(p, parsed);
-      }
-      return p;
-    }});
+    // 한글에서 복사한 것이면 문서 모델을 먼저 쓴다.
+    //
+    // 한글은 클립보드 HTML 끝 주석 `[data-hwpjson]` 에 문서 모델 전체를 싣는다.
+    // HTML 에는 글꼴 등록·문단모양 정의·쪽 설정·셀 속성이 없어, HTML 만 읽으면 대상 문서의
+    // 기본 글꼴로 떨어지고 줄바꿈·쪽수가 어긋난다. 실패하면 조용히 종전 HTML 경로로
+    // 되돌아간다 — 워드·엑셀·파워포인트에는 이 주석이 없다.
+    const model = extractHwpJsonModel(html);
+    if (model && pasteHwpJsonModel.call(this, model, hasSelection)) return;
+    // 한글은 그림을 HTML 에 file:/// 로만 적고 실제 픽셀은 같은 클립보드의
+    // text/rtf 안에 둔다. 그 경우에만 RTF 에서 그림을 꺼내 data URI 로 채운 뒤 붙여넣는다.
+    if (needsRtfImageInlining(html, rtf)) {
+      void (async () => {
+        let merged = html;
+        try {
+          merged = await inlineOfficeClipboardImages(html, rtf);
+        } catch (error) {
+          console.warn('[paste] RTF 그림 삽입 실패 — 그림 없이 붙여넣기:', error);
+        }
+        pasteExternalHtml.call(this, merged, text, hasSelection);
+      })();
+      return;
+    }
+    pasteExternalHtml.call(this, liftImagesToBlockLevel(html), text, hasSelection);
     return;
   }
 
   // 플레인 텍스트 붙여넣기 fallback도 동일한 원자적 경로를 쓴다.
   pastePlainText.call(this, text);
+}
+
+/**
+ * 문서 모델 붙여넣기. 코어가 이 경로를 못 다루면 false 를 돌려
+ * 호출한 쪽이 종전 HTML 경로로 되돌아가게 한다.
+ */
+function pasteHwpJsonModel(this: any, model: string, hasSelection: boolean): boolean {
+  if (model.length > HWPJSON_PASTE_MAX_CHARS) return false;
+  const cursor = this.cursor.getPosition();
+  // 표 칸 안은 아직 HTML 경로가 담당한다(코어에 셀 진입점이 없다).
+  if (cursor.parentParaIndex !== undefined) return false;
+  const selection = hasSelection ? this.cursor.getSelectionOrdered() : null;
+  try {
+    this.executeOperation({
+      kind: 'snapshot',
+      operationType: 'pasteHwpJson',
+      operation: (wasm: WasmBridge) => {
+        const p = selection
+          ? deleteSelectionImmediate(wasm, selection.start, selection.end)
+          : cursor;
+        const result = wasm.pasteHwpJson(p.sectionIndex, p.paragraphIndex, p.charOffset, model);
+        console.debug('[paste] pasteHwpJson 결과:', String(result).slice(0, 200));
+        const parsed = JSON.parse(result);
+        if (!parsed.ok) throw new Error(String(parsed.error ?? 'pasteHwpJson 거절'));
+        return positionAfterPasteResult(p, parsed);
+      },
+    });
+    this.cursor.clearSelection();
+    return true;
+  } catch (error) {
+    console.warn('[paste] 문서모델 붙여넣기 실패 — HTML 경로로 되돌아감:', error);
+    return false;
+  }
+}
+
+/** 외부 HTML 붙여넣기 본체 — 코어 정리 → pasteHtml → 실패 시 text/plain 폴백. */
+function pasteExternalHtml(this: any, html: string, text: string, hasSelection: boolean): void {
+  const htmlForCore = sanitizeOfficeHtmlForCore(html);
+  console.debug(`[paste] HTML 붙여넣기 시작: 원본 ${html.length}자 → 정리 ${htmlForCore.length}자, img ${(htmlForCore.match(/<img\b/gi) ?? []).length}개`);
+  const selection = hasSelection ? this.cursor.getSelectionOrdered() : null;
+  let htmlPasted = false;
+  try {
+    this.executeOperation({ kind: 'snapshot', operationType: 'pasteHtml', operation: (wasm: WasmBridge) => {
+      const p = selection
+        ? deleteSelectionImmediate(wasm, selection.start, selection.end)
+        : this.cursor.getPosition();
+      let result: string;
+      if (isNestedCellPosition(p)) {
+        result = wasm.pasteHtmlInCellByPath(
+          p.sectionIndex, p.parentParaIndex!, JSON.stringify(p.cellPath), p.charOffset, htmlForCore,
+        );
+      } else if (p.parentParaIndex !== undefined) {
+        result = wasm.pasteHtmlInCell(
+          p.sectionIndex, p.parentParaIndex, p.controlIndex!,
+          p.cellIndex!, p.cellParaIndex!, p.charOffset, htmlForCore,
+        );
+      } else {
+        result = wasm.pasteHtml(p.sectionIndex, p.paragraphIndex, p.charOffset, htmlForCore);
+      }
+      const parsed = JSON.parse(result);
+      console.debug('[paste] pasteHtml 결과:', String(result).slice(0, 200));
+      if (!parsed.ok) throw new Error(String(parsed.error ?? 'pasteHtml 거절'));
+      htmlPasted = true;
+      return positionAfterPasteResult(p, parsed);
+    }});
+    this.cursor.clearSelection();
+  } catch (error) {
+    console.warn('[paste] HTML 붙여넣기 실패 — 텍스트로 폴백:', error);
+  }
+  if (!htmlPasted && text) {
+    pastePlainText.call(this, text);
+  }
 }
 
 /** 클립보드의 이미지 파일을 커서 위치에 삽입한다. */
@@ -2185,28 +2241,32 @@ async function pasteImageFile(this: any, file: File, hasSelection: boolean): Pro
 
     const natW = img.naturalWidth;
     const natH = img.naturalHeight;
+    const selection = hasSelection ? this.cursor.getSelectionOrdered() : null;
+    const insertAt = selection?.start ?? this.cursor.getPosition();
 
     // 스냅샷으로 삽입 (Undo 지원)
     this.executeOperation({ kind: 'snapshot', operationType: 'pasteImage', operation: (wasm: WasmBridge) => {
-      if (hasSelection) this.deleteSelection();
-      const p = this.cursor.getPosition();
-      // 표 셀 안 paste (#1151): floating picture 분기 — parentParaIndex + cellPath 전달.
-      const inCell = (p.cellPath?.length ?? 0) > 0 && p.parentParaIndex !== undefined;
-      const paraForCall = inCell ? p.parentParaIndex! : p.paragraphIndex;
-      const cellPathJson = inCell ? JSON.stringify(p.cellPath) : '';
+      const p = selection
+        ? deleteSelectionImmediate(wasm, selection.start, selection.end)
+        : insertAt;
+      // New-table and legacy navigation positions may have only flat cell
+      // coordinates. Resolve those as well as full nested paths before calling
+      // the core; a missing path must never redirect a cell paste into the body.
+      const target = inlinePictureInsertionTarget(p);
       const result = wasm.insertPicture(
-        p.sectionIndex, paraForCall, p.charOffset,
-        cellPathJson, data, wHwp, hHwp, natW, natH, ext, '',
+        p.sectionIndex, target.paragraphIndex, p.charOffset,
+        target.cellPathJson, data, wHwp, hHwp, natW, natH, ext, '',
+        undefined, undefined, 'inline',
       );
       if (result.ok) {
         return {
-          sectionIndex: p.sectionIndex,
-          paragraphIndex: result.paraIdx + 1,
-          charOffset: 0,
+          ...target.position,
+          charOffset: result.logicalOffset ?? p.charOffset + 1,
         } as DocumentPosition;
       }
-      return p;
+      throw new Error('그림을 삽입할 수 없습니다.');
     }});
+    this.cursor.clearSelection();
   } catch (err) {
     console.warn('[InputHandler] 클립보드 이미지 삽입 실패:', err);
   }
@@ -2297,7 +2357,7 @@ export function handleF11(this: any): void {
         try {
           const pageCount = this.wasm.pageCount;
           for (let p = 0; p < pageCount; p++) {
-            const layout = this.wasm.getPageControlLayout(p);
+            const layout = { controls: this.wasm.getPageControlLayout(p).controls.filter(isBodyControl) };
             for (const ctrl of layout.controls) {
               if (ctrl.type === 'line' && ctrl.secIdx === result.sec && ctrl.paraIdx === result.para && ctrl.controlIdx === result.ci) {
                 ctrlType = 'line';
@@ -2395,7 +2455,7 @@ export function handleShiftF11(this: any): void {
         try {
           const pageCount = this.wasm.pageCount;
           for (let p = 0; p < pageCount; p++) {
-            const layout = this.wasm.getPageControlLayout(p);
+            const layout = { controls: this.wasm.getPageControlLayout(p).controls.filter(isBodyControl) };
             for (const ctrl of layout.controls) {
               if (ctrl.type === 'line' && ctrl.secIdx === result.sec && ctrl.paraIdx === result.para && ctrl.controlIdx === result.ci) {
                 ctrlType = 'line';

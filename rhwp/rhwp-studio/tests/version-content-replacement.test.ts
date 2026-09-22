@@ -93,7 +93,7 @@ test('WasmBridge exposes a separate trusted-local constructor path', () => {
   const bridge = source('src/core/wasm-bridge.ts');
   assert.match(
     bridge,
-    /loadTrustedLocalFileOnce\(data: Uint8Array, fileName\?: string\): DocumentInfo \{[\s\S]*?fromTrustedLocalFileBytes\(bytes\)/,
+    /loadTrustedLocalFileOnce\(data: Uint8Array, fileName\?: string\): DocumentInfo \{[\s\S]*?fromTrustedLocalFileBytesWithFontMetrics\(bytes, this\.requestedHwpxFontMetrics\(\)\)/,
   );
 
   const main = source('src/main.ts');

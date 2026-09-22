@@ -8,6 +8,7 @@ import {
   captureDroppedFileHandle,
   isSupportedDocumentFileName,
   pickOpenFileHandle,
+  pickReadableBrowserDocument,
   readFileFromHandle,
   saveDocumentToFileSystem,
 } from '../src/command/file-system-access.ts';
@@ -566,4 +567,33 @@ test('HML로 저장을 선택하면 HML 저장 picker 형식(.hml)을 사용한�
 
   assert.equal(result.handle, pickerHandle);
   assert.equal(pickerHandle.writable.writes.length, 1);
+});
+
+test('브라우저가 선택한 handle 읽기를 차단하면 파일 input으로 전환한다', async () => {
+  for (const name of ['NotAllowedError', 'SecurityError']) {
+    const handle = createHandle('sample.hwpx');
+    handle.getFile = async () => { throw new DOMException('The request is not allowed in the current context.', name); };
+    assert.equal(await pickReadableBrowserDocument({ showOpenFilePicker: async () => [handle] }), undefined);
+  }
+});
+
+test('브라우저 파일 선택 취소는 fallback을 열지 않고 읽기 오류는 유지한다', async () => {
+  assert.equal(await pickReadableBrowserDocument({ showOpenFilePicker: async () => { throw new DOMException('Cancelled', 'AbortError'); } }), null);
+  const handle = createHandle('sample.hwpx');
+  handle.getFile = async () => { throw new DOMException('File missing', 'NotFoundError'); };
+  await assert.rejects(pickReadableBrowserDocument({ showOpenFilePicker: async () => [handle] }), { name: 'NotFoundError' });
+  const readable = createHandle('sample.hwpx');
+  const result = await pickReadableBrowserDocument({ showOpenFilePicker: async () => [readable] });
+  assert.equal(result?.handle, readable);
+  assert.equal(result?.name, 'sample.hwpx');
+});
+
+
+test('브라우저 picker 사용 불가와 권한 차단은 파일 input fallback을 사용한다', async () => {
+  assert.equal(await pickReadableBrowserDocument({}), undefined);
+  for (const name of ['SecurityError', 'NotAllowedError']) {
+    assert.equal(await pickReadableBrowserDocument({
+      showOpenFilePicker: async () => { throw new DOMException('Blocked', name); },
+    }), undefined);
+  }
 });

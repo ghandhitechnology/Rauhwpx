@@ -1,10 +1,9 @@
 import type { CursorRect } from '@/core/types';
 import { VirtualScroll } from '@/view/virtual-scroll';
+import { isCompositionBoxRepresentable } from './line-start-affinity';
 
 /** 활자를 이어 치는 동안 깜박임을 멈춰 두는 시간(ms). */
 const TYPING_IDLE_MS = 500;
-/** 삭제 결과를 눈으로 따라갈 수 있게 하는 짧은 캐럿 이동 시간(ms). */
-const ERASE_MOTION_MS = 50;
 
 /**
  * Canvas 위에 캐럿을 렌더링한다.
@@ -22,8 +21,6 @@ export class CaretRenderer {
   private isCompMode = false;
 
   private typingIdleTimer: number | null = null;
-  private eraseMotionDepth = 0;
-  private eraseMotionTimer: number | null = null;
 
   constructor(
     private container: HTMLElement,
@@ -69,8 +66,6 @@ export class CaretRenderer {
   hide(): void {
     this.stopBlink();
     this.clearTypingIdle();
-    this.clearEraseMotion();
-    this.eraseMotionDepth = 0;
     this.caretEl.style.display = 'none';
     this.underlineEl.style.display = 'none';
     this.isCompMode = false;
@@ -101,29 +96,18 @@ export class CaretRenderer {
   }
 
   /**
-   * Backspace/Delete 처리 중에만 다음 캐럿 이동을 아주 짧게 완화한다.
-   * 일반 입력과 탐색은 이 범위 밖이므로 계속 즉시 반영된다.
-   */
-  beginEraseMotion(): void {
-    this.eraseMotionDepth += 1;
-  }
-
-  endEraseMotion(): void {
-    this.eraseMotionDepth = Math.max(0, this.eraseMotionDepth - 1);
-  }
-
-  /**
    * 같은 줄의 조합 범위에만 1.5px 밑줄을 그린다. 줄바꿈이 일어나면 숨긴다 —
    * 글리프는 이미 엔진 캔버스에 있다.
+   *
+   * 같은 줄 판정에 y 를 쓰지 않는다 — 글꼴 크기가 섞이면 같은 줄에서도 캐럿 y 가 run 마다
+   * 달라 밑줄이 사라졌다. 판정은 `isCompositionBoxRepresentable` 한 곳이 소유한다.
    */
   showCompositionUnderline(startRect: CursorRect, endRect: CursorRect, zoom: number): void {
     this.ensureAttached();
     this.isCompMode = true;
 
-    const sameLine = startRect.pageIndex === endRect.pageIndex
-      && Math.abs(startRect.y - endRect.y) < Math.max(startRect.height, endRect.height, 1) * 0.5;
     const rawWidth = endRect.x - startRect.x;
-    if (!sameLine || !(rawWidth > 0)) {
+    if (!isCompositionBoxRepresentable(startRect, endRect) || !(rawWidth > 0)) {
       this.underlineEl.style.display = 'none';
       return;
     }
@@ -168,21 +152,8 @@ export class CaretRenderer {
     const nextY = pageOffset + y * zoom;
     const nextH = height * zoom;
 
-    if (this.eraseMotionDepth > 0) {
-      if (this.eraseMotionTimer !== null) clearTimeout(this.eraseMotionTimer);
-      this.caretEl.classList.add('is-erasing');
-    } else {
-      // 삭제 직후 곧바로 입력/탐색하면 남은 transition을 즉시 끊는다.
-      this.clearEraseMotion();
-    }
     this.caretEl.style.transform = `translate3d(${nextX}px, ${nextY}px, 0)`;
     this.caretEl.style.height = `${nextH}px`;
-    if (this.eraseMotionDepth > 0) {
-      this.eraseMotionTimer = window.setTimeout(() => {
-        this.eraseMotionTimer = null;
-        this.caretEl.classList.remove('is-erasing');
-      }, ERASE_MOTION_MS);
-    }
   }
 
   /**
@@ -205,14 +176,6 @@ export class CaretRenderer {
       clearTimeout(this.typingIdleTimer);
       this.typingIdleTimer = null;
     }
-  }
-
-  private clearEraseMotion(): void {
-    if (this.eraseMotionTimer !== null) {
-      clearTimeout(this.eraseMotionTimer);
-      this.eraseMotionTimer = null;
-    }
-    this.caretEl.classList.remove('is-erasing');
   }
 
   /** 셀 bbox가 있는 캐럿은 DOM 선 폭까지 셀 안에 남도록 보정한다. */
@@ -268,7 +231,6 @@ export class CaretRenderer {
   dispose(): void {
     this.stopBlink();
     this.clearTypingIdle();
-    this.clearEraseMotion();
     this.caretEl.remove();
     this.underlineEl.remove();
   }

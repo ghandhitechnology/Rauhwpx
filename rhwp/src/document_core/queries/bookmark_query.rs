@@ -414,6 +414,7 @@ mod tests {
         doc.sections.push(Section {
             paragraphs,
             raw_stream: Some(vec![SENTINEL; 64]),
+            raw_provenance: None,
             ..Default::default()
         });
         doc

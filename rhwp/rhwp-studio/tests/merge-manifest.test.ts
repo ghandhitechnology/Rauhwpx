@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { CompareDocumentSnapshot } from '../src/compare/types.ts';
-import { snapshotToMergeTree } from '../src/merge/manifest.ts';
+import { buildMergeManifest, snapshotToMergeTree } from '../src/merge/manifest.ts';
+import { commitId, repositoryId, type MergeManifestEntrySeed } from '../src/versioning/types.ts';
 
 test('snapshot merge trees preserve paragraph and control ordering while grouping once', () => {
   const anchor = { pageIndex: 0, x: 0, y: 0, width: 1, height: 1 };
@@ -34,4 +35,20 @@ test('snapshot merge trees preserve paragraph and control ordering while groupin
   assert.deepEqual(tree.sections[0].paragraphs.map((item) => item.stableId), ['s0-p1', 's0-p0']);
   assert.deepEqual(tree.sections[0].paragraphs[0].controls.map((item) => item.stableId), ['second', 'first']);
   assert.deepEqual(tree.sections[1].paragraphs[0].controls.map((item) => item.stableId), ['other']);
+});
+
+test('a merge preserves shared paragraph identities for subsequent branch edits', () => {
+  const repository = repositoryId('merge-lineage');
+  const snapshot: CompareDocumentSnapshot = { meta: { name: 'test', sectionCount: 1, pageCount: 1 }, paragraphs: [], controls: [] };
+  const seeds = (hash: string): MergeManifestEntrySeed[] => [
+    { kind: 'paragraph', path: ['sections', '0', 'paragraphs', '0'], propertyHash: `blake3:${hash}` },
+    { kind: 'paragraph', path: ['sections', '0', 'paragraphs', '1'], propertyHash: 'blake3:anchor' },
+  ];
+  const base = buildMergeManifest(repository, commitId('base'), snapshot, 1, [], seeds('base'));
+  const current = buildMergeManifest(repository, commitId('current'), snapshot, 2, [base], seeds('local'));
+  const incoming = buildMergeManifest(repository, commitId('incoming'), snapshot, 3, [base], seeds('cloud'));
+  const merged = buildMergeManifest(repository, commitId('merged'), snapshot, 4, [current, incoming], seeds('both'));
+  const next = buildMergeManifest(repository, commitId('next'), snapshot, 5, [merged], seeds('next-local'));
+  assert.deepEqual(merged.entries.map((entry) => entry.identity), base.entries.map((entry) => entry.identity));
+  assert.deepEqual(next.entries.map((entry) => entry.identity), base.entries.map((entry) => entry.identity));
 });

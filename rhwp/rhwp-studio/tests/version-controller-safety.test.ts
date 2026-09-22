@@ -30,7 +30,7 @@ test('one semantic analysis supplies both checkpoint stats and the AI title summ
 });
 
 test('complete current merge manifests are reused before walking their ancestors', () => {
-  const ensure = method('async #ensureFullMergeManifest(', 'async #flushDeferredSave(');
+  const ensure = method('async #ensureFullMergeManifest(', 'async #refreshData(');
   const persisted = ensure.indexOf('const persisted = commit.mergeManifestId');
   const recurse = ensure.indexOf('this.#ensureFullMergeManifest(repositoryId, parent, memo)');
   assert.ok(persisted >= 0 && persisted < recurse);
@@ -55,7 +55,7 @@ test('workspace tokens bind async content reads and compares to one document rev
 
 test('versioning cannot adopt an unsaved document as its disk baseline', () => {
   const enable = method('async enable(): Promise<void>', 'async checkpoint(');
-  assert.match(enable, /if \(this\.#documentState\.isDirty\(\)\) \{/);
+  assert.match(enable, /if \(this\.#documentState\.isDirty\(\) && !baseline\) \{/);
   assert.match(enable, /new VersionError\('SAVE_REQUIRED'/);
   assert.ok(enable.indexOf('documentState.isDirty()') < enable.indexOf('createRepository({'));
 });
@@ -92,8 +92,9 @@ test('shelves use HEAD divergence and protect current work before applying', () 
   assert.match(create, /deleteShelf\(/);
 
   const apply = method('async applyShelf(', 'async deleteShelf(');
-  assert.ok(apply.indexOf("#checkpointDirty('pre-restore')") < apply.indexOf('replaceContentFromBytes'));
-  assert.match(apply, /if \(!persisted\) this\.#rollbackReplacement/);
+  assert.ok(apply.indexOf('#prepareMergeWorkingTree()') < apply.indexOf('#openMergeResolver('));
+  assert.match(apply, /target: existing\?\.id \?\? shelf\.baseCommitId/);
+  assert.doesNotMatch(apply, /replaceContentFromBytes/);
 });
 
 test('branch transitions defer ref and dirty state callbacks until after history afterEdit', () => {
@@ -117,21 +118,15 @@ test('branch switching revalidates cross-controller repository and ref advances 
   assert.match(switchBranch, /new VersionError\('STALE_WORKSPACE'/);
 });
 
-test('loadMore always releases loading and saves defer safely across an active agent turn', () => {
+test('loadMore releases loading and file saves preserve the uncommitted working tree', () => {
   const loadMore = method('async loadMore()', 'async restore(');
-  assert.match(loadMore, /try \{/);
   assert.match(loadMore, /finally \{/);
   assert.match(loadMore, /this\.#state\.loading = false/);
-
   const constructor = method('constructor(deps:', 'getState()');
-  assert.match(constructor, /if \(this\.#agentBridge\.isTurnRunning\(\)\) \{/);
-  assert.match(constructor, /this\.#deferredSavedSnapshot = \{/);
-  assert.match(constructor, /workspace,\s*snapshot: captureVersionSnapshot\(this\.#wasm\)/);
-  assert.match(constructor, /await this\.#flushDeferredSave\(\)/);
-
-  const flush = method('async #flushDeferredSave()', 'async #refreshData(');
-  assert.match(flush, /repository\.id !== deferred\.workspace\.repositoryId/);
-  assert.match(flush, /#createCheckpoint\(\{ reason: 'save', lastSaved: true \}, deferred\.snapshot\)/);
+  assert.match(constructor, /captureVersionSnapshot\(this\.#wasm\)/);
+  assert.match(constructor, /id !== this\.#getDocumentId\(\)/);
+  assert.match(constructor, /this\.#store\.markSaved\(/);
+  assert.doesNotMatch(constructor, /#createCheckpoint\(/);
 });
 
 test('active branch refresh keeps memory before falling back to the repository default', () => {

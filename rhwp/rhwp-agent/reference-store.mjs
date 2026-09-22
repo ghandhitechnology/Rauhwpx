@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   recoverInterruptedFileReplacement,
   replaceFileAtomically,
+  retryLockedOperation,
 } from './harness-update.mjs';
 import {
   MAX_EXTRACTED_CHARS as MAX_EXTRACTED_CHARS_PER_FILE,
@@ -325,7 +326,7 @@ async function pathIsPlainFile(file) {
   }
 }
 
-async function atomicWriteJson(file, value, { onRetainedTemp = null } = {}) {
+async function atomicWriteJson(file, value, { onRetainedTemp = null, platform = process.platform } = {}) {
   const temp = `${file}.tmp-${process.pid}-${crypto.randomUUID()}`;
   const serialized = `${JSON.stringify(value)}\n`;
   let handle;
@@ -335,7 +336,7 @@ async function atomicWriteJson(file, value, { onRetainedTemp = null } = {}) {
     await handle.sync();
     await handle.close();
     handle = null;
-    await replaceFileAtomically(temp, file);
+    await replaceFileAtomically(temp, file, { platform });
   } finally {
     await handle?.close().catch(() => undefined);
     await fs.unlink(temp).catch((error) => {
@@ -345,6 +346,26 @@ async function atomicWriteJson(file, value, { onRetainedTemp = null } = {}) {
       }
     });
   }
+}
+
+export async function publishNewReferenceBlob(staging, blobPath, {
+  platform = process.platform,
+  rename = fs.rename,
+  lstat = fs.lstat,
+  delays,
+} = {}) {
+  if (platform !== 'win32') return rename(staging, blobPath);
+  try {
+    const stats = await lstat(blobPath);
+    if (stats.isDirectory()) {
+      const error = new Error(`Refusing to replace directory ${blobPath}`);
+      error.code = 'EISDIR';
+      throw error;
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  await retryLockedOperation(() => rename(staging, blobPath), { platform, delays });
 }
 
 function publicFile(record) {
@@ -534,7 +555,7 @@ export class ReferenceStore {
         if (error instanceof ReferenceStoreError) throw error;
         throw new ReferenceStoreError('REFERENCE_STORE_CORRUPT', `Could not read reference metadata: ${error?.message ?? error}`);
       }
-      await atomicWriteJson(this.metadataPath, this.metadata);
+      await atomicWriteJson(this.metadataPath, this.metadata, { platform: this.platform });
       this.metadataPhysicalBytes = Buffer.byteLength(JSON.stringify(this.metadata), 'utf8') + 1;
     }
     await this.#loadPhysicalObjects();
@@ -1160,6 +1181,7 @@ export class ReferenceStore {
       };
       await atomicWriteJson(this.#stagedMetadataPath(stageId), staged, {
         onRetainedTemp: (file, bytes) => this.#trackQuarantinedFile(file, bytes),
+        platform: this.platform,
       });
       await this.#exclusive(() => {
         if (this.stagedFiles.has(stageId)) {
@@ -1593,6 +1615,7 @@ export class ReferenceStore {
     this.#assertUsageWithinLimits(usage);
     await this.persistMetadata(this.metadataPath, this.metadata, {
       onRetainedTemp: (file, bytes) => this.#trackQuarantinedFile(file, bytes),
+      platform: this.platform,
     });
     this.metadataPhysicalBytes = serializedBytes;
   }
@@ -1732,11 +1755,12 @@ export class ReferenceStore {
         if (!objectExisted) {
           await atomicWriteJson(objectPath, object, {
             onRetainedTemp: (file, bytes) => this.#trackQuarantinedFile(file, bytes),
+            platform: this.platform,
           });
         }
         try {
           if (blobExisted) await this.#unlinkOrQuarantine(staging, size, { coveredByStageId: transferStageId });
-          else await fs.rename(staging, blobPath);
+          else await publishNewReferenceBlob(staging, blobPath, { platform: this.platform });
         } catch (error) {
           if (!objectExisted) await this.#unlinkOrQuarantine(objectPath, objectBytes);
           throw error;
@@ -1818,6 +1842,26 @@ export class ReferenceStore {
       .slice()
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .map(publicFile);
+  }
+
+  async readFile({ fileId, scope, scopeId }) {
+    const scoped = normalizeReferenceScope(scope, scopeId);
+    const record = this.metadata.files.find((file) => (
+      file.id === fileId
+      && file.scope === scoped.scope
+      && file.scopeId === scoped.scopeId
+      && file.status === 'ready'
+    ));
+    if (!record) throw new ReferenceStoreError('REFERENCE_NOT_FOUND', 'Reference file was not found in this scope');
+    const blobPath = this.#blobPath(record.sha256);
+    if (!await pathIsPlainFile(blobPath)) {
+      throw new ReferenceStoreError('REFERENCE_BLOB_MISSING', 'Reference file data is missing');
+    }
+    const bytes = await fs.readFile(blobPath);
+    if (bytes.length !== record.size || crypto.createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
+      throw new ReferenceStoreError('REFERENCE_STORE_CORRUPT', 'Reference file data failed integrity verification');
+    }
+    return { ...publicFile(record), bytes };
   }
 
   async #deletePhysicalObject(sha256) {

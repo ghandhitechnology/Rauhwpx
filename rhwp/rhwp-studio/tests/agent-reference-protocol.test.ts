@@ -21,8 +21,8 @@ test('search hit normalizer accepts results without injecting content into marku
 });
 
 test('bridge sends stable chat scope and uses authenticated streaming HTTP endpoints', () => {
-  assert.match(source, /type: 'chat-start' as const,[\s\S]*threadId,[\s\S]*documentId,[\s\S]*documentName[\s\S]*history: this\.chatHistory/);
-  assert.match(source, /history: pending\.history/);
+  assert.match(source, /this\.pendingChatStart = \{[\s\S]*threadId,[\s\S]*documentId,[\s\S]*documentName[\s\S]*history: this\.chatHistory/);
+  assert.match(source, /type: 'chat-start',[\s\S]*\.\.\.pending/);
   assert.match(source, /type: 'chat-user-message',[\s\S]*threadId: message\.context\.threadId,[\s\S]*documentId: message\.context\.documentId/);
   assert.match(source, /messageId: message\.messageId, stagedReferenceIds: message\.stagedReferenceIds/);
   assert.match(source, /case 'chat-reference-status'/);

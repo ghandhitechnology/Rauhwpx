@@ -36,6 +36,11 @@ export const MUTATING_METHODS: readonly string[] = [
   'createTable', 'createTableEx', 'deleteTableControl', 'insertTableRow',
   'insertTableColumn', 'deleteTableRow', 'deleteTableColumn', 'mergeTableCells',
   'splitTableCell', 'splitTableCellInto', 'splitTableCellsInRange', 'resizeTableCells',
+  'insertTableRowByPath', 'insertTableColumnByPath',
+  'deleteTableRowByPath', 'deleteTableColumnByPath',
+  'mergeTableCellsByPath', 'splitTableCellByPath',
+  'splitTableCellIntoByPath', 'splitTableCellsInRangeByPath',
+  'resizeTableCellsByPath', // [#7189] 중첩 표는 평면 resizeTableCells 로 닿지 않는다
   'moveTableOffset', 'setTableProperties', 'setCellProperties', 'setCellZoneProperties',
   'pasteTableCellsTransposed', 'transposeTableCellsInPlace', 'pasteTableCellsTransposedAsTable',
   'evaluateTableFormula', 'evaluateTableFormulaEx',
@@ -46,8 +51,8 @@ export const MUTATING_METHODS: readonly string[] = [
   'setCellShapePropertiesByPath', 'deletePictureControl', 'movePictureControl', 'deleteCellPictureControlByPath',
   'createShapeControl', 'setShapeProperties', 'deleteShapeControl', 'changeObjectZOrder',
   'groupShapes', 'ungroupShape', 'moveLineEndpoint', 'updateConnectorsInSection',
-  'insertEquation', 'setEquationProperties', 'setNoteEquationProperties', 'deleteEquationControl',
-  'insertEquationInCell', 'deleteEquationControlInCell',
+  'insertEquation', 'promoteOleEquation', 'setEquationProperties', 'setEquationPropertiesByPath', 'setNoteEquationProperties', 'deleteEquationControl',
+  'insertEquationInCell', 'insertEquationInCellByPath', 'deleteEquationControlInCell', 'deleteEquationControlInCellByPath',
   // 각주/미주
   'insertFootnote', 'insertEndnote', 'deleteFootnote', 'applyEndnoteShape',
   'insertTextInFootnote', 'deleteTextInFootnote', 'splitParagraphInFootnote',
@@ -55,11 +60,12 @@ export const MUTATING_METHODS: readonly string[] = [
   'applyCharFormatInFootnote', 'setCharShapeIdInFootnote', 'setParaShapeIdInFootnote',
   // 붙여넣기
   'pasteInternal', 'pasteInternalInCell', 'pasteInternalInCellByPath', 'pasteDocumentBlock', 'pasteControl',
-  'pasteHtml', 'pasteHtmlInCell', 'pasteHtmlInCellByPath',
+  'pasteHtml', 'pasteHtmlInCell', 'pasteHtmlInCellByPath', 'pasteHwpJson',
   // 글자/문단 모양
   'applyCharFormat', 'applyCharFormatAcrossSections', 'setCharShapeId',
   'applyCharFormatInCell', 'applyCharFormatInCellByPath',
   'setCharShapeIdInCell', 'setCharShapeIdInCellByPath',
+  'setCharShapeRuns', 'setCharShapeRunsInCellByPath',
   'applyParaFormat', 'applyParaFormatAcrossSections', 'setParaShapeId',
   'applyParaFormatInCell', 'setCellParaShapeId',
   'applyParaFormatInCellByPath', 'setCellParaShapeIdByPath',
@@ -75,6 +81,7 @@ export const MUTATING_METHODS: readonly string[] = [
   'applyCharFormatInHf', 'setCharShapeIdInHf', 'setParaShapeIdInHf',
   // 필드/양식/찾아바꾸기/책갈피
   'setFieldValue', 'setFieldValueByName', 'removeFieldAt', 'insertClickHereField',
+  'insertHyperlink', 'updateHyperlink', 'replaceHyperlinkText', 'removeHyperlink',
   'updateClickHereProps', 'setFormValue', 'setFormValueInCell',
   'replaceText', 'replaceOne', 'replaceAll',
   'addBookmark', 'deleteBookmark', 'renameBookmark',

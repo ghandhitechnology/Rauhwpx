@@ -23,11 +23,11 @@ test('the server owns one generic account-session module behind the Rau backend 
   const account = await readSource('account-session.mjs');
   const provider = await readSource('pi-manager.mjs');
 
-  assert.match(server, /const accountSession = createAccountSession\(\{\s*secretStore,\s*creditsClient: rauCredits,\s*\}\)/);
+  assert.match(server, /const accountSession = createAccountSession\(\{/);
   assert.match(account, /function createRauAccountBackendAdapter\([\s\S]+creditsClient\.createAccountDeviceSessionV2/);
   assert.doesNotMatch(account, /export function createRauAccountBackendAdapter/);
   assert.match(account, /ACCOUNT_SESSION_SECRET_ID = 'rhwp\.account\.session-token'/);
-  assert.match(provider, /RAU_SECRET_ID = 'rhwp\.rau\.openrouter-api-key'/);
+  assert.match(provider, /PI_SECRET_ID = 'rhwp\.pi\.openrouter-api-key'/);
   assert.doesNotMatch(account, /cloud|quota|allowance/i);
 });
 

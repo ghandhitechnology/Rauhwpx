@@ -1,10 +1,12 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   app,
+  autoUpdater as nativeAutoUpdater,
   BrowserWindow,
   Menu,
   clipboard,
@@ -12,6 +14,8 @@ import {
   ipcMain,
   nativeTheme,
   net,
+  Notification as ElectronNotification,
+  powerMonitor,
   protocol,
   safeStorage,
   session as electronSession,
@@ -55,11 +59,32 @@ import {
   resolveDevelopmentUrl,
 } from './studio-protocol.mjs';
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
+import { CloudClient } from './cloud-client.mjs';
+import {
+  createRaucloudBrokerProvider,
+  raucloudBrokerUrl,
+} from './cloud-broker.mjs';
+import { CloudCoordinator } from './cloud-coordinator.mjs';
+import { installCloudContinuityTriggers } from './cloud-continuity-triggers.mjs';
+import { CloudDisplayRegistry } from './cloud-display-registry.mjs';
+import { CloudEditDraftStore } from './cloud-edit-drafts.mjs';
+import { CloudHandoffStore } from './cloud-handoff.mjs';
+import { collectProviderAuth as collectImportedProviderAuth } from './cloud-provider-auth.mjs';
+import { CloudProvisioner } from './cloud-provisioner.mjs';
+import { mergeCloudOperationSnapshot } from './cloud-snapshot.mjs';
+import { CloudApiTransport, SshTunnelManager } from './cloud-ssh-tunnel.mjs';
+import { collectProviderAuth } from './provider-auth.mjs';
+import { applyCloudRecovery } from './cloud-result.mjs';
+import { isNewerStableVersion, selectDebAsset } from './update-policy.mjs';
+import { createUpdateLifecycle, completeWindowClose } from './update-lifecycle.mjs';
+import { documentEditMenuItem } from './edit-menu.mjs';
 import { deliverPlainTextPaste } from './plain-text-paste.mjs';
 import {
   hasPendingLaunchCleanupSync,
   retainLaunchRootForProcessCleanupSync,
 } from '../rhwp/rhwp-agent/credential-mirror.mjs';
+import { ACCOUNT_SESSION_SECRET_ID, createAccountSession } from '../rhwp/rhwp-agent/account-session.mjs';
+import { createRauCreditsClient, rauCreditsUrl } from '../rhwp/rhwp-agent/rau-credits-client.mjs';
 import {
   launchStoragePaths,
   prepareDevelopmentCaches,
@@ -68,11 +93,15 @@ import {
   writeLaunchOwnerMetadata,
 } from './runtime-cleanup.mjs';
 import { reportUniqueInstall, uniqueInstallsPublicUrl } from './unique-install.mjs';
-import { rauCreditsUrl } from '../rhwp/rhwp-agent/rau-credits-client.mjs';
+import {
+  nativeExtractorFileName,
+  sourceStagedNativeExtractorPath,
+} from './native-rhwp-path.mjs';
 
 const { autoUpdater } = electronUpdater;
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const RELEASES_URL = 'https://github.com/ghandhitechnology/Rauhwpx/releases/latest';
+const RELEASES_API_URL = 'https://api.github.com/repos/ghandhitechnology/Rauhwpx/releases/latest';
 const PRELOAD_PATH = join(__dirname, 'preload.cjs');
 const devUrl = resolveDevelopmentUrl({
   packaged: app.isPackaged,
@@ -82,6 +111,7 @@ const launchId = randomUUID();
 const hubToken = createHubToken();
 const devOrigin = devUrl ? new URL(devUrl).origin : null;
 
+const CLOUD_CLOSE_WAIT_MS = 120_000;
 // Vite gives every hot update a new timestamped URL. Reusing Electron's
 // persistent HTTP cache across dev runs otherwise leaves one JS/WASM entry per
 // edit and per worktree in the production profile.
@@ -124,6 +154,27 @@ function unpackedPath(path) {
 
 function agentScript() {
   return unpackedPath(join(__dirname, '..', 'rhwp', 'rhwp-agent', 'server.mjs'));
+}
+
+function nativeRhwpExecutable() {
+  const bundled = unpackedPath(sourceStagedNativeExtractorPath(
+    __dirname,
+    process.platform,
+    process.arch,
+  ));
+  if (existsSync(bundled)) return bundled;
+  if (app.isPackaged) throw new Error(`Packaged native document extractor is missing: ${bundled}`);
+  const configured = String(process.env.RHWP_BIN ?? '').trim();
+  if (configured && existsSync(configured)) return configured;
+  const development = join(
+    __dirname,
+    '..',
+    'rhwp',
+    'target',
+    'release',
+    nativeExtractorFileName(process.platform),
+  );
+  return existsSync(development) ? development : null;
 }
 
 class AgentHubOwner {
@@ -260,6 +311,7 @@ class AgentHubOwner {
     }
 
     const server = agentScript();
+    const rhwpExecutable = nativeRhwpExecutable();
     const rhwpBinary = packagedRhwpBinary({
       packaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
@@ -287,6 +339,7 @@ class AgentHubOwner {
         RHWP_OWN_RUNTIME_DIR: '1',
         RHWP_OWN_WORK_DIR: '1',
         RHWP_SECRET_BROKER: 'ipc',
+        ...(rhwpExecutable ? { RHWP_BIN: rhwpExecutable } : {}),
       },
     });
     if (!launch) throw new Error(`Agent hub launch command not found: ${server}`);
@@ -296,6 +349,12 @@ class AgentHubOwner {
     const child = spawnHubProcess(launch, {
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       onMessage: (message, source) => {
+        if (message?.type === 'rhwp-account-status-changed') {
+          if (source === this.#child) {
+            void cloudCoordinator?.refreshAccountStatus().catch(() => {});
+          }
+          return;
+        }
         if (!secretVault) return;
         void handleSecretRequest(secretVault, message).then((response) => {
           if (response && source.connected) source.send(response);
@@ -372,6 +431,21 @@ let quitting = false;
 let quitRequested = false;
 let desktopReady = false;
 let secretVault = null;
+let cloudAccountSession = null;
+let cloudCoordinator = null;
+let cloudTransport = null;
+let stopCloudContinuityTriggers = () => {};
+const cloudDisplayConnections = new CloudDisplayRegistry({
+  openDisplay: (sessionId, listener, options) => requireCloudCoordinator().openDisplay(
+    sessionId,
+    listener,
+    options,
+  ),
+});
+let cloudBroadcastChain = Promise.resolve();
+const CLOUD_BROADCAST_COALESCE_MS = 100;
+let cloudBroadcastTimer = null;
+let cloudBroadcastPending = [];
 const pendingLaunches = [launchRequest({ argv: process.argv, source: 'initial' })];
 const launchStorage = launchStoragePaths({
   tempDir: app.getPath('temp'),
@@ -401,6 +475,10 @@ const sessions = new SessionManager({
 const documentLeases = new DocumentLeaseManager();
 const nativeFiles = new NativeFileHandleRegistry();
 const nativeBookmarkFile = join(app.getPath('userData'), 'native-document-bookmarks.json');
+const cloudEditDraftStore = new CloudEditDraftStore({
+  root: join(app.getPath('userData'), 'cloud', 'edit-drafts'),
+});
+const pendingCloudEditDraftSaves = new Map();
 let uniqueInstallSnapshot = {
   uniqueInstalls: null,
   publicUrl: uniqueInstallsPublicUrl(),
@@ -437,6 +515,194 @@ const nativeBookmarkWriter = new SerializedStateWriter({
   onError: (error) => console.warn('[rauhwpx] native bookmark persist failed:', error),
 });
 
+function normalizeCloudScope(payload = {}) {
+  const threadId = typeof payload.threadId === 'string' && payload.threadId.length <= 256
+    ? payload.threadId
+    : '';
+  const documentId = payload.documentId === null
+    ? null
+    : typeof payload.documentId === 'string' && payload.documentId.length <= 256
+      ? payload.documentId
+      : null;
+  const selectedSessionId = typeof payload.selectedSessionId === 'string'
+    && /^[A-Za-z0-9_-]{1,128}$/.test(payload.selectedSessionId)
+    ? payload.selectedSessionId
+    : null;
+  return { threadId, documentId, selectedSessionId };
+}
+
+function applyCloudSnapshot(session, snapshot) {
+  session.cloudLocked = snapshot?.lease?.owner === 'cloud';
+  session.cloudHandoffId = snapshot?.session?.kind === 'idle' ? null : snapshot?.session?.sessionId ?? null;
+  return snapshot;
+}
+
+async function scopedCloudSnapshot(session, operation = null, { refresh = false } = {}) {
+  const scope = session.cloudScope ?? { threadId: '', documentId: null };
+  const options = {
+    originSessionId: session.sessionId,
+    threadId: scope.threadId,
+    documentId: scope.documentId,
+    selectedSessionId: scope.selectedSessionId,
+  };
+  const scoped = refresh
+    ? await requireCloudCoordinator().refresh(options)
+    : await requireCloudCoordinator().snapshot(options);
+  const snapshot = mergeCloudOperationSnapshot(operation, scoped);
+  return applyCloudSnapshot(session, snapshot);
+}
+
+function cloudEditDraftWindow(sessionId, editSessionId) {
+  return sessions.windows().find((candidate) => {
+    const candidateSession = sessions.sessionForSender(candidate.webContents);
+    return candidateSession.cloudEditDraft?.sessionId === sessionId
+      && candidateSession.cloudEditDraft?.editSessionId === editSessionId;
+  }) ?? null;
+}
+
+async function requestCloudEditDraftSave(window) {
+  const editorSession = sessions.sessionForSender(window.webContents);
+  if (!editorSession.cloudEditDraft) throw new Error('Cloud edit window has no draft identity');
+  const requestId = randomUUID();
+  let timer;
+  const saved = new Promise((resolve, reject) => {
+    pendingCloudEditDraftSaves.set(requestId, {
+      senderId: editorSession.senderId,
+      resolve,
+      reject,
+    });
+    timer = setTimeout(() => {
+      const pending = pendingCloudEditDraftSaves.get(requestId);
+      if (!pending) return;
+      pendingCloudEditDraftSaves.delete(requestId);
+      reject(new Error('Cloud edit draft save timed out'));
+    }, 30_000);
+  });
+  window.webContents.send('cloud:edit-draft-save-requested', { requestId });
+  try {
+    await saved;
+  } finally {
+    clearTimeout(timer);
+    pendingCloudEditDraftSaves.delete(requestId);
+  }
+}
+
+async function broadcastCloudEvent(payload) {
+  await Promise.all(sessions.windows().map(async (window) => {
+    if (window.isDestroyed()) return;
+    const session = sessions.sessionForSender(window.webContents);
+    const snapshot = await scopedCloudSnapshot(session).catch(() => null);
+    if (!snapshot || window.isDestroyed()) return;
+    window.webContents.send('cloud:event', { ...payload, snapshot });
+  }));
+}
+
+const pendingMergeNotifications = new Map();
+let mergeNotificationTimer = null;
+
+async function openCloudNotification(payload) {
+  const windows = sessions.windows().filter((candidate) => !candidate.isDestroyed());
+  if (!windows.length) return;
+  const target = windows.find((candidate) => {
+    const candidateSession = sessions.sessionForSender(candidate.webContents);
+    return payload.documentId && candidateSession.cloudScope?.documentId === payload.documentId;
+  }) ?? windows[0];
+  const targetSession = sessions.sessionForSender(target.webContents);
+  targetSession.cloudScope = {
+    ...(targetSession.cloudScope ?? { threadId: '', documentId: payload.documentId ?? null }),
+    selectedSessionId: payload.sessionId,
+  };
+  if (target.isMinimized()) target.restore();
+  target.show();
+  target.focus();
+  const snapshot = await scopedCloudSnapshot(targetSession).catch(() => null);
+  if (!snapshot || target.isDestroyed()) return;
+  target.webContents.send('cloud:event', {
+    type: 'notification-open',
+    sessionId: payload.sessionId,
+    operationId: payload.operationId ?? null,
+    snapshot,
+  });
+}
+
+/**
+ * A completed Cloud turn has to reach the user while they are in another app.
+ * macOS only delivers these for a signed bundle, so this stays best-effort.
+ * One turn can finish several merge requests at once, so a burst settles into
+ * a single banner on the same cadence as the event broadcast coalescing.
+ */
+function notifyCloudMergeReady(payload) {
+  if (payload?.type !== 'merge-prefetch-completed') return;
+  pendingMergeNotifications.set(payload.operationId ?? pendingMergeNotifications.size, payload);
+  if (mergeNotificationTimer) return;
+  mergeNotificationTimer = setTimeout(() => {
+    mergeNotificationTimer = null;
+    const payloads = [...pendingMergeNotifications.values()];
+    pendingMergeNotifications.clear();
+    try {
+      if (!payloads.length || !ElectronNotification.isSupported()) return;
+      const windows = sessions.windows().filter((candidate) => !candidate.isDestroyed());
+      // The sidebar already shows the arriving change while the app has focus.
+      if (!windows.length || windows.some((candidate) => candidate.isFocused())) return;
+      const [first] = payloads;
+      const notification = new ElectronNotification({
+        title: 'Cloud 변경이 준비되었습니다',
+        body: payloads.length > 1
+          ? `${payloads.length}개의 Cloud 변경이 도착했습니다.`
+          : first.fileName
+            ? `${first.fileName}${Number.isSafeInteger(first.turn) ? ` · ${first.turn}턴` : ''}`
+            : '검토할 Cloud 변경이 도착했습니다.',
+      });
+      notification.on('click', () => {
+        void openCloudNotification(first).catch((error) => {
+          console.warn('[rauhwpx] cloud notification open failed:', error);
+        });
+      });
+      notification.show();
+    } catch (error) {
+      console.warn('[rauhwpx] cloud notification failed:', error);
+    }
+  }, CLOUD_BROADCAST_COALESCE_MS);
+  mergeNotificationTimer.unref?.();
+}
+
+function queueCloudBroadcast(payload) {
+  notifyCloudMergeReady(payload);
+  // Build one snapshot per burst, but never collapse ordered agent deltas.
+  // The renderer reconciles them with the stable timeline at each boundary.
+  // Durable handoffs and operation snapshots can each contain the full timeline.
+  // Renderers reconcile from the per-window snapshot added at broadcast time.
+  const { handoff, snapshot, ...notification } = payload;
+  cloudBroadcastPending.push(notification);
+  if (cloudBroadcastTimer) return;
+  cloudBroadcastTimer = setTimeout(() => {
+    cloudBroadcastTimer = null;
+    const events = cloudBroadcastPending;
+    cloudBroadcastPending = [];
+    if (!events.length) return;
+    cloudBroadcastChain = cloudBroadcastChain
+      .then(() => broadcastCloudEvent({ type: 'cloud-event-batch', events }))
+      .catch((error) => console.warn('[rauhwpx] cloud event broadcast failed:', error));
+  }, CLOUD_BROADCAST_COALESCE_MS);
+  cloudBroadcastTimer.unref?.();
+}
+
+function requireCloudCoordinator() {
+  if (!cloudCoordinator) throw new Error('Cloud service is not ready');
+  return cloudCoordinator;
+}
+
+const RAUCLOUD_DEVICE_SECRET = 'cloud.managed-device-id';
+
+async function raucloudDeviceIdentity() {
+  let id = String(await secretVault.get(RAUCLOUD_DEVICE_SECRET).catch(() => '') ?? '').trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(id)) {
+    id = randomUUID();
+    await secretVault.set(RAUCLOUD_DEVICE_SECRET, id);
+  }
+  return { id, name: app.getName() };
+}
+
 async function loadNativeBookmarks() {
   try {
     const raw = await readBookmarkState(nativeBookmarkFile);
@@ -454,8 +720,8 @@ async function loadNativeBookmarks() {
   }
 }
 
-function persistNativeBookmarks() {
-  return nativeBookmarkWriter.enqueue(JSON.stringify(nativeFiles.dumpBookmarks()));
+function persistNativeBookmarks(options) {
+  return nativeBookmarkWriter.enqueue(JSON.stringify(nativeFiles.dumpBookmarks()), options);
 }
 
 async function bestEffortStartupCleanup(label, cleanup) {
@@ -466,87 +732,130 @@ async function bestEffortStartupCleanup(label, cleanup) {
   }
 }
 
-let updateDownloadReady = false;
+const updateLifecycle = createUpdateLifecycle({
+  app,
+  updater: autoUpdater,
+  nativeUpdater: nativeAutoUpdater,
+  platform: process.platform,
+  isInteractive: () => manualUpdateCheck || interactiveUpdateDownload,
+  showMessageBox: (options) => dialog.showMessageBox(options),
+  openReleases: () => shell.openExternal(RELEASES_URL),
+  cleanupTasks: [
+    () => cloudDisplayConnections.closeAll(),
+    () => stopCloudContinuityTriggers(),
+    () => cloudCoordinator?.stop(),
+    () => hubOwner.teardown(),
+  ],
+  stopTransport: () => cloudTransport?.stop(),
+  onQuitRequested: (requested) => { quitRequested = requested; },
+  onTeardown: () => { quitting = true; },
+});
 let manualUpdateCheck = false;
+let interactiveUpdateDownload = false;
+let updateCheckPromise = null;
 
-function configureAutoUpdater() {
-  autoUpdater.logger = console;
-  // macOS stages updates automatically and applies them on quit. Windows
-  // installers are unsigned today, so background installs get blocked by
-  // SmartScreen; downloads there only happen after an explicit confirmation.
-  autoUpdater.autoDownload = process.platform === 'darwin';
-  autoUpdater.on('error', (error) => {
-    console.warn('[rauhwpx] update check failed:', error?.message ?? error);
-  });
-  autoUpdater.on('update-not-available', () => {
-    if (!manualUpdateCheck) return;
-    void dialog.showMessageBox({
-      type: 'info',
-      message: 'Rauhwpx is up to date',
-      detail: `Version ${app.getVersion()} is the latest release.`,
-      buttons: ['OK'],
-    });
-  });
-  autoUpdater.on('update-available', (info) => {
-    if (autoUpdater.autoDownload || !manualUpdateCheck) return;
-    void dialog.showMessageBox({
-      type: 'info',
-      message: `Rauhwpx ${info?.version ?? ''} is available`,
-      detail: `You are running version ${app.getVersion()}. Download the installer now?`,
-      buttons: ['Download', 'Cancel'],
-      defaultId: 0,
-      cancelId: 1,
-    }).then(({ response }) => {
-      if (response === 0) void autoUpdater.downloadUpdate().catch((error) => {
-        console.warn('[rauhwpx] update download failed:', error?.message ?? error);
-      });
-    });
-  });
-  autoUpdater.on('update-downloaded', (info) => {
-    if (updateDownloadReady) return;
-    updateDownloadReady = true;
-    const version = info?.version ?? '';
-    const isMac = process.platform === 'darwin';
-    const buttons = isMac ? ['Quit to install', 'Later'] : ['Install now', 'Later'];
-    void dialog.showMessageBox({
-      type: 'info',
-      message: `Rauhwpx ${version} is ready to install`,
-      detail: isMac
-        ? 'It will be installed when Rauhwpx quits.'
-        : 'The installer opens after Rauhwpx closes; Windows may ask you to confirm it because it is not signed yet.',
-      buttons,
-      defaultId: 1,
-      cancelId: 1,
-    }).then(({ response }) => {
-      if (response !== 0) return;
-      if (isMac) {
-        app.quit();
-        return;
-      }
-      updateDownloadReady = false;
-      setImmediate(() => autoUpdater.quitAndInstall(false, true));
-    });
+async function showUpToDate() {
+  await dialog.showMessageBox({
+    type: 'info',
+    message: 'Rauhwpx is up to date',
+    detail: `Version ${app.getVersion()} is the latest release.`,
+    buttons: ['OK'],
   });
 }
 
-async function checkForAppUpdates() {
-  if (manualUpdateCheck) return;
-  manualUpdateCheck = true;
-  try {
-    await autoUpdater.checkForUpdates();
-  } catch (error) {
-    console.warn('[rauhwpx] update check failed:', error?.message ?? error);
-    const { response } = await dialog.showMessageBox({
-      type: 'warning',
-      message: 'Rauhwpx could not check for updates',
-      detail: error?.message ?? String(error),
-      buttons: ['Open releases page', 'OK'],
-      defaultId: 1,
-    });
-    if (response === 0) void shell.openExternal(RELEASES_URL);
-  } finally {
-    manualUpdateCheck = false;
+async function checkForDebUpdates({ manual }) {
+  const response = await net.fetch(RELEASES_API_URL, {
+    headers: {
+      accept: 'application/vnd.github+json',
+      'x-github-api-version': '2022-11-28',
+    },
+    cache: 'no-store',
+  });
+  if (!response.ok) throw new Error(`GitHub Releases returned HTTP ${response.status}`);
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > 2 * 1024 * 1024) {
+    throw new Error('GitHub release metadata is too large');
   }
+  const release = await response.json();
+  if (!isNewerStableVersion(release?.tag_name, app.getVersion())) {
+    if (manual) await showUpToDate();
+    return null;
+  }
+  const asset = selectDebAsset(release?.assets, process.arch);
+  const { response: choice } = await dialog.showMessageBox({
+    type: 'info',
+    message: `Rauhwpx ${String(release.tag_name).replace(/^v/i, '')} is available`,
+    detail: `You are running version ${app.getVersion()}. Download the signed Debian package and install it with your system package manager.`,
+    buttons: ['Open download page', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (choice === 0) void shell.openExternal(asset?.browser_download_url ?? release?.html_url ?? RELEASES_URL);
+  return release;
+}
+
+function configureAutoUpdater() {
+  autoUpdater.logger = console;
+  const linuxAppImage = process.platform === 'linux' && Boolean(process.env.APPIMAGE);
+  // macOS and AppImage builds can stage compatible updates. Debian packages
+  // stay under the system package manager and only link to the signed release.
+  autoUpdater.autoDownload = process.platform === 'darwin' || linuxAppImage;
+  updateLifecycle.configureUpdates();
+  autoUpdater.on('update-not-available', () => {
+    if (!manualUpdateCheck) return;
+    void showUpToDate();
+  });
+  autoUpdater.on('update-available', (info) => {
+    const linuxDeb = process.platform === 'linux' && !process.env.APPIMAGE;
+    if (autoUpdater.autoDownload || (!manualUpdateCheck && !linuxDeb)) return;
+    void dialog.showMessageBox({
+      type: 'info',
+      message: `Rauhwpx ${info?.version ?? ''} is available`,
+      detail: linuxDeb
+        ? `You are running version ${app.getVersion()}. Download the signed Debian package from Releases.`
+        : `You are running version ${app.getVersion()}. Download the installer now?`,
+      buttons: linuxDeb ? ['Open download page', 'Cancel'] : ['Download', 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response !== 0) return;
+      if (linuxDeb) {
+        void shell.openExternal(RELEASES_URL);
+      } else {
+        interactiveUpdateDownload = true;
+        void autoUpdater.downloadUpdate().catch((error) => updateLifecycle.reportError(error)).finally(() => {
+          interactiveUpdateDownload = false;
+        });
+      }
+    }).catch((error) => updateLifecycle.reportError(error));
+  });
+}
+
+async function checkForAppUpdates({ manual = true } = {}) {
+  if (manual && updateLifecycle.hasDownloadedUpdate()) return updateLifecycle.offerInstall();
+  if (updateCheckPromise) {
+    if (manual) manualUpdateCheck = true;
+    return updateCheckPromise;
+  }
+  manualUpdateCheck = manual;
+  updateCheckPromise = (async () => {
+    try {
+      if (process.platform === 'linux' && !process.env.APPIMAGE) {
+        return await checkForDebUpdates({ manual: manualUpdateCheck });
+      }
+      const result = await autoUpdater.checkForUpdates();
+      // Keep a user-requested automatic download interactive until it settles.
+      if (manualUpdateCheck && result?.downloadPromise) await result.downloadPromise;
+      return result;
+    } catch (error) {
+      if (manualUpdateCheck) await updateLifecycle.reportError(error);
+      return null;
+    } finally {
+      manualUpdateCheck = false;
+      updateCheckPromise = null;
+    }
+  })();
+  return updateCheckPromise;
 }
 
 function installMenu() {
@@ -604,16 +913,16 @@ function installMenu() {
     {
       label: 'Edit',
       submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
+        documentEditMenuItem('undo', 'Undo', 'CmdOrCtrl+Z'),
+        documentEditMenuItem('redo', 'Redo', isMac ? 'Cmd+Shift+Z' : 'Ctrl+Y'),
         { type: 'separator' },
         { role: 'cut' },
         { role: 'copy' },
         { role: 'paste' },
         pasteWithoutFormatting,
-        { role: 'delete' },
+        documentEditMenuItem('delete', 'Delete'),
         { type: 'separator' },
-        { role: 'selectAll' },
+        documentEditMenuItem('select-all', 'Select All', 'CmdOrCtrl+A'),
       ],
     },
     { role: 'viewMenu' },
@@ -656,12 +965,22 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
       sandbox: true,
     },
   });
-  const session = sessions.addWindow(window);
+  const displayOwnerId = window.webContents.id;
+  const closeDisplayConnection = () => {
+    void cloudDisplayConnections.close(displayOwnerId);
+  };
+  const session = sessions.addWindow(window, { source: launch.source, openFiles: [] });
   session.generatedDocument = generatedDocument
     ? { launchDocumentId: randomUUID(), ...generatedDocument }
     : null;
+  session.cloudEditDraft = session.generatedDocument?.cloudEditDraft ?? null;
   session.allowCloseOnce = false;
   session.pendingCloseRequestId = null;
+  session.cloudLocked = false;
+  session.cloudHandoffId = null;
+  session.cloudTransferPromise = null;
+  session.cloudScope = { threadId: '', documentId: null };
+  session.cloudTransferIntent = null;
   window.on('close', (event) => {
     if (session.allowCloseOnce) return;
     // A dead renderer can never answer the Save–Discard–Cancel prompt.
@@ -677,11 +996,17 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
     });
   });
   window.on('closed', () => {
+    for (const [requestId, pending] of pendingCloudEditDraftSaves) {
+      if (pending.senderId !== session.senderId) continue;
+      pendingCloudEditDraftSaves.delete(requestId);
+      pending.reject(new Error('Cloud edit window closed before saving'));
+    }
+    closeDisplayConnection();
     documentLeases.releaseSession(session.sessionId);
     nativeFiles.releaseSession(session.sessionId);
     sessions.removeWindow(window);
     if (quitRequested) setImmediate(() => {
-      if (quitRequested) app.quit();
+      if (quitRequested && !quitting) app.quit();
     });
     const hub = hubOwner.context() ?? closeHubContext;
     void closeHubSession({
@@ -720,10 +1045,12 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
   });
   window.webContents.on('render-process-gone', (_event, details) => {
     console.warn('[rauhwpx] renderer process gone:', details?.reason);
+    closeDisplayConnection();
     // An unanswered close prompt died with the renderer; clear it so the
     // window can close (the close handler skips the prompt for dead renderers).
     session.pendingCloseRequestId = null;
   });
+  window.webContents.once('destroyed', closeDisplayConnection);
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/i.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
@@ -765,6 +1092,7 @@ async function openLaunch(request) {
 }
 
 function queueLaunch(request) {
+  if (quitting) return;
   if (!desktopReady) {
     pendingLaunches.push(request);
     return;
@@ -1014,19 +1342,430 @@ ipcMain.handle('desktop:document-release', (event) => {
   const session = sessionForEvent(event);
   documentLeases.releaseSession(session.sessionId);
 });
+ipcMain.handle('cloud:get-state', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  session.cloudScope = normalizeCloudScope(payload);
+  return scopedCloudSnapshot(session, null, { refresh: true });
+});
+ipcMain.handle('cloud:save-profile', async (event, payload) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().saveProfile(payload));
+});
+ipcMain.handle('cloud:test-profile', async (event, payload) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().testProfile(payload));
+});
+ipcMain.handle('cloud:provision', async (event, payload) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().provision(payload));
+});
+ipcMain.handle('cloud:pair', async (event, payload) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().pair(payload));
+});
+ipcMain.handle('cloud:select-server-mode', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().selectServerMode(payload?.mode));
+});
+ipcMain.handle('cloud:spawn-sandbox', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().spawnAppServer({
+    providerId: payload?.providerId ?? null,
+    selectedProvider: payload?.selectedProvider ?? null,
+  }));
+});
+ipcMain.handle('cloud:sandbox-status', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().appServerStatus());
+});
+ipcMain.handle('cloud:force-quit-account', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().forceQuitAccountCloud());
+});
+ipcMain.handle('cloud:reconnect-link', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().reconnectCloud());
+});
+ipcMain.handle('cloud:recreate-link', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().recreateCloud());
+});
+ipcMain.handle('cloud:teardown-sandbox', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().teardownAppServer({
+    force: payload?.force === true,
+  }));
+});
+ipcMain.handle('cloud:takeover-sandbox', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().takeoverAppServer());
+});
+ipcMain.handle('cloud:account-logout', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().logoutRaucloud());
+});
+ipcMain.handle('cloud:transfer-intent', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  const scope = normalizeCloudScope(payload);
+  session.cloudScope = scope;
+  if (payload.pending === true) {
+    if (!session.cloudTransferIntent) {
+      let settle;
+      const promise = new Promise((resolve) => { settle = resolve; });
+      session.cloudTransferIntent = { ...scope, promise, settle, settled: false };
+    }
+  } else if (session.cloudTransferIntent) {
+    if (!session.cloudTransferIntent.settled) {
+      session.cloudTransferIntent.settled = true;
+      session.cloudTransferIntent.settle(false);
+    }
+    session.cloudTransferIntent = null;
+  }
+  return scopedCloudSnapshot(session);
+});
+ipcMain.handle('cloud:read-reference', async (event, payload = {}) => {
+  sessionForEvent(event);
+  const id = String(payload.id ?? '');
+  const scope = String(payload.scope ?? '');
+  const scopeId = scope === 'global' ? 'global' : String(payload.scopeId ?? '');
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('Reference id is invalid');
+  if (!['chat', 'document', 'global'].includes(scope)) throw new Error('Reference scope is invalid');
+  if (!scopeId || scopeId.length > 256 || /[\u0000-\u001f\u007f]/.test(scopeId)) {
+    throw new Error('Reference scope id is invalid');
+  }
+  const context = await sessions.contextForSender(event.sender);
+  const url = new URL(context.hubUrl);
+  url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+  url.pathname = `/reference-files/${encodeURIComponent(id)}`;
+  url.searchParams.set('scope', scope);
+  url.searchParams.set('scopeId', scopeId);
+  url.searchParams.set('sessionId', context.sessionId);
+  const response = await net.fetch(url.toString(), {
+    headers: { authorization: `Bearer ${context.hubToken}` },
+    cache: 'no-store',
+  });
+  if (!response.ok) throw new Error(`Reference export failed with HTTP ${response.status}`);
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > 128 * 1024 * 1024) {
+    throw new Error('Reference export exceeds 128 MiB');
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > 128 * 1024 * 1024) throw new Error('Reference export size is invalid');
+  const expectedDigest = response.headers.get('x-content-sha256');
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  if (!expectedDigest || expectedDigest !== digest) throw new Error('Reference export failed integrity verification');
+  return { bytes: new Uint8Array(bytes), sha256: digest, size: bytes.length };
+});
+ipcMain.handle('cloud:transfer', async (event, payload) => {
+  const session = sessionForEvent(event);
+  session.cloudScope = normalizeCloudScope(payload);
+  if (payload?.permissionProfile !== 'unrestricted') {
+    throw new Error('Cloud agents require Full access');
+  }
+  // Recovery retries are checked against their durable handoff token below;
+  // an accepted retry can return its existing lease without another upload.
+  if (session.cloudLocked && !payload?.document?.restartToken) throw new Error('This document is already owned by a cloud session');
+  if (session.cloudTransferPromise) return scopedCloudSnapshot(session, await session.cloudTransferPromise);
+  const lease = documentLeases.leaseForSession(session.sessionId);
+  const transfer = requireCloudCoordinator().transfer(payload, {
+    originSessionId: session.sessionId,
+    originPath: lease?.canonicalPath ?? null,
+    originDigest: nativeFiles.originDigestForSessionPath(session.sessionId, lease?.canonicalPath),
+  });
+  session.cloudTransferPromise = transfer;
+  try {
+    const snapshot = await transfer;
+    const scoped = await scopedCloudSnapshot(session, snapshot);
+    if (session.cloudTransferIntent && !session.cloudTransferIntent.settled) {
+      session.cloudTransferIntent.settled = true;
+      session.cloudTransferIntent.settle(true);
+    }
+    return scoped;
+  } catch (error) {
+    if (session.cloudTransferIntent && !session.cloudTransferIntent.settled) {
+      session.cloudTransferIntent.settled = true;
+      session.cloudTransferIntent.settle(false);
+    }
+    throw error;
+  } finally {
+    session.cloudTransferPromise = null;
+  }
+});
+ipcMain.handle('cloud:command', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const operation = await requireCloudCoordinator().command(payload);
+  return scopedCloudSnapshot(session, operation);
+});
+ipcMain.handle('cloud:begin-edit', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  const sessionId = String(payload?.sessionId ?? '');
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) throw new Error('Invalid cloud session id');
+  let draft = await cloudEditDraftStore.get(sessionId);
+  let operation = null;
+  if (!draft) {
+    const prepared = await requireCloudCoordinator().prepareEditDraft({ sessionId });
+    draft = await cloudEditDraftStore.save(prepared.draft);
+    operation = prepared.operation ?? null;
+  }
+  const existing = cloudEditDraftWindow(sessionId, draft.editSessionId);
+  if (existing) {
+    if (existing.isMinimized()) existing.restore();
+    existing.show();
+    existing.focus();
+  } else {
+    await createWindow(
+      launchRequest({ source: 'cloud-edit-draft' }),
+      {
+        generatedDocument: {
+          fileName: draft.fileName,
+          bytes: draft.bytes,
+          readOnly: false,
+          cloudEditDraft: {
+            sessionId,
+            editSessionId: draft.editSessionId,
+            boundary: draft.boundary,
+          },
+        },
+      },
+    );
+  }
+  return {
+    snapshot: await scopedCloudSnapshot(session, operation),
+    editDraft: {
+      sessionId,
+      editSessionId: draft.editSessionId,
+      boundary: draft.boundary,
+      fileName: draft.fileName,
+      savedAt: draft.savedAt,
+    },
+  };
+});
+ipcMain.handle('cloud:edit-draft-save', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  const identity = session.cloudEditDraft;
+  const requestId = typeof payload?.requestId === 'string' ? payload.requestId : null;
+  const pending = requestId ? pendingCloudEditDraftSaves.get(requestId) : null;
+  try {
+    if (!identity
+      || payload?.sessionId !== identity.sessionId
+      || payload?.editSessionId !== identity.editSessionId
+      || payload?.boundary?.operationId !== identity.boundary?.operationId
+      || payload?.boundary?.revision !== identity.boundary?.revision
+      || payload?.boundary?.writerGeneration !== identity.boundary?.writerGeneration
+      || payload?.boundary?.stateVersion !== identity.boundary?.stateVersion) {
+      throw new Error('Cloud edit draft identity does not match this window');
+    }
+    const saved = await cloudEditDraftStore.save({
+      ...identity,
+      fileName: payload.fileName,
+      bytes: payload.bytes,
+    });
+    if (pending && pending.senderId === session.senderId) pending.resolve(saved);
+    return { savedAt: saved.savedAt, sha256: saved.sha256, size: saved.size };
+  } catch (error) {
+    if (pending && pending.senderId === session.senderId) pending.reject(error);
+    throw error;
+  }
+});
+ipcMain.handle('cloud:continue-edit', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  const sessionId = String(payload?.sessionId ?? '');
+  const editSessionId = String(payload?.editSessionId ?? '');
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)
+    || !/^[A-Za-z0-9._:-]{1,160}$/.test(editSessionId)) {
+    throw new Error('Invalid cloud edit identity');
+  }
+  const editorWindow = cloudEditDraftWindow(sessionId, editSessionId);
+  if (editorWindow) await requestCloudEditDraftSave(editorWindow);
+  const draft = await cloudEditDraftStore.get(sessionId);
+  if (!draft || draft.editSessionId !== editSessionId) {
+    throw new Error('Saved Cloud edit draft is unavailable');
+  }
+  const operation = await requireCloudCoordinator().resumeEditedDocument({
+    sessionId,
+    editSessionId,
+    boundary: draft.boundary,
+    bytes: draft.bytes,
+    fileName: draft.fileName,
+    changeSummary: typeof payload?.changeSummary === 'string'
+      ? payload.changeSummary.trim().slice(0, 4000)
+      : '',
+  });
+  await cloudEditDraftStore.remove(sessionId, editSessionId);
+  if (editorWindow && !editorWindow.isDestroyed()) {
+    const editorSession = sessions.sessionForSender(editorWindow.webContents);
+    editorSession.allowCloseOnce = true;
+    editorWindow.close();
+  }
+  return {
+    snapshot: await scopedCloudSnapshot(session, operation),
+    editDraft: null,
+  };
+});
+ipcMain.handle('cloud:dismiss-session', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const operation = await requireCloudCoordinator().dismissSession(payload);
+  return scopedCloudSnapshot(session, operation);
+});
+ipcMain.handle('cloud:complete-takeover', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const operation = await requireCloudCoordinator().completeTakeover(payload);
+  return scopedCloudSnapshot(session, operation);
+});
+ipcMain.handle('cloud:download-result', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const coordinator = requireCloudCoordinator();
+  return coordinator.withActiveHandoff(payload.sessionId, async () => {
+    const result = await coordinator.downloadResult(payload);
+    const handoff = await coordinator.handoffForSession(payload?.sessionId);
+    let conflict = 'none';
+    if (handoff?.originPath && handoff.documentDigest) {
+      try {
+        const current = await readFile(handoff.originPath);
+        if (createHash('sha256').update(current).digest('hex') !== (Object.hasOwn(handoff, 'originDigest') ? handoff.originDigest : handoff.documentDigest)) {
+          conflict = 'external-change';
+        }
+      } catch {
+        conflict = 'external-change';
+      }
+    }
+    const preview = await createWindow(
+      launchRequest({ source: 'cloud-result-preview' }),
+      { generatedDocument: { fileName: result.fileName, bytes: result.bytes, readOnly: true } },
+    );
+    return {
+      ...result,
+      snapshot: await scopedCloudSnapshot(session, result.snapshot),
+      previewOpened: Boolean(preview),
+      conflict,
+    };
+  });
+});
+ipcMain.handle('cloud:prepare-restart-document', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const sessionId = String(payload?.sessionId ?? '');
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) throw new Error('Invalid cloud session id');
+  return requireCloudCoordinator().prepareRestartDocument({ sessionId }, {
+    originSessionId: session.sessionId,
+    originPath: documentLeases.leaseForSession(session.sessionId)?.canonicalPath ?? null,
+  });
+});
+ipcMain.handle('cloud:download-checkpoint', async (event, payload) => {
+  sessionForEvent(event);
+  const sessionId = String(payload?.sessionId ?? '');
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) throw new Error('Invalid cloud session id');
+  const operationId = payload?.operationId == null ? null : String(payload.operationId);
+  if (operationId !== null && !/^[A-Za-z0-9._:-]{1,160}$/.test(operationId)) {
+    throw new Error('Invalid cloud checkpoint operation id');
+  }
+  const kind = payload?.kind ?? null;
+  if (kind !== null && kind !== 'turn') throw new Error('Invalid cloud checkpoint kind');
+  return requireCloudCoordinator().downloadCheckpoint({ sessionId, operationId, ...(kind ? { kind } : {}) });
+});
+ipcMain.handle('cloud:publish-checkpoint', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const sessionId = String(payload?.sessionId ?? '');
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) throw new Error('Invalid cloud session id');
+  const operationId = payload?.operationId == null ? null : String(payload.operationId);
+  if (operationId !== null && !/^[A-Za-z0-9._:-]{1,160}$/.test(operationId)) {
+    throw new Error('Invalid cloud checkpoint operation id');
+  }
+  const coordinator = requireCloudCoordinator();
+  return coordinator.withActiveHandoff(sessionId, async (handoff) => {
+    const lease = documentLeases.leaseForSession(session.sessionId);
+    if (!handoff || !lease || lease.identity.documentId !== handoff.originDocumentId
+      || lease.canonicalPath !== handoff.originPath) {
+      throw new Error('Open the origin document on its origin device before publishing it');
+    }
+    return coordinator.publishCheckpoint({ sessionId, operationId });
+  });
+});
+ipcMain.handle('cloud:display-open', async (event, payload = {}) => {
+  sessionForEvent(event);
+  const sessionId = String(payload?.sessionId ?? '');
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) throw new Error('Invalid cloud session id');
+  const sender = event.sender;
+  return cloudDisplayConnections.open(sender.id, sessionId, (displayEvent, connectionId) => {
+    if (!sender.isDestroyed()) sender.send('cloud:display-event', { connectionId, event: displayEvent });
+  });
+});
+ipcMain.handle('cloud:display-close', async (event, payload = {}) => {
+  sessionForEvent(event);
+  const connectionId = typeof payload?.connectionId === 'string' ? payload.connectionId : '';
+  if (!connectionId) return false;
+  return cloudDisplayConnections.close(event.sender.id, connectionId);
+});
+ipcMain.handle('cloud:display-input', async (event, payload = {}) => {
+  sessionForEvent(event);
+  const connectionId = typeof payload?.connectionId === 'string' ? payload.connectionId : '';
+  if (!connectionId) throw new Error('Invalid cloud display connection id');
+  return cloudDisplayConnections.sendInput(event.sender.id, connectionId, payload.event);
+});
+ipcMain.handle('cloud:resolve-result', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  const coordinator = requireCloudCoordinator();
+  return coordinator.withActiveHandoff(payload.sessionId, async (handoff) => {
+    if (!handoff?.recoveryPath || !handoff.resultDigest) throw new Error('Verified cloud recovery is unavailable');
+    const action = String(payload.action ?? '');
+    if (action === 'replace') {
+      const lease = documentLeases.leaseForSession(session.sessionId);
+      if (
+        !lease
+        || lease.identity.documentId !== handoff.originDocumentId
+        || lease.canonicalPath !== handoff.originPath
+      ) {
+        throw new Error('Open the origin document on its origin device before replacing it');
+      }
+    }
+    if (action === 'replace' || action === 'keep-both') {
+      const recoveryBytes = await readFile(handoff.recoveryPath);
+      validateNativeDocumentBytes(handoff.originPath || handoff.recoveryPath, recoveryBytes);
+    }
+    const resolution = await applyCloudRecovery({
+      recoveryPath: handoff.recoveryPath,
+      resultDigest: handoff.resultDigest,
+      originalPath: handoff.originPath,
+      originalDigest: Object.hasOwn(handoff, 'originDigest') ? handoff.originDigest : handoff.documentDigest,
+      action,
+      resolutionId: handoff.id,
+    });
+    for (const candidate of sessions.windows()) {
+      const candidateSession = sessions.sessionForSender(candidate.webContents);
+      const lease = documentLeases.leaseForSession(candidateSession.sessionId);
+      if (lease?.identity.documentId === handoff.originDocumentId) candidateSession.cloudLocked = false;
+    }
+    const snapshot = await scopedCloudSnapshot(session, await coordinator.recordResolution(handoff.id, resolution));
+    return {
+      ...resolution,
+      conflict: resolution.conflict ? 'external-change' : 'none',
+      preservedCopyName: resolution.action === 'keep-both' && resolution.path
+        ? basename(resolution.path)
+        : null,
+      snapshot,
+    };
+  });
+});
 ipcMain.handle('window:is-fullscreen', (event) => sessionForEvent(event).window.isFullScreen());
 ipcMain.handle('desktop:close-response', async (event, requestId, allowClose) => {
   const session = sessionForEvent(event);
   if (session.pendingCloseRequestId !== requestId) return false;
   session.pendingCloseRequestId = null;
-  if (!allowClose) {
-    quitRequested = false;
-    return false;
-  }
-  await persistNativeBookmarks();
-  session.allowCloseOnce = true;
-  session.window.close();
-  return true;
+  return completeWindowClose({
+    session,
+    allowClose,
+    cancelQuit: updateLifecycle.cancelQuit,
+    persistBookmarks: () => persistNativeBookmarks({ rejectOnError: true }),
+    timeoutMs: CLOUD_CLOSE_WAIT_MS,
+    onError: async (error) => {
+      console.warn('[rauhwpx] document close failed:', error);
+      await dialog.showMessageBox({
+        type: 'warning',
+        message: 'Rauhwpx could not close the document',
+        detail: error?.message ?? String(error),
+        buttons: ['OK'],
+      });
+    },
+  });
 });
 ipcMain.handle('agent-hub:ensure', async (event) => {
   sessionForEvent(event);
@@ -1038,9 +1777,7 @@ ipcMain.handle('agent-hub:ensure', async (event) => {
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('before-quit', () => {
-    quitRequested = true;
-  });
+  updateLifecycle.start();
 
   app.on('second-instance', (_event, argv, workingDirectory) => {
     queueLaunch(launchRequest({ argv, cwd: workingDirectory, source: 'second-instance' }));
@@ -1096,6 +1833,65 @@ if (!hasSingleInstanceLock) {
       filePath: join(app.getPath('userData'), 'secrets.json'),
       safeStorage,
     });
+    cloudAccountSession = createAccountSession({
+      secretStore: secretVault,
+      creditsClient: createRauCreditsClient({
+        baseUrl: raucloudBrokerUrl(),
+        fetchImpl: (...args) => net.fetch(...args),
+        // Per-operation deadlines are owned by the Cloud broker and abort this request.
+        timeoutMs: 4 * 60_000 + 30_000,
+      }),
+    });
+    const knownHostsPath = join(app.getPath('userData'), 'cloud', 'ssh-known-hosts');
+    cloudTransport = new CloudApiTransport({
+      tunnelManager: new SshTunnelManager({ knownHostsPath }),
+    });
+    const cloudClient = new CloudClient({
+      vault: secretVault,
+      fetchImpl: (...args) => net.fetch(...args),
+      transport: cloudTransport,
+    });
+    cloudCoordinator = new CloudCoordinator({
+      client: cloudClient,
+      store: new CloudHandoffStore({
+        filePath: join(app.getPath('userData'), 'cloud', 'handoffs.json'),
+      }),
+      provisioner: new CloudProvisioner({
+        installerPath: unpackedPath(join(__dirname, '..', 'cloud', 'install', 'install.sh')),
+        bootstrapDir: unpackedPath(join(__dirname, '..', 'cloud', 'release')),
+        appVersion: app.getVersion(),
+        knownHostsPath,
+      }),
+      recoveryDir: join(app.getPath('userData'), 'cloud', 'recovery'),
+      appServers: [createRaucloudBrokerProvider({
+        authorizeOwnedBackend: (request, options) => (
+          cloudAccountSession.authorizeOwnedBackend(request, options)
+        ),
+        getLocalCacheIdentity: async () => {
+          const token = await secretVault.get(ACCOUNT_SESSION_SECRET_ID);
+          return token ? createHash('sha256').update(`raucloud-merge-cache:${raucloudBrokerUrl()}:${token}`).digest('hex') : null;
+        },
+        getDeviceIdentity: raucloudDeviceIdentity,
+      })],
+      collectProviderAuth: (provider) => collectProviderAuth(provider, {
+        vault: secretVault,
+        homeDir: homedir(),
+      }),
+      collectImportedAuth: (provider) => collectImportedProviderAuth(provider, {
+        homeDir: homedir(),
+        env: process.env,
+        readSecret: (key) => secretVault.get(key),
+        readFileImpl: readFile,
+      }),
+    });
+    cloudCoordinator.on('event', queueCloudBroadcast);
+    await cloudCoordinator.start();
+    stopCloudContinuityTriggers = installCloudContinuityTriggers({
+      powerMonitor,
+      isOnline: () => net.isOnline(),
+      reconcile: (options) => cloudCoordinator?.reconcileContinuity(options),
+      keepWarm: (options) => cloudCoordinator?.prewarmAppServer(options),
+    });
     configureAutoUpdater();
     await loadNativeBookmarks();
     installMenu();
@@ -1117,9 +1913,9 @@ if (!hasSingleInstanceLock) {
       return;
     }
     void finishUniqueInstallMetric();
-    if (app.isPackaged && process.platform === 'darwin') {
+    if (app.isPackaged && ['darwin', 'linux'].includes(process.platform)) {
       setTimeout(() => {
-        void autoUpdater.checkForUpdates().catch(() => {});
+        void checkForAppUpdates({ manual: false });
       }, 4000);
     }
   }).catch((error) => {
@@ -1129,6 +1925,7 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on('activate', () => {
+    if (quitting) return;
     const windows = sessions.windows();
     if (windows.length === 0) {
       queueLaunch(launchRequest({ source: 'activate' }));
@@ -1142,21 +1939,5 @@ if (!hasSingleInstanceLock) {
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
-  });
-
-  let teardownStarted = false;
-  let teardownFinished = false;
-  app.on('will-quit', (event) => {
-    if (teardownFinished) return;
-    event.preventDefault();
-    if (teardownStarted) return;
-    teardownStarted = true;
-    quitting = true;
-    void hubOwner.teardown().catch((error) => {
-      console.warn('[rauhwpx] agent hub teardown did not finish:', error);
-    }).finally(() => {
-      teardownFinished = true;
-      app.exit(0);
-    });
   });
 }

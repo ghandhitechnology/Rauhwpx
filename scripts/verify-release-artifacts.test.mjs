@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 
+import { packagedStagedNativeExtractorPath } from '../desktop/native-rhwp-path.mjs';
 import {
   peMachine,
   verifyBlockmap,
@@ -199,7 +200,13 @@ test('full Windows release check rejects a wrong-architecture native engine', (t
 
   const app = join(directory, 'win-unpacked', 'Rauhwpx.exe');
   const engine = join(directory, 'win-unpacked', 'resources', 'bin', 'rhwp.exe');
+  const staged = packagedStagedNativeExtractorPath(
+    join(directory, 'win-unpacked', 'resources'),
+    'win32',
+    'x64',
+  );
   mkdirSync(join(directory, 'win-unpacked', 'resources', 'bin'), { recursive: true });
+  mkdirSync(dirname(staged), { recursive: true });
   writeFileSync(app, peFixture(0x8664));
   writeFileSync(engine, peFixture(0xaa64));
 
@@ -215,6 +222,19 @@ test('full Windows release check rejects a wrong-architecture native engine', (t
   );
 
   writeFileSync(engine, peFixture(0x8664));
+  writeFileSync(staged, peFixture(0xaa64));
+  assert.throws(
+    () => verifyReleaseArtifacts({
+      platform: 'windows',
+      architecture: 'x64',
+      releaseDir: directory,
+      hostPlatform: 'win32',
+      expectedVersion: '1.2.3',
+    }),
+    /not x64/,
+  );
+
+  writeFileSync(staged, peFixture(0x8664));
   assert.doesNotThrow(() => verifyReleaseArtifacts({
     platform: 'windows',
     architecture: 'x64',
@@ -222,6 +242,34 @@ test('full Windows release check rejects a wrong-architecture native engine', (t
     hostPlatform: 'win32',
     expectedVersion: '1.2.3',
   }));
+});
+
+test('full Windows release check requires the staged Studio extractor', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'rauhwpx-win-staged-extractor-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const installerName = 'Rauhwpx-1.2.3-x64.exe';
+  const installer = join(directory, installerName);
+  const installerBytes = peFixture(0x014c);
+  writeFileSync(installer, installerBytes);
+  writeFileSync(`${installer}.blockmap`, blockmapFixture(installerBytes.length));
+  writeFileSync(join(directory, 'latest.yml'), artifactDescriptor(installerName, installerBytes));
+
+  const app = join(directory, 'win-unpacked', 'Rauhwpx.exe');
+  const engine = join(directory, 'win-unpacked', 'resources', 'bin', 'rhwp.exe');
+  mkdirSync(join(directory, 'win-unpacked', 'resources', 'bin'), { recursive: true });
+  writeFileSync(app, peFixture(0x8664));
+  writeFileSync(engine, peFixture(0x8664));
+
+  assert.throws(
+    () => verifyReleaseArtifacts({
+      platform: 'windows',
+      architecture: 'x64',
+      releaseDir: directory,
+      hostPlatform: 'win32',
+      expectedVersion: '1.2.3',
+    }),
+    /is missing/,
+  );
 });
 
 test('macOS artifact check accepts the native arm64 Node executable', {

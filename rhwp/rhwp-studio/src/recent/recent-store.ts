@@ -19,8 +19,10 @@
 
 import type { FileSystemFileHandleLike } from '@/command/file-system-access';
 import {
-  IDB_OPERATION_TIMEOUT_MS,
   openIndexedDatabase,
+  requestResult,
+  transactionDone,
+  withDatabase,
   withTimeout,
 } from '../core/idb-open.ts';
 
@@ -96,10 +98,6 @@ function pruneLiveHandles(keep: Set<string>): void {
   }
 }
 
-function idbAvailable(): boolean {
-  return typeof indexedDB !== 'undefined';
-}
-
 function createRecentId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `recent_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -109,7 +107,6 @@ function createDocumentId(): string {
 }
 
 function openDb(): Promise<IDBDatabase | null> {
-  if (!idbAvailable()) return Promise.resolve(null);
   return openIndexedDatabase(DB_NAME, DB_VER, (db, event) => {
     if (!db.objectStoreNames.contains(STORE)) {
       db.createObjectStore(STORE, { keyPath: 'id' });
@@ -122,44 +119,24 @@ function openDb(): Promise<IDBDatabase | null> {
   });
 }
 
-async function withDb<T>(fn: (db: IDBDatabase) => Promise<T>, fallback: () => Promise<T>): Promise<T> {
-  const db = await openDb();
-  if (!db) return fallback();
-  try {
-    return await withTimeout(fn(db), IDB_OPERATION_TIMEOUT_MS, DB_NAME);
-  } catch (error) {
-    console.warn(`[recent] IndexedDB 지연, 메모리 폴백:`, error);
-    return fallback();
-  } finally {
-    db.close();
-  }
+function withDb<T>(fn: (db: IDBDatabase) => Promise<T>, fallback: () => Promise<T>) {
+  return withDatabase(openDb, DB_NAME, fn, fallback);
 }
 
 function getAllRows(db: IDBDatabase): Promise<RecentDoc[]> {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readonly');
-    const req = tx.objectStore(STORE).getAll();
-    req.onsuccess = () => resolve((req.result as RecentDoc[]) ?? []);
-    req.onerror = () => reject(req.error);
-  });
+  return requestResult(db.transaction(STORE, 'readonly').objectStore(STORE).getAll() as IDBRequest<RecentDoc[]>);
 }
 
 function putRow(db: IDBDatabase, row: RecentDoc): Promise<void> {
-  return withTimeout(new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(row);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  }), 800, 'recent-put');
+  const tx = db.transaction(STORE, 'readwrite');
+  tx.objectStore(STORE).put(row);
+  return withTimeout(transactionDone(tx), 800, 'recent-put');
 }
 
 function deleteRow(db: IDBDatabase, id: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  const tx = db.transaction(STORE, 'readwrite');
+  tx.objectStore(STORE).delete(id);
+  return transactionDone(tx);
 }
 
 /** 동일 파일 판정 — 핸들 비교가 불가능할 때만 원본 digest로 폴백한다. */
@@ -297,13 +274,11 @@ export async function clearRecentDocs(): Promise<void> {
   memory.clear();
   liveHandles.clear();
   await withDb(
-    async (db) =>
-      new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(STORE, 'readwrite');
-        tx.objectStore(STORE).clear();
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      }),
+    async (db) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).clear();
+      await transactionDone(tx);
+    },
     async () => {},
   );
 }

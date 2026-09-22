@@ -169,9 +169,9 @@ export class PendingOverlayRenderer {
   private pinnedKey: string | null = null;
   private renderRafId: number | null = null;
   // 파라미터 프로퍼티 대신 명시적 할당 (node --test strip-only 모드 호환).
-  private deps: { canvasView: CanvasView; wasm: WasmBridge; eventBus: EventBus };
+  private deps: { canvasView: CanvasView; wasm: WasmBridge; eventBus: EventBus; getCaretPosition: () => DocumentPosition | null };
 
-  constructor(deps: { canvasView: CanvasView; wasm: WasmBridge; eventBus: EventBus }) {
+  constructor(deps: { canvasView: CanvasView; wasm: WasmBridge; eventBus: EventBus; getCaretPosition: () => DocumentPosition | null }) {
     this.deps = deps;
     this.markerLayer = document.createElement('div');
     this.markerLayer.className = 'ag-pending-layer ag-pending-marker-layer';
@@ -742,7 +742,7 @@ export class PendingOverlayRenderer {
   }
 
   private inspectCaret(): void {
-    const position = this.deps.wasm.getCaretPosition();
+    const position = this.deps.getCaretPosition();
     const hit = position ? this.hitRegions.find((region) => this.caretInRange(position, region.range)) : undefined;
     this.pinnedKey = hit?.key ?? null;
     if (hit) this.showPopover(hit, true);

@@ -21,11 +21,11 @@ import { RevisionTracker } from './revision.ts';
 import { AgentToolExecutor } from './tool-executor.ts';
 import { PendingEditManager } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
+import { readProviderQuota, readRemoteBalance } from './provider-quota-protocol.ts';
 import { PendingRequestRegistry } from './pending-requests.ts';
 import { AgentTypewriterReveal } from './typewriter-reveal.ts';
 import { deriveAgentEditingLease, planModeAllowsUserEditing } from './editing-lease.ts';
 import {
-  setCursorModels as setCursorModelRegistry,
   setPiModels as setPiModelRegistry,
 } from './models.ts';
 import {
@@ -66,10 +66,14 @@ import type {
   PiCatalogModel,
   PiModelConfig,
   PiStatus,
+  BrowserbaseCredentialSource,
+  BrowserbaseOverride,
+  BrowserbaseStatus,
   ProductSkillFile,
   ProviderHealth,
   ProviderStatusMap,
   ProviderUsage,
+  CodexResetResult,
   ReferenceFile,
   ReferenceScope,
   ReferenceScopeContext,
@@ -100,6 +104,13 @@ import type {
   UserQuestionOutcome,
 } from './types.ts';
 
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const digest = await crypto.subtle.digest('SHA-256', copy.buffer);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 export function providerTurnEndMatches(
   activeTurnId: string | null,
   eventTurnId: string | null,
@@ -116,8 +127,14 @@ export interface ChatHistoryEntry {
   text: string;
 }
 
+/** Frontend consumers only need the pending-edit review surface. */
+export type SidebarBridge = Omit<AgentBridge, 'pendingEdits'> & {
+  readonly pendingEdits: Pick<PendingEditManager, 'getChangeSets' | 'onChange' | 'approve' | 'reject'>;
+};
+
 export interface AgentBridge {
   readonly pendingEdits: PendingEditManager;
+  getDocumentSelectionIdentity(): { documentId: string | null; revision: number };
   getConnectionState(): 'connecting' | 'connected' | 'disconnected' | 'replaced';
   getActiveAgent(): AgentName | null;
   isTurnRunning(): boolean;
@@ -133,7 +150,7 @@ export interface AgentBridge {
   reconnectNow(): Promise<void>;
   /** 로컬 CLI 설치 상태. refresh=true 면 허브가 새로 프로브한다. */
   requestProviderStatus(refresh?: boolean): Promise<ProviderStatusMap | null>;
-  requestAgentSetupStatus(): Promise<AgentSetupStatusMap | null>;
+  requestAgentSetupStatus(refresh?: boolean): Promise<AgentSetupStatusMap | null>;
   requestAccountStatus(): Promise<AccountSessionStatus | null>;
   loginAccount(): Promise<AccountLoginStart | null>;
   submitAccountAuthCode(authRunId: string, code: string): void;
@@ -142,12 +159,16 @@ export interface AgentBridge {
   installAgent(agent: AgentName): Promise<AgentSetupStatusMap | null>;
   authenticateAgent(agent: AgentName, method: AgentAuthMethod, key?: string): Promise<AgentSetupAuthStart | null>;
   /** 브라우저 로그인 뒤 받은 인증 코드를 진행 중인 CLI 로그인에 전달한다. */
+  resumeSetupTerminal(agent: AgentName, authRunId: string): void;
+  sendSetupTerminalInput(agent: AgentName, authRunId: string, data: string): void;
+  resizeSetupTerminal(agent: AgentName, authRunId: string, cols: number, rows: number): void;
   submitAgentAuthCode(agent: AgentName, authRunId: string, code: string): void;
   cancelAgentSetup(agent: AgentName, authRunId: string): void;
   /** 이 기기의 Rau 키만 지운다. 호스티드 $5 키는 서버에 남는다. */
   disconnectAgent(agent: AgentName): Promise<AgentSetupStatusMap | null>;
   /** 누적 사용량 요약. 응답이 없으면 null. */
   requestUsage(refresh?: boolean): Promise<UsageSummary | null>;
+  consumeCodexReset(idempotencyKey: string, accountKey: string): Promise<CodexResetResult>;
   /** 요금제를 바꾸고 갱신된 요약을 돌려받는다. */
   setUsagePlan(agent: AgentName, plan: string): Promise<UsageSummary | null>;
   /** CLIProxyAPI 관리 API 에 연결해 공식 요금제 사용량을 받는다. */
@@ -166,6 +187,15 @@ export interface AgentBridge {
   setPiModels(
     models: Array<{ id: string; name: string; defaultEffort?: string }>,
   ): Promise<PiStatus | null>;
+  /** 허브가 보는 Browserbase 설정 상태. */
+  requestBrowserbaseStatus(): Promise<BrowserbaseStatus | null>;
+  /**
+   * 앱에서 입력한 Browserbase 자격 증명을 허브에 보낸다. 허브가 키를 확인하고
+   * 앱을 쓰는 동안만 환경 변수 대신 쓴다. 재연결 때마다 마지막 값을 다시 보낸다.
+   */
+  setBrowserbaseCredentials(override: BrowserbaseOverride): Promise<BrowserbaseStatus | null>;
+  /** 덮어쓰기를 거두고 허브 환경 변수로 돌아간다. */
+  clearBrowserbaseCredentials(): Promise<BrowserbaseStatus | null>;
   startChat(agent: AgentName, model?: string, effort?: string, force?: boolean, permissionProfile?: PermissionProfile, workflow?: AgentWorkflow, threadId?: string, documentId?: string | null, documentName?: string | null, history?: ChatHistoryEntry[]): void;
   /** 허브 세션을 폐기하고 새 채팅을 시작할 수 있게 한다. */
   stopChat(): void;
@@ -173,7 +203,13 @@ export interface AgentBridge {
   requestTitle(threadId: string, preview: string): string;
   /** 커밋 메시지는 부수 정보다. 오프라인, 실패, 타임아웃이면 null. */
   requestCheckpointTitle(input: CheckpointTitleRequest): Promise<CheckpointTitleResult | null>;
-  sendUserMessage(text: string, skillName?: string, stagedReferenceIds?: string[]): Promise<string | null>;
+  sendUserMessage(
+    text: string,
+    skillName?: string,
+    stagedReferenceIds?: string[],
+    requireReceipt?: boolean,
+    signal?: AbortSignal,
+  ): Promise<string | null>;
   listTemplates(): Promise<TemplateCatalog>;
   addTemplate(file: File, name?: string): Promise<DocumentTemplate>;
   renameTemplate(id: string, name: string): Promise<DocumentTemplate>;
@@ -187,6 +223,7 @@ export interface AgentBridge {
   /** 참고자료 원본은 HTTP로 스트리밍하고, 브라우저에는 메타데이터만 돌려준다. */
   uploadReference(scope: ReferenceScope, scopeId: string, file: File): Promise<ReferenceFile>;
   listReferences(scope: ReferenceScope, scopeId: string): Promise<ReferenceFile[]>;
+  downloadReference(file: Pick<ReferenceFile, 'id' | 'scope' | 'scopeId'>): Promise<Uint8Array>;
   searchReferences(query: string, scope: ReferenceScope, scopeId: string, limit?: number): Promise<ReferenceSearchHit[]>;
   deleteReference(file: Pick<ReferenceFile, 'id' | 'scope' | 'scopeId'>): Promise<void>;
   setWorkflow(workflow: AgentWorkflow): void;
@@ -218,6 +255,7 @@ export interface AgentBridge {
   /** 현재 막힌 프로바이더 요청에 답한다. 재연결 재시도에도 같은 응답 ID를 쓴다. */
   answerUserQuestion(interactionId: string, answers: Record<string, UserQuestionAnswer>): string;
   interrupt(): void;
+  interruptIfIdle(): boolean;
   onEvent(cb: (e: SidebarEvent) => void): () => void;
   dispose(): void;
 }
@@ -283,7 +321,7 @@ const STUDIO_INSTANCE_ID = globalThis.crypto?.randomUUID?.()
   ?? `studio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
 function isAgentName(v: unknown): v is AgentName {
-  return v === 'claude' || v === 'codex' || v === 'pi' || v === 'grok' || v === 'cursor' || v === 'rau';
+  return v === 'claude' || v === 'codex' || v === 'pi';
 }
 
 function isBoundedText(value: unknown, max: number): value is string {
@@ -704,17 +742,14 @@ function readProviderHealth(value: unknown): ProviderHealth {
   };
 }
 
-/** 허브가 보낸 provider-status 를 항상 다섯 프로바이더가 있는 형태로 정규화한다. */
+/** 허브가 보낸 provider-status 를 항상 모든 프로바이더가 있는 형태로 정규화한다. */
 function readProviderStatus(value: unknown): ProviderStatusMap {
   const src = (value ?? {}) as Record<string, unknown>;
   return {
-    rau: readProviderHealth(src['rau']),
     claude: readProviderHealth(src['claude']),
     codex: readProviderHealth(src['codex']),
     pi: readProviderHealth(src['pi']),
-    grok: readProviderHealth(src['grok']),
-    cursor: readProviderHealth(src['cursor']),
-  };
+  } as ProviderStatusMap;
 }
 
 function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatus {
@@ -725,6 +760,7 @@ function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatu
   return {
     agent,
     available: src['available'] === true,
+    ...(typeof src['terminalAuthSupported'] === 'boolean' ? { terminalAuthSupported: src['terminalAuthSupported'] } : {}),
     connected: src['connected'] === true,
     installed: src['installed'] === true,
     installing: src['installing'] === true,
@@ -745,21 +781,16 @@ function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatu
     latestVersion: typeof src['latestVersion'] === 'string' ? src['latestVersion'] : null,
     updateRequired: src['updateRequired'] === true,
     error: typeof src['error'] === 'string' ? src['error'] : null,
-    // cursor 만 CLI 가 알려 주는 모델 목록을 함께 싣는다.
-    ...(isStringArray(src['models']) ? { models: src['models'] } : {}),
   };
 }
 
 function readAgentSetupStatuses(value: unknown): AgentSetupStatusMap {
   const src = (value ?? {}) as Record<string, unknown>;
   return {
-    rau: readAgentSetupStatus(src['rau'], 'rau'),
     claude: readAgentSetupStatus(src['claude'], 'claude'),
     codex: readAgentSetupStatus(src['codex'], 'codex'),
     pi: readAgentSetupStatus(src['pi'], 'pi'),
-    grok: readAgentSetupStatus(src['grok'], 'grok'),
-    cursor: readAgentSetupStatus(src['cursor'], 'cursor'),
-  };
+  } as AgentSetupStatusMap;
 }
 
 function readAccountSessionStatus(value: unknown): AccountSessionStatus {
@@ -914,28 +945,31 @@ function readUsageSummary(value: unknown): UsageSummary | null {
   const plans = (src['plans'] ?? {}) as Record<string, unknown>;
   const providers = (src['providers'] ?? {}) as Record<string, unknown>;
   const openrouter = readOpenRouterCredits(src['openrouter']);
-  const rau = readOpenRouterCredits(src['rau']);
   return {
     plans: {
       claude: typeof plans['claude'] === 'string' ? plans['claude'] : 'pro',
       codex: typeof plans['codex'] === 'string' ? plans['codex'] : 'plus',
       pi: typeof plans['pi'] === 'string' ? plans['pi'] : 'api',
-      grok: typeof plans['grok'] === 'string' ? plans['grok'] : 'api',
-      cursor: typeof plans['cursor'] === 'string' ? plans['cursor'] : 'api',
-      rau: typeof plans['rau'] === 'string' ? plans['rau'] : 'api',
     },
     providers: {
       claude: readProviderUsage(providers['claude']),
       codex: readProviderUsage(providers['codex']),
       pi: readProviderUsage(providers['pi']),
-      grok: readProviderUsage(providers['grok']),
-      cursor: readProviderUsage(providers['cursor']),
-      rau: readProviderUsage(providers['rau']),
     },
     cliproxy: readCliproxyStatus(src['cliproxy']),
+    ...(src['limits'] && typeof src['limits'] === 'object' ? {
+      limits: {
+        claude: readProviderQuota((src['limits'] as Record<string, unknown>)['claude']),
+        codex: readProviderQuota((src['limits'] as Record<string, unknown>)['codex']),
+      },
+    } : {}),
+    ...(src['balances'] && typeof src['balances'] === 'object' ? {
+      balances: Object.fromEntries(['openrouter']
+        .filter((provider) => provider in (src['balances'] as Record<string, unknown>))
+        .map((provider) => [provider, readRemoteBalance((src['balances'] as Record<string, unknown>)[provider])])),
+    } : {}),
     ...(openrouter ? { openrouter } : {}),
-    ...(rau ? { rau } : {}),
-  };
+  } as UsageSummary;
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -973,6 +1007,30 @@ function readPiModels(value: unknown): PiModelConfig[] {
     if (model) out.push(model);
   }
   return out;
+}
+
+function readCredentialSource(value: unknown): BrowserbaseCredentialSource {
+  return value === 'studio' || value === 'env' ? value : null;
+}
+
+function readBrowserbaseStatus(value: unknown): BrowserbaseStatus {
+  const src = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+  const browsers = Array.isArray(src['browsers'])
+    ? (src['browsers'] as unknown[]).flatMap((entry) => {
+      const row = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>;
+      return typeof row['id'] === 'string' ? [{ id: row['id'], connected: row['connected'] === true }] : [];
+    })
+    : [];
+  return {
+    configured: src['configured'] === true,
+    missing: Array.isArray(src['missing']) ? (src['missing'] as unknown[]).filter((v): v is string => typeof v === 'string') : [],
+    keySource: readCredentialSource(src['keySource']),
+    keyTail: typeof src['keyTail'] === 'string' ? src['keyTail'] : null,
+    projectId: typeof src['projectId'] === 'string' ? src['projectId'] : null,
+    projectSource: readCredentialSource(src['projectSource']),
+    geminiSource: readCredentialSource(src['geminiSource']),
+    browsers,
+  };
 }
 
 function readPiStatus(value: unknown): PiStatus {
@@ -1028,7 +1086,7 @@ function readCheckpointTitleResult(value: unknown): CheckpointTitleResult | null
   const provider = src['provider'];
   const title = src['title'];
   const revision = src['titleRevision'];
-  if (provider !== 'pi' && provider !== 'codex' && provider !== 'grok' && provider !== 'claude') return null;
+  if (provider !== 'pi' && provider !== 'codex' && provider !== 'claude') return null;
   if (typeof src['commitId'] !== 'string' || !src['commitId']) return null;
   if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return null;
   if (typeof title !== 'string' || !title || title.trim() !== title
@@ -1073,6 +1131,8 @@ export class AgentBridgeImpl implements AgentBridge {
   private hubLaunch: Promise<boolean> | null = null;
   private reconnectSeq = 0;
   private requests = new PendingRequestRegistry();
+  /** 마지막으로 보낸 Browserbase 덮어쓰기 — 허브가 다시 뜨면 기억을 잃으므로 연결마다 재전송한다. */
+  private browserbaseOverride: BrowserbaseOverride | null = null;
   /** 끊긴 사이에 완료된 도구 결과 — 재연결 직후 다시 보낸다. */
   private toolResponses = new ToolResponseBuffer();
   /** 사용자 답변은 로컬에서 만료시키지 않고, 재연결 뒤에도 같은 응답 ID로 다시 보낸다. */
@@ -1101,6 +1161,7 @@ export class AgentBridgeImpl implements AgentBridge {
   private turnRunning = false;
   /** Hub-issued identity for the one root provider turn allowed to mutate. */
   private activeProviderTurnId: string | null = null;
+  private interruptedProviderTurnId: string | null = null;
   private editingAgent: AgentName = 'codex';
   private activeToolRequests = 0;
   private activeToolRequestControllers = new Map<number, {
@@ -1119,7 +1180,9 @@ export class AgentBridgeImpl implements AgentBridge {
   private workflowBeforeSwitch: { workflow: AgentWorkflow; phase: AgentPhase } | null = null;
   private turnHadError = false;
   private pendingTurnOpen = false;
+  private chatStartSent = false;
   private pendingChatStart: {
+    requestId: string;
     agent: AgentName;
     model?: string;
     effort?: string;
@@ -1153,6 +1216,7 @@ export class AgentBridgeImpl implements AgentBridge {
   constructor(deps: AgentBridgeDeps, opts?: AgentBridgeOptions) {
     this.revision = new RevisionTracker(deps.eventBus);
     this.overlay = new PendingOverlayRenderer({
+      getCaretPosition: () => deps.inputHandler.getCursorPosition(),
       canvasView: deps.canvasView,
       wasm: deps.wasm,
       eventBus: deps.eventBus,
@@ -1169,10 +1233,9 @@ export class AgentBridgeImpl implements AgentBridge {
       wasm: deps.wasm,
       eventBus: deps.eventBus,
     });
-    // 승인/거절/무효화 시 진행 중인 타자기 공개를 즉시 완료한다 — 커버가
-    // 사라진 op 위에 남지 않도록.
+    // 검토 대기/승인/거절/무효화 시 타자기 커버를 걷어 최종 텍스트를 보여 준다.
     this.revealUnsub = this.pendingEdits.onChange((e) => {
-      if (e.type === 'approved' || e.type === 'rejected' || e.type === 'invalidated') {
+      if (e.type === 'set-finalized' || e.type === 'approved' || e.type === 'rejected' || e.type === 'invalidated') {
         this.reveal.finishAll();
       }
     });
@@ -1185,6 +1248,7 @@ export class AgentBridgeImpl implements AgentBridge {
       loadTemplateBytes: (template) => this.downloadTemplateBytes(template),
       getDocumentSourcePath: () => getNativeFileSourcePath(deps.wasm.currentFileHandle),
       isReadOnly: deps.isReadOnly,
+      canPublishCloudDocument: deps.canPublishCloudDocument,
     });
 
     this.options = opts;
@@ -1198,6 +1262,10 @@ export class AgentBridgeImpl implements AgentBridge {
     document.addEventListener('visibilitychange', this.onVisibility);
     this.setState('connecting');
     void this.initializeConnection();
+  }
+
+  getDocumentSelectionIdentity(): { documentId: string | null; revision: number } {
+    return { documentId: this.documentId, revision: this.revision.revision };
   }
 
   private async initializeConnection() {
@@ -1421,6 +1489,7 @@ export class AgentBridgeImpl implements AgentBridge {
       if (this.disposed || this.ws !== ws) return;
       this.clearConnectTimer();
       this.reconnectAttempt = 0;
+      this.chatStartSent = false;
       this.setState('connected');
       // 끊긴 사이에 끝난 도구 결과를 먼저 흘려보낸다 — 허브의 인플라이트 호출이
       // 30초 타임아웃까지 가지 않고 이 응답으로 마무리된다.
@@ -1432,23 +1501,11 @@ export class AgentBridgeImpl implements AgentBridge {
         this.pendingInterrupt = false;
       }
       this.flushPendingQuestionAnswer();
+      if (this.browserbaseOverride !== null) {
+        this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'browserbase-credentials-set', ...this.browserbaseOverride });
+      }
       if (this.pendingChatStart !== null) {
-        const pending = this.pendingChatStart;
-        this.sendJson({
-          v: AGENT_PROTOCOL_VERSION,
-          type: 'chat-start',
-          agent: pending.agent,
-          workflow: pending.workflow,
-          threadId: pending.threadId,
-          documentId: pending.documentId,
-          documentName: pending.documentName,
-          history: pending.history,
-          ...(pending.model ? { model: pending.model } : {}),
-          ...(pending.effort ? { effort: pending.effort } : {}),
-          ...(pending.permissionProfile ? { permissionProfile: pending.permissionProfile } : {}),
-          ...(pending.serviceTier ? { serviceTier: pending.serviceTier } : {}),
-          ...(pending.force ? { force: true } : {}),
-        });
+        this.sendPendingChatStart();
       }
     };
     ws.onmessage = (ev) => {
@@ -1740,6 +1797,8 @@ export class AgentBridgeImpl implements AgentBridge {
   private handleMessage(msg: any): void {
     switch (msg.type) {
       case 'welcome': {
+        // A reconnect snapshot predates the start command replayed on socket open.
+        if (this.pendingChatStart) return;
         const session = msg.session;
         const sessionThreadId = typeof session?.threadId === 'string' ? session.threadId : '';
         if (this.threadId && sessionThreadId !== this.threadId) {
@@ -1749,10 +1808,11 @@ export class AgentBridgeImpl implements AgentBridge {
         }
         const wasRunning = this.turnRunning;
         if (session && isAgentName(session.agent)) {
+          this.selectedAgent = session.agent;
           this.activeAgent = session.agent;
           this.editingAgent = session.agent;
           if (typeof session.model === 'string') this.selectedModel = session.model;
-          if (typeof session.effort === 'string') this.selectedEffort = session.effort;
+          if (typeof session.effort === 'string' || session.effort === null) this.selectedEffort = session.effort;
           if (sessionThreadId) this.threadId = sessionThreadId;
           if (typeof session.documentId === 'string' || session.documentId === null) this.documentId = session.documentId;
           if (typeof session.documentName === 'string' || session.documentName === null) this.documentName = session.documentName;
@@ -1927,18 +1987,21 @@ export class AgentBridgeImpl implements AgentBridge {
         break;
       }
       case 'chat-started': {
+        if (typeof msg.requestId === 'string' && msg.requestId !== this.pendingChatStart?.requestId) break;
         // 스레드를 빠르게 오가면 이전 chat-start 응답이 뒤늦게 도착할 수 있다.
         // 마지막 startChat 이 고른 정체성을 절대 덮어쓰지 않는다.
         if (typeof msg.threadId === 'string' && this.threadId && msg.threadId !== this.threadId) break;
         const replacedSession = this.pendingChatStart !== null;
         this.pendingChatStart = null;
+        this.chatStartSent = false;
         if (replacedSession) this.clearPendingQuestionCancellation();
         if (isAgentName(msg.agent)) {
+          this.selectedAgent = msg.agent;
           this.activeAgent = msg.agent;
           this.editingAgent = msg.agent;
         }
-        if (typeof msg.model === 'string') this.selectedModel = msg.model;
-        if (typeof msg.effort === 'string') this.selectedEffort = msg.effort;
+        if (typeof msg.model === 'string' || msg.model === null) this.selectedModel = msg.model;
+        if (typeof msg.effort === 'string' || msg.effort === null) this.selectedEffort = msg.effort;
         if (msg.permissionProfile === 'safe' || msg.permissionProfile === 'unrestricted') this.permissionProfile = msg.permissionProfile;
         if (msg.serviceTier === 'fast' || msg.serviceTier === 'standard') this.serviceTier = msg.serviceTier;
         if (typeof msg.threadId === 'string') this.threadId = msg.threadId;
@@ -2153,9 +2216,6 @@ export class AgentBridgeImpl implements AgentBridge {
       }
       case 'agent-setup-status': {
         const statuses = readAgentSetupStatuses(msg.statuses);
-        // cursor 모델 레지스트리를 이벤트 발행 전에 갱신해, 리스너가
-        // modelsForAgent('cursor') 를 즉시 최신 상태로 읽을 수 있게 한다.
-        if (statuses.cursor.models) setCursorModelRegistry(statuses.cursor.models);
         if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, statuses);
         this.emit({ type: 'agent-setup-status', statuses });
         break;
@@ -2171,6 +2231,15 @@ export class AgentBridgeImpl implements AgentBridge {
             expiresAt: typeof msg.expiresAt === 'string' ? msg.expiresAt : null,
           } satisfies AgentSetupAuthStart : null);
         }
+        break;
+      }
+      case 'agent-setup-terminal': {
+        if (!isAgentName(msg.agent) || typeof msg.authRunId !== 'string') break;
+        this.emit({ type: 'agent-setup-terminal', agent: msg.agent, authRunId: msg.authRunId,
+          ...(typeof msg.data === 'string' ? { data: msg.data } : {}),
+          ...(msg.ready === true ? { ready: true } : {}),
+          ...(msg.reset === true ? { reset: true } : {}),
+        });
         break;
       }
       case 'agent-setup-progress': {
@@ -2255,6 +2324,22 @@ export class AgentBridgeImpl implements AgentBridge {
         if (usage) this.emit({ type: 'usage-report', usage });
         break;
       }
+      case 'codex-reset-result': {
+        const usage = readUsageSummary(msg.usage);
+        const outcome = msg.outcome;
+        if (usage && (outcome === 'reset' || outcome === 'nothingToReset'
+          || outcome === 'noCredit' || outcome === 'alreadyRedeemed')) {
+          if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, { usage, outcome });
+          this.emit({ type: 'usage-report', usage });
+        } else if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        break;
+      }
+      case 'codex-reset-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, {
+          error: typeof msg.message === 'string' ? msg.message : '초기화에 실패했어요.',
+        });
+        break;
+      }
       case 'usage-error':
       case 'provider-error': {
         // 사용량·프로브는 부수 정보다 — 실패는 던지지 않고 "모름(null)" 으로 닫는다.
@@ -2311,7 +2396,32 @@ export class AgentBridgeImpl implements AgentBridge {
         });
         break;
       }
+      case 'browserbase-status': {
+        const status = readBrowserbaseStatus(msg.status);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, status);
+        this.emit({ type: 'browserbase-status', status });
+        break;
+      }
+      case 'browserbase-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        this.emit({
+          type: 'browserbase-error',
+          requestId: typeof msg.requestId === 'string' ? msg.requestId : '',
+          code: typeof msg.code === 'string' ? msg.code : 'BROWSERBASE_ERROR',
+          message: typeof msg.message === 'string' ? msg.message : 'Browserbase request failed',
+        });
+        break;
+      }
       case 'chat-error': {
+        if (typeof msg.requestId === 'string' && msg.requestId !== this.pendingChatStart?.requestId) break;
+        if (this.pendingChatStart && msg.session && isAgentName(msg.session.agent)) {
+          // Validation/busy rejection leaves the previous provider alive.
+          for (const message of this.queuedMessages) message.resolve(null);
+          this.queuedMessages = [];
+          this.pendingChatStart = null;
+          this.chatStartSent = false;
+          this.handleMessage({ ...msg.session, type: 'chat-started' });
+        }
         const chatStartFailed = this.pendingChatStart !== null;
         // 시작 실패 시 대기 중이던 메시지를 정리하지 않으면 sendUserMessage promise가
         // 영원히 미해결로 남아 컴포저가 잠기고, 다음 chat-started에 스테일 메시지가 흘러간다.
@@ -2328,6 +2438,7 @@ export class AgentBridgeImpl implements AgentBridge {
         for (const message of this.queuedMessages) message.resolve(null);
         this.queuedMessages = [];
         if (chatStartFailed) {
+          this.chatStartSent = false;
           // 허브는 교체 프로바이더를 시작하기 전에 이전 세션을 폐기한다. 요청한 시작값은
           // 재시도 설정으로 남기되 다음 메시지가 사라진 이전 에이전트로 향하지 않게 한다.
           if (this.pendingTurnOpen) {
@@ -2459,6 +2570,7 @@ export class AgentBridgeImpl implements AgentBridge {
       : null;
     const belongsToActiveTurn = () => !turnBound || (
       providerTurnId !== null && providerTurnId === this.activeProviderTurnId
+        && providerTurnId !== this.interruptedProviderTurnId
     );
     if (!belongsToActiveTurn()) {
       this.sendToolResponse({
@@ -2609,30 +2721,16 @@ export class AgentBridgeImpl implements AgentBridge {
     history: ChatHistoryEntry[] = this.chatHistory,
   ): void {
     this.selectedAgent = agent;
-    if (model) this.selectedModel = model;
-    if (effort) this.selectedEffort = effort;
+    this.selectedModel = model || null;
+    this.selectedEffort = effort || null;
     this.threadId = threadId;
     this.documentId = documentId;
     this.documentName = documentName;
     this.chatHistory = history.map((entry) => ({ ...entry }));
     // 워크플로와 권한은 서버 상태가 기준이다. 요청값은 chat-started가 확인할 때까지
     // 시작 대기에만 두어, 프로바이더 시작 실패 뒤 가상의 모드가 남지 않게 한다.
-    const payload = {
-      v: AGENT_PROTOCOL_VERSION,
-      type: 'chat-start' as const,
-      agent,
-      workflow,
-      threadId,
-      documentId,
-      documentName,
-      history: this.chatHistory,
-      ...(this.selectedModel ? { model: this.selectedModel } : {}),
-      ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
-      permissionProfile,
-      serviceTier: this.serviceTier,
-      ...(force ? { force: true } : {}),
-    };
     this.pendingChatStart = {
+      requestId: `chat-start-${++this.requestSeq}`,
       agent,
       model: this.selectedModel ?? undefined,
       effort: this.selectedEffort ?? undefined,
@@ -2645,7 +2743,8 @@ export class AgentBridgeImpl implements AgentBridge {
       history: this.chatHistory,
       force,
     };
-    if (this.state === 'connected') this.sendJson(payload);
+    this.chatStartSent = false;
+    this.sendPendingChatStart();
   }
 
   stopChat(): void {
@@ -2717,34 +2816,39 @@ export class AgentBridgeImpl implements AgentBridge {
     );
   }
 
-  sendUserMessage(text: string, skillName?: string, stagedReferenceIds: string[] = []): Promise<string | null> {
+  sendUserMessage(
+    text: string,
+    skillName?: string,
+    stagedReferenceIds: string[] = [],
+    requireReceipt = false,
+    signal?: AbortSignal,
+  ): Promise<string | null> {
     const context = this.referenceContext();
-    const messageId = stagedReferenceIds.length > 0 ? `message-${++this.requestSeq}` : undefined;
+    const messageId = stagedReferenceIds.length > 0 || requireReceipt ? `message-${++this.requestSeq}` : undefined;
     return new Promise((resolve) => {
-      const message = { text, skillName, context, messageId, stagedReferenceIds: [...stagedReferenceIds], resolve };
-      if (this.workflowSwitchPending || this.activeAgent === null || this.queuedMessages.length > 0) {
+      if (signal?.aborted) {
+        resolve(null);
+        return;
+      }
+      let message: (typeof this.queuedMessages)[number];
+      const cancel = (): void => {
+        const index = this.queuedMessages.indexOf(message);
+        if (index < 0) return;
+        this.queuedMessages.splice(index, 1);
+        settle(null);
+      };
+      const settle = (result: string | null): void => {
+        signal?.removeEventListener('abort', cancel);
+        resolve(result);
+      };
+      message = { text, skillName, context, messageId, stagedReferenceIds: [...stagedReferenceIds], resolve: settle };
+      signal?.addEventListener('abort', cancel, { once: true });
+      if (this.pendingChatStart || this.workflowSwitchPending || this.activeAgent === null || this.queuedMessages.length > 0) {
         this.queuedMessages.push(message);
         if (this.activeAgent === null) {
           // 연결 중에도 시작 대기를 남겨 재접속이 첫 메시지를 다시 보낼 수 있게 한다.
           this.rememberPendingChatStart();
-          const pending = this.pendingChatStart;
-          if (pending && this.state === 'connected' && !this.workflowSwitchPending) {
-            this.sendJson({
-              v: AGENT_PROTOCOL_VERSION,
-              type: 'chat-start',
-              agent: pending.agent,
-              workflow: pending.workflow,
-              threadId: pending.threadId,
-              documentId: pending.documentId,
-              documentName: pending.documentName,
-              history: pending.history,
-              ...(pending.model ? { model: pending.model } : {}),
-              ...(pending.effort ? { effort: pending.effort } : {}),
-              permissionProfile: pending.permissionProfile ?? this.permissionProfile,
-              serviceTier: pending.serviceTier ?? this.serviceTier,
-              ...(pending.force ? { force: true } : {}),
-            });
-          }
+          if (!this.workflowSwitchPending) this.sendPendingChatStart();
         } else {
           this.flushQueuedMessages();
         }
@@ -2758,6 +2862,7 @@ export class AgentBridgeImpl implements AgentBridge {
     if (this.pendingChatStart) return;
     const context = this.referenceContext();
     this.pendingChatStart = {
+      requestId: `chat-start-${++this.requestSeq}`,
       agent: this.selectedAgent,
       model: this.selectedModel ?? undefined,
       effort: this.selectedEffort ?? undefined,
@@ -2769,6 +2874,16 @@ export class AgentBridgeImpl implements AgentBridge {
       documentName: context.documentName ?? null,
       history: this.chatHistory,
     };
+  }
+
+  private sendPendingChatStart(): void {
+    const pending = this.pendingChatStart;
+    if (!pending || this.chatStartSent || this.state !== 'connected') return;
+    this.chatStartSent = this.sendJson({
+      v: AGENT_PROTOCOL_VERSION,
+      type: 'chat-start',
+      ...pending,
+    });
   }
 
   private dispatchUserMessage(message: (typeof this.queuedMessages)[number]): void {
@@ -2786,7 +2901,7 @@ export class AgentBridgeImpl implements AgentBridge {
   }
 
   private flushQueuedMessages(): void {
-    if (this.workflowSwitchPending) return;
+    if (this.workflowSwitchPending || this.pendingChatStart) return;
     if (this.queuedMessages.length === 0) return;
     if (this.state !== 'connected') {
       if (this.activeAgent === null) this.rememberPendingChatStart();
@@ -2794,23 +2909,7 @@ export class AgentBridgeImpl implements AgentBridge {
     }
     if (this.activeAgent === null) {
       this.rememberPendingChatStart();
-      const pending = this.pendingChatStart;
-      if (!pending) return;
-      this.sendJson({
-        v: AGENT_PROTOCOL_VERSION,
-        type: 'chat-start',
-        agent: pending.agent,
-        workflow: pending.workflow,
-        threadId: pending.threadId,
-        documentId: pending.documentId,
-        documentName: pending.documentName,
-        history: pending.history,
-        ...(pending.model ? { model: pending.model } : {}),
-        ...(pending.effort ? { effort: pending.effort } : {}),
-        permissionProfile: pending.permissionProfile ?? this.permissionProfile,
-        serviceTier: pending.serviceTier ?? this.serviceTier,
-        ...(pending.force ? { force: true } : {}),
-      });
+      this.sendPendingChatStart();
       return;
     }
     const queued = this.queuedMessages;
@@ -3053,6 +3152,20 @@ export class AgentBridgeImpl implements AgentBridge {
       : [];
   }
 
+  async downloadReference(file: Pick<ReferenceFile, 'id' | 'scope' | 'scopeId'>): Promise<Uint8Array> {
+    const response = await fetch(this.referenceUrl(`/reference-files/${encodeURIComponent(file.id)}`, {
+      scope: file.scope,
+      scopeId: file.scopeId,
+    }), { headers: { Authorization: `Bearer ${this.token}` } });
+    if (!response.ok) throw new Error(`참고자료 ${file.id}를 읽지 못했습니다.`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const expected = response.headers.get('x-content-sha256') ?? '';
+    if (!expected || expected !== await sha256Hex(bytes)) {
+      throw new Error(`참고자료 ${file.id} 무결성 검증에 실패했습니다.`);
+    }
+    return bytes;
+  }
+
   async searchReferences(
     query: string,
     scope: ReferenceScope,
@@ -3249,7 +3362,15 @@ export class AgentBridgeImpl implements AgentBridge {
     return responseId;
   }
 
+  interruptIfIdle(): boolean {
+    if (!this.turnRunning || this.activeToolRequests > 0) return false;
+    this.interrupt();
+    return true;
+  }
+
   interrupt(): void {
+    // Fence requests already in transit before the hub acknowledges the stop.
+    this.interruptedProviderTurnId = this.activeProviderTurnId;
     this.abortProviderToolRequests(this.activeProviderTurnId ?? undefined);
     const pendingQuestion = this.pendingUserQuestion;
     if (pendingQuestion) {
@@ -3296,8 +3417,12 @@ export class AgentBridgeImpl implements AgentBridge {
     );
   }
 
-  requestAgentSetupStatus(): Promise<AgentSetupStatusMap | null> {
-    return this.request<AgentSetupStatusMap>({ type: 'agent-setup-status-request' }, 'agent-setup-status', 30_000);
+  requestAgentSetupStatus(refresh = false): Promise<AgentSetupStatusMap | null> {
+    return this.request<AgentSetupStatusMap>(
+      { type: 'agent-setup-status-request', ...(refresh ? { refresh: true } : {}) },
+      'agent-setup-status',
+      30_000,
+    );
   }
 
   requestAccountStatus(): Promise<AccountSessionStatus | null> {
@@ -3335,10 +3460,22 @@ export class AgentBridgeImpl implements AgentBridge {
 
   authenticateAgent(agent: AgentName, method: AgentAuthMethod, key?: string): Promise<AgentSetupAuthStart | null> {
     return this.request<AgentSetupAuthStart>(
-      { type: 'agent-setup-auth', agent, method, ...(key ? { key } : {}) },
+      { type: 'agent-setup-auth', agent, method, terminal: method === 'oauth' && agent === 'claude', ...(key ? { key } : {}) },
       'agent-setup-auth',
       30_000,
     );
+  }
+
+  resumeSetupTerminal(agent: AgentName, authRunId: string): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-terminal-resume', agent, authRunId });
+  }
+
+  sendSetupTerminalInput(agent: AgentName, authRunId: string, data: string): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-terminal-input', agent, authRunId, data });
+  }
+
+  resizeSetupTerminal(agent: AgentName, authRunId: string, cols: number, rows: number): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-terminal-resize', agent, authRunId, cols, rows });
   }
 
   submitAgentAuthCode(agent: AgentName, authRunId: string, code: string): void {
@@ -3357,8 +3494,17 @@ export class AgentBridgeImpl implements AgentBridge {
     return this.request<UsageSummary>(
       { type: 'usage-request', ...(refresh ? { refresh: true } : {}) },
       'usage',
-      refresh ? 20_000 : REQUEST_TIMEOUT_MS,
+      60_000,
     );
+  }
+
+  async consumeCodexReset(idempotencyKey: string, accountKey: string): Promise<CodexResetResult> {
+    const result = await this.request<CodexResetResult | { error: string }>(
+      { type: 'codex-reset-consume', idempotencyKey, accountKey }, 'codex-reset', 60_000,
+    );
+    if (!result) throw new Error('초기화 결과를 확인하지 못했어요. 새로고침 후 다시 확인해 주세요.');
+    if ('error' in result) throw new Error(result.error);
+    return result;
   }
 
   setUsagePlan(agent: AgentName, plan: string): Promise<UsageSummary | null> {
@@ -3383,6 +3529,35 @@ export class AgentBridgeImpl implements AgentBridge {
 
   setPiKey(key: string): Promise<PiStatus | null> {
     return this.request<PiStatus>({ type: 'pi-set-key', key }, 'pi-set-key', 30_000);
+  }
+
+  requestBrowserbaseStatus(): Promise<BrowserbaseStatus | null> {
+    return this.request<BrowserbaseStatus>({ type: 'browserbase-status-request' }, 'browserbase-status');
+  }
+
+  async setBrowserbaseCredentials(override: BrowserbaseOverride): Promise<BrowserbaseStatus | null> {
+    const candidate = {
+      apiKey: override.apiKey,
+      ...(override.projectId ? { projectId: override.projectId } : {}),
+      ...(override.geminiApiKey ? { geminiApiKey: override.geminiApiKey } : {}),
+    };
+    const status = await this.request<BrowserbaseStatus>(
+      { type: 'browserbase-credentials-set', ...candidate },
+      'browserbase-credentials',
+      30_000,
+    );
+    // 재연결 시에는 허브가 실제로 수락한 자격 증명만 다시 보낸다.
+    if (status) this.browserbaseOverride = candidate;
+    return status;
+  }
+
+  async clearBrowserbaseCredentials(): Promise<BrowserbaseStatus | null> {
+    const status = await this.request<BrowserbaseStatus>(
+      { type: 'browserbase-credentials-clear' },
+      'browserbase-credentials',
+    );
+    if (status) this.browserbaseOverride = null;
+    return status;
   }
 
   requestPiCatalog(refresh = false): Promise<PiCatalogModel[] | null> {

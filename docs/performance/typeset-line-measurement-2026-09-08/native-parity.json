@@ -1,0 +1,14 @@
+{
+  "exact_match": true,
+  "files": 173,
+  "hwp_exports": 6,
+  "svg_pages": 167,
+  "fixtures": [
+    "kps78",
+    "business1",
+    "masked9",
+    "overflow7",
+    "columns8",
+    "hwp3_64"
+  ]
+}

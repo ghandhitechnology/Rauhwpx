@@ -8,6 +8,11 @@ const piExtension = readFileSync(new URL('../pi/extension/rhwp.ts', import.meta.
 const runner = readFileSync(new URL('../copy-layout-runner.mjs', import.meta.url), 'utf8');
 
 test('hub launches the copy-layout worker as a real isolated provider session', () => {
+  const launchStart = server.indexOf('async function launchTemplateJob(');
+  const launchEnd = server.indexOf('\nfunction createTemplateJob(', launchStart);
+  assert.notEqual(launchStart, -1);
+  assert.ok(launchEnd > launchStart);
+  const launch = server.slice(launchStart, launchEnd);
   assert.match(server, /const createBackend = SESSION_FACTORIES\[job\.agent\]/);
   assert.match(server, /job\.backend = createBackend\(opts\)/);
   assert.match(server, /toolProfile: 'copy-layout-worker'/);
@@ -24,8 +29,7 @@ test('hub launches the copy-layout worker as a real isolated provider session', 
   assert.match(server, /copy-layout-providers/);
   assert.match(server, /prepareCodexHome\(codexHome/);
   assert.match(server, /prepareClaudeHome\(isolatedHome/);
-  assert.match(server, /prepareGrokHome\(grokHome/);
-  assert.match(server, /prepareCursorHome\(cursorHome/);
+  assert.doesNotMatch(server, /prepareGrokHome|prepareCursorHome|prepareOpenCodeHome|openCodeAuthPath|flushOpenCodeCredentialMirror/);
   assert.match(mcp, /url\.searchParams\.set\('role', AGENT_ROLE\)/);
   assert.match(mcp, /url\.searchParams\.set\('workerJobId', COPY_LAYOUT_JOB_ID\)/);
   assert.match(piExtension, /RHWP_AGENT_ROLE/);
@@ -153,7 +157,7 @@ test('provider replacement and stop fail closed on an unconfirmed process tree',
   );
   assert.match(
     server,
-    /const cleaned = await disposeSession\(record\);[\s\S]*const reported = cleaned \? e : agentProcessCleanupUncertain\(e\)/,
+    /const cleaned = await disposeSession\(record\);[\s\S]*throw cleaned \? error : agentProcessCleanupUncertain\(error\)/,
   );
   assert.match(
     server,

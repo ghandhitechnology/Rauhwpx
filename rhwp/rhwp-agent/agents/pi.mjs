@@ -15,7 +15,7 @@ import {
   truncate,
   validateExecutionMode,
 } from './backend.mjs';
-import { applyNpmCliLaunch } from '../npm-cli-launch.mjs';
+import { applyManagedCliLaunch } from '../npm-cli-launch.mjs';
 import {
   PROCESS_TREE_CLEANUP_OUTCOME,
   processTreeCleanupOutcome,
@@ -42,6 +42,8 @@ const CANCEL_TOOL = 'subagent_cancel';
  */
 const ENV_PASSTHROUGH = [
   'PATH', 'HOME', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR',
+  // Cloud session virtual desktop — only present when the worker started Xvfb.
+  'DISPLAY', 'XAUTHORITY', 'RAUHWpx_SESSION_DISPLAY',
   // Windows 에서 cross-spawn/셸이 요구하는 값들.
   'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'TEMP', 'TMP',
 ];
@@ -57,9 +59,7 @@ export function isOpenRouterCreditError(text) {
 
 export function formatOpenRouterCreditError(text, agent = 'pi') {
   if (!isOpenRouterCreditError(text)) return null;
-  return agent === 'rau'
-    ? 'Rau 체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.'
-    : 'OpenRouter 크레딧이 부족합니다.';
+  return 'OpenRouter 크레딧이 부족합니다.';
 }
 
 /**
@@ -68,7 +68,7 @@ export function formatOpenRouterCreditError(text, agent = 'pi') {
  *   piRoot?: string,
  *   openRouterApiKey?: string,
  *   reasoning?: boolean,
- *   agentName?: 'pi' | 'rau',
+ *   agentName?: 'pi',
  * }} PiBackendOptions
  *
  * piBin  — pi 실행 파일 경로(`<piRoot>/prefix/node_modules/.bin/pi`).
@@ -117,7 +117,7 @@ export function buildPiArgv(opts, sessionId) {
     // 워크스페이스의 CLAUDE.md/AGENTS.md 를 끌어오지 않는다.
     '--no-context-files',
   );
-  // Safe Pi/Rau has no OS write sandbox. Never expose its general shell: even
+  // Safe Pi has no OS write sandbox. Never expose its general shell: even
   // a hub-private sibling path is writable by the same OS user. Background
   // copy-layout work uses the structured hub runner instead.
   if (isPlanningRestricted(opts)) argv.push('--exclude-tools', PLANNING_EXCLUDED_TOOLS);
@@ -154,7 +154,7 @@ export function buildPiEnv(opts, sourceEnv = process.env) {
     PI_OFFLINE: '1',
     RHWP_WS_URL: `ws://127.0.0.1:${opts.hubPort}/mcp`,
     RHWP_AGENT_TOKEN: String(opts.token ?? ''),
-    RHWP_AGENT_NAME: opts.agentName === 'rau' ? 'rau' : 'pi',
+    RHWP_AGENT_NAME: 'pi',
     RHWP_HUB_HTTP: `http://127.0.0.1:${opts.hubPort}`,
     RHWP_ROOT_DIR: String(opts.rootDir ?? ''),
     ...(readOnlyRoots.length > 0 ? { RHWP_READONLY_ROOTS: readOnlyRoots.join(path.delimiter) } : {}),
@@ -354,8 +354,7 @@ export function createPiSession(opts, {
 } = {}) {
   const onEvent = opts.onEvent;
 
-  // rau 허니스도 같은 세션 루틴을 쓴다 — 이벤트는 호출자가 준 이름으로 낸다.
-  const agent = opts.agentName === 'rau' ? 'rau' : 'pi';
+  const agent = 'pi';
 
   // pi 세션 id 는 우리가 발급한다. 첫 스폰은 세션 파일을 만들고(“creating a new
   // session” 경고가 stderr 에 찍힌다) 이후 스폰은 같은 파일을 이어 쓴다.
@@ -547,13 +546,13 @@ export function createPiSession(opts, {
       let proc;
       try {
         const spawnEnv = buildPiEnv(opts);
-        const launched = applyNpmCliLaunch(opts.piBin ?? 'pi', argv, {
+        const launched = applyManagedCliLaunch(opts.piBin ?? 'pi', argv, {
           platform, nodeCommand, env: spawnEnv,
         });
         proc = spawnProcess(launched.command, launched.argv, {
           ...processTreeSpawnOptions(),
           cwd: opts.rootDir,
-          env: { ...spawnEnv, ...launched.env },
+          env: launched.env,
           // stdin 은 반드시 닫아야 한다: json 모드는 열린 stdin 을 계속 기다린다.
           stdio: ['ignore', 'pipe', 'pipe'],
         });
