@@ -20,12 +20,7 @@ for (const affected of ['cloud', 'cloud/install/provider-runtime', 'rhwp/rau-cre
   });
 }
 
-test('sparse CI checkout includes the manifests needed to audit every production dependency tree', () => {
-  const workflow = yaml.load(readFileSync(new URL('../.github/workflows/checks.yml', import.meta.url), 'utf8'));
-  const checkout = workflow.jobs['production-dependencies'].steps.find((step) => step.uses?.startsWith('actions/checkout@'));
-  const paths = checkout.with['sparse-checkout'].trim().split('\n');
-  for (const directory of PRODUCTION_DIRECTORIES) {
-    if (directory === '.') assert.ok(paths.includes('/package-lock.json'));
-    else assert.ok(paths.includes(`/${directory}/package*.json`), directory);
-  }
+test('nightly audits every production dependency tree', () => {
+  const workflow = yaml.load(readFileSync(new URL('../.github/workflows/nightly.yml', import.meta.url), 'utf8'));
+  assert.ok(workflow.jobs.app.steps.some((step) => step.run === 'npm run audit:production'));
 });

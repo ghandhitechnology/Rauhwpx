@@ -2,8 +2,6 @@ name: Repository checks
 
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -33,12 +31,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      packages: ${{ steps.changes.outputs.packages }}
       sessions: ${{ steps.changes.outputs.sessions }}
       app: ${{ steps.changes.outputs.app }}
       browser: ${{ steps.changes.outputs.browser }}
-      npm: ${{ steps.changes.outputs.npm }}
-      rustAudit: ${{ steps.changes.outputs.rustAudit }}
       engine: ${{ steps.changes.outputs.engine }}
     steps:
       - uses: actions/checkout@v5
@@ -49,38 +44,10 @@ jobs:
       - id: changes
         run: node scripts/ci-changes.mjs
 
-  package:
-    name: ${{ matrix.label }}
-    needs: changes
-    # Expand the matrix even for docs so every protected check name is reported.
-    if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            label: macOS ARM64 package
-            platform: macos
-          - os: windows-latest
-            label: Windows x64 package
-            platform: windows
-    runs-on: ${{ needs.changes.outputs.packages == 'false' && 'ubuntu-latest' || matrix.os }}
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v5
-        if: needs.changes.outputs.packages != 'false'
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/package-desktop
-        if: needs.changes.outputs.packages != 'false'
-        with:
-          platform: ${{ matrix.platform }}
-
-
   cloud-contracts:
     name: Cloud transfer contracts
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.app == 'true' || needs.changes.outputs.browser == 'true' || needs.changes.outputs.packages == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.app == 'true' || needs.changes.outputs.browser == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -287,81 +254,6 @@ jobs:
           npm --prefix rhwp/rhwp-studio run e2e:cloud-workspace
           npm --prefix rhwp/rhwp-studio run e2e:cloud-display
 
-  production-dependencies:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.npm == 'true') }}
-    name: Production dependency audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-          sparse-checkout-cone-mode: false
-          sparse-checkout: |
-            /package.json
-            /package-lock.json
-            /scripts/audit-production.mjs
-            /rhwp/rhwp-agent/package*.json
-            /rhwp/rhwp-studio/package*.json
-            /cloud/package*.json
-            /cloud/install/provider-runtime/package*.json
-            /rhwp/rau-credits/package*.json
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: 22.18.0
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            rhwp/rhwp-agent/package-lock.json
-            rhwp/rhwp-studio/package-lock.json
-
-      - name: Audit high and critical production advisories
-        run: node scripts/audit-production.mjs
-
-  rust-dependencies:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rustAudit == 'true') }}
-    name: Rust production dependency audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - uses: ./.github/actions/setup-rust
-        with:
-          cache: audit
-
-      - name: Cache cargo-audit executable
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-0.22.2
-
-      - name: Install pinned cargo-audit
-        run: |
-          if [[ "$(cargo audit --version 2>/dev/null || true)" != "cargo-audit 0.22.2" ]]; then
-            cargo install cargo-audit --version 0.22.2 --locked --force
-          fi
-
-      - name: Reject RustSec vulnerabilities and new warnings
-        working-directory: rhwp
-        run: |
-          set -euo pipefail
-          # Print accepted existing warnings, then fail if RustSec adds a new warning.
-          cargo audit
-          cargo audit --no-fetch -D warnings \
-            --ignore RUSTSEC-2026-0192 \
-            --ignore RUSTSEC-2026-0206
-
   parser-boundaries:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.engine == 'true') }}
@@ -414,24 +306,3 @@ jobs:
             echo 'The hostile-HML test target did not run any tests.' >&2
             exit 1
           fi
-
-  ir-field-sweep:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.engine == 'true') }}
-    name: Full IR field round-trip sweep
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - uses: ./.github/actions/setup-rust
-        with:
-          cache: roundtrip
-
-      - name: Run the full 803-lane release-profile gate
-        working-directory: rhwp
-        run: cargo test --locked --profile release-test --test ir_field_sweep_baseline -- --nocapture

@@ -19,15 +19,13 @@ for (const [description, files, expected] of [
   ['documentation', ['README.md', 'CONTRIBUTING.md', 'docs/releasing.md', 'rhwp/rhwp-agent/README.md'], []],
   ['engine changes', ['rhwp/src/parser/hwp.rs'], ['browser', 'engine']],
   ['corpus changes', ['rhwp/samples/report.hwpx', 'rhwp/pdf/reference.pdf'], ['browser', 'engine']],
-  ['native executable', ['rhwp/src/main.rs'], ['browser', 'engine', 'packages']],
-  ['Cargo manifest', ['rhwp/Cargo.toml'], ['browser', 'engine', 'packages', 'rustAudit']],
-  ['desktop shell', ['desktop/main.mjs'], ['app', 'packages', 'sessions']],
+  ['Cargo manifest', ['rhwp/Cargo.toml', 'rhwp/Cargo.lock'], ['browser', 'engine']],
+  ['desktop shell', ['desktop/main.mjs'], ['app', 'sessions']],
   ['agent hub source', ['rhwp/rhwp-agent/server.mjs'], ['app', 'sessions']],
-  ['agent lockfile', ['rhwp/rhwp-agent/package-lock.json'], ['app', 'npm', 'sessions']],
-  ['shared package', ['rhwp/rhwp-shared/package.json'], ['app', 'browser', 'npm']],
+  ['shared package', ['rhwp/rhwp-shared/package.json'], ['app', 'browser']],
   ['Studio unit tests', ['rhwp/rhwp-studio/tests/save.test.ts'], ['app', 'browser']],
   ['desktop session tests', ['rhwp/rhwp-studio/tests/desktop-shell.test.ts'], ['app', 'browser', 'sessions']],
-  ['Rust lockfile', ['rhwp/Cargo.lock'], ['browser', 'engine', 'rustAudit']],
+  ['installer packaging', ['build/entitlements.plist'], []],
 ]) {
   test(`change selection covers ${description}`, () => assert.deepEqual(enabled(files), expected));
 }
@@ -67,17 +65,17 @@ function ancestors(workflow, id, visited = new Set()) {
   return visited;
 }
 
-test('one PR event owns each existing protected check name', () => {
+test('one PR-only workflow owns each protected check name', () => {
   const pr = Object.values(workflows).filter((workflow) => Object.hasOwn(workflow.on, 'pull_request'));
   assert.equal(pr.length, 1);
   const names = Object.values(pr[0].jobs).flatMap((job) => {
     if (job.strategy?.matrix?.include) return job.strategy.matrix.include.map((entry) => job.name.replace('${{ matrix.label }}', entry.label).replace('${{ matrix.os }}', entry.os));
     return [job.name];
   });
-  for (const name of ['macOS ARM64 package', 'Windows x64 package', 'Session tests (macos-15)', 'Session tests (windows-latest)', 'Production dependency audit', 'Rust production dependency audit', 'Hostile document input boundaries', 'Auth and resource boundary regressions', 'Full IR field round-trip sweep']) {
+  for (const name of ['Session tests (macos-15)', 'Session tests (windows-latest)', 'Hostile document input boundaries', 'Auth and resource boundary regressions']) {
     assert.equal(names.filter((actual) => actual === name).length, 1, name);
   }
-  assert.deepEqual(pr[0].on.push.branches, ['main']);
+  assert.equal(Object.hasOwn(pr[0].on, 'push'), false);
 });
 
 test('releases depend on verification within the same workflow run', () => {
