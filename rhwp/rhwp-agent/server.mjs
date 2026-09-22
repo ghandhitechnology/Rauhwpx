@@ -3478,6 +3478,18 @@ async function handleStudioMessage(record, sock, msg) {
         .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
       return;
     }
+    case 'skill-editor-read': {
+      void skillRegistry.readEditor(String(msg.name ?? ''))
+        .then((document) => sendJson(sock, { v: 1, type: 'skill-editor-read-result', requestId: msg.requestId ?? null, document }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
+      return;
+    }
+    case 'skill-editor-save': {
+      void skillRegistry.saveEditor(String(msg.name ?? ''), String(msg.body ?? ''), String(msg.base ?? ''))
+        .then((outcome) => sendJson(sock, { v: 1, type: 'skill-editor-save-result', requestId: msg.requestId ?? null, outcome: publishedSkillOutcome(outcome) }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
+      return;
+    }
     case 'provider-status-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void providerHealth.check(msg.refresh === true)

@@ -4,9 +4,11 @@ import type {
   SkillCommitChange,
   SkillCommitOutcome,
   SkillHarnessId,
+  SkillEditorDocument,
 } from '../../agent/types.ts';
 import { createIcon } from './icons.ts';
 import { skillGlyphForSkill } from './skill-presentation.ts';
+import { createSkillEditor } from './skill-editor.ts';
 
 export interface SkillsShelf {
   root: HTMLElement;
@@ -29,6 +31,9 @@ type PendingChange =
 export function createSkillsShelf(options: {
   onCommit(change: SkillCommitChange): void;
   onListHarness(): void;
+  readEditor(name: string): Promise<SkillEditorDocument | null>;
+  saveEditor(name: string, body: string, base: string): Promise<SkillCommitOutcome | null>;
+  refresh(): void;
 }): SkillsShelf {
   const root = el('div', 'ag-skills-shelf');
   const toolbar = el('div', 'ag-skills-toolbar');
@@ -65,6 +70,7 @@ export function createSkillsShelf(options: {
   const replaceDigests = new Map<string, string>();
   let reflowFrame: number | null = null;
   const reflowAnimations = new Set<Animation>();
+  const editors = new Map<string, HTMLElement>();
 
   search.addEventListener('input', () => render());
   modeButton.addEventListener('click', () => {
@@ -271,6 +277,38 @@ export function createSkillsShelf(options: {
       case 'sealed':
         break;
       case 'skill':
+        if (skill.editable === true) {
+          const edit = el('button', 'ag-skill-text ag-skill-edit', '편집');
+          edit.type = 'button';
+          edit.setAttribute('aria-label', `${skill.name} 편집`);
+          edit.addEventListener('click', () => {
+            const existing = editors.get(skill.name);
+            if (existing) { existing.querySelector('textarea')?.focus(); return; }
+            const close = () => {
+              editors.get(skill.name)?.remove();
+              editors.delete(skill.name);
+              edit.focus();
+            };
+            const editor = createSkillEditor({
+              name: skill.name,
+              async read() {
+                const value = await options.readEditor(skill.name);
+                if (!value) throw new Error('Read failed');
+                return value;
+              },
+              async save(body, base) {
+                const value = await options.saveEditor(skill.name, body, base);
+                if (!value) throw new Error('Save failed');
+                return value;
+              },
+              close,
+              saved() { close(); options.refresh(); },
+            });
+            editors.set(skill.name, editor.root);
+            item.appendChild(editor.root);
+          });
+          actions.appendChild(edit);
+        }
         actions.appendChild(renderSwitch(skill.name, skill.enabled));
         if (skill.origin === 'user') actions.appendChild(renderDelete(skill.name, skill.digest));
         break;
@@ -284,6 +322,8 @@ export function createSkillsShelf(options: {
     }
     actions.appendChild(renderDragHandle(item, skill.name));
     item.append(copy, actions);
+    const editor = editors.get(skill.name);
+    if (editor) item.appendChild(editor);
     return item;
   }
 

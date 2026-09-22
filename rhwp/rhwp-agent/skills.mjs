@@ -28,6 +28,7 @@ const CATALOG_LINE_BUDGET = 8_000;
 const DESCRIPTION_LINE_LIMIT = 1_000;
 const RESERVED_NAMES = new Set(['skills', 'skill-create', 'skill-edit', 'skill-delete']);
 const SEALED_NAME = 'present-plan';
+const APP_ORIGIN_FILE = '.rhwp-origin.json';
 const SKILL_ICONS = new Set(['pencil', 'bot', 'system']);
 const HARNESS_IDS = ['claude', 'codex', 'cursor', 'pi'];
 const WINDOWS_FORBIDDEN_COMPONENT_RE = /[<>:"|?*\u0000-\u001f]/;
@@ -372,6 +373,7 @@ export class SkillRegistry {
         origin: 'sealed',
         digest: null,
         icon: sealed.icon,
+        editable: false,
       });
     }
     const hidden = new Set(users.filter((row) => row.name !== SEALED_NAME).map((row) => row.name));
@@ -504,6 +506,28 @@ export class SkillRegistry {
     return this._resourceFromEntry(entry, name, rel);
   }
 
+  async readEditor(name) {
+    const row = (await this.catalog()).rows.find((item) => item.name === name);
+    if (!row || row.kind !== 'skill' || row.origin !== 'user' || row.editable !== true) {
+      throw new SkillError('SKILL_NOT_EDITABLE', '이 스킬은 편집할 수 없습니다.');
+    }
+    const entry = await this._loadEntry(this.userRoot, name);
+    const markdown = entry?.files.get('SKILL.md')?.toString('utf8') ?? '';
+    const front = frontmatterSplit(markdown);
+    if (!front) throw new SkillError('INVALID_SKILL', 'SKILL.md를 읽을 수 없습니다');
+    return { name, body: markdown.slice(front.length).trim(), digest: entry.digest };
+  }
+
+  async saveEditor(name, body, base) {
+    return this.#mutate(async () => {
+      const row = (await this.catalog()).rows.find((item) => item.name === name);
+      if (!row || row.kind !== 'skill' || row.origin !== 'user' || row.editable !== true) {
+        return refusal('SEALED');
+      }
+      return this._commitBody({ kind: 'body', name, body, base }, await this._snapshot(name));
+    });
+  }
+
   async promptContext(text, explicitName, { phase = 'direct', agent = null } = {}) {
     const catalog = await this.catalog();
     const enabled = catalog.rows.filter((row) => row.enabled && row.kind !== 'broken');
@@ -593,7 +617,10 @@ export class SkillRegistry {
     } catch (error) {
       return refusal(error?.code === 'INVALID_SKILL_NAME' ? 'INVALID_SKILL_NAME' : 'INVALID_SKILL');
     }
-    const files = new Map([['SKILL.md', Buffer.from(markdown, 'utf8')]]);
+    const files = new Map([
+      ['SKILL.md', Buffer.from(markdown, 'utf8')],
+      [APP_ORIGIN_FILE, Buffer.from('{"source":"app"}\n', 'utf8')],
+    ]);
     if (this._sameVisible(snapshot, files)) return this._unchanged(change.name, snapshot);
     if (snapshot.user?.broken) {
       if (change.base !== undefined && change.base !== snapshot.user.digest) {
@@ -693,12 +720,13 @@ export class SkillRegistry {
       if (error instanceof SkillError) return refusal(error.code === 'SKILL_TOO_LARGE' ? 'SKILL_TOO_LARGE' : 'INVALID_SKILL');
       throw error;
     }
-    if (snapshot.user && !snapshot.user.structural && sameFiles(snapshot.user.files, source.files)) {
+    const importedFiles = new Map([...source.files].filter(([rel]) => rel !== APP_ORIGIN_FILE));
+    if (snapshot.user && !snapshot.user.structural && sameFiles(snapshot.user.files, importedFiles)) {
       return this._unchanged(change.name, snapshot);
     }
     if (change.mode === 'adopt') {
       if (!snapshot.user) {
-        await this._install(change.name, source.files);
+        await this._install(change.name, importedFiles);
         return this._accepted(change.name, false);
       }
       return refusal('LOCAL_EDITS', snapshot.user.digest);
@@ -706,7 +734,7 @@ export class SkillRegistry {
     if (!snapshot.user || change.base !== snapshot.user.digest) {
       return refusal('STALE', snapshot.user?.digest ?? null);
     }
-    await this._install(change.name, source.files);
+    await this._install(change.name, importedFiles);
     return this._accepted(change.name, false);
   }
 
@@ -817,6 +845,7 @@ export class SkillRegistry {
           origin,
           digest: loaded.digest,
           icon: loaded.projected.icon,
+          editable: false,
         });
         continue;
       }
@@ -829,6 +858,7 @@ export class SkillRegistry {
           origin: 'user',
           digest: loaded.digest,
           icon: null,
+          editable: false,
         });
         continue;
       }
@@ -840,6 +870,7 @@ export class SkillRegistry {
         origin: 'user',
         digest: loaded.digest,
         icon: loaded.projected.icon,
+        editable: origin === 'user' && loaded.files.has(APP_ORIGIN_FILE),
       });
     }
     return rows;

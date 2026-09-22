@@ -854,6 +854,85 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   gap: 10px;
 }
 
+.ag-skill-editor {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  margin: 6px 0 4px;
+  padding: 12px;
+  border: 1px solid var(--ag-border);
+  border-radius: 12px;
+  background: var(--ag-input-bg);
+}
+
+.ag-skill-editor-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ag-text-secondary);
+  font-size: 12px;
+}
+
+.ag-skill-editor-pixel {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  shape-rendering: crispEdges;
+}
+
+.ag-skill-editor-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 240px;
+  resize: vertical;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  outline: none;
+  background: transparent;
+  color: var(--ag-text);
+  font: 12px/1.75 var(--font-family-mono, monospace);
+  tab-size: 2;
+  transition: border-color 140ms, background-color 140ms;
+}
+
+.ag-skill-editor-input:focus {
+  border-color: var(--ag-border);
+  background: var(--ag-bg);
+}
+
+.ag-skill-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ag-skill-editor-status {
+  margin-right: auto;
+  color: var(--ag-text-muted);
+  font-size: 11px;
+}
+
+.ag-skill-editor-footer button {
+  flex: none;
+  min-height: 30px;
+  padding: 5px 12px;
+  border-radius: 7px;
+}
+
+.ag-skill-editor-footer .ag-skill-editor-save {
+  background: var(--ag-text);
+  color: var(--ag-bg);
+}
+
+.ag-skill-editor-footer button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .ag-skills-toolbar {
   display: flex;
   gap: 8px;

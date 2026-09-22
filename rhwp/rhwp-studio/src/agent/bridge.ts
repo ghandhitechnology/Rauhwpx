@@ -75,6 +75,7 @@ import type {
   SkillCatalog,
   SkillCommitChange,
   SkillCommitOutcome,
+  SkillEditorDocument,
   SkillHarnessId,
   ProviderHealth,
   ProviderStatusMap,
@@ -306,6 +307,8 @@ export interface AgentBridge {
   listSkills(): void;
   listHarnessSkills(): string;
   commitSkill(change: SkillCommitChange): string;
+  readSkillEditor(name: string): Promise<SkillEditorDocument | null>;
+  saveSkillEditor(name: string, body: string, base: string): Promise<SkillCommitOutcome | null>;
   requestWritingStyleStatus(): string;
   requestAgentInstructions(): Promise<AgentInstructionsStatus | null>;
   saveAgentInstructions(content: string, expectedRevision: number): Promise<AgentInstructionsStatus | null>;
@@ -2249,7 +2252,21 @@ export class AgentBridgeImpl implements AgentBridge {
         }
         break;
       }
+      case 'skill-editor-read-result': {
+        const document = msg.document && typeof msg.document === 'object'
+          ? msg.document as SkillEditorDocument : null;
+        if (document && typeof document.name === 'string' && typeof document.body === 'string' && typeof document.digest === 'string') {
+          if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, document);
+        } else if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        break;
+      }
+      case 'skill-editor-save-result': {
+        const outcome = readSkillCommitOutcome(msg.outcome);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, outcome);
+        break;
+      }
       case 'skills-error':
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
         this.emit({ type: 'skills-error', requestId: String(msg.requestId ?? ''), code: String(msg.code ?? 'SKILLS_ERROR'), message: String(msg.message ?? 'Skill request failed') });
         break;
       case 'writing-style-status':
@@ -3308,6 +3325,14 @@ export class AgentBridgeImpl implements AgentBridge {
     const requestId = `skill-commit-${++this.requestSeq}`;
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-commit', requestId, change });
     return requestId;
+  }
+
+  readSkillEditor(name: string): Promise<SkillEditorDocument | null> {
+    return this.request<SkillEditorDocument>({ type: 'skill-editor-read', name }, 'skill-editor-read');
+  }
+
+  saveSkillEditor(name: string, body: string, base: string): Promise<SkillCommitOutcome | null> {
+    return this.request<SkillCommitOutcome>({ type: 'skill-editor-save', name, body, base }, 'skill-editor-save');
   }
 
   requestWritingStyleStatus(): string {

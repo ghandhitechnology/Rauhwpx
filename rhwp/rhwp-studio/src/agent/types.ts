@@ -673,6 +673,7 @@ export type CatalogRow =
       origin: 'bundled' | 'user';
       digest: string;
       icon: ProductSkillIcon | null;
+      editable?: boolean;
     })
   | (CatalogSkillFields & {
       kind: 'broken';
@@ -685,6 +686,8 @@ export type CatalogRow =
 export interface SkillCatalog {
   rows: CatalogRow[];
 }
+
+export interface SkillEditorDocument { name: string; body: string; digest: string; }
 
 export interface HarnessSkillRow {
   harness: SkillHarnessId;

@@ -57,6 +57,7 @@
     "build:sidebar": "vite build --config vite.sidebar.config.ts",
     "test:sidebar": "node sidebar-preview/check.mjs",
     "test:sidebar:skills": "node sidebar-preview/skills.check.mjs",
+    "test:sidebar:skill-editor": "node sidebar-preview/skill-editor.check.mjs",
     "test:sidebar:audit": "node sidebar-preview/audit.check.mjs"
   },
   "devDependencies": {

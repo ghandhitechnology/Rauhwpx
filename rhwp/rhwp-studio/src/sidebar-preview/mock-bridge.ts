@@ -107,6 +107,14 @@ export function createMockBridge(report: (message: string) => void) {
   const setupChanged = () =>
     emit({ type: 'agent-setup-status', statuses: data.setups });
   const skillTrash = new Map();
+  // Bodies live separately from catalog metadata so refreshes exercise the same
+  // read/save path as the real bridge. Imported/bundled rows intentionally have
+  // no editable body in the preview.
+  const skillBodies = new Map<string, string>([
+    ['proofread-korean', '# proofread-korean\n\n한국어 문서의 맞춤법과 문장을 다듬습니다.\n'],
+    ['summarize-document', '# summarize-document\n\n문서의 핵심 내용을 요약합니다.\n'],
+    ['draft-document', '# draft-document\n\n요청에 맞는 새 문서의 초안을 작성합니다.\n'],
+  ]);
   const skillsChanged = () => {
     emit({ type: 'skills-catalog', catalog: data.skills });
   };
@@ -900,6 +908,30 @@ export function createMockBridge(report: (message: string) => void) {
           ],
         }),
       ),
+    readSkillEditor: async (name: string) => {
+      const row = data.skills.rows.find((item) => item.name === name);
+      if (!row || row.kind !== 'skill' || row.editable !== true)
+        throw new Error('This skill is read-only.');
+      const body = skillBodies.get(name) ?? `# ${name}\n\n${row.description}\n`;
+      return { name, body, digest: row.digest };
+    },
+    saveSkillEditor: async (name: string, body: string, base: string) => {
+      const row = data.skills.rows.find((item) => item.name === name);
+      if (!row || row.kind !== 'skill' || row.editable !== true)
+        return { ok: false, code: 'read-only', message: 'This skill is read-only.', digest: row?.digest ?? null };
+      if (row.digest !== base)
+        return { ok: false, code: 'conflict', message: 'Skill changed. Reopen and try again.', digest: row.digest };
+      // The failure sentinel makes async error handling testable without adding
+      // a second preview-only control to the production UI.
+      if (body.includes('__FAIL_SAVE__'))
+        return { ok: false, code: 'preview-failure', message: 'Preview save failed.', digest: row.digest };
+      const unchanged = body === skillBodies.get(name);
+      const digest = `${name}:${body}`.split('').reduce((hash, char) => ((hash * 31 + char.charCodeAt(0)) >>> 0), 2166136261).toString(16).padStart(64, '0');
+      skillBodies.set(name, body);
+      row.digest = digest;
+      skillsChanged();
+      return { ok: true, name, digest, unchanged, notice: null };
+    },
     commitSkill: (change) =>
       request((requestId) => {
         if (change.action === 'enable') {

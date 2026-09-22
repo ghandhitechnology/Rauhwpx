@@ -3139,6 +3139,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   skillsClose.appendChild(createColumnIcon());
   skillsHeader.append(skillsTitle, skillsClose);
   const skillsShelf = createSkillsShelf({
+    readEditor: (name) => bridge.readSkillEditor(name),
+    saveEditor: (name, body, base) => bridge.saveSkillEditor(name, body, base),
+    refresh: () => { bridge.listSkills(); },
     onCommit(change) {
       bridge.commitSkill(change);
     },
