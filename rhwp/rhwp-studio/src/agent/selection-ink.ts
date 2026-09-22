@@ -53,9 +53,11 @@ export function measureInkRange(range: DocRange, probe: InkGeometryProbe): Measu
 /** `text` 안의 `\n` 을 startOffset 기준 스칼라 오프셋으로 돌려준다. */
 export function newlineOffsets(text: string, startOffset: number): number[] {
   const offsets: number[] = [];
-  const chars = [...text];
-  for (let i = 0; i < chars.length; i++) {
-    if (chars[i] === '\n') offsets.push(startOffset + i);
+  let scalarOffset = 0;
+  for (let codeUnit = 0; codeUnit < text.length; codeUnit++, scalarOffset++) {
+    if (text[codeUnit] === '\n') offsets.push(startOffset + scalarOffset);
+    const codePoint = text.codePointAt(codeUnit);
+    if (codePoint !== undefined && codePoint > 0xffff) codeUnit++;
   }
   return offsets;
 }
@@ -64,9 +66,15 @@ export function clampRectsToTextEnds(
   rects: readonly SelectionRect[],
   ends: readonly SelectionRect[],
 ): SelectionRect[] {
+  const endsByPage = new Map<number, SelectionRect[]>();
+  for (const end of ends) {
+    const page = endsByPage.get(end.pageIndex);
+    if (page) page.push(end);
+    else endsByPage.set(end.pageIndex, [end]);
+  }
   const clamped: SelectionRect[] = [];
   for (const rect of rects) {
-    const end = ends.find((candidate) => isTextEndOnRect(candidate, rect));
+    const end = endsByPage.get(rect.pageIndex)?.find((candidate) => isTextEndOnRect(candidate, rect));
     if (!end) {
       clamped.push(rect);
       continue;

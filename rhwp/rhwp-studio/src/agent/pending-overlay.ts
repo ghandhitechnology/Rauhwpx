@@ -12,6 +12,7 @@ import {
   type ExactDiffResult,
 } from './exact-text-diff.ts';
 import { measureInkRange } from './selection-ink.ts';
+import { indexExactTextRects, subtractExactTextRects } from './overlay-geometry.ts';
 
 /** 객체 op 의 overlay 좌표 해석 참조 — 렌더 시점에 wasm 프로브로 rect 를 구한다 */
 export type ObjectOverlayRef =
@@ -94,7 +95,6 @@ interface PooledNode {
 
 const HIT_SLOP_PX = 4;
 const POPOVER_MAX_SCALARS = 320;
-const EXACT_INK_GUTTER = 0.35;
 /** 텍스트 끝과 개행 표시 사이의 간격(줄 높이 배수). */
 const ENTER_GAP_FACTOR = 0.18;
 /** 개행 표시의 크기(줄 높이 배수). */
@@ -168,6 +168,8 @@ export class PendingOverlayRenderer {
   private hoverKey: string | null = null;
   private pinnedKey: string | null = null;
   private renderRafId: number | null = null;
+  /** Avoid four CSS declarations per node when a projection event leaves a rect unchanged. */
+  private positionedNodes = new Map<HTMLDivElement, string>();
   // 파라미터 프로퍼티 대신 명시적 할당 (node --test strip-only 모드 호환).
   private deps: { canvasView: CanvasView; wasm: WasmBridge; eventBus: EventBus; getCaretPosition: () => DocumentPosition | null };
 
@@ -209,6 +211,10 @@ export class PendingOverlayRenderer {
     for (const name of projectionEvents) {
       this.unsubs.push(deps.eventBus.on(name, () => this.projectNow()));
     }
+    // Scrolling changes which edit ink needs a DOM node. Keep this work on the
+    // existing rAF scroll cadence instead of retaining thousands of offscreen
+    // highlights in the composited layer.
+    this.unsubs.push(deps.eventBus.on('viewport-scroll', () => this.projectNow()));
     this.unsubs.push(deps.eventBus.on('cursor-rect-updated', () => this.inspectCaret()));
     document.addEventListener('keydown', this.onKeyDown, true);
   }
@@ -312,6 +318,7 @@ export class PendingOverlayRenderer {
       node.marker?.remove();
     }
     this.nodePool.clear();
+    this.positionedNodes.clear();
   }
 
   /** 가상 스크롤이 아직 모르는 페이지(변이 직후 새로 생긴 페이지)는 null — 그리지 않는다. */
@@ -333,10 +340,14 @@ export class PendingOverlayRenderer {
   }
 
   private positionRect(div: HTMLDivElement, pos: { left: number; top: number; width: number; height: number }): void {
-    div.style.left = `${pos.left.toFixed(2)}px`;
-    div.style.top = `${pos.top.toFixed(2)}px`;
-    div.style.width = `${pos.width.toFixed(2)}px`;
-    div.style.height = `${pos.height.toFixed(2)}px`;
+    const value = `${pos.left.toFixed(2)}|${pos.top.toFixed(2)}|${pos.width.toFixed(2)}|${pos.height.toFixed(2)}`;
+    if (this.positionedNodes.get(div) === value) return;
+    this.positionedNodes.set(div, value);
+    const [left, top, width, height] = value.split('|');
+    div.style.left = `${left}px`;
+    div.style.top = `${top}px`;
+    div.style.width = `${width}px`;
+    div.style.height = `${height}px`;
   }
 
   private diffFor(op: ReplaceOverlayOp): ExactDiffResult {
@@ -451,35 +462,6 @@ export class PendingOverlayRenderer {
     return visuals;
   }
 
-  /** Overlapping screen-blend inks mix colors, so reserve exact text pixels for green. */
-  private excludeExactTextRects(
-    sourceRects: readonly SelectionRect[],
-    exactRects: readonly SelectionRect[],
-  ): SelectionRect[] {
-    let pieces = [...sourceRects];
-    for (const exact of exactRects) {
-      if (exact.width <= 0 || exact.height <= 0) continue;
-      const cutLeft = exact.x - EXACT_INK_GUTTER;
-      const cutRight = exact.x + exact.width + EXACT_INK_GUTTER;
-      pieces = pieces.flatMap((piece) => {
-        if (piece.pageIndex !== exact.pageIndex || piece.width <= 0 || piece.height <= 0) return [piece];
-        const overlapY = Math.min(piece.y + piece.height, exact.y + exact.height) - Math.max(piece.y, exact.y);
-        if (overlapY <= Math.min(piece.height, exact.height) * 0.5) return [piece];
-        const pieceRight = piece.x + piece.width;
-        if (cutRight <= piece.x || cutLeft >= pieceRight) return [piece];
-        const result: SelectionRect[] = [];
-        if (cutLeft > piece.x) {
-          result.push({ ...piece, width: Math.max(0, cutLeft - piece.x) });
-        }
-        if (cutRight < pieceRight) {
-          result.push({ ...piece, x: cutRight, width: Math.max(0, pieceRight - cutRight) });
-        }
-        return result.filter((candidate) => candidate.width > 0.05);
-      });
-    }
-    return pieces;
-  }
-
   /** 문서 기준 기하(페이지 좌표 rect 목록)를 다시 프로브한다. */
   private recomputeGeometry(): void {
     const exactVisuals: ExactVisual[] = [];
@@ -490,6 +472,7 @@ export class PendingOverlayRenderer {
       else legacyOps.push(op);
     }
     const exactTextRects = exactVisuals.filter((visual) => !visual.anchor).map((visual) => visual.rect);
+    const exactTextIndex = exactTextRects.length > 0 ? indexExactTextRects(exactTextRects) : null;
 
     const legacy: Array<{ op: LegacyOverlayOp; rects: SelectionRect[] }> = [];
     for (const op of legacyOps) {
@@ -506,8 +489,8 @@ export class PendingOverlayRenderer {
       } catch {
         continue;
       }
-      if (op.range && exactTextRects.length > 0) {
-        rects = this.excludeExactTextRects(rects, exactTextRects);
+      if (op.range && exactTextIndex) {
+        rects = subtractExactTextRects(rects, exactTextRects, exactTextIndex);
       }
       legacy.push({ op, rects });
     }
@@ -529,6 +512,28 @@ export class PendingOverlayRenderer {
   private legacyNodeKey(op: LegacyOverlayOp, rectIdx: number): string {
     const at = op.objRef ? JSON.stringify(op.objRef) : rangeKey(op.range);
     return `L:${op.kind}:${op.agent}:${at}#${rectIdx}`;
+  }
+
+  /**
+   * Long documents can contain many pending ranges, while only a handful of
+   * pages are on screen. DOM ink outside the visible rows still costs style,
+   * paint, and GPU surface memory. Keep one adjacent row as a scroll cushion so
+   * fast trackpad movement never reveals a blank frame.
+   */
+  private renderablePages(): Set<number> {
+    const viewport = this.deps.canvasView.getViewportManager();
+    const size = viewport.getViewportSize();
+    const virtualScroll = this.deps.canvasView.getVirtualScroll();
+    const window = virtualScroll.getPageWindow(
+      viewport.getScrollY(),
+      Math.max(size.height, 1),
+      viewport.getScrollX(),
+      Math.max(size.width, 1),
+    );
+    // During the first paint the host can report a zero-sized viewport. Keep a
+    // single page warm until layout emits viewport-resize instead of mounting
+    // every pending highlight in a long document.
+    return new Set(window.prefetch.length > 0 ? window.prefetch : (virtualScroll.pageCount > 0 ? [0] : []));
   }
 
   /**
@@ -558,6 +563,7 @@ export class PendingOverlayRenderer {
       }
       if (node.ink.parentElement !== scrollContent) scrollContent.appendChild(node.ink);
     } else if (node.ink) {
+      this.positionedNodes.delete(node.ink);
       node.ink.remove();
       node.ink = null;
       node.inkClass = '';
@@ -575,6 +581,7 @@ export class PendingOverlayRenderer {
       if (node.marker.parentElement !== this.markerLayer) this.markerLayer.appendChild(node.marker);
       if (created && onCreateMarker) onCreateMarker(node.marker);
     } else if (node.marker) {
+      this.positionedNodes.delete(node.marker);
       node.marker.remove();
       node.marker = null;
       node.markerClass = '';
@@ -593,11 +600,13 @@ export class PendingOverlayRenderer {
 
     const zoom = this.deps.canvasView.getViewportManager().getZoom();
     const contentWidth = scrollContent.clientWidth;
+    const renderablePages = this.renderablePages();
     this.hitRegions = [];
     const desired = new Set<string>();
 
     for (const { op, rects } of this.cachedLegacy!) {
       rects.forEach((rect, rectIdx) => {
+        if (!renderablePages.has(rect.pageIndex)) return;
         const pos = this.pagePosition(rect, contentWidth, zoom);
         if (!pos) return;
         const key = this.legacyNodeKey(op, rectIdx);
@@ -614,6 +623,7 @@ export class PendingOverlayRenderer {
     }
 
     for (const visual of this.cachedExact!) {
+      if (!renderablePages.has(visual.rect.pageIndex)) continue;
       const pos = this.pagePosition(visual.rect, contentWidth, zoom);
       if (!pos) continue;
       desired.add(visual.nodeKey);
@@ -661,6 +671,7 @@ export class PendingOverlayRenderer {
     }
 
     this.cachedEnters.forEach((mark, index) => {
+      if (!renderablePages.has(mark.pageIndex)) return;
       const pos = this.pagePosition(
         { pageIndex: mark.pageIndex, x: mark.x, y: mark.y, width: 0, height: mark.height },
         contentWidth,
@@ -690,6 +701,8 @@ export class PendingOverlayRenderer {
       if (desired.has(key)) continue;
       node.ink?.remove();
       node.marker?.remove();
+      if (node.ink) this.positionedNodes.delete(node.ink);
+      if (node.marker) this.positionedNodes.delete(node.marker);
       this.nodePool.delete(key);
     }
 

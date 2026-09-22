@@ -13,7 +13,7 @@ export async function checkSetupTerminal(page, origin) {
     assert.equal(await page.$eval('.ag-setup-terminal', el => el.scrollWidth > el.clientWidth), false);
     await page.focus('.ag-setup-terminal .xterm-helper-textarea');
     await page.waitForFunction(() => document.querySelector('.ag-setup-terminal').textContent.includes('❯ Anthropic'));
-    await page.keyboard.press(width === 320 ? 'ArrowDown' : 'ArrowUp');
+    await page.keyboard.press('ArrowDown');
     await page.waitForFunction(() => document.querySelector('.ag-setup-terminal').textContent.includes('❯ OpenAI'));
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => document.querySelector('.ag-setup-terminal').textContent.includes('브라우저에서'));

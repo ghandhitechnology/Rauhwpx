@@ -86,3 +86,22 @@ test('CanvasKit replacement releases the detached original backing store', () =>
     restore();
   }
 });
+
+test('long documents do not retain one zero-sized canvas per page', () => {
+  const restore = installFakeDocument();
+  try {
+    const pool = new CanvasPool(1);
+    const canvases: FakeCanvas[] = [];
+    for (let page = 0; page < 100; page++) {
+      const canvas = pool.acquire(page) as unknown as FakeCanvas;
+      canvas.width = 32;
+      canvas.height = 32;
+      canvases.push(canvas);
+    }
+    for (let page = 0; page < canvases.length; page++) pool.release(page);
+    assert.ok(pool.totalCount <= 8, `warm canvas pool grew to ${pool.totalCount}`);
+    assert.equal(pool.retainedBackingBytes, 32 * 32 * 4);
+  } finally {
+    restore();
+  }
+});
