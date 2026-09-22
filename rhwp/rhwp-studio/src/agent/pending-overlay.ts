@@ -205,7 +205,16 @@ export class PendingOverlayRenderer {
     // page-layout-changed: 문서 변이 시 캔버스 뷰의 페이지 재수집은 비동기라,
     // document-changed 시점의 배치는 낡은(또는 아직 없는) 페이지 좌표를 쓴다.
     // 가상 스크롤 배치가 확정되면 캐시된 페이지 기하를 다시 사영한다.
-    const projectionEvents = ['zoom-changed', 'viewport-resize', 'viewport-inset-changed', 'page-layout-changed'];
+    const projectionEvents = [
+      'zoom-changed',
+      'viewport-resize',
+      'viewport-inset-changed',
+      'page-layout-changed',
+      // Scrolling changes which edit ink needs a DOM node. Keep this work on the
+      // existing rAF scroll cadence instead of retaining thousands of offscreen
+      // highlights in the composited layer.
+      'viewport-scroll',
+    ];
     for (const name of projectionEvents) {
       this.unsubs.push(deps.eventBus.on(name, () => this.projectNow()));
     }
@@ -532,6 +541,28 @@ export class PendingOverlayRenderer {
   }
 
   /**
+   * Long documents can contain many pending ranges, while only a handful of
+   * pages are on screen. DOM ink outside the visible rows still costs style,
+   * paint, and GPU surface memory. Keep one adjacent row as a scroll cushion so
+   * fast trackpad movement never reveals a blank frame.
+   */
+  private renderablePages(): Set<number> {
+    const viewport = this.deps.canvasView.getViewportManager();
+    const size = viewport.getViewportSize();
+    const virtualScroll = this.deps.canvasView.getVirtualScroll();
+    if (size.width <= 0 || size.height <= 0) {
+      return new Set(Array.from({ length: virtualScroll.pageCount }, (_, index) => index));
+    }
+    const window = virtualScroll.getPageWindow(
+      viewport.getScrollY(),
+      size.height,
+      viewport.getScrollX(),
+      size.width,
+    );
+    return new Set(window.prefetch);
+  }
+
+  /**
    * key 의 DOM 쌍을 확보한다. 이미 있으면 그대로 재사용해 진행 중인 애니메이션과
    * 스타일 상태를 보존하고, 클래스가 달라졌을 때만 갱신한다.
    */
@@ -593,11 +624,13 @@ export class PendingOverlayRenderer {
 
     const zoom = this.deps.canvasView.getViewportManager().getZoom();
     const contentWidth = scrollContent.clientWidth;
+    const renderablePages = this.renderablePages();
     this.hitRegions = [];
     const desired = new Set<string>();
 
     for (const { op, rects } of this.cachedLegacy!) {
       rects.forEach((rect, rectIdx) => {
+        if (!renderablePages.has(rect.pageIndex)) return;
         const pos = this.pagePosition(rect, contentWidth, zoom);
         if (!pos) return;
         const key = this.legacyNodeKey(op, rectIdx);
@@ -614,6 +647,7 @@ export class PendingOverlayRenderer {
     }
 
     for (const visual of this.cachedExact!) {
+      if (!renderablePages.has(visual.rect.pageIndex)) continue;
       const pos = this.pagePosition(visual.rect, contentWidth, zoom);
       if (!pos) continue;
       desired.add(visual.nodeKey);
@@ -661,6 +695,7 @@ export class PendingOverlayRenderer {
     }
 
     this.cachedEnters.forEach((mark, index) => {
+      if (!renderablePages.has(mark.pageIndex)) return;
       const pos = this.pagePosition(
         { pageIndex: mark.pageIndex, x: mark.x, y: mark.y, width: 0, height: mark.height },
         contentWidth,
