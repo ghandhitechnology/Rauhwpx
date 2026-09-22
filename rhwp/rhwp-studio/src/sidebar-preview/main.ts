@@ -75,6 +75,10 @@ const sidebar = initAgentSidebar({
     },
     mergeCloudCheckpoint: async (startId, checkpoint) => {
       cloud.calls.merges.push({ startId, checkpoint });
+      const branchName = `Cloud · ${checkpoint.fileName.replace(/\.[^.]+$/, '')} · ${checkpoint.turn}턴`;
+      if (!versions.getState().branches.some((branch) => branch.name === branchName)) {
+        await versions.createBranch(branchName);
+      }
       status.value = 'Cloud 변경 병합 미리보기';
       return true;
     },
@@ -92,7 +96,9 @@ const sidebar = initAgentSidebar({
     if (documentNavigation.outcome !== 'moved') return;
     documentId = target.documentId;
     documentName = target.fileName;
+    Object.assign(versions.getState(), { documentId, documentName, saved: true });
     eventBus.emit('document-context-changed');
+    void versions.refresh();
   },
   versionController: versions,
   openClassicVersionControl: () =>
