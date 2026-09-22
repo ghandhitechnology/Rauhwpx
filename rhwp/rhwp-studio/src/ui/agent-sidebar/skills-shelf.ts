@@ -218,6 +218,7 @@ export function createSkillsShelf(options: {
     else for (const skill of visible) list.appendChild(renderCatalogRow(skill));
     const create = el('button', 'ag-skill-new', '새 스킬 만들기') as HTMLButtonElement;
     create.type = 'button';
+    create.hidden = editors.size > 0 || Boolean(newEditor);
     create.setAttribute('aria-label', '새 스킬 만들기');
     create.addEventListener('click', openNewEditor);
     list.appendChild(create);
@@ -258,6 +259,12 @@ export function createSkillsShelf(options: {
   function closeNewEditor(): void {
     newEditor?.remove();
     newEditor = null;
+    syncCreateButtonVisibility();
+  }
+
+  function syncCreateButtonVisibility(): void {
+    const create = list.querySelector<HTMLButtonElement>('.ag-skill-new');
+    if (create) create.hidden = editors.size > 0 || Boolean(newEditor);
   }
 
   function openNewEditor(): void {
@@ -302,6 +309,7 @@ export function createSkillsShelf(options: {
       copyIcon.setAttribute('tabindex', '0');
       copyIcon.setAttribute('aria-label', `${skill.name} 아이콘 선택`);
       copyIcon.setAttribute('aria-haspopup', 'dialog');
+      copyIcon.setAttribute('aria-expanded', 'false');
       const open = (event: Event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -342,11 +350,13 @@ export function createSkillsShelf(options: {
           edit.type = 'button';
           edit.setAttribute('aria-label', `${skill.name} 편집`);
           edit.addEventListener('click', () => {
+            activeIconPickerClose?.();
             const existing = editors.get(skill.name);
             if (existing) { existing.querySelector('textarea')?.focus(); return; }
             const close = () => {
               editors.get(skill.name)?.remove();
               editors.delete(skill.name);
+              syncCreateButtonVisibility();
               edit.focus();
             };
             const editor = createSkillEditor({
@@ -366,6 +376,7 @@ export function createSkillsShelf(options: {
             });
             editors.set(skill.name, editor.root);
             item.appendChild(editor.root);
+            syncCreateButtonVisibility();
           });
           actions.appendChild(edit);
         }
@@ -388,6 +399,10 @@ export function createSkillsShelf(options: {
   }
 
   function openIconPicker(skill: Extract<CatalogRow, { kind: 'skill' }>, item: HTMLElement, anchor: HTMLElement): void {
+    if (activeIconPicker && item.contains(activeIconPicker)) {
+      activeIconPickerClose?.();
+      return;
+    }
     activeIconPickerClose?.();
     if (item.querySelector('.ag-skill-icon-picker')) {
       activeIconPicker = null;
@@ -396,15 +411,15 @@ export function createSkillsShelf(options: {
     const picker = el('div', 'ag-skill-icon-picker') as HTMLDivElement;
     picker.setAttribute('role', 'dialog');
     picker.setAttribute('aria-label', `${skill.name} 아이콘 선택`);
-    const heading = el('div', 'ag-skill-icon-picker-heading', '아이콘 선택');
     const grid = el('div', 'ag-skill-icon-picker-grid');
+    const selectedIcon = skillGlyphForSkill(skill);
     for (const icon of PRODUCT_SKILL_ICONS) {
       const option = el('button', 'ag-skill-icon-option') as HTMLButtonElement;
       option.type = 'button';
       option.dataset.skillIcon = icon.value;
       option.title = icon.label;
       option.setAttribute('aria-label', icon.label);
-      option.setAttribute('aria-pressed', skill.icon === icon.value ? 'true' : 'false');
+      option.setAttribute('aria-pressed', selectedIcon === icon.value ? 'true' : 'false');
       option.appendChild(createIcon(icon.value));
       option.addEventListener('click', (event) => {
         event.stopPropagation();
@@ -414,10 +429,12 @@ export function createSkillsShelf(options: {
       });
       grid.appendChild(option);
     }
-    picker.append(heading, grid);
+    picker.append(grid);
     item.appendChild(picker);
     activeIconPicker = picker;
+    anchor.setAttribute('aria-expanded', 'true');
     requestAnimationFrame(() => {
+      if (activeIconPicker !== picker) return;
       const first = picker.querySelector<HTMLButtonElement>(`[aria-pressed="true"]`)
         ?? picker.querySelector<HTMLButtonElement>('button');
       first?.focus();
@@ -427,7 +444,9 @@ export function createSkillsShelf(options: {
       if (activeIconPicker !== picker) return;
       activeIconPicker = null;
       picker.remove();
+      anchor.setAttribute('aria-expanded', 'false');
       if (closeOnEscape) window.removeEventListener('keydown', closeOnEscape, true);
+      window.removeEventListener('pointerdown', closeOnPointerDown, true);
       activeIconPickerClose = null;
     };
     closeOnEscape = (event: KeyboardEvent) => {
@@ -437,8 +456,14 @@ export function createSkillsShelf(options: {
       close();
       anchor.focus();
     };
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && (picker.contains(target) || anchor.contains(target))) return;
+      close();
+    };
     activeIconPickerClose = close;
     window.addEventListener('keydown', closeOnEscape, true);
+    window.addEventListener('pointerdown', closeOnPointerDown, true);
   }
 
   function renderDragHandle(item: HTMLElement, name: string): HTMLButtonElement {

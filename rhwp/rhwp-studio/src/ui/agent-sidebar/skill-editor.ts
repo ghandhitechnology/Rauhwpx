@@ -120,11 +120,6 @@ export function createSkillEditor(options: {
   return { root };
 }
 
-function skillMarkdown(name: string, description: string, body: string): string {
-  const safeDescription = description.replaceAll('"', '\\"');
-  return `---\nname: ${name || 'new-skill'}\ndescription: "${safeDescription}"\n---\n\n${body}`;
-}
-
 export function createNewSkillEditor(options: {
   commit(name: string, description: string, body: string): Promise<SkillCommitOutcome>;
   close(): void;
@@ -134,10 +129,6 @@ export function createNewSkillEditor(options: {
   root.className = 'ag-skill-editor ag-skill-new-editor';
   root.setAttribute('aria-label', '새 스킬 만들기');
   appendPixelHeading(root, '새 스킬 만들기');
-
-  const intro = document.createElement('p');
-  intro.className = 'ag-skill-editor-intro';
-  intro.textContent = 'Markdown으로 바로 작성하고, 저장하면 스킬 목록에 추가됩니다.';
 
   const fields = document.createElement('div');
   fields.className = 'ag-skill-editor-fields';
@@ -165,20 +156,6 @@ export function createNewSkillEditor(options: {
   textarea.spellcheck = false;
   bodyLabel.appendChild(textarea);
 
-  const artifact = document.createElement('article');
-  artifact.className = 'ag-skill-editor-artifact';
-  artifact.setAttribute('aria-label', 'SKILL.md 미리보기');
-  const artifactHead = document.createElement('div');
-  artifactHead.className = 'ag-skill-editor-artifact-head';
-  artifactHead.append(
-    Object.assign(document.createElement('span'), { textContent: 'SKILL.md' }),
-    Object.assign(document.createElement('span'), { className: 'ag-skill-editor-artifact-badge', textContent: 'artifact' }),
-  );
-  const code = document.createElement('code');
-  const pre = document.createElement('pre');
-  pre.appendChild(code);
-  artifact.append(artifactHead, pre);
-
   const footer = document.createElement('div');
   footer.className = 'ag-skill-editor-footer';
   const status = document.createElement('span');
@@ -193,7 +170,7 @@ export function createNewSkillEditor(options: {
   save.className = 'ag-skill-text ag-skill-editor-save';
   save.textContent = '스킬 저장';
   footer.append(status, cancel, save);
-  root.append(intro, fields, bodyLabel, artifact, footer);
+  root.append(fields, bodyLabel, footer);
 
   let busy = false;
   let closed = false;
@@ -207,7 +184,6 @@ export function createNewSkillEditor(options: {
     name.disabled = busy;
     description.disabled = busy;
     textarea.readOnly = busy;
-    code.textContent = skillMarkdown(name.value.trim(), description.value.trim(), textarea.value);
     root.setAttribute('aria-busy', String(busy));
     if (!busy && commitError) status.textContent = commitError;
     else if (!busy && name.value.trim() && !validName) status.textContent = '이름은 영문 소문자, 숫자, 하이픈만 사용할 수 있습니다.';
