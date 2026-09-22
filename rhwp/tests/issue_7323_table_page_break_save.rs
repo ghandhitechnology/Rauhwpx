@@ -94,6 +94,8 @@ fn repeat_header_edit_survives_hwp5_save() {
     );
 }
 
+/// `set_table_properties` 는 raw 를 동기화한다. 이 테스트는 동기화 없이 IR 만
+/// 바꾼 뒤 `raw_stream` 을 비워 재구성 경로를 탄다.
 #[test]
 fn unsynced_ir_edit_survives_hwp5_save() {
     let mut original =

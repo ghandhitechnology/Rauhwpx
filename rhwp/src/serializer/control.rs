@@ -521,6 +521,8 @@ fn serialize_table(table: &Table, level: u16, records: &mut Vec<Record>) {
     }
 }
 
+/// bit 0-1 은 파서가 읽은 값과 IR 이 다를 때만 덮는다. 비표준 원본 3(CellBreak)을
+/// 무편집 왕복에서 1로 바꾸지 않기 위함이다. bit 2 는 IR 의 `repeat_header` 다.
 fn table_record_attr(table: &Table) -> u32 {
     let raw = table.raw_table_record_attr;
     let raw_page_break = match raw & 0x03 {
