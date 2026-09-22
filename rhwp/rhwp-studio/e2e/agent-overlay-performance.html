@@ -1,0 +1,90 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  html,body { margin:0; width:100%; height:100%; overflow:hidden; background:#e9e9eb; }
+  #viewport { width:100%; height:100%; overflow:auto; contain:strict; }
+  #scroll-content { position:relative; width:100%; height:220000px; }
+  .page { position:absolute; left:120px; width:900px; height:800px; background:#fff; box-shadow:0 1px 4px #0002; contain:paint; }
+  .page span { display:block; padding:50px; font:14px/1.7 system-ui,sans-serif; color:#222; }
+</style>
+<div id="viewport"><div id="scroll-content"></div></div>
+<script type="module">
+  import { EventBus } from '../src/core/event-bus.ts';
+  import { VirtualScroll } from '../src/view/virtual-scroll.ts';
+  const implementation = new URLSearchParams(location.search).get('implementation') || 'current';
+  const { PendingOverlayRenderer } = await import(implementation === 'baseline'
+    ? './.agent-overlay-baseline.ts'
+    : '../src/agent/pending-overlay.ts');
+  let appendedNodes = 0;
+  const appendNode = Node.prototype.appendChild;
+  Node.prototype.appendChild = function(node) { appendedNodes++; return appendNode.call(this, node); };
+
+  const viewport = document.querySelector('#viewport');
+  const content = document.querySelector('#scroll-content');
+  const pageCount = 240;
+  const pageHeight = 800;
+  const pageGap = 20;
+  const virtualScroll = new VirtualScroll(pageGap);
+  const dimensions = Array.from({length: pageCount}, (_, i) => ({ width:900, height:pageHeight, pageIndex:i }));
+  virtualScroll.setPageDimensions(dimensions, 1, 1140, undefined, 'vertical', 900);
+  const bus = new EventBus();
+  const geom = (section, para, offset=0) => {
+    const page = Math.max(0, Math.min(pageCount - 1, Math.floor(para / 10)));
+    const line = para % 10;
+    return { pageIndex: page, x: 80 + (offset % 30) * 5, y: line * 58 + 45, width: 100 + (offset % 5) * 5, height: 24 };
+  };
+  const wasm = {
+    getSelectionRects(_s, startPara, startOffset, endPara, endOffset) {
+      const out=[]; for (let p=startPara;p<=endPara;p++) { const r=geom(0,p,p===startPara?startOffset:0); out.push({...r,width:p===endPara?Math.max(10,(endOffset-(p===startPara?startOffset:0))*5):300}); } return out;
+    },
+    getCursorRect(_s, p, o) { return geom(0,p,o); },
+    getParagraphLength() { return 60; },
+    getTextRange(_s, _p, _start, count) { return 'agent edit '.repeat(Math.max(1, Math.ceil(count / 11))).slice(0, count); },
+    getSelectionRectsInCell(...args) { return this.getSelectionRects(args[0], args[4], args[5], args[6], args[7]); },
+    getCursorRectInCell(...args) { return this.getCursorRect(args[0], args[4], args[5]); },
+    getCellParagraphLength() { return 60; },
+    getTextInCell(_s, _p, _c, _cell, _para, _start, count) { return 'cell edit '.repeat(Math.max(1, Math.ceil(count / 10))).slice(0, count); },
+    getTableBBox(_s,p) { return {...geom(0,p,0), width:500,height:200}; },
+    getShapeBBox(_s,p) { return {...geom(0,p,0), width:300,height:100}; },
+    getTableCellBboxes(_s,p) { return [{cellIdx:0,row:0,col:0,rowSpan:1,colSpan:1,pageIndex:Math.floor(p/10),x:80,y:45,w:200,h:30}]; }
+  };
+  for (let i=0;i<pageCount;i++) {
+    const page=document.createElement('div'); page.className='page'; page.style.top=`${virtualScroll.getPageOffset(i)}px`; page.dataset.page=String(i);
+    const text=document.createElement('span'); text.textContent=`Long document page ${i + 1} · pending agent edit rendering fixture`;
+    page.append(text); content.append(page);
+  }
+  const viewportManager = { getViewportSize:()=>({width:1140,height:900}), getScrollY:()=>viewport.scrollTop, getScrollX:()=>viewport.scrollLeft, getZoom:()=>1 };
+  const canvasView = { getVirtualScroll:()=>virtualScroll, getViewportManager:()=>viewportManager };
+  const overlay = new PendingOverlayRenderer({ canvasView, wasm, eventBus:bus, getCaretPosition:()=>null });
+  const ops=[];
+  for (let i=0;i<320;i++) {
+    const p=(i*7)%2300; const range={sectionIdx:0,startParaIdx:p,startCharOffset:i%8,endParaIdx:p,endCharOffset:20+(i%20)};
+    ops.push({kind:'replace',id:`replace-${i}`,agent:i%2?'codex':'claude',range,oldText:'old agent content '.repeat(3),newText:'new agent content '.repeat(3)});
+  }
+  for (let i=0;i<180;i++) {
+    const p=(i*11)%2300; ops.push({kind:i%3===0?'insert':i%3===1?'delete':'format',agent:i%2?'codex':'claude',range:{sectionIdx:0,startParaIdx:p,startCharOffset:2,endParaIdx:p,endCharOffset:18}});
+  }
+  overlay.setOps(ops);
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+  const initialNodes = () => ({ total:content.querySelectorAll('.ag-pending-rect').length, inks:content.querySelectorAll('.ag-pending-ink').length, markers:content.querySelectorAll('.ag-pending-marker').length });
+  window.__overlayBench = {
+    async workload(durationMs=16000) {
+      const started=performance.now(); let n=0;
+      while (performance.now()-started < durationMs) {
+        const max=Math.max(0, content.scrollHeight - viewport.clientHeight);
+        viewport.scrollTop = (n*1379) % Math.max(1,max);
+        bus.emit('viewport-scroll');
+        if (n % 12 === 0) { const op=ops[n % ops.length]; op.newText = `new agent mutation ${n} `.repeat(3); overlay.setOps(ops); bus.emit('document-changed'); }
+        n++; await new Promise(r=>requestAnimationFrame(r));
+      }
+      // Make the visual comparison independent of small frame-count jitter.
+      viewport.scrollTop = 12345;
+      bus.emit('viewport-scroll');
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      return { frames:n, scrollTop:viewport.scrollTop, visibleNodes:content.querySelectorAll('.ag-pending-rect').length, pageCount };
+    },
+    nodeStats() { return { initial:initialNodes(), total:content.querySelectorAll('.ag-pending-rect').length, inks:content.querySelectorAll('.ag-pending-ink').length, markers:content.querySelectorAll('.ag-pending-marker').length, appendedNodes, window:virtualScroll.getPageWindow(viewport.scrollTop, 900, 0, 1140) }; },
+    screenshotTarget:content,
+  };
+  window.__overlayBenchReady=true;
+</script>
