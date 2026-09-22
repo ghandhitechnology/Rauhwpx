@@ -162,7 +162,7 @@ try {
     await page.evaluate(() => window.sidebarPreview.cloud.setLink('failed'));
     assert.deepEqual(await page.$$eval('.ag-cd-task-status', nodes => nodes.map(node => node.textContent)), initialStatuses,
       'viewing connection loss must not change saved task states');
-    await page.click('.ag-cd-settings-toggle');
+    if (await page.$eval('.ag-cd-config', node => node.hidden)) await page.click('.ag-cd-settings-toggle');
     assert.equal(await page.$eval('.ag-cd-config', node => node.hidden), false);
     await page.click('.ag-cloud-settings-action');
     await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
@@ -170,7 +170,7 @@ try {
     await page.evaluate(() => window.sidebarPreview.cloud.blockReconnect(true));
     await page.click('.ag-cd-reconnect');
     await page.waitForSelector('.ag-cd-content .ag-cloud-link-progress:not([hidden])');
-    assert.equal(await page.$eval('.ag-cd-content [role="progressbar"]', node => node.hasAttribute('aria-valuenow')), false);
+    assert.equal(await page.$eval('.ag-cd-content .ag-cloud-link-progress [role="progressbar"]', node => node.hasAttribute('aria-valuenow')), false);
     assert.match(await page.$eval('.ag-cd-content .ag-cloud-link-progress-eta', node => node.textContent), /경과$/);
     await page.evaluate(() => window.sidebarPreview.cloud.blockReconnect(false));
     await page.waitForFunction(() => !document.querySelector('.ag-cd-refresh').disabled);
