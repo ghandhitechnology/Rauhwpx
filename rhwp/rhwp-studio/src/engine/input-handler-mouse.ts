@@ -824,13 +824,37 @@ export function onClick(this: any, e: MouseEvent): void {
                 py >= picBbox.y && py <= picBbox.y + picBbox.h) {
               try {
                 const props = this.getObjectProperties(ref);
-                if (!props.treatAsChar) {
+                // tac(글자처럼 취급) 그림도 인라인 위치 이동 드래그를 허용한다 —
+                // Rust movePictureControl 이 Picture 만 받으므로 type==='image' 로 제한하고
+                // 셀/머리글·바닥글 tac 개체는 이동 명령이 본문 문단 전제라 제외한다.
+                const inlineTac = !!props.treatAsChar
+                  && ref.type === 'image'
+                  && !ref.cellPath
+                  && !ref.headerFooter;
+                // undo 원본 자리 = 드래그 시작 시 그림의 논리(캐럿) 위치. hitTest 는 인라인
+                // 그림 좌측 절반에서 find_logical_control_positions 값을 돌려주므로 좌측으로 캡처한다.
+                let originCharOffset = 0;
+                if (inlineTac) {
+                  try {
+                    const originHit = this.wasm.hitTest(
+                      pi, picBbox.x + Math.min(2, picBbox.w * 0.25), picBbox.y + picBbox.h / 2,
+                    );
+                    if (originHit.sectionIndex !== ref.sec || originHit.paragraphIndex !== ref.ppi
+                        || !Number.isFinite(originHit.charOffset)) throw new Error('hitTest mismatch');
+                    originCharOffset = originHit.charOffset;
+                  } catch {
+                    return; // 원본 자리 캡처 실패 시 인라인 드래그를 시작하지 않는다
+                  }
+                }
+                if (!props.treatAsChar || inlineTac) {
                   e.preventDefault();
                   this.isPictureMoveDragging = true;
                   this.pictureMoveState = {
                     ref: { sec: ref.sec, ppi: ref.ppi, ci: ref.ci, type: ref.type, cellPath: ref.cellPath, headerFooter: ref.headerFooter },
                     origHorzOffset: props.horzOffset,
                     origVertOffset: props.vertOffset,
+                    inlineTac: inlineTac || undefined,
+                    originCharOffset: inlineTac ? originCharOffset : undefined,
                     startPageX: px, startPageY: py,
                     lastPageX: px, lastPageY: py,
                     totalDeltaH: 0, totalDeltaV: 0,
@@ -1882,7 +1906,8 @@ export function onMouseMove(this: any, e: MouseEvent): void {
               py >= picBbox.y && py <= picBbox.y + picBbox.h) {
             try {
               const props = this.getObjectProperties(ref);
-              this.container.style.cursor = props.treatAsChar ? '' : 'move';
+              // tac 그림(image)도 이동 드래그 대상이라 항상 move 커서를 쓴다.
+              this.container.style.cursor = (ref.type === 'image' || !props.treatAsChar) ? 'move' : '';
             } catch {
               this.container.style.cursor = '';
             }

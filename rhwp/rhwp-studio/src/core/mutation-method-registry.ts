@@ -43,7 +43,7 @@ export const MUTATING_METHODS: readonly string[] = [
   // 그림/도형/수식 개체
   'insertPicture', 'assignPictureImage', 'setPictureProperties',
   'setHeaderFooterPictureProperties', 'setCellPicturePropertiesByPath',
-  'setCellShapePropertiesByPath', 'deletePictureControl', 'deleteCellPictureControlByPath',
+  'setCellShapePropertiesByPath', 'deletePictureControl', 'movePictureControl', 'deleteCellPictureControlByPath',
   'createShapeControl', 'setShapeProperties', 'deleteShapeControl', 'changeObjectZOrder',
   'groupShapes', 'ungroupShape', 'moveLineEndpoint', 'updateConnectorsInSection',
   'insertEquation', 'setEquationProperties', 'setNoteEquationProperties', 'deleteEquationControl',

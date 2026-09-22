@@ -38,6 +38,76 @@ impl DocumentCore {
                 .iter()
                 .all(|ctrl| matches!(ctrl, Control::SectionDef(_) | Control::ColumnDef(_)))
     }
+    /// 인라인 컨트롤이 차지하는 8 code unit 갭의 시작 UTF-16 위치를 찾는다.
+    ///
+    /// char_offsets 의 컨트롤 갭 점프를 순회하며 control_idx 번째 갭을 찾고,
+    /// 텍스트 뒤에 몰린 컨트롤은 스트림 끝 순서로 배정한다. 유효한 control_idx
+    /// 에서는 항상 발견되며, 실패 시 스트림 끝을 반환한다.
+    pub(crate) fn find_inline_control_gap_start(para: &Paragraph, control_idx: usize) -> u32 {
+        let text_chars: Vec<char> = para.text.chars().collect();
+        let mut ci = 0usize;
+        let mut prev_end: u32 = 0;
+        for i in 0..text_chars.len() {
+            let offset = if i < para.char_offsets.len() {
+                para.char_offsets[i]
+            } else {
+                prev_end
+            };
+            while prev_end + 8 <= offset && ci < para.controls.len() {
+                if ci == control_idx {
+                    return prev_end;
+                }
+                ci += 1;
+                prev_end += 8;
+            }
+            let char_size: u32 = if text_chars[i] == '\t' {
+                8
+            } else if text_chars[i].len_utf16() == 2 {
+                2
+            } else {
+                1
+            };
+            prev_end = offset + char_size;
+        }
+        while ci < para.controls.len() {
+            if ci == control_idx {
+                return prev_end;
+            }
+            ci += 1;
+            prev_end += 8;
+        }
+        prev_end
+    }
+
+    /// 인라인 컨트롤을 문단에서 제거하고 뒤쪽 char_offsets 를 당긴다.
+    ///
+    /// delete_picture_control_native 와 move_picture_control_native 의 공통 삭제
+    /// 절반이다. 반환값은 제거된 갭의 시작 UTF-16 위치다.
+    pub(crate) fn remove_inline_control_and_shift(para: &mut Paragraph, control_idx: usize) -> u32 {
+        let gap_start = Self::find_inline_control_gap_start(para, control_idx);
+
+        // char_offsets 조정
+        let threshold = gap_start + 8;
+        for offset in para.char_offsets.iter_mut() {
+            if *offset >= threshold {
+                *offset -= 8;
+            }
+        }
+
+        // 컨트롤 및 ctrl_data_record 제거
+        para.controls.remove(control_idx);
+        if control_idx < para.ctrl_data_records.len() {
+            para.ctrl_data_records.remove(control_idx);
+        }
+
+        // char_count 갱신
+        if para.char_count >= 8 {
+            para.char_count -= 8;
+        }
+
+        gap_start
+    }
+
     /// 컨트롤 삭제 후 문단의 line_segs를 재계산한다.
     ///
     /// 그림/도형 삭제 시 문단의 line_segs에 컨트롤 높이가 그대로 남아,

@@ -42,6 +42,7 @@ e2e 스크립트의 **단일 권위 목록**이다. 파일 추가/변경/폐기 
 | `drag-selection-autoscroll.test.mjs` | 상시 | active | 텍스트 드래그 선택 edge 자동 스크롤 | — | npm e2e:drag-autoscroll |  |
 | `drop-confirm.test.mjs` | 상시 | active | #1439 드래그&드롭 로컬 파일 로딩 보안 게이트 | — | 수동 |  |
 | `drop-image-table-cell.test.mjs` | 상시 | active | 표 셀 위 이미지 드롭: #1151 floating sibling 로 렌더 (사라짐 결함 회귀 게이트), 셀 영역 배치·tac=false·wrap=Square, undo, 본문 drop tac=true 유지 | — | npm e2e:drop-table-picture |  |
+| `drag-inline-image.test.mjs` | 상시 | active | 인라인(tac) 그림 마우스 드래그 이동: 개체 선택 후 본체 드래그 → 드롭 문단 컨트롤 이동, undo 원본 문단·ci 복원, redo 재이동 | — | npm e2e:drag-inline-image | macOS 실행 시 CHROME_PATH 지정 필요 |
 | `edit-pipeline.test.mjs` | 상시 | active | 편집 파이프라인 검증 (Issue #2) | — | 수동 |  |
 | `embed-save-ack.test.mjs` | 상시 | active | Task #2660 호스트 저장 완료 통지와 dirty/autosave 정리 계약 | footnote-01.hwp | 수동 |  |
 | `embed-transport.test.mjs` | 상시 | active | Issue #2186 @rhwp/editor MessageChannel v1 iframe transport | — | npm e2e:embed |  |

@@ -36,6 +36,7 @@
     "e2e:drag-autoscroll": "node e2e/drag-selection-autoscroll.test.mjs",
     "e2e:page-break-caret": "node e2e/page-break-caret-reveal.test.mjs --mode=headless",
     "e2e:drop-table-picture": "node e2e/drop-image-table-cell.test.mjs --mode=headless",
+    "e2e:drag-inline-image": "node e2e/drag-inline-image.test.mjs --mode=headless",
     "e2e:issue-4121": "node e2e/header-footer-selection-issue4121.test.mjs --mode=headless",
     "e2e:renderer-contract": "node e2e/renderer-contract.test.mjs",
     "e2e:issue-2214": "node e2e/issue-2214-page-local-repaint.test.mjs --mode=headless",
