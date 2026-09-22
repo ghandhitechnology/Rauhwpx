@@ -95,9 +95,9 @@ test('plan mode leaves the document editable while a planning turn is running', 
   );
   assert.deepEqual(
     deriveAgentEditingLease({
-      turnRunning: true, activeToolRequests: 0, agent: 'grok', workflow: 'plan', phase: 'implementing',
+      turnRunning: true, activeToolRequests: 0, agent: 'pi', workflow: 'plan', phase: 'implementing',
     }),
-    { active: true, agent: 'grok' },
+    { active: true, agent: 'pi' },
   );
   assert.deepEqual(
     deriveAgentEditingLease({
@@ -131,12 +131,12 @@ test('plan mode leaves the document editable while a planning turn is running', 
     deriveAgentEditingLease({
       turnRunning: true,
       activeToolRequests: 0,
-      agent: 'grok',
+      agent: 'claude',
       workflow: 'direct',
       phase: 'direct',
       waitingForUser: true,
     }),
-    { active: true, agent: 'grok', waitingForUser: true },
+    { active: true, agent: 'claude', waitingForUser: true },
   );
 });
 
@@ -193,7 +193,7 @@ test('editing frame reflects the active agent and has responsive reduced-motion 
   assert.match(main, /editorArea\?\.setAttribute\('aria-busy', lease\.active \? 'true' : 'false'\)/);
   assert.match(main, /statusLabel\.textContent = `\$\{AGENT_LABEL\[lease\.agent\]\}가 문서를 편집 중이에요`/);
   assert.match(main, /if \(lease\.waitingForUser\) statusLabel\.textContent = `\$\{AGENT_LABEL\[lease\.agent\]\}가 답변을 기다리고 있어요`/);
-  for (const agent of ['claude', 'pi', 'grok', 'cursor']) {
+  for (const agent of ['claude', 'pi']) {
     assert.match(css, new RegExp(`data-editing-agent='${agent}'`));
   }
   assert.match(css, /animation:\s*agent-editing-sweep/);

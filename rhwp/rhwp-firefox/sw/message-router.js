@@ -64,7 +64,7 @@ export const messageHandlers = {
    * Content Script → Service Worker: HWP 파일 열기 요청
    * 웹 페이지발 요청은 fetch 정책과 동일한 URL 검증을 통과해야 한다.
    */
-  'open-hwp': (message, sender) => {
+  'open-hwp': async (message, sender) => {
     if (!isWebPageSender(sender)) {
       return { error: 'Unauthorized sender' };
     }
@@ -73,7 +73,7 @@ export const messageHandlers = {
     } catch (err) {
       return { error: err.message };
     }
-    openViewer({ url: message.url, filename: message.filename });
+    await openViewer({ url: message.url, filename: message.filename });
     return { ok: true };
   },
 

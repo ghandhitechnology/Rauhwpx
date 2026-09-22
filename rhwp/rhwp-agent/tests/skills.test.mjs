@@ -461,8 +461,6 @@ test('promptContext appends provider tool notes only for a known activated agent
   assert.match(pi, /subagent_spawn\/subagent_wait\/subagent_check\/subagent_list\/subagent_cancel/);
   assert.match(pi, /Background hub jobs .* are not collaboration agents/);
 
-  const removed = await registry.promptContext('복사', 'starter', { agent: 'grok' });
-  assert.doesNotMatch(removed, /provider_tool_notes/);
   const noSkill = await registry.promptContext('복사', undefined, { agent: 'claude' });
   assert.doesNotMatch(noSkill, /provider_tool_notes/);
   const neutral = await registry.promptContext('복사', 'starter');

@@ -186,31 +186,6 @@ test('a tool-call turn maps to the unified event sequence and settles', () => {
   session.dispose();
 });
 
-test('rau harness events carry the rau agent name', () => {
-  const { session, events, spawns } = startSession({ agentName: 'rau' });
-  session.sendUserMessage('probe the document');
-  const { proc } = spawns[0];
-
-  assert.equal(spawns[0].options.env.RHWP_AGENT_NAME, 'rau');
-
-  proc.emitJson(
-    SESSION_LINE,
-    { type: 'agent_start' },
-    { type: 'turn_start' },
-    {
-      type: 'message_update',
-      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: '확인했습니다.' },
-    },
-    { type: 'agent_settled' },
-  );
-  proc.exit(0);
-
-  assert.ok(events.length > 0);
-  for (const event of events) assert.equal(event.agent, 'rau');
-  assert.equal(events.at(-1).type, 'turn-end');
-  session.dispose();
-});
-
 test('thinking deltas stay out of the transcript', () => {
   const { session, events, spawns } = startSession();
   session.sendUserMessage('explain');
@@ -306,15 +281,15 @@ test('formatPiExitError redacts key-shaped strings and falls back without stderr
   );
 });
 
-test('OpenRouter 402 blocks a Rau turn with the empty-credit copy', () => {
+test('OpenRouter 402 blocks a Pi turn with the empty-credit copy', () => {
   assert.equal(isOpenRouterCreditError('OpenRouter 402 Payment Required'), true);
   assert.equal(
-    formatOpenRouterCreditError('HTTP 402: insufficient credits', 'rau'),
-    'Rau 체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.',
+    formatOpenRouterCreditError('HTTP 402: insufficient credits', 'pi'),
+    'OpenRouter 크레딧이 부족합니다.',
   );
   assert.match(
-    formatPiExitError('402 Payment Required: out of credits', 1, null, '', 'rau'),
-    /체험 크레딧이 다 됐어요/,
+    formatPiExitError('402 Payment Required: out of credits', 1, null, '', 'pi'),
+    /OpenRouter 크레딧이 부족합니다/,
   );
 });
 
@@ -691,9 +666,9 @@ test('Windows Pi terminal cleanup starts live, drains buffered output, and allow
   assert.equal(await disposing, true);
 });
 
-test('Pi fleet events preserve child terminal status and Rau identity', () => {
+test('Pi fleet events preserve child terminal status and the Pi agent name', () => {
   const events = [];
-  const mapper = createPiFleetMapper((event) => events.push(event), 'rau');
+  const mapper = createPiFleetMapper((event) => events.push(event), 'pi');
   for (const [callId, id, name] of [
     ['spawn-ok', 'sa-1', 'Edit'],
     ['spawn-fail', 'sa-2', 'Research'],
@@ -717,8 +692,8 @@ test('Pi fleet events preserve child terminal status and Rau identity', () => {
     ] } },
   });
   assert.deepEqual(events.filter((event) => event.type === 'task-end'), [
-    { type: 'task-end', agent: 'rau', taskId: 'spawn-ok', status: 'completed' },
-    { type: 'task-end', agent: 'rau', taskId: 'spawn-fail', status: 'failed' },
+    { type: 'task-end', agent: 'pi', taskId: 'spawn-ok', status: 'completed' },
+    { type: 'task-end', agent: 'pi', taskId: 'spawn-fail', status: 'failed' },
   ]);
 });
 
