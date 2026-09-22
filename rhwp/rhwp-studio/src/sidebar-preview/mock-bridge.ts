@@ -888,7 +888,17 @@ export function createMockBridge(report: (message: string) => void) {
       later(() => emit({ type: 'skills-catalog', catalog: data.skills })),
     listHarnessSkills: () =>
       request((requestId) =>
-        emit({ type: 'harness-list-result', requestId, rows: [] }),
+        emit({
+          type: 'harness-list-result',
+          requestId,
+          rows: [
+            {
+              harness: 'claude',
+              name: 'meeting-notes',
+              description: '회의 메모를 실행 항목으로 정리합니다.',
+            },
+          ],
+        }),
       ),
     commitSkill: (change) =>
       request((requestId) => {
@@ -909,6 +919,18 @@ export function createMockBridge(report: (message: string) => void) {
             data.skills.rows.push(row);
             data.skills.rows.sort((left, right) => left.name.localeCompare(right.name));
             skillTrash.delete(change.name);
+          }
+        } else if (change.action === 'import') {
+          if (!data.skills.rows.some((item) => item.name === change.name)) {
+            data.skills.rows.unshift({
+              kind: 'skill',
+              name: change.name,
+              description: '가져온 스킬',
+              origin: 'user',
+              icon: 'system',
+              enabled: true,
+              digest: 'a'.repeat(64),
+            });
           }
         }
         emit({
