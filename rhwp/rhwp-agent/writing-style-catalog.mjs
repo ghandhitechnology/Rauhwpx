@@ -42,8 +42,6 @@ export function buildWritingStyleCatalog({
       error: health?.claude?.error ?? null, models: CLAUDE_MODELS.map((model) => ({ ...model, efforts: [...model.efforts] })),
     },
     {
-    },
-    {
       id: 'pi', name: 'Pi · OpenRouter', available: providerAvailable('pi', health, piStatus),
       error: piStatus?.setupComplete ? null : 'Configure an OpenRouter key and at least one Pi model.',
       models: piModels(piStatus),

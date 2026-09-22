@@ -167,6 +167,17 @@ async function openCloud(page) {
   await waitForTitle(page, '내 VPS에서 Cloud 시작하기');
 }
 
+async function revealCloudSettings(page) {
+  await page.waitForSelector('.ag-cd-config', { timeout: 15_000 });
+  if (await page.$eval('.ag-cd-config', (node) => node.hidden)) {
+    await clickStable(page, '.ag-cd-settings-toggle');
+    await page.waitForFunction(() => {
+      const config = document.querySelector('.ag-cd-config');
+      return Boolean(config) && !config.hidden;
+    });
+  }
+}
+
 async function manageCloud(page) {
   if (!await page.$eval('#agent-sidebar', (node) => node.classList.contains('ag-settings-open'))) {
     await clickStable(page, '#agent-sidebar .ag-header-icon-btn.ag-settings-btn');
@@ -177,6 +188,7 @@ async function manageCloud(page) {
     () => document.querySelector('#ag-settings-tab-cloud')?.getAttribute('aria-selected') === 'true',
     { timeout: 15_000 },
   );
+  await revealCloudSettings(page);
   await clickStable(page, '.ag-cloud-settings-action');
   await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
 }
@@ -837,7 +849,7 @@ try {
   assert.match(await page.$eval('.ag-cloud-setup-technical pre', (node) => node.textContent), /reports crashed/);
   assert.deepEqual(
     await page.evaluate(() => window.__cloudHarness.calls.filter((call) => call.method === 'cloudSpawnSandbox').map((call) => call.payload)),
-    [{ providerId: 'railway', selectedProvider: 'rau' }],
+    [{ providerId: 'railway', selectedProvider: 'claude' }],
   );
   console.log('  PASS a failed sandbox spawn reports the provider detail and stays recoverable');
 
@@ -865,6 +877,7 @@ try {
   const preparingCard = await settingsCard(page);
   assert.equal(preparingCard.status, '서버 준비 중');
   assert.equal(preparingCard.action, '진행 보기');
+  await revealCloudSettings(page);
   await clickStable(page, '.ag-cloud-settings-action');
   await waitForTitle(page, 'Raucloud 준비 중');
   assert.deepEqual(await page.evaluate(() => ({

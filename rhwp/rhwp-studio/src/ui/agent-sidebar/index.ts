@@ -5764,8 +5764,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function showThreadPopover(thread: ChatThread, row: HTMLElement): void {
     if (!fullscreen || !row.isConnected) return;
     const head = el('div', 'ag-thread-popover-head');
+    const modeLabel = thread.executionMode === 'cloud' ? 'Cloud' : 'Local';
+    const mode = el('span', 'ag-thread-popover-mode');
+    mode.setAttribute('role', 'img');
+    mode.setAttribute('aria-label', modeLabel);
+    mode.append(createIcon(thread.executionMode === 'cloud' ? 'cloud' : 'local'));
     head.append(
       el('span', 'ag-thread-popover-title', thread.title || '새 채팅'),
+      mode,
       el('span', 'ag-thread-popover-age', formatRelativeAge(thread.updatedAt)),
     );
     const docRow = el('div', 'ag-thread-popover-row');
@@ -5892,8 +5898,41 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     // 상태 점은 제목 들여쓰기 여백에 겹쳐 앉는다 — 행 배치는 그대로다.
     const status = getChatStatus(thread.id);
     if (status) btn.appendChild(buildStatusDot(status, 'ag-row-status'));
-    btn.appendChild(el('span', 'ag-threads-item-title', thread.title || '새 채팅'));
-    btn.appendChild(el('span', 'ag-thread-mode', thread.executionMode === 'cloud' ? 'Cloud' : 'Local'));
+    const mode = el('span', 'ag-thread-mode');
+    const modeLabel = thread.executionMode === 'cloud' ? 'Cloud' : 'Local';
+    mode.title = modeLabel;
+    mode.setAttribute('role', 'img');
+    mode.setAttribute('aria-label', modeLabel);
+    mode.append(createIcon(thread.executionMode === 'cloud' ? 'cloud' : 'local'));
+    const title = el('span', 'ag-threads-item-title');
+    const titleText = el('span', 'ag-threads-item-title-text', thread.title || '새 채팅');
+    title.append(titleText);
+    btn.append(title, mode);
+    btn.setAttribute('aria-label', `${thread.title || '새 채팅'}, ${modeLabel}`);
+    let titleScroll: Animation | null = null;
+    const stopTitleScroll = () => {
+      titleScroll?.cancel();
+      titleScroll = null;
+      title.classList.remove('ag-scrolling');
+    };
+    const startTitleScroll = () => {
+      if (titleScroll || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      title.classList.add('ag-scrolling');
+      const overflow = titleText.scrollWidth - title.clientWidth;
+      if (overflow <= 0) { stopTitleScroll(); return; }
+      titleScroll = titleText.animate([
+        { transform: 'translateX(0)', offset: 0 },
+        { transform: 'translateX(0)', offset: .15 },
+        { transform: `translateX(-${overflow}px)`, offset: .85 },
+        { transform: `translateX(-${overflow}px)`, offset: 1 },
+      ], { duration: Math.max(2400, overflow / 30 * 1000 / .7), iterations: Infinity, direction: 'alternate', easing: 'linear' });
+    };
+    li.addEventListener('mouseenter', startTitleScroll);
+    li.addEventListener('mouseleave', () => { if (!li.contains(document.activeElement)) stopTitleScroll(); });
+    li.addEventListener('focusin', startTitleScroll);
+    li.addEventListener('focusout', (event) => {
+      if (!li.contains(event.relatedTarget as Node | null) && !li.matches(':hover')) stopTitleScroll();
+    });
     // 두 번 누르기로는 열지 않는다 — 첫 클릭이 이미 대화를 열어버리므로
     // 이름 바꾸기는 연필 버튼 하나로만 들어간다.
     btn.addEventListener('click', () => openThread(thread.id));
@@ -5903,14 +5942,23 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const rename = el('button', 'ag-thread-rename');
     rename.type = 'button';
     rename.setAttribute('aria-label', `${thread.title || '새 채팅'} 이름 바꾸기`);
-    rename.title = '이름 바꾸기';
     rename.appendChild(createIcon('format'));
+    const renameTooltip = el('span', 'ag-thread-rename-tooltip', '이름 바꾸기');
+    renameTooltip.setAttribute('role', 'tooltip');
+    const positionRenameTooltip = () => {
+      const rect = rename.getBoundingClientRect();
+      renameTooltip.style.left = `${rect.left + rect.width / 2}px`;
+      renameTooltip.style.top = `${rect.top - 8}px`;
+    };
+    rename.addEventListener('mouseenter', positionRenameTooltip);
+    rename.addEventListener('focus', positionRenameTooltip);
     rename.addEventListener('click', (e) => {
       e.stopPropagation();
+      stopTitleScroll();
       beginThreadRename(thread, li);
     });
 
-    li.append(btn, rename);
+    li.append(btn, rename, renameTooltip);
     return li;
   }
 

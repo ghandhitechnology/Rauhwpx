@@ -1305,7 +1305,11 @@ async function initialize(): Promise<void> {
           applyCloudResult,
           publishCloudCheckpoint,
           isCloudCheckpointMerged: (checkpoint) => versionController.isCloudCheckpointMerged(checkpoint),
-          mergeCloudCheckpoint: (startId, checkpoint) => versionController.mergeCloudCheckpoint(startId, checkpoint),
+          mergeCloudCheckpoint: async (startId, checkpoint) => {
+            const applied = await versionController.mergeCloudCheckpoint(startId, checkpoint);
+            if (applied) await versionController.refresh();
+            return applied;
+          },
           applyCloudTakeover,
         });
         disposeAgentSidebar = () => {
