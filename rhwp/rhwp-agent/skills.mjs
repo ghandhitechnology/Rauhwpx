@@ -28,7 +28,11 @@ const CATALOG_LINE_BUDGET = 8_000;
 const DESCRIPTION_LINE_LIMIT = 1_000;
 const RESERVED_NAMES = new Set(['skills', 'skill-create', 'skill-edit', 'skill-delete']);
 const SEALED_NAME = 'present-plan';
-const SKILL_ICONS = new Set(['pencil', 'bot', 'system']);
+const APP_ORIGIN_FILE = '.rhwp-origin.json';
+const SKILL_ICONS = new Set([
+  'pencil', 'bot', 'system', 'sparkles', 'book', 'target', 'chart', 'lightbulb',
+  'calendar', 'code', 'check', 'heart', 'bolt', 'shield',
+]);
 const HARNESS_IDS = ['claude', 'codex', 'cursor', 'pi'];
 const WINDOWS_FORBIDDEN_COMPONENT_RE = /[<>:"|?*\u0000-\u001f]/;
 const WINDOWS_DEVICE_COMPONENT_RE = /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/i;
@@ -152,9 +156,10 @@ function yamlDoubleQuoted(value) {
   return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r/g, '\\r').replace(/\n/g, '\\n')}"`;
 }
 
-function canonicalMarkdown(name, description, body) {
+function canonicalMarkdown(name, description, body, icon = null) {
   const next = String(body).replace(/\r\n/g, '\n').replace(/^\n+/, '').replace(/\s+$/, '');
-  return `---\nname: ${name}\ndescription: ${yamlDoubleQuoted(description)}\n---\n\n${next}\n`;
+  const iconLine = icon ? `icon: ${icon}\n` : '';
+  return `---\nname: ${name}\ndescription: ${yamlDoubleQuoted(description)}\n${iconLine}---\n\n${next}\n`;
 }
 
 function frontmatterSplit(markdown) {
@@ -174,6 +179,19 @@ function spliceBody(markdown, body) {
   const next = String(body).replace(/\r\n/g, '\n').replace(/\s+$/, '');
   if (!front || !next.trim()) return null;
   return `${front}\n${next}\n`;
+}
+
+function spliceIcon(markdown, icon) {
+  const front = frontmatterSplit(markdown);
+  if (!front) return null;
+  const body = String(markdown).slice(front.length);
+  const lines = front.replace(/\r\n/g, '\n').split('\n');
+  const closing = lines.lastIndexOf('---');
+  if (closing <= 0) return null;
+  const kept = lines.filter((line, index) => index === 0 || index >= closing || !/^icon\s*:/.test(line));
+  const nextClosing = kept.lastIndexOf('---');
+  kept.splice(nextClosing, 0, `icon: ${icon}`);
+  return `${kept.join('\n')}${body}`;
 }
 
 function digestFiles(files) {
@@ -279,6 +297,13 @@ function requireDigest(value, optional = false) {
   return value;
 }
 
+function requireIcon(value) {
+  if (typeof value !== 'string' || !SKILL_ICONS.has(value)) {
+    throw new SkillError('INVALID_REQUEST', 'Invalid skill icon');
+  }
+  return value;
+}
+
 function requireText(value, label) {
   if (typeof value !== 'string') throw new SkillError('INVALID_REQUEST', `${label} is required`);
   return value;
@@ -372,6 +397,7 @@ export class SkillRegistry {
         origin: 'sealed',
         digest: null,
         icon: sealed.icon,
+        editable: false,
       });
     }
     const hidden = new Set(users.filter((row) => row.name !== SEALED_NAME).map((row) => row.name));
@@ -424,12 +450,13 @@ export class SkillRegistry {
     }
     switch (raw.action) {
       case 'create':
-        exactKeys(raw, ['action', 'name', 'description', 'body', 'base']);
+        exactKeys(raw, ['action', 'name', 'description', 'body', 'base', 'icon']);
         return {
           kind: 'create',
           name: requireName(raw.name),
           description: requireText(raw.description, 'Skill description'),
           body: requireText(raw.body, 'Skill body'),
+          ...(raw.icon === undefined ? {} : { icon: requireIcon(raw.icon) }),
           ...(raw.base === undefined ? {} : { base: requireDigest(raw.base) }),
         };
       case 'write': {
@@ -453,6 +480,14 @@ export class SkillRegistry {
           kind: 'body',
           name: requireName(raw.name),
           body: requireText(raw.body, 'Skill body'),
+          base: requireDigest(raw.base),
+        };
+      case 'icon':
+        exactKeys(raw, ['action', 'name', 'icon', 'base']);
+        return {
+          kind: 'icon',
+          name: requireName(raw.name),
+          icon: requireIcon(raw.icon),
           base: requireDigest(raw.base),
         };
       case 'enable':
@@ -502,6 +537,28 @@ export class SkillRegistry {
     const entry = await this._loadEntry(row.origin === 'user' ? this.userRoot : this.bundledRoot, name);
     if (!entry || entry.broken) throw new SkillError('SKILL_NOT_FOUND', `Skill not found: ${name}`);
     return this._resourceFromEntry(entry, name, rel);
+  }
+
+  async readEditor(name) {
+    const row = (await this.catalog()).rows.find((item) => item.name === name);
+    if (!row || row.kind !== 'skill' || row.origin !== 'user' || row.editable !== true) {
+      throw new SkillError('SKILL_NOT_EDITABLE', '이 스킬은 편집할 수 없습니다.');
+    }
+    const entry = await this._loadEntry(this.userRoot, name);
+    const markdown = entry?.files.get('SKILL.md')?.toString('utf8') ?? '';
+    const front = frontmatterSplit(markdown);
+    if (!front) throw new SkillError('INVALID_SKILL', 'SKILL.md를 읽을 수 없습니다');
+    return { name, body: markdown.slice(front.length).trim(), digest: entry.digest };
+  }
+
+  async saveEditor(name, body, base) {
+    return this.#mutate(async () => {
+      const row = (await this.catalog()).rows.find((item) => item.name === name);
+      if (!row || row.kind !== 'skill' || row.origin !== 'user' || row.editable !== true) {
+        return refusal('SEALED');
+      }
+      return this._commitBody({ kind: 'body', name, body, base }, await this._snapshot(name));
+    });
   }
 
   async promptContext(text, explicitName, { phase = 'direct', agent = null } = {}) {
@@ -569,6 +626,8 @@ export class SkillRegistry {
         return this._commitWrite(change, snapshot);
       case 'body':
         return this._commitBody(change, snapshot);
+      case 'icon':
+        return this._commitIcon(change, snapshot);
       case 'enable':
         return this._commitEnable(change, snapshot);
       case 'delete':
@@ -588,12 +647,15 @@ export class SkillRegistry {
     if (!change.description.trim() || !change.body.trim()) return refusal('INVALID_SKILL');
     let markdown;
     try {
-      markdown = canonicalMarkdown(change.name, change.description, change.body);
+      markdown = canonicalMarkdown(change.name, change.description, change.body, change.icon ?? null);
       projectSkillMarkdown(markdown, change.name);
     } catch (error) {
       return refusal(error?.code === 'INVALID_SKILL_NAME' ? 'INVALID_SKILL_NAME' : 'INVALID_SKILL');
     }
-    const files = new Map([['SKILL.md', Buffer.from(markdown, 'utf8')]]);
+    const files = new Map([
+      ['SKILL.md', Buffer.from(markdown, 'utf8')],
+      [APP_ORIGIN_FILE, Buffer.from('{"source":"app"}\n', 'utf8')],
+    ]);
     if (this._sameVisible(snapshot, files)) return this._unchanged(change.name, snapshot);
     if (snapshot.user?.broken) {
       if (change.base !== undefined && change.base !== snapshot.user.digest) {
@@ -628,6 +690,23 @@ export class SkillRegistry {
     if (snapshot.user?.structural) return refusal('INVALID_SKILL_FILE', snapshot.user.digest);
     const current = base.files.get('SKILL.md');
     const markdown = current ? spliceBody(current, change.body) : null;
+    if (!markdown) return refusal('INVALID_SKILL', this._visibleDigest(snapshot));
+    const files = cloneFiles(base.files);
+    putFile(files, 'SKILL.md', Buffer.from(markdown, 'utf8'));
+    const projected = this._projectedFiles(change.name, files);
+    if (!projected.ok) return refusal(projected.code, this._visibleDigest(snapshot));
+    if (this._sameVisible(snapshot, files)) return this._unchanged(change.name, snapshot);
+    if (base.digest !== change.base) return refusal('STALE', base.digest);
+    await this._install(change.name, files);
+    return this._accepted(change.name, false);
+  }
+
+  async _commitIcon(change, snapshot) {
+    const base = this._editableFiles(snapshot);
+    if (!base) return refusal('SKILL_NOT_FOUND');
+    if (snapshot.user?.structural) return refusal('INVALID_SKILL_FILE', snapshot.user.digest);
+    const current = base.files.get('SKILL.md');
+    const markdown = current ? spliceIcon(current, change.icon) : null;
     if (!markdown) return refusal('INVALID_SKILL', this._visibleDigest(snapshot));
     const files = cloneFiles(base.files);
     putFile(files, 'SKILL.md', Buffer.from(markdown, 'utf8'));
@@ -693,12 +772,13 @@ export class SkillRegistry {
       if (error instanceof SkillError) return refusal(error.code === 'SKILL_TOO_LARGE' ? 'SKILL_TOO_LARGE' : 'INVALID_SKILL');
       throw error;
     }
-    if (snapshot.user && !snapshot.user.structural && sameFiles(snapshot.user.files, source.files)) {
+    const importedFiles = new Map([...source.files].filter(([rel]) => rel !== APP_ORIGIN_FILE));
+    if (snapshot.user && !snapshot.user.structural && sameFiles(snapshot.user.files, importedFiles)) {
       return this._unchanged(change.name, snapshot);
     }
     if (change.mode === 'adopt') {
       if (!snapshot.user) {
-        await this._install(change.name, source.files);
+        await this._install(change.name, importedFiles);
         return this._accepted(change.name, false);
       }
       return refusal('LOCAL_EDITS', snapshot.user.digest);
@@ -706,7 +786,7 @@ export class SkillRegistry {
     if (!snapshot.user || change.base !== snapshot.user.digest) {
       return refusal('STALE', snapshot.user?.digest ?? null);
     }
-    await this._install(change.name, source.files);
+    await this._install(change.name, importedFiles);
     return this._accepted(change.name, false);
   }
 
@@ -817,6 +897,7 @@ export class SkillRegistry {
           origin,
           digest: loaded.digest,
           icon: loaded.projected.icon,
+          editable: false,
         });
         continue;
       }
@@ -829,6 +910,7 @@ export class SkillRegistry {
           origin: 'user',
           digest: loaded.digest,
           icon: null,
+          editable: false,
         });
         continue;
       }
@@ -840,6 +922,7 @@ export class SkillRegistry {
         origin: 'user',
         digest: loaded.digest,
         icon: loaded.projected.icon,
+        editable: origin === 'user' && loaded.files.has(APP_ORIGIN_FILE),
       });
     }
     return rows;

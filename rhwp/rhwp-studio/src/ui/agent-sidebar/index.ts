@@ -92,7 +92,7 @@ import { createEffortSlider } from './effort-slider.ts';
 import { createSubagentFleet, isSpawnToolName } from './subagent-fleet.ts';
 import { createSettingsPanel } from './settings.ts';
 import {
-  isSettingsDestination,
+  normalizeSettingsDestination,
   type EditorSettingsRuntime,
   type SettingsDestination,
 } from './settings-contract.ts';
@@ -2921,7 +2921,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   phaseBadge.hidden = true;
 
   const composerUtilityActions = el('div', 'ag-composer-utility-actions');
-  composerUtilityActions.append(phaseBadge, permissionBtn, skillsBtn);
+  composerUtilityActions.append(phaseBadge, permissionBtn);
   composerUtilities.append(composerUtilityActions);
   const composer = el('form', 'ag-composer');
   // 진행 상태는 계획/변경 surface와 별개인 입력기 overlay다. 이 행은 문서
@@ -3139,6 +3139,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   skillsClose.appendChild(createColumnIcon());
   skillsHeader.append(skillsTitle, skillsClose);
   const skillsShelf = createSkillsShelf({
+    readEditor: (name) => bridge.readSkillEditor(name),
+    saveEditor: (name, body, base) => bridge.saveSkillEditor(name, body, base),
+    refresh: () => { bridge.listSkills(); },
     onCommit(change) {
       bridge.commitSkill(change);
     },
@@ -3337,6 +3340,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     onAgentSetupAbandoned: (info) => initialSetup?.notifySetupAbandoned(info),
     cloudSettings: cloudUi.settingsElement,
     refreshCloudSettings: () => cloudUi.openSettings(),
+    skillsSettings: skillsShelf.root,
+    refreshSkills: () => bridge.listSkills(),
   });
   const settingsPage = settingsPanel.element;
   settingsPage.addEventListener('ag-settings-expand-request', () => {
@@ -3390,7 +3395,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     compactRailHoverTarget,
     chatPage,
     threadsPage,
-    skillsPage,
     referenceLibrary.page,
     settingsPage,
     versionsPage,
@@ -4042,8 +4046,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function setSkillsPanelOpen(open: boolean): void {
-    if (open && settingsPanelOpen && settingsPanel.isDirty()) {
-      void requestSettingsClose(undefined, () => setSkillsPanelOpen(true));
+    if (open) {
+      if (settingsPanelOpen && settingsPanel.isDirty()) {
+        void requestSettingsClose(undefined, () => setSkillsPanelOpen(true));
+        return;
+      }
+      setSettingsPanelOpen(true, 'skills');
       return;
     }
     if (open && referenceLibrary.isOpen()) referenceLibrary.setOpen(false);
@@ -8074,7 +8082,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         }),
         eventBus.on('settings:open', (payload) => {
           const requested = (payload as { destination?: unknown } | undefined)?.destination;
-          const destination = isSettingsDestination(requested) ? requested : undefined;
+          const destination = normalizeSettingsDestination(requested);
           setCollapsed(false);
           setSettingsPanelOpen(true, destination);
         }),

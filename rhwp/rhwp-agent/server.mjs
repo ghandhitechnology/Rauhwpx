@@ -296,9 +296,10 @@ let sourceClaudeAuth = await resolveSourceClaudeAuth();
 function claudeRuntimeEnv(isolatedHome) {
   return {
     ...cliSetup.envFor('claude'),
-    HOME: isolatedHome,
+    HOME: process.platform === 'darwin' ? (process.env.HOME ?? os.homedir()) : isolatedHome,
     USERPROFILE: isolatedHome,
     CLAUDE_CONFIG_DIR: path.join(isolatedHome, '.claude'),
+    ...(process.platform === 'darwin' ? {} : { CLAUDE_SECURESTORAGE_CONFIG_DIR: path.join(isolatedHome, '.claude') }),
   };
 }
 // App-managed bins are available to auxiliary CLI calls as soon as installation completes.
@@ -340,6 +341,10 @@ const usageStore = await createUsageStore().init();
 const providerLimits = createProviderLimitsClient({
   homeDir: HOST_PROFILE_HOME,
   resetLedgerPath: path.join(usageStore.rootDir, 'codex-reset-ledger.json'),
+  // Anthropic rate-limits this endpoint aggressively. A manual refresh should
+  // reuse a recent successful read instead of immediately turning it into a
+  // 429 after the automatic post-login refresh.
+  forceCooldownMs: 5 * 60 * 1000,
   getProviderEnv: (agent) => cliSetup.envFor(agent),
   getAuthMethod: (agent) => cliSetupStatus[agent]?.authMethod,
   getCodexBin: () => cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
@@ -952,6 +957,18 @@ function beginAccountLogin(record, sock, requestId) {
       pairingCode: login.pairingCode,
       expiresAt: login.expiresAt,
     };
+    // Install the callback waiter before exposing the login URL. A browser can
+    // finish an already-authenticated OAuth session immediately, so publishing
+    // first creates a small window where the callback would receive a 409.
+    const waitForProof = () => new Promise((resolve, reject) => {
+      rejectProof = reject;
+      authRun.submitProof = (value) => {
+        rejectProof = null;
+        authRun.submitProof = null;
+        resolve(value);
+      };
+    });
+    let proofPromise = waitForProof();
     authRuns.update(authRun, { phase: 'authorizing', replayableUi: authDetails });
     replyToStudio(record, sock, {
       v: 1,
@@ -964,14 +981,7 @@ function beginAccountLogin(record, sock, requestId) {
 
     let proof = null;
     while (!proof) {
-      const candidate = await new Promise((resolve, reject) => {
-        rejectProof = reject;
-        authRun.submitProof = (value) => {
-          rejectProof = null;
-          authRun.submitProof = null;
-          resolve(value);
-        };
-      });
+      const candidate = await proofPromise;
       if (!isLiveAuthRun()) throw agentAuthCancelled();
       authRuns.update(authRun, { phase: 'redeeming' });
       try {
@@ -986,6 +996,7 @@ function beginAccountLogin(record, sock, requestId) {
         authRuns.update(authRun, { phase: 'authorizing' });
         sendAccountRunError(authRun, error, 'DEVICE_PROOF_INVALID');
         progress(authDetails);
+        proofPromise = waitForProof();
       }
     }
   })().then(
@@ -3465,6 +3476,18 @@ async function handleStudioMessage(record, sock, msg) {
         .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
       return;
     }
+    case 'skill-editor-read': {
+      void skillRegistry.readEditor(String(msg.name ?? ''))
+        .then((document) => sendJson(sock, { v: 1, type: 'skill-editor-read-result', requestId: msg.requestId ?? null, document }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
+      return;
+    }
+    case 'skill-editor-save': {
+      void skillRegistry.saveEditor(String(msg.name ?? ''), String(msg.body ?? ''), String(msg.base ?? ''))
+        .then((outcome) => sendJson(sock, { v: 1, type: 'skill-editor-save-result', requestId: msg.requestId ?? null, outcome: publishedSkillOutcome(outcome) }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
+      return;
+    }
     case 'provider-status-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void providerHealth.check(msg.refresh === true)
@@ -3543,7 +3566,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'account-logout': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      if (authRuns.get('account') || authRuns.get('rau')) {
+      if (authRuns.get('account')) {
         replyToStudio(record, sock, {
           v: 1,
           type: 'account-error',

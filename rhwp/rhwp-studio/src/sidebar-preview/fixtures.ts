@@ -171,7 +171,7 @@ export function createFixtures() {
     })),
   };
   const skills: T.SkillCatalog = {
-    rows: [
+    rows: [...[
       ['proofread-korean', '한국어 문서의 맞춤법과 문장을 다듬습니다.'],
       ['summarize-document', '문서의 핵심 내용을 요약합니다.'],
       ['draft-document', '요청에 맞는 새 문서의 초안을 작성합니다.'],
@@ -183,7 +183,19 @@ export function createFixtures() {
       icon: 'pencil' as const,
       enabled: true,
       digest: 'a'.repeat(64),
+      editable: true,
     })),
+      {
+        kind: 'skill',
+        name: 'imported-style-guide',
+        description: '외부에서 가져온 읽기 전용 스킬입니다.',
+        origin: 'bundled',
+        icon: 'system',
+        enabled: true,
+        digest: 'b'.repeat(64),
+        editable: false,
+      },
+    ],
   };
   const writing: T.WritingStyleStatus = {
     active: false,

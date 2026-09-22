@@ -177,18 +177,18 @@ try {
     await page.waitForFunction(
       () => document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'),
     );
-    await page.click('#ag-settings-tab-connections');
+    await page.click('#ag-settings-tab-ai');
     await page.waitForFunction(
-      () => document.querySelector('#ag-settings-tab-connections')?.getAttribute('aria-selected') === 'true',
+      () => document.querySelector('#ag-settings-tab-ai')?.getAttribute('aria-selected') === 'true',
     );
     await page.waitForFunction(
       () => document.querySelector(
-        '#ag-settings-pane-connections .ag-settings-hub-row .ag-settings-row-detail',
+        '#ag-settings-pane-ai .ag-settings-hub-row .ag-settings-row-detail',
       )?.textContent === '연결됨',
     );
     const settings = await page.evaluate(() => {
       const panel = document.querySelector('#ag-settings-panel');
-      const destination = panel?.querySelector('#ag-settings-pane-connections');
+      const destination = panel?.querySelector('#ag-settings-pane-ai');
       const sections = [...(destination?.querySelectorAll('.ag-settings-section-title') ?? [])]
         .map((n) => n.textContent);
       return {

@@ -27,7 +27,7 @@ import { createProviderQuota } from './provider-quota.ts';
 import { createEditingSettings } from './settings-editing.ts';
 import { userSettings } from '../../core/user-settings.ts';
 import {
-  isSettingsDestination,
+  normalizeSettingsDestination,
   type DirtyExitChoice,
   type EditorSettingsRuntime,
   type SettingsDestination,
@@ -70,9 +70,6 @@ type RauAuthFeedback = 'idle' | 'success';
 type PlanAgent = 'claude' | 'codex';
 
 const PLAN_AGENTS: readonly PlanAgent[] = ['claude', 'codex'];
-
-/** 요금제도 잔액도 없는 프로바이더 — 기록된 토큰만 보여준다. */
-const API_USAGE_AGENTS: readonly AgentName[] = ['grok', 'cursor', 'opencode'];
 
 /** API 키 입력칸 힌트 — 키 접두사가 있는 프로바이더만 형태를 보여준다. */
 const API_KEY_PLACEHOLDER: Record<AgentName, string> = {
@@ -321,6 +318,10 @@ export interface SettingsPanelDeps {
   }) => void;
   cloudSettings?: HTMLElement;
   refreshCloudSettings?: () => void;
+  /** 설정 안에 스킬 선반을 붙인다. */
+  skillsSettings?: HTMLElement;
+  /** 스킬 탭에 들어갈 때 최신 목록을 요청한다. */
+  refreshSkills?: () => void;
 }
 
 export interface SettingsPanel {
@@ -352,6 +353,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     onAgentSetupAbandoned,
     cloudSettings,
     refreshCloudSettings,
+    skillsSettings,
+    refreshSkills,
   } = deps;
 
   let disposed = false;
@@ -380,9 +383,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let lastDestination: SettingsDestination = 'editing';
   try {
     const storedDestination = sessionStorage.getItem('rhwp-settings-destination');
-    if (isSettingsDestination(storedDestination)) {
-      currentDestination = storedDestination;
-      lastDestination = storedDestination;
+    const normalized = normalizeSettingsDestination(storedDestination);
+    if (normalized) {
+      currentDestination = normalized;
+      lastDestination = normalized;
     }
   } catch {
     // 세션 저장소가 없어도 기본 목적지로 계속 진행한다.
@@ -467,8 +471,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const navButtons = new Map<SettingsDestination, HTMLButtonElement>();
   const destinations: ReadonlyArray<{ id: SettingsDestination; label: string }> = [
     { id: 'editing', label: '편집' },
-    { id: 'ai', label: 'AI 설정' },
-    { id: 'connections', label: 'AI 연결' },
+    { id: 'ai', label: 'AI' },
+    { id: 'skills', label: '스킬' },
     { id: 'cloud', label: 'Cloud 작업' },
   ];
   for (const destination of destinations) {
@@ -1330,15 +1334,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     return { root, session, day, week, models, updated, credits, meters, empty };
   }
 
-  const rauUsage = createUsageRow('rau');
-  const { root: rauUsageBlock, credits: rauUsageCredits, meters: rauUsageMeters,
-    empty: rauUsageEmpty, day: rauUsageDay, week: rauUsageWeek,
-    models: rauUsageModels, updated: rauUsageUpdated } = rauUsage;
   const usageBlocks = new Map(PLAN_AGENTS.map(agent => [agent, createUsageRow(agent)]));
   const piUsage = createUsageRow('pi');
   const { root: piUsageBlock, credits: piUsageCredits, day: piUsageDay,
     week: piUsageWeek, models: piUsageModels, updated: piUsageUpdated } = piUsage;
-  const apiUsageBlocks = new Map(API_USAGE_AGENTS.map(agent => [agent, createUsageRow(agent)]));
 
   const aiStatus = el('p', 'ag-settings-apply-status');
   aiStatus.hidden = true;
@@ -1355,7 +1354,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   const connectionContent = el('div', 'ag-settings-destination-content');
   connectionContent.append(accountSection.root, connection.root, quotaSection.root, browserbaseSection.root, usageSection.root);
-  panes.get('connections')?.appendChild(connectionContent);
+  aiContent.prepend(connectionContent);
+  if (skillsSettings) {
+    const skillsContent = el('div', 'ag-settings-destination-content ag-settings-skills-content');
+    skillsContent.appendChild(skillsSettings);
+    panes.get('skills')?.appendChild(skillsContent);
+  }
   if (cloudSettings) panes.get('cloud')?.appendChild(cloudSettings);
 
   aiApply.addEventListener('click', () => void applyAiDraft());
@@ -1409,7 +1413,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         return editingSettings.isDirty();
       case 'ai':
         return isAiDirty();
-      case 'connections':
+      case 'skills':
       case 'cloud':
         return false;
       default: {
@@ -1451,6 +1455,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }
     renderDestinationState();
     syncUsagePolling();
+    if (destination === 'skills') refreshSkills?.();
     panes.get(destination)?.scrollTo({ top: 0 });
   }
 
@@ -1614,7 +1619,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         case 'ai':
           cancelAiDraft();
           return true;
-        case 'connections':
+        case 'skills':
         case 'cloud':
           return true;
         default: {
@@ -1628,7 +1633,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         return editingSettings.apply();
       case 'ai':
         return applyAiDraft();
-      case 'connections':
+      case 'skills':
       case 'cloud':
         return true;
       default: {
@@ -2401,7 +2406,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           : `${AGENT_LABEL[agent]} 웹 계정으로 로그인했습니다.`
         : `${AGENT_LABEL[agent]} CLI 연결이 확인되었습니다.`;
     setupRauAuthFeedback.hidden = agent !== 'rau' || rauAuthFeedback !== 'success';
-    renderRauAccount();
     setupError.textContent = setupMessage;
     setupError.hidden = !setupMessage;
     setupProgress.hidden = setupProgressPercent <= 0;
@@ -2630,78 +2634,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     return rows;
   }
 
-  /** 체험 크레딧 미터 — 쓴 달러를 한도($5)에 대한 비율로 보여준다. */
-  function rauCreditMeter(): HTMLElement | null {
-    const percent = rauCreditPercent();
-    const credits = usage?.rau ?? null;
-    if (percent === null || !credits) return null;
-    return meterRow(
-      'Trial credits',
-      `${percent.toFixed(1)}% | ${formatUsd(credits.balanceUsd)} / ${formatUsd(credits.totalCreditsUsd)} left`,
-      percent,
-    );
-  }
-
-  /** 쓴 비율(0–100). 크레딧을 못 읽었거나 한도가 없으면 null. */
-  function rauCreditPercent(): number | null {
-    const credits = usage?.rau ?? null;
-    if (!credits || credits.error) return null;
-    const limit = credits.totalCreditsUsd;
-    if (!Number.isFinite(limit) || limit <= 0) return null;
-    return Math.min(100, Math.max(0, (credits.totalUsageUsd / limit) * 100));
-  }
-
-  /**
-   * Rau 계정 카드 — 로그인한 계정과 남은 체험 크레딧.
-   * 키 정보는 사용자에게 노출하지 않는다.
-   */
-  function renderRauAccount(): void {
-    const agent = setupAgent;
-    const status = agent ? setupStatuses?.[agent] ?? null : null;
-    const connected = status?.setupComplete === true || status?.connected === true;
-    setupAccountPane.hidden = agent !== 'rau' || !connected || setupReauth;
-    if (setupAccountPane.hidden) return;
-    setupAccountEmail.textContent = status?.account ?? '계정 이메일을 확인할 수 없습니다';
-    const credits = usage?.rau ?? null;
-    const percent = rauCreditPercent();
-    const rows: HTMLElement[] = [];
-    if (percent !== null && credits) {
-      const row = meterRow(
-        '체험 크레딧',
-        `${formatUsd(credits.balanceUsd)} 남음 / ${formatUsd(credits.totalCreditsUsd)}`,
-        percent,
-      );
-      row.classList.add('ag-agent-setup-account-meter');
-      rows.push(row);
-    }
-    setupAccountRows.replaceChildren(...rows);
-    setupAccountEmpty.hidden = !(percent !== null && credits && credits.balanceUsd <= 0);
-  }
-
-  /** rau 사용량 — 크레딧 미터와 오늘·주간 누적. */
-  function renderRauUsage(): void {
-    const setup = setupStatuses?.rau;
-    rauUsageBlock.hidden = setup?.setupComplete !== true && setup?.connected !== true;
-    if (rauUsageBlock.hidden) return;
-    const credits = usage?.rau ?? null;
-    const meter = rauCreditMeter();
-    rauUsageMeters.replaceChildren(...(meter ? [meter] : []));
-    rauUsageCredits.textContent = meter
-      ? ''
-      : (credits?.error ?? (credits ? `${formatUsd(credits.balanceUsd)} / $5 left` : 'Checking balance…'));
-    const empty = credits != null && credits.balanceUsd <= 0 && !credits.error;
-    rauUsageEmpty.hidden = !empty;
-    const providerUsage = usage?.providers?.rau ?? null;
-    rauUsageDay.textContent = providerUsage
-      ? formatUsageWindow('Today', providerUsage.day)
-      : formatUsageWindow('Today', null);
-    rauUsageWeek.textContent = providerUsage
-      ? formatUsageWindow('Week', providerUsage.week)
-      : formatUsageWindow('Week', null);
-    rauUsageModels.replaceChildren(...buildModelRows(providerUsage, 'rau'));
-    rauUsageUpdated.textContent = formatUsageUpdated(providerUsage?.updatedAt);
-  }
-
   function renderPiUsage(): void {
     piUsageBlock.hidden = piStatus?.setupComplete !== true;
     if (piUsageBlock.hidden) return;
@@ -2720,41 +2652,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     piUsageUpdated.textContent = formatUsageUpdated(providerUsage?.updatedAt);
   }
 
-  /** grok · cursor 사용량 — 한도가 없어 미터 대신 세션 · 오늘 · 주간 누적만 쓴다. */
-  function renderApiUsage(): void {
-    for (const agent of API_USAGE_AGENTS) {
-      const ui = apiUsageBlocks.get(agent);
-      if (!ui) continue;
-      const providerUsage = usage?.providers?.[agent] ?? null;
-      const turns = (providerUsage?.session.turns ?? 0)
-        + (providerUsage?.day.turns ?? 0)
-        + (providerUsage?.week.turns ?? 0);
-      const setup = setupStatuses?.[agent] ?? null;
-      // 설정을 마쳤거나 기록이 남아 있을 때만 자리를 차지한다.
-      ui.root.hidden = turns === 0
-        && setup?.setupComplete !== true
-        && setup?.connected !== true;
-      if (ui.root.hidden) continue;
-      ui.session.textContent = providerUsage
-        ? formatUsageWindow('Session', providerUsage.session)
-        : formatUsageWindow('Session', null);
-      ui.day.textContent = providerUsage
-        ? formatUsageWindow('Today', providerUsage.day)
-        : formatUsageWindow('Today', null);
-      ui.week.textContent = providerUsage
-        ? formatUsageWindow('Week', providerUsage.week)
-        : formatUsageWindow('Week', null);
-      ui.models.replaceChildren(...buildModelRows(providerUsage, agent));
-      ui.updated.textContent = formatUsageUpdated(providerUsage?.updatedAt);
-    }
-  }
-
   function renderUsage(): void {
     quotaCards.render(usage);
-    renderRauUsage();
-    renderRauAccount();
     renderPiUsage();
-    renderApiUsage();
     for (const agent of PLAN_AGENTS) {
       const ui = usageBlocks.get(agent);
       if (!ui) continue;
@@ -3147,7 +3047,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   function syncUsagePolling(): void {
     if (usagePoll) clearInterval(usagePoll);
     usagePoll = null;
-    if (!settingsOpen || currentDestination !== 'connections' || document.hidden || disposed) return;
+    if (!settingsOpen || currentDestination !== 'ai' || document.hidden || disposed) return;
     void refreshUsage();
     usagePoll = setInterval(() => void refreshUsage(), 60_000);
   }

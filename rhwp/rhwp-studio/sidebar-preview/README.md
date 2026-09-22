@@ -68,7 +68,7 @@ The focus-mode button shows a placeholder because this preview covers the sideba
 | `?page=versions` | Production version graph |
 | `?page=versions&history=branches` | Branching and merging history with colored graph lanes |
 | `?services=setup&page=settings` | Uninstalled/unconfigured service fixtures |
-| `?page=settings&quota=error` | Provider quota errors and unknown health bars in AI 연결 |
+| `?page=settings&quota=error` | Provider quota errors and unknown health bars in AI |
 | `?page=settings&quota=empty` | Exhausted Codex quota and zero banked resets |
 | `?page=settings&quota=refresh-error` | Manual refresh fails once, then succeeds on retry |
 | `?initial-setup=1` | Production first-run setup wizard |
@@ -108,7 +108,7 @@ RHWP_AGENT_PORT=5178 npm start
 RHWP_SIDEBAR_LIVE_HUB=http://127.0.0.1:5178 npm run dev:sidebar
 ```
 
-Open `http://127.0.0.1:7715/?page=settings&usage=live` and select **AI 연결**. Usage, token history, and banked reset actions use the real hub; chat, document, and provider setup controls remain fixtures. Confirming a banked reset spends a real reset. The default URL continues to use samples. If the hub uses a custom development token, set `RHWP_SIDEBAR_HUB_TOKEN` on the preview server; hub credentials stay server-side.
+Open `http://127.0.0.1:7715/?page=settings&usage=live` and select **AI**. Usage, token history, and banked reset actions use the real hub; chat, document, and provider setup controls remain fixtures. Confirming a banked reset spends a real reset. The default URL continues to use samples. If the hub uses a custom development token, set `RHWP_SIDEBAR_HUB_TOKEN` on the preview server; hub credentials stay server-side.
 
 The optional transport accepts only same-origin usage reads and Codex reset requests on loopback. It registers its own hub session and deletes that session when the preview server closes.
 

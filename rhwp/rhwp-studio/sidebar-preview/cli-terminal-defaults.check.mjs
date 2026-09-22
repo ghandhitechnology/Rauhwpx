@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 
 export async function checkCliTerminalDefaults(page, origin) {
   for (const provider of ['claude', 'codex']) {
-    await page.goto(`${origin}/?page=settings&destination=connections&surface=provider-setup&provider=${provider}&services=setup`, { waitUntil: 'networkidle0' });
+    await page.goto(`${origin}/?page=settings&destination=ai&surface=provider-setup&provider=${provider}&services=setup`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.ag-agent-setup-overlay.ag-open');
     await page.$$eval('.ag-agent-setup-primary', buttons => buttons.find(b => b.textContent === '설치하고 계속').click());
     try {
@@ -22,7 +22,7 @@ export async function checkCliTerminalDefaults(page, origin) {
     await page.keyboard.press('Enter');
     await page.waitForSelector('.ag-agent-setup-done:not([hidden])', { visible: true });
   }
-  await page.goto(`${origin}/?page=settings&destination=connections&surface=provider-setup&provider=claude&services=setup`, { waitUntil: 'networkidle0' });
+  await page.goto(`${origin}/?page=settings&destination=ai&surface=provider-setup&provider=claude&services=setup`, { waitUntil: 'networkidle0' });
   await page.evaluate(async () => {
     const setups = await window.sidebarPreview.bridge.requestAgentSetupStatus();
     setups.claude.terminalAuthSupported = false;

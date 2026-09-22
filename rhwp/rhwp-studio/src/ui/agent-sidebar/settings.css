@@ -1604,6 +1604,11 @@
   padding: 32px 36px 96px;
 }
 
+.ag-settings-skills-content {
+  display: flex;
+  flex-direction: column;
+}
+
 .ag-settings-destination-content > .ag-settings-section,
 .ag-settings-group {
   padding: 0 0 28px;

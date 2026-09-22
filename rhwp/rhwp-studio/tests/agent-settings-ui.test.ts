@@ -38,7 +38,7 @@ const mainSource = readSource('../src/main.ts');
 test('설정과 버전 페이지는 무대에 다른 페이지와 나란히 선다', () => {
   assert.match(
     source,
-    /stage\.append\(\s*workspaceBar,\s*workspaceDrawerScrim,\s*compactRailHoverTarget,\s*chatPage,\s*threadsPage,\s*skillsPage,\s*referenceLibrary\.page,\s*settingsPage,\s*versionsPage,\s*reviewColumn,\s*planColumn,\s*railResize,\s*reviewResize,?\s*\)/,
+    /stage\.append\(\s*workspaceBar,\s*workspaceDrawerScrim,\s*compactRailHoverTarget,\s*chatPage,\s*threadsPage,\s*referenceLibrary\.page,\s*settingsPage,\s*versionsPage,\s*reviewColumn,\s*planColumn,\s*railResize,\s*reviewResize,?\s*\)/,
   );
   assert.match(settings, /element\.id = 'ag-settings-panel'/);
   assert.match(settings, /element\.setAttribute\('role', 'region'\)/);
@@ -139,7 +139,7 @@ test('설정 적용 버튼은 카드 없이 콘텐츠 하단에 머문다', () =
   assert.doesNotMatch(footerRule, /bottom:|z-index:|border:|border-radius:|box-shadow:|backdrop-filter:/);
 });
 
-test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', () => {
+test('설정은 편집·AI·스킬 목적지와 업무별 묶음을 갖는다', () => {
   for (const title of ['연결', '새 대화 기본값', '글쓰기 보정', '템플릿', '사용량']) {
     assert.match(settings, new RegExp(`createSection\\('${title}'\\)`));
   }
@@ -147,8 +147,11 @@ test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', 
     assert.match(editingSettings, new RegExp(`group\\('${title}'`));
   }
   assert.match(settings, /\{ id: 'editing', label: '편집' \}/);
-  assert.match(settings, /\{ id: 'ai', label: 'AI 설정' \}/);
-  assert.match(settings, /\{ id: 'connections', label: 'AI 연결' \}/);
+  assert.match(settings, /\{ id: 'ai', label: 'AI' \}/);
+  assert.match(settings, /\{ id: 'skills', label: '스킬' \}/);
+  assert.match(settings, /aiContent\.prepend\(connectionContent\)/);
+  assert.match(source, /composerUtilityActions\.append\(phaseBadge, permissionBtn\)/);
+  assert.match(source, /skillsSettings: skillsShelf\.root/);
   assert.doesNotMatch(settings, /'product'/);
   assert.match(settingsCss, /\.ag-settings-section-title/);
 });
@@ -436,7 +439,7 @@ test('프로바이더 사용량 표는 압축된 호출 수와 토큰을 표시�
 test('직접 한도 새로고침은 기존 연결 목적지에 있고 프록시 설정을 제거한다', () => {
   assert.doesNotMatch(settings, /connectCliproxy|disconnectCliproxy|CLIProxyAPI|remote-management/);
   assert.match(settings, /void refreshUsage\(true\)/);
-  assert.match(settings, /currentDestination !== 'connections'/);
+  assert.match(settings, /currentDestination !== 'ai'/);
   assert.match(settings, /document.removeEventListener\('visibilitychange', syncUsagePolling\)/);
 });
 

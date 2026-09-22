@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   lstatSync,
@@ -64,6 +65,17 @@ const baseOpts = {
 };
 
 const sessionId = '00000000-0000-4000-8000-000000000000';
+
+test('isolated Claude sessions can still locate the macOS login Keychain', { skip: process.platform !== 'darwin' }, () => {
+  const normal = spawnSync('/usr/bin/security', ['default-keychain', '-d', 'user'], { encoding: 'utf8' });
+  assert.equal(normal.status, 0, 'the host must have a default Keychain');
+  const options = buildClaudeSdkOptions({ ...baseOpts, providerEnv: process.env, requestUserInput: async () => null, agentRole: 'chat' }, sessionId, false, new AbortController());
+  const isolated = spawnSync('/usr/bin/security', ['default-keychain', '-d', 'user'], { env: options.env, encoding: 'utf8' });
+  assert.equal(isolated.status, 0, isolated.stderr);
+  assert.equal(isolated.stdout, normal.stdout);
+  assert.equal(options.env.CLAUDE_CONFIG_DIR, path.join(testHome, '.claude'));
+  assert.equal(options.env.CLAUDE_SECURESTORAGE_CONFIG_DIR, undefined);
+});
 
 function argValue(argv, flag) {
   const index = argv.indexOf(flag);
@@ -1183,7 +1195,7 @@ test('Claude waits for an idle restart and resumes with the new phase', async ()
   await nextTask();
   assert.equal(spawns.length, 1);
   assert.equal(spawns[0].options.cwd, '/tmp/Rau workspace');
-  assert.equal(spawns[0].options.env.HOME, testHome);
+  assert.equal(spawns[0].options.env.HOME, process.platform === 'darwin' ? (process.env.HOME ?? os.homedir()) : testHome);
   assert.equal(spawns[0].options.env.USERPROFILE, testHome);
   assert.equal(spawns[0].options.env.CLAUDE_CONFIG_DIR, path.join(testHome, '.claude'));
   assert.equal(spawns[0].options.env.RHWP_SESSION_ID, 'studio-thread-42');

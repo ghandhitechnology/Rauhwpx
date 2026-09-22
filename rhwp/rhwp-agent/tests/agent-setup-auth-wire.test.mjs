@@ -36,10 +36,8 @@ test('the auth progress frame forwards both the login URL and the device code', 
 /** Codex OAuth uses the CLI login command and has no localhost callback fallback. */
 test('codex OAuth never falls back to the localhost callback login', async () => {
   const source = await readSource('cli-setup-manager.mjs');
-  const start = source.indexOf('if (![\'oauth\', \'login\'].includes(method))');
-  assert.notEqual(start, -1);
-  const login = source.slice(start, source.indexOf('authProcesses.delete(agent)', start));
-  assert.match(login, /spawnProcess\(binPath\(agent\), \['login'\]/);
+  assert.match(source, /agent === 'codex' \? \['login', '--device-auth'\] : \['login'\]/);
+  assert.doesNotMatch(source, /platform === 'win32'[^;]+\['login', '--device-auth'\]/);
   assert.doesNotMatch(source, /localhost.*callback|callback.*localhost/i);
 });
 
@@ -90,6 +88,7 @@ test('OAuth callback and post-auth work share one exact credential commit bounda
   assert.match(handler, /const isLiveAuthRun = \(\) => !abort\.signal\.aborted && authRuns\.get\(agent\) === authRun/);
   assert.match(handler, /authRuns\.finish\(authRun\)[\s\S]+authRun\.credentialsCommitted = true/);
   assert.match(handler, /const progress = \(entry\) => \{\s*if \(!isLiveAuthRun\(\)\) return/);
+  assert.match(source, /accountSession\.completeLogin\([^;]+signal: abort\.signal,[^;]+onCommitted: commitAuthRun/s);
   assert.match(handler, /piManager\.setApiKey\([^;]+signal: abort\.signal,[^;]+onCommitted: commitAuthRun/s);
   assert.match(handler, /cliSetup\.authenticate\([^;]+signal: abort\.signal,[^;]+onCommitted: commitAuthRun/s);
   assert.ok(handler.indexOf('onCommitted: commitAuthRun') < handler.indexOf('providerHealth.check(true)'));

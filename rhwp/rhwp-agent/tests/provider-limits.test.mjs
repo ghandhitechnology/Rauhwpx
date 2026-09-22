@@ -72,6 +72,19 @@ test('coalesces reads, caches polls, and forces a manual refresh', async () => {
   assert.equal(reads, 2);
 });
 
+test('keeps a recent Claude read when the UI asks for an immediate second refresh', async () => {
+  let reads = 0;
+  const { client } = fixture({
+    forceCooldownMs: 60_000,
+    codexRpc: async () => { reads += 1; return rpcUsage(); },
+  });
+  await client.refresh();
+  const before = client.snapshot();
+  const after = await client.refresh(true);
+  assert.equal(reads, 1);
+  assert.deepEqual(after, before);
+});
+
 test('preserves stale readings on same-account errors and discards them when the account changes', async () => {
   const { client, current } = fixture();
   await client.refresh();

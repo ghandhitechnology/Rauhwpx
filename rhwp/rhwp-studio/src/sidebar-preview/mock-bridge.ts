@@ -107,6 +107,14 @@ export function createMockBridge(report: (message: string) => void) {
   const setupChanged = () =>
     emit({ type: 'agent-setup-status', statuses: data.setups });
   const skillTrash = new Map();
+  // Bodies live separately from catalog metadata so refreshes exercise the same
+  // read/save path as the real bridge. Imported/bundled rows intentionally have
+  // no editable body in the preview.
+  const skillBodies = new Map<string, string>([
+    ['proofread-korean', '# proofread-korean\n\n한국어 문서의 맞춤법과 문장을 다듬습니다.\n'],
+    ['summarize-document', '# summarize-document\n\n문서의 핵심 내용을 요약합니다.\n'],
+    ['draft-document', '# draft-document\n\n요청에 맞는 새 문서의 초안을 작성합니다.\n'],
+  ]);
   const skillsChanged = () => {
     emit({ type: 'skills-catalog', catalog: data.skills });
   };
@@ -118,9 +126,10 @@ export function createMockBridge(report: (message: string) => void) {
     request((requestId) =>
       emit({ type: 'writing-style-result', requestId, status: data.writing }),
     );
+  const terminalOptions = ['Anthropic', 'OpenAI'];
   let terminalRun: { id: string; agent: T.AgentName; step: number; choice: number } | null = null;
   const terminalMenu = () => `\x1b[2J\x1b[H\x1b[36m◆  ${terminalRun?.agent ?? 'CLI'} 로그인\x1b[0m\r\n\r\n`
-    + ['Anthropic', 'OpenAI'].map((name, index) => `  ${index === terminalRun?.choice ? '❯' : ' '} ${name}`).join('\r\n')
+    + terminalOptions.map((name, index) => `  ${index === terminalRun?.choice ? '❯' : ' '} ${name}`).join('\r\n')
     + '\r\n\r\n  Enter 키로 선택하세요.';
   const authenticate = (provider: T.AgentName) => {
     if (provider === 'pi') {
@@ -349,7 +358,8 @@ export function createMockBridge(report: (message: string) => void) {
       if (provider !== terminalRun?.agent || terminalRun?.id !== authRunId) return;
       if (input.includes('\x03')) { bridge.cancelAgentSetup(provider, authRunId); return; }
       if (terminalRun.step === 0 && /\x1b\[[AB]/.test(input)) {
-        terminalRun.choice = (terminalRun.choice + (input.includes('\x1b[B') ? 1 : 2)) % 3;
+        const direction = input.includes('\x1b[B') ? 1 : terminalOptions.length - 1;
+        terminalRun.choice = (terminalRun.choice + direction) % terminalOptions.length;
         emit({ type: 'agent-setup-terminal', agent: provider, authRunId, data: terminalMenu() });
         return;
       }
@@ -888,11 +898,96 @@ export function createMockBridge(report: (message: string) => void) {
       later(() => emit({ type: 'skills-catalog', catalog: data.skills })),
     listHarnessSkills: () =>
       request((requestId) =>
-        emit({ type: 'harness-list-result', requestId, rows: [] }),
+        emit({
+          type: 'harness-list-result',
+          requestId,
+          rows: [
+            {
+              harness: 'claude',
+              name: 'meeting-notes',
+              description: '회의 메모를 실행 항목으로 정리합니다.',
+            },
+          ],
+        }),
       ),
+    readSkillEditor: async (name: string) => {
+      const row = data.skills.rows.find((item) => item.name === name);
+      if (!row || row.kind !== 'skill' || row.editable !== true)
+        throw new Error('This skill is read-only.');
+      const body = skillBodies.get(name) ?? `# ${name}\n\n${row.description}\n`;
+      return { name, body, digest: row.digest };
+    },
+    saveSkillEditor: async (name: string, body: string, base: string) => {
+      const row = data.skills.rows.find((item) => item.name === name);
+      if (!row || row.kind !== 'skill' || row.editable !== true)
+        return { ok: false, code: 'read-only', message: 'This skill is read-only.', digest: row?.digest ?? null };
+      if (row.digest !== base)
+        return { ok: false, code: 'conflict', message: 'Skill changed. Reopen and try again.', digest: row.digest };
+      // The failure sentinel makes async error handling testable without adding
+      // a second preview-only control to the production UI.
+      if (body.includes('__FAIL_SAVE__'))
+        return { ok: false, code: 'preview-failure', message: 'Preview save failed.', digest: row.digest };
+      const unchanged = body === skillBodies.get(name);
+      const digest = `${name}:${body}`.split('').reduce((hash, char) => ((hash * 31 + char.charCodeAt(0)) >>> 0), 2166136261).toString(16).padStart(64, '0');
+      skillBodies.set(name, body);
+      row.digest = digest;
+      skillsChanged();
+      return { ok: true, name, digest, unchanged, notice: null };
+    },
     commitSkill: (change) =>
       request((requestId) => {
-        if (change.action === 'enable') {
+        let outcome: T.SkillCommitOutcome = {
+          ok: true,
+          name: change.name,
+          digest: 'a'.repeat(64),
+          unchanged: false,
+          notice: null,
+        };
+        if (change.action === 'create') {
+          const exists = data.skills.rows.some((item) => item.name === change.name);
+          if (exists) {
+            outcome = {
+              ok: false,
+              code: 'exists',
+              message: '같은 이름의 스킬이 이미 있습니다.',
+              digest: data.skills.rows.find((item) => item.name === change.name)?.digest ?? null,
+            };
+          } else {
+            const digest = `${change.name}:${change.description}:${change.body}`
+              .split('')
+              .reduce((hash, char) => ((hash * 31 + char.charCodeAt(0)) >>> 0), 2166136261)
+              .toString(16)
+              .padStart(64, '0');
+            data.skills.rows.unshift({
+              kind: 'skill',
+              name: change.name,
+              description: change.description,
+              origin: 'user',
+              icon: change.icon ?? 'pencil',
+              enabled: true,
+              digest,
+              editable: true,
+            });
+            skillBodies.set(change.name, change.body);
+            outcome = { ok: true, name: change.name, digest, unchanged: false, notice: null };
+          }
+        } else if (change.action === 'icon') {
+          const row = data.skills.rows.find((item) => item.name === change.name);
+          if (!row || row.kind !== 'skill' || row.editable !== true) {
+            outcome = { ok: false, code: 'read-only', message: 'This skill is read-only.', digest: row?.digest ?? null };
+          } else if (row.digest !== change.base) {
+            outcome = { ok: false, code: 'STALE', message: 'Skill changed. Reopen and try again.', digest: row.digest };
+          } else {
+            const digest = `${change.name}:${change.icon}`
+              .split('')
+              .reduce((hash, char) => ((hash * 31 + char.charCodeAt(0)) >>> 0), 2166136261)
+              .toString(16)
+              .padStart(64, '0');
+            row.icon = change.icon;
+            row.digest = digest;
+            outcome = { ok: true, name: change.name, digest, unchanged: false, notice: null };
+          }
+        } else if (change.action === 'enable') {
           const row = data.skills.rows.find(
             (item) => item.name === change.name && item.kind === 'skill',
           );
@@ -910,19 +1005,21 @@ export function createMockBridge(report: (message: string) => void) {
             data.skills.rows.sort((left, right) => left.name.localeCompare(right.name));
             skillTrash.delete(change.name);
           }
+        } else if (change.action === 'import') {
+          if (!data.skills.rows.some((item) => item.name === change.name)) {
+            data.skills.rows.unshift({
+              kind: 'skill',
+              name: change.name,
+              description: '가져온 스킬',
+              origin: 'user',
+              icon: 'system',
+              enabled: true,
+              digest: 'a'.repeat(64),
+            });
+          }
         }
-        emit({
-          type: 'skill-commit-result',
-          requestId,
-          outcome: {
-            ok: true,
-            name: change.name,
-            digest: 'a'.repeat(64),
-            unchanged: false,
-            notice: null,
-          },
-        });
-        skillsChanged();
+        emit({ type: 'skill-commit-result', requestId, outcome });
+        if (outcome.ok) skillsChanged();
       }),
     requestWritingStyleStatus: () =>
       request((requestId) =>

@@ -650,7 +650,10 @@ export function isUsagePlanForAgent(agent: AgentName, value: unknown): boolean {
   return USAGE_PLAN_GUARDS[agent](value);
 }
 
-export type ProductSkillIcon = 'pencil' | 'bot' | 'system';
+export type ProductSkillIcon =
+  | 'pencil' | 'bot' | 'system'
+  | 'sparkles' | 'book' | 'target' | 'chart' | 'lightbulb'
+  | 'calendar' | 'code' | 'check' | 'heart' | 'bolt' | 'shield';
 
 export type SkillHarnessId = 'claude' | 'codex' | 'cursor' | 'pi';
 
@@ -673,6 +676,7 @@ export type CatalogRow =
       origin: 'bundled' | 'user';
       digest: string;
       icon: ProductSkillIcon | null;
+      editable?: boolean;
     })
   | (CatalogSkillFields & {
       kind: 'broken';
@@ -686,6 +690,8 @@ export interface SkillCatalog {
   rows: CatalogRow[];
 }
 
+export interface SkillEditorDocument { name: string; body: string; digest: string; }
+
 export interface HarnessSkillRow {
   harness: SkillHarnessId;
   name: string;
@@ -693,9 +699,10 @@ export interface HarnessSkillRow {
 }
 
 export type SkillCommitChange =
-  | { action: 'create'; name: string; description: string; body: string; base?: string }
+  | { action: 'create'; name: string; description: string; body: string; base?: string; icon?: ProductSkillIcon }
   | { action: 'write'; name: string; path: string; content: string; encoding?: 'utf8' | 'base64'; base: string }
   | { action: 'body'; name: string; body: string; base: string }
+  | { action: 'icon'; name: string; icon: ProductSkillIcon; base: string }
   | { action: 'enable'; name: string; enabled: boolean }
   | { action: 'delete'; name: string; base: string }
   | { action: 'import'; harness: SkillHarnessId; name: string; mode: 'adopt' | 'replace'; base?: string }

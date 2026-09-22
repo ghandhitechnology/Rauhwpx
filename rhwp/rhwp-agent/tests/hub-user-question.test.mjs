@@ -463,7 +463,7 @@ test('provider MCP writes are bound to one exact running turn', { timeout: 40_00
   );
 });
 
-test('URL agent and role spoofing cannot bypass root question correlation', { timeout: 40_000 }, async (t) => {
+test('URL provider and parent-task spoofing cannot bypass root question correlation', { timeout: 40_000 }, async (t) => {
   const { port } = await startHub(t, { fakePi: true });
   const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=question-loss&instance=page-1`);
   t.after(() => closeClient(studio));

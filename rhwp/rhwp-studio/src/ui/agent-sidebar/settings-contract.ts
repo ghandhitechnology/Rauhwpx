@@ -1,10 +1,26 @@
 import type { EditorScalarSettings } from '../../core/user-settings.ts';
 
-export const SETTINGS_DESTINATIONS = ['editing', 'ai', 'connections', 'cloud'] as const;
+export const SETTINGS_DESTINATIONS = ['editing', 'ai', 'skills', 'cloud'] as const;
 export type SettingsDestination = (typeof SETTINGS_DESTINATIONS)[number];
 
+/** 이전 설정 링크와 세션 값에서 사용하던 연결 탭 이름. */
+export type LegacySettingsDestination = 'connections';
+
+/** 외부 호출자가 넘길 수 있는 현재 이름과 이전 이름의 합집합. */
+export type SettingsDestinationInput = SettingsDestination | LegacySettingsDestination;
+
+/** 이전 연결 탭 주소를 통합 AI 탭으로 보낸다. */
+export function normalizeSettingsDestination(value: unknown): SettingsDestination | undefined {
+  if (value === 'connections') return 'ai';
+  return SETTINGS_DESTINATIONS.some((destination) => destination === value)
+    ? value as SettingsDestination
+    : undefined;
+}
+
 export function isSettingsDestination(value: unknown): value is SettingsDestination {
-  return SETTINGS_DESTINATIONS.some((destination) => destination === value);
+  // Keep the legacy value accepted by URL/event callers; consumers that need
+  // the canonical pane id should call normalizeSettingsDestination().
+  return normalizeSettingsDestination(value) !== undefined;
 }
 
 export interface EditorSettingsRuntime {

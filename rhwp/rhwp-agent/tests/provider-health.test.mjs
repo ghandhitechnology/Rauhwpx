@@ -73,9 +73,9 @@ test('probes report versions from the first stdout line', async () => {
   assert.equal(result.codex.version, 'codex-cli 0.9.3');
 });
 
-test('the claude probe runs with the injected probe environment', async () => {
+test('each supported CLI probe runs with its injected environment', async () => {
   const { spawns, spawnProcess } = fakeSpawner((command, proc) => proc.succeed(`${command} 1.0`));
-  const probeHome = '/rhwp/cli/claude-probe';
+  const probeHome = '/rhwp/cli/claude-home';
   await createProviderHealth({
     spawnProcess,
     probeEnv: (agent) => (agent === 'claude' ? { HOME: probeHome } : undefined),
@@ -96,7 +96,7 @@ test('ENOENT reports a missing command without a version', async () => {
 
   assert.equal(result.claude.available, false);
   assert.equal(result.claude.version, null);
-  assert.match(result.claude.error, /실행에 실패했습니다/);
+  assert.match(result.claude.error, /명령을 찾을 수 없습니다/);
   assert.equal(result.codex.available, true);
 });
 
@@ -121,7 +121,7 @@ test('a hung probe times out and kills the child', async () => {
 
   assert.equal(result.claude.available, true);
   assert.equal(result.codex.available, false);
-  assert.match(result.codex.error, /시간 초과되었습니다/);
+  assert.match(result.codex.error, /응답하지 않았습니다/);
   assert.equal(spawns.find((s) => s.command === 'codex').proc.killed, 'SIGTERM');
 });
 
@@ -131,12 +131,18 @@ test('probe output floods terminate the owned process tree', async () => {
       proc.stdout.emit('data', Buffer.alloc(PROBE_STDOUT_LIMIT_BYTES + 1));
       return;
     }
+    if (command === 'claude') {
+      proc.stderr.emit('data', Buffer.alloc(PROBE_STDERR_LIMIT_BYTES + 1));
+      return;
+    }
     proc.succeed(`${command} 1.0`);
   });
   const result = await createProviderHealth({ spawnProcess, timeoutMs: 20 }).check();
 
-  assert.equal(result.codex.available, false);
+  assert.match(result.codex.error, /stdout.*64 KiB/);
+  assert.match(result.claude.error, /stderr.*16 KiB/);
   assert.equal(spawns.find((item) => item.command === 'codex').proc.killed, 'SIGTERM');
+  assert.equal(spawns.find((item) => item.command === 'claude').proc.killed, 'SIGTERM');
 });
 
 test('results are cached for the ttl and refresh forces a re-probe', async () => {
@@ -204,7 +210,7 @@ test('a stale pi bin path falls back to the not-installed message', async () => 
   const result = await createProviderHealth({ spawnProcess, piBin: () => '/gone/pi' }).check();
 
   assert.equal(result.pi.available, false);
-  assert.match(result.pi.error, /실행에 실패했습니다/);
+  assert.equal(result.pi.error, '설치되지 않았어요');
 });
 
 test('probes settle on close after stdout arrives', async () => {

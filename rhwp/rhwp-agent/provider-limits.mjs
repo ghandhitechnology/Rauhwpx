@@ -163,6 +163,7 @@ export function createProviderLimitsClient({
   fetchImpl = globalThis.fetch,
   now = Date.now,
   cacheMs = 30_000,
+  forceCooldownMs = 0,
   timeoutMs = REQUEST_TIMEOUT,
   resetLedgerPath = path.join(homeDir, '.rhwp-provider-resets.json'),
 } = {}) {
@@ -290,6 +291,12 @@ export function createProviderLimitsClient({
 
   function refresh(force = false) {
     if (refreshing) return refreshing;
+    if (force && forceCooldownMs > 0
+      && state.claude.status === 'ok'
+      && Number.isFinite(state.claude.updatedAt)
+      && now() - state.claude.updatedAt < forceCooldownMs) {
+      return Promise.resolve(snapshot());
+    }
     if (!force && lastAttempt !== null && now() - lastAttempt < cacheMs) return Promise.resolve(snapshot());
     lastAttempt = now();
     const currentGeneration = generation;

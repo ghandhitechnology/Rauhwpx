@@ -135,7 +135,9 @@ export async function readClaudeOAuthCredential({
     || (explicit !== null && explicit !== defaultClaudeConfigDir(homeDir, platform));
   const file = path.join(resolvedConfigDir, CLAUDE_CREDENTIAL_FILENAME);
   const fromFile = await readFileImpl(file).catch(() => null);
-  if (fromFile) {
+  const fileExpired = claudeCredentialExpiry(fromFile) > 0
+    && claudeCredentialExpiry(fromFile) <= Date.now();
+  if (fromFile && (platform !== 'darwin' || !fileExpired)) {
     return {
       source: 'file',
       configDir: resolvedConfigDir,
@@ -154,6 +156,14 @@ export async function readClaudeOAuthCredential({
       configDir: resolvedConfigDir,
       file,
       text: JSON.stringify(fromKeychain),
+    };
+  }
+  if (fromFile) {
+    return {
+      source: 'file',
+      configDir: resolvedConfigDir,
+      file,
+      text: JSON.stringify(fromFile),
     };
   }
   return null;

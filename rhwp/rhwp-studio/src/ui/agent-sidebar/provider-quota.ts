@@ -158,7 +158,7 @@ export function createProviderQuota(bridge: SidebarBridge, accept: (usage: Usage
       }
       return card;
     });
-    for (const [provider, label] of [['openrouter', 'OpenRouter'], ['grok', 'Grok'], ['opencode', 'OpenCode']] as const) {
+    for (const [provider, label] of [['openrouter', 'OpenRouter']] as const) {
       const balance = summary?.balances?.[provider];
       const card = node('section', 'ag-settings-quota-card ag-settings-balance-card');
       card.dataset.provider = provider;
