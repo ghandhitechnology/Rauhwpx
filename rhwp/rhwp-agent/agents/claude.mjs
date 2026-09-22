@@ -169,9 +169,17 @@ function claudeProcessEnv(opts, sourceEnv) {
   const env = isolatedProcessEnv(opts, sourceEnv);
   if (!opts.isolatedHome) {
     delete env.CLAUDE_CONFIG_DIR;
+    delete env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
     return env;
   }
+  if (process.platform === 'darwin') {
+    // Claude's macOS Keychain belongs to the host login. Keep HOME attached
+    // to that login while redirecting Claude's files to the session profile.
+    env.HOME = sourceEnv.HOME ?? process.env.HOME ?? os.homedir();
+    delete env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  }
   env.CLAUDE_CONFIG_DIR = path.join(String(opts.isolatedHome), '.claude');
+  if (process.platform !== 'darwin') env.CLAUDE_SECURESTORAGE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR;
   return env;
 }
 

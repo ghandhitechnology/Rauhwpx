@@ -961,12 +961,28 @@ export function createMockBridge(report: (message: string) => void) {
               name: change.name,
               description: change.description,
               origin: 'user',
-              icon: 'pencil',
+              icon: change.icon ?? 'pencil',
               enabled: true,
               digest,
               editable: true,
             });
             skillBodies.set(change.name, change.body);
+            outcome = { ok: true, name: change.name, digest, unchanged: false, notice: null };
+          }
+        } else if (change.action === 'icon') {
+          const row = data.skills.rows.find((item) => item.name === change.name);
+          if (!row || row.kind !== 'skill' || row.editable !== true) {
+            outcome = { ok: false, code: 'read-only', message: 'This skill is read-only.', digest: row?.digest ?? null };
+          } else if (row.digest !== change.base) {
+            outcome = { ok: false, code: 'STALE', message: 'Skill changed. Reopen and try again.', digest: row.digest };
+          } else {
+            const digest = `${change.name}:${change.icon}`
+              .split('')
+              .reduce((hash, char) => ((hash * 31 + char.charCodeAt(0)) >>> 0), 2166136261)
+              .toString(16)
+              .padStart(64, '0');
+            row.icon = change.icon;
+            row.digest = digest;
             outcome = { ok: true, name: change.name, digest, unchanged: false, notice: null };
           }
         } else if (change.action === 'enable') {

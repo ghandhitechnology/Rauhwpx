@@ -898,6 +898,86 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-skill-new:active { transform: scale(0.985); }
 
+.ag-skill-icon-button {
+  position: relative;
+  z-index: 1;
+  border-radius: 7px;
+  outline: none;
+  cursor: pointer;
+  transition: background-color 140ms var(--ag-skills-motion), color 140ms var(--ag-skills-motion), transform 140ms var(--ag-skills-motion);
+}
+
+.ag-skill-icon-button:hover,
+.ag-skill-icon-button:focus-visible {
+  background: color-mix(in srgb, var(--ag-accent) 12%, transparent);
+  color: var(--ag-accent);
+  transform: scale(1.08);
+}
+
+.ag-skill-icon-picker {
+  grid-column: 1 / -1;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  margin: 2px 0 4px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--ag-accent) 28%, var(--ag-border));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--ag-raised) 96%, var(--ag-bg));
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--ag-text) 9%, transparent);
+  animation: ag-skill-icon-picker-in 180ms var(--ag-skills-motion) both;
+}
+
+@keyframes ag-skill-icon-picker-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); transform-origin: top left; }
+  to { opacity: 1; transform: translateY(0) scale(1); transform-origin: top left; }
+}
+
+.ag-skill-icon-picker-heading {
+  color: var(--ag-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.ag-skill-icon-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(28px, 1fr));
+  gap: 4px;
+}
+
+.ag-skill-icon-option {
+  display: grid;
+  width: 100%;
+  aspect-ratio: 1;
+  min-width: 0;
+  place-items: center;
+  padding: 5px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ag-text-secondary);
+  cursor: pointer;
+  transition: background-color 140ms var(--ag-skills-motion), border-color 140ms var(--ag-skills-motion), color 140ms var(--ag-skills-motion), transform 140ms var(--ag-skills-motion);
+}
+
+.ag-skill-icon-option:hover,
+.ag-skill-icon-option:focus-visible,
+.ag-skill-icon-option[aria-pressed='true'] {
+  border-color: color-mix(in srgb, var(--ag-accent) 46%, var(--ag-border));
+  background: color-mix(in srgb, var(--ag-accent) 13%, transparent);
+  color: var(--ag-accent);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.ag-skill-icon-option .ag-icon {
+  width: 16px;
+  height: 16px;
+}
+
 .ag-skill-editor {
   grid-column: 1 / -1;
   display: flex;

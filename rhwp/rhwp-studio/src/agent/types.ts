@@ -508,11 +508,9 @@ export interface UsageSummary {
   providers: Record<AgentName, ProviderUsage>;
   cliproxy?: CliproxyStatus;
   limits?: { claude: ProviderQuota; codex: ProviderQuota };
-  balances?: Partial<Record<'openrouter' | 'grok' | 'opencode', RemoteBalance>>;
+  balances?: Partial<Record<'openrouter', RemoteBalance>>;
   /** pi(OpenRouter) 가 설정돼 있을 때만 온다. */
   openrouter?: OpenRouterCredits;
-  /** Legacy account balance retained for migration reads only. */
-  rau?: OpenRouterCredits;
 }
 
 /** pi 사용자가 OpenRouter 카탈로그에서 고른 모델 하나 (최대 3개). */
@@ -650,7 +648,10 @@ export function isUsagePlanForAgent(agent: AgentName, value: unknown): boolean {
   return USAGE_PLAN_GUARDS[agent](value);
 }
 
-export type ProductSkillIcon = 'pencil' | 'bot' | 'system';
+export type ProductSkillIcon =
+  | 'pencil' | 'bot' | 'system'
+  | 'sparkles' | 'book' | 'target' | 'chart' | 'lightbulb'
+  | 'calendar' | 'code' | 'check' | 'heart' | 'bolt' | 'shield';
 
 export type SkillHarnessId = 'claude' | 'codex' | 'cursor' | 'pi';
 
@@ -696,9 +697,10 @@ export interface HarnessSkillRow {
 }
 
 export type SkillCommitChange =
-  | { action: 'create'; name: string; description: string; body: string; base?: string }
+  | { action: 'create'; name: string; description: string; body: string; base?: string; icon?: ProductSkillIcon }
   | { action: 'write'; name: string; path: string; content: string; encoding?: 'utf8' | 'base64'; base: string }
   | { action: 'body'; name: string; body: string; base: string }
+  | { action: 'icon'; name: string; icon: ProductSkillIcon; base: string }
   | { action: 'enable'; name: string; enabled: boolean }
   | { action: 'delete'; name: string; base: string }
   | { action: 'import'; harness: SkillHarnessId; name: string; mode: 'adopt' | 'replace'; base?: string }

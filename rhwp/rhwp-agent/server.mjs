@@ -296,9 +296,10 @@ let sourceClaudeAuth = await resolveSourceClaudeAuth();
 function claudeRuntimeEnv(isolatedHome) {
   return {
     ...cliSetup.envFor('claude'),
-    HOME: isolatedHome,
+    HOME: process.platform === 'darwin' ? (process.env.HOME ?? os.homedir()) : isolatedHome,
     USERPROFILE: isolatedHome,
     CLAUDE_CONFIG_DIR: path.join(isolatedHome, '.claude'),
+    ...(process.platform === 'darwin' ? {} : { CLAUDE_SECURESTORAGE_CONFIG_DIR: path.join(isolatedHome, '.claude') }),
   };
 }
 // App-managed bins are available to auxiliary CLI calls as soon as installation completes.
@@ -340,6 +341,10 @@ const usageStore = await createUsageStore().init();
 const providerLimits = createProviderLimitsClient({
   homeDir: HOST_PROFILE_HOME,
   resetLedgerPath: path.join(usageStore.rootDir, 'codex-reset-ledger.json'),
+  // Anthropic rate-limits this endpoint aggressively. A manual refresh should
+  // reuse a recent successful read instead of immediately turning it into a
+  // 429 after the automatic post-login refresh.
+  forceCooldownMs: 5 * 60 * 1000,
   getProviderEnv: (agent) => cliSetup.envFor(agent),
   getAuthMethod: (agent) => cliSetupStatus[agent]?.authMethod,
   getCodexBin: () => cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
@@ -952,6 +957,18 @@ function beginAccountLogin(record, sock, requestId) {
       pairingCode: login.pairingCode,
       expiresAt: login.expiresAt,
     };
+    // Install the callback waiter before exposing the login URL. A browser can
+    // finish an already-authenticated OAuth session immediately, so publishing
+    // first creates a small window where the callback would receive a 409.
+    const waitForProof = () => new Promise((resolve, reject) => {
+      rejectProof = reject;
+      authRun.submitProof = (value) => {
+        rejectProof = null;
+        authRun.submitProof = null;
+        resolve(value);
+      };
+    });
+    let proofPromise = waitForProof();
     authRuns.update(authRun, { phase: 'authorizing', replayableUi: authDetails });
     replyToStudio(record, sock, {
       v: 1,
@@ -964,14 +981,7 @@ function beginAccountLogin(record, sock, requestId) {
 
     let proof = null;
     while (!proof) {
-      const candidate = await new Promise((resolve, reject) => {
-        rejectProof = reject;
-        authRun.submitProof = (value) => {
-          rejectProof = null;
-          authRun.submitProof = null;
-          resolve(value);
-        };
-      });
+      const candidate = await proofPromise;
       if (!isLiveAuthRun()) throw agentAuthCancelled();
       authRuns.update(authRun, { phase: 'redeeming' });
       try {
@@ -986,6 +996,7 @@ function beginAccountLogin(record, sock, requestId) {
         authRuns.update(authRun, { phase: 'authorizing' });
         sendAccountRunError(authRun, error, 'DEVICE_PROOF_INVALID');
         progress(authDetails);
+        proofPromise = waitForProof();
       }
     }
   })().then(
@@ -1460,7 +1471,6 @@ function writingStyleCatalog(record) {
   return buildWritingStyleCatalog({
     health: providerHealth.cached(),
     piStatus,
-    rauStatus,
     currentSelection: activeSession ? { agent: activeSession.agent, model: activeSession.model, effort: activeSession.effort } : null,
   });
 }
@@ -1496,7 +1506,6 @@ function usageSnapshot() {
   const credits = keyId && keyId === openRouterCreditsKey ? openRouterCredits : null;
   if (credits) usage.openrouter = credits;
   usage.balances = {
-    ...providerBalances.snapshot(),
     openrouter: {
       status: credits ? (credits.error ? 'error' : 'ok') : 'unavailable',
       balanceUsd: credits && !credits.error ? credits.balanceUsd : null,
@@ -1508,7 +1517,6 @@ function usageSnapshot() {
         : !credits ? (currentKey ? '잔액을 새로고침해 주세요.' : 'Pi에서 OpenRouter 계정을 연결해 주세요.') : null,
     },
   };
-  if (rauCreditsBalance) usage.rau = rauCreditsBalance;
   return usage;
 }
 
@@ -1540,21 +1548,11 @@ async function refreshOpenRouterCredits(refresh = false) {
       openRouterCreditsKey = crypto.createHash('sha256').update(key).digest('hex');
     }
   }
-  if (!rauStatus.keyConfigured) {
-    rauCreditsBalance = null;
-    return;
-  }
-  try {
-    rauCreditsBalance = await rauManager.credits(refresh === true);
-  } catch (error) {
-    rauCreditsBalance = emptyCreditsError(error);
-  }
 }
 
 async function usageSnapshotRefreshing(refresh = false) {
   await Promise.all([
     providerLimits.refresh(refresh === true),
-    providerBalances.refresh(refresh === true),
     refreshOpenRouterCredits(refresh),
   ]);
   return usageSnapshot();
@@ -3568,7 +3566,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'account-logout': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      if (authRuns.get('account') || authRuns.get('rau')) {
+      if (authRuns.get('account')) {
         replyToStudio(record, sock, {
           v: 1,
           type: 'account-error',
@@ -3991,7 +3989,6 @@ async function handleStudioMessage(record, sock, msg) {
           {
             health: providerHealth.cached(),
             piStatus,
-            rauStatus,
             currentSelection: record.agentSession ? { agent: record.agentSession.agent, model: record.agentSession.model, effort: record.agentSession.effort } : null,
           },
         );

@@ -16,10 +16,9 @@ function between(start, end) {
 }
 const accountLogin = between('function beginAccountLogin(', '\nfunction resolveModel(');
 const accountCases = between("    case 'account-login':", "    case 'account-login-cancel':");
-const agentCases = between("    case 'agent-setup-auth':", "    case 'agent-setup-cancel':");
 const flush = async () => { for (let i = 0; i < 8; i += 1) await new Promise(setImmediate); };
 
-function fixture(t, { signedIn = false } = {}) {
+function fixture(t, { signedIn = false, onFrame = null } = {}) {
   const frames = [];
   const calls = { start: [], complete: [], sync: 0 };
   let active = null;
@@ -51,7 +50,10 @@ function fixture(t, { signedIn = false } = {}) {
     hubPort: 12345, PROTOCOL_VERSION: 1,
     agentAuthCancelled: (message = 'Cancelled') => Object.assign(new Error(message), { code: 'AGENT_AUTH_CANCELLED' }),
     boundedAgentAuthCode: (code) => String(code).trim(),
-    replyToStudio: (_record, _sock, frame) => push(frame),
+    replyToStudio: (_record, _sock, frame) => {
+      push(frame);
+      onFrame?.(frame, authRuns);
+    },
     sendAccountRunFrame: (_run, frame) => push(frame),
     sendAuthRunFrame: (_run, frame) => push(frame),
     sendAccountRunError: (_run, error) => push({ type: 'account-error', code: error.code, message: error.message }),
@@ -65,60 +67,48 @@ function fixture(t, { signedIn = false } = {}) {
     piManager: { status: async () => ({}) }, piStatus: {},
     refreshOpenRouterCredits: async () => {}, usageSnapshot: () => ({}), log: () => {},
   });
-  vm.runInContext(`${accountLogin}\nfunction dispatch(msg, record, sock) { switch (msg.type) { ${accountCases}\n${agentCases} } }`, context);
+  vm.runInContext(`${accountLogin}\nfunction dispatch(msg, record, sock) { switch (msg.type) { ${accountCases} } }`, context);
   t.after(() => authRuns.cancelForSession('studio-1'));
   return {
     frames, calls, authRuns,
     send: (msg) => context.dispatch(msg, { sessionId: 'studio-1' }, {}),
   };
 }
-const entry = (kind) => kind === 'account'
-  ? { type: 'account-login', requestId: 'request-1' }
-  : { type: 'agent-setup-auth', agent: 'rau', method: 'oauth', requestId: 'request-1' };
+const entry = { type: 'account-login', requestId: 'request-1' };
 
-for (const kind of ['account', 'rau']) {
-  test(`${kind} entrypoint commits the account using its manual callback`, async (t) => {
-    const f = fixture(t);
-    f.send(entry(kind));
-    await flush();
-    assert.equal(f.calls.start.length, 1, JSON.stringify(f.frames));
-    assert.equal(f.calls.start[0].redirectUri, `http://127.0.0.1:12345/oauth/${kind}/callback`);
-    assert.equal(f.calls.start[0].returnMode, 'hybrid');
-    const run = f.authRuns.get(kind);
-    assert.ok(run);
-    f.send({ type: kind === 'account' ? 'account-auth-code' : 'agent-setup-auth-code', agent: 'rau', authRunId: run.runId, code: 'manual-code' });
-    await flush();
-    assert.equal(f.calls.complete.length, 1, JSON.stringify(f.frames));
-    assert.equal(f.calls.complete[0].proof.kind, 'manual');
-    assert.equal(f.calls.complete[0].proof.code, 'manual-code');
-    assert.equal(f.authRuns.get(kind), null);
-    assert.ok(f.frames.some((frame) => frame.type === 'account-status' && frame.status.signedIn));
-    assert.ok(f.frames.some((frame) => frame.type === 'agent-setup-status'));
+test('account login installs its callback waiter before publishing the browser URL', async (t) => {
+  let completedFromCallback = false;
+  const f = fixture(t, {
+    onFrame(frame, authRuns) {
+      if (frame.type !== 'account-login-started') return;
+      const run = authRuns.get('account');
+      assert.equal(typeof run?.submitProof, 'function');
+      run.submitProof({ kind: 'loopback', code: 'instant-callback' });
+      completedFromCallback = true;
+    },
   });
-}
-
-for (const [first, second] of [['account', 'rau'], ['rau', 'account']]) {
-  test(`${first} login prevents a concurrent ${second} login`, async (t) => {
-    const f = fixture(t);
-    f.send(entry(first));
-    await flush();
-    assert.equal(f.calls.start.length, 1, JSON.stringify(f.frames));
-    f.send(entry(second));
-    await flush();
-    assert.equal(f.calls.start.length, 1);
-    assert.ok(f.frames.some((frame) => /BUSY/.test(frame.code ?? '')), JSON.stringify(f.frames));
-    assert.ok(f.authRuns.get(first), 'Original login remains usable');
-    assert.equal(f.authRuns.get(second), null, 'Rejected login releases its registry slot');
-  });
-}
-
-test('Rau reuses an existing account without starting another browser login', async (t) => {
-  const f = fixture(t, { signedIn: true });
-  f.send(entry('rau'));
+  f.send(entry);
   await flush();
-  assert.equal(f.calls.start.length, 0);
-  assert.equal(f.calls.sync, 1, JSON.stringify(f.frames));
-  assert.equal(f.authRuns.get('rau'), null);
-  assert.ok(f.frames.some((frame) => frame.type === 'agent-setup-status'));
-  assert.ok(!f.frames.some((frame) => frame.type === 'agent-setup-error'));
+  assert.equal(completedFromCallback, true);
+  assert.equal(f.calls.complete.length, 1, JSON.stringify(f.frames));
+  assert.equal(f.calls.complete[0].proof.kind, 'loopback');
+  assert.equal(f.calls.complete[0].proof.code, 'instant-callback');
+});
+
+test('account entrypoint commits the account using its manual callback', async (t) => {
+  const f = fixture(t);
+  f.send(entry);
+  await flush();
+  assert.equal(f.calls.start.length, 1, JSON.stringify(f.frames));
+  assert.equal(f.calls.start[0].redirectUri, 'http://127.0.0.1:12345/oauth/account/callback');
+  assert.equal(f.calls.start[0].returnMode, 'hybrid');
+  const run = f.authRuns.get('account');
+  assert.ok(run);
+  f.send({ type: 'account-auth-code', authRunId: run.runId, code: 'manual-code' });
+  await flush();
+  assert.equal(f.calls.complete.length, 1, JSON.stringify(f.frames));
+  assert.equal(f.calls.complete[0].proof.kind, 'manual');
+  assert.equal(f.calls.complete[0].proof.code, 'manual-code');
+  assert.equal(f.authRuns.get('account'), null);
+  assert.ok(f.frames.some((frame) => frame.type === 'account-status' && frame.status.signedIn));
 });

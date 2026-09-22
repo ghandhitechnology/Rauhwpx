@@ -1,13 +1,14 @@
 import type {
   CatalogRow,
   HarnessSkillRow,
+  ProductSkillIcon,
   SkillCommitChange,
   SkillCommitOutcome,
   SkillHarnessId,
   SkillEditorDocument,
 } from '../../agent/types.ts';
 import { createIcon } from './icons.ts';
-import { skillGlyphForSkill } from './skill-presentation.ts';
+import { PRODUCT_SKILL_ICONS, skillGlyphForSkill } from './skill-presentation.ts';
 import { createNewSkillEditor, createSkillEditor } from './skill-editor.ts';
 
 export interface SkillsShelf {
@@ -24,6 +25,7 @@ type ShelfMode = 'catalog' | 'harness';
 
 type PendingChange =
   | { action: 'create'; name: string }
+  | { action: 'icon'; name: string; icon: ProductSkillIcon }
   | { action: 'enable'; name: string }
   | { action: 'delete'; name: string }
   | { action: 'restore'; name: string }
@@ -74,6 +76,8 @@ export function createSkillsShelf(options: {
   const editors = new Map<string, HTMLElement>();
   let newEditor: HTMLElement | null = null;
   let createResolve: ((outcome: SkillCommitOutcome) => void) | null = null;
+  let activeIconPicker: HTMLElement | null = null;
+  let activeIconPickerClose: (() => void) | null = null;
 
   search.addEventListener('input', () => render());
   modeButton.addEventListener('click', () => {
@@ -195,6 +199,8 @@ export function createSkillsShelf(options: {
 
   function renderCatalog(previousPositions?: Map<string, DOMRect>): void {
     const before = previousPositions ?? capturePositions();
+    activeIconPickerClose?.();
+    activeIconPicker = null;
     list.replaceChildren();
     const needle = query();
     const visible = sortByStoredOrder(rows).filter((row) => !needle || `${row.name} ${row.description}`.toLowerCase().includes(needle));
@@ -290,6 +296,23 @@ export function createSkillsShelf(options: {
     copy.setAttribute('aria-expanded', 'false');
     const copyIcon = el('span', 'ag-skill-kind-icon');
     copyIcon.appendChild(createIcon(skillGlyphForSkill(skill)));
+    if (skill.kind === 'skill' && skill.origin === 'user' && skill.editable === true) {
+      copyIcon.classList.add('ag-skill-icon-button');
+      copyIcon.setAttribute('role', 'button');
+      copyIcon.setAttribute('tabindex', '0');
+      copyIcon.setAttribute('aria-label', `${skill.name} 아이콘 선택`);
+      copyIcon.setAttribute('aria-haspopup', 'dialog');
+      const open = (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openIconPicker(skill, item, copyIcon);
+      };
+      copyIcon.addEventListener('click', open);
+      copyIcon.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        open(event);
+      });
+    }
     const copyText = el('span', 'ag-skill-copy-text');
     copyText.append(
       el('strong', 'ag-skill-item-name', skill.name),
@@ -362,6 +385,60 @@ export function createSkillsShelf(options: {
     const editor = editors.get(skill.name);
     if (editor) item.appendChild(editor);
     return item;
+  }
+
+  function openIconPicker(skill: Extract<CatalogRow, { kind: 'skill' }>, item: HTMLElement, anchor: HTMLElement): void {
+    activeIconPickerClose?.();
+    if (item.querySelector('.ag-skill-icon-picker')) {
+      activeIconPicker = null;
+      return;
+    }
+    const picker = el('div', 'ag-skill-icon-picker') as HTMLDivElement;
+    picker.setAttribute('role', 'dialog');
+    picker.setAttribute('aria-label', `${skill.name} 아이콘 선택`);
+    const heading = el('div', 'ag-skill-icon-picker-heading', '아이콘 선택');
+    const grid = el('div', 'ag-skill-icon-picker-grid');
+    for (const icon of PRODUCT_SKILL_ICONS) {
+      const option = el('button', 'ag-skill-icon-option') as HTMLButtonElement;
+      option.type = 'button';
+      option.dataset.skillIcon = icon.value;
+      option.title = icon.label;
+      option.setAttribute('aria-label', icon.label);
+      option.setAttribute('aria-pressed', skill.icon === icon.value ? 'true' : 'false');
+      option.appendChild(createIcon(icon.value));
+      option.addEventListener('click', (event) => {
+        event.stopPropagation();
+        activeIconPickerClose?.();
+        pending = { action: 'icon', name: skill.name, icon: icon.value };
+        options.onCommit({ action: 'icon', name: skill.name, icon: icon.value, base: skill.digest });
+      });
+      grid.appendChild(option);
+    }
+    picker.append(heading, grid);
+    item.appendChild(picker);
+    activeIconPicker = picker;
+    requestAnimationFrame(() => {
+      const first = picker.querySelector<HTMLButtonElement>(`[aria-pressed="true"]`)
+        ?? picker.querySelector<HTMLButtonElement>('button');
+      first?.focus();
+    });
+    let closeOnEscape: ((event: KeyboardEvent) => void) | null = null;
+    const close = () => {
+      if (activeIconPicker !== picker) return;
+      activeIconPicker = null;
+      picker.remove();
+      if (closeOnEscape) window.removeEventListener('keydown', closeOnEscape, true);
+      activeIconPickerClose = null;
+    };
+    closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || activeIconPicker !== picker) return;
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+      anchor.focus();
+    };
+    activeIconPickerClose = close;
+    window.addEventListener('keydown', closeOnEscape, true);
   }
 
   function renderDragHandle(item: HTMLElement, name: string): HTMLButtonElement {
@@ -535,6 +612,8 @@ export function createSkillsShelf(options: {
         }
         break;
       }
+      case 'icon':
+        break;
       case 'import':
         if (!outcome.ok && outcome.code === 'LOCAL_EDITS' && outcome.digest) {
           replaceDigests.set(`${current.harness}:${current.name}`, outcome.digest);

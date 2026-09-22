@@ -51,7 +51,7 @@ test('the profile file is preferred over the Keychain item', async (t) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'rhwp-claude-creds-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   await mkdir(path.join(home, '.claude'), { recursive: true });
-  await writeFile(path.join(home, '.claude', '.credentials.json'), credential('file-token'));
+  await writeFile(path.join(home, '.claude', '.credentials.json'), credential('file-token', Date.now() + 3_600_000));
   let keychainReads = 0;
 
   const resolved = await readClaudeOAuthCredential({
@@ -67,6 +67,23 @@ test('the profile file is preferred over the Keychain item', async (t) => {
   assert.equal(resolved.source, 'file');
   assert.equal(JSON.parse(resolved.text).claudeAiOauth.accessToken, 'file-token');
   assert.equal(keychainReads, 0, 'the Keychain is not consulted when the file is present');
+});
+
+test('an expired macOS fallback file yields to a live Keychain credential', async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'rhwp-claude-creds-expired-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await mkdir(path.join(home, '.claude'), { recursive: true });
+  await writeFile(path.join(home, '.claude', '.credentials.json'), credential('expired-file', Date.now() - 1));
+
+  const resolved = await readClaudeOAuthCredential({
+    homeDir: home,
+    env: {},
+    platform: 'darwin',
+    readKeychainImpl: async () => ({ claudeAiOauth: { accessToken: 'live-keychain', expiresAt: Date.now() + 3_600_000 } }),
+  });
+
+  assert.equal(resolved.source, 'keychain');
+  assert.equal(JSON.parse(resolved.text).claudeAiOauth.accessToken, 'live-keychain');
 });
 
 test('a Keychain-only profile resolves to the Keychain credential', async (t) => {
