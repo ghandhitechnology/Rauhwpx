@@ -109,9 +109,9 @@ fn repeat_header_edit_survives_hwp5_save() {
     );
 }
 
-/// Rauhwpx 의 `set_table_properties` 는 이미 `Table::sync_raw_record_attr` 로 raw 를
-/// 맞춘다. 이 가드는 그 우회를 건너뛰고 IR 만 바꿨을 때도 직렬화기가 bit 0-2 를
-/// 쓰는지 확인한다. 명령 계층 동기화가 빠져도 HWP5 저장이 IR 을 잃지 않게 한다.
+/// Rauhwpx 의 `set_table_properties` 는 `Table::sync_raw_record_attr` 로 raw 를
+/// 맞춘다. 이 가드는 그 동기화 없이 IR 만 바꾼 뒤 `raw_stream` 을 비워 재구성
+/// 경로로 저장한다. 직렬화기가 bit 0-2 를 IR 에서 쓰는지 확인한다.
 #[test]
 fn unsynced_ir_edit_survives_hwp5_save() {
     let mut original =
@@ -126,6 +126,7 @@ fn unsynced_ir_edit_survives_hwp5_save() {
         t.page_break = TablePageBreak::CellBreak;
         t.repeat_header = false;
     }
+    original.sections[SEC as usize].raw_stream = None;
     let out = serialize_document(&original).unwrap_or_else(|e| panic!("HWP5 직렬화: {e:?}"));
     let reparsed = parse_document(&out).unwrap_or_else(|e| panic!("HWP5 재파싱: {e:?}"));
     let t = table_at(&reparsed);
