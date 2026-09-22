@@ -906,6 +906,7 @@ pub(crate) fn assign_auto_numbers(doc: &mut Document) {
         doc.doc_properties.picture_start_num.saturating_sub(1),
         doc.doc_properties.table_start_num.saturating_sub(1),
         doc.doc_properties.equation_start_num.saturating_sub(1),
+        0, // TotalPage는 아래에서 카운터 할당 없이 보존한다.
     ];
 
     fn counter_index(t: AutoNumberType) -> usize {
@@ -916,6 +917,7 @@ pub(crate) fn assign_auto_numbers(doc: &mut Document) {
             AutoNumberType::Picture => 3,
             AutoNumberType::Table => 4,
             AutoNumberType::Equation => 5,
+            AutoNumberType::TotalPage => 6,
         }
     }
 
@@ -945,14 +947,14 @@ pub(crate) fn assign_auto_numbers(doc: &mut Document) {
 
 fn assign_auto_numbers_in_controls(
     controls: &mut [crate::model::control::Control],
-    counters: &mut [u16; 6],
+    counters: &mut [u16; 7],
     counter_index: fn(crate::model::control::AutoNumberType) -> usize,
 ) {
     use crate::model::control::Control;
 
     fn assign_caption_auto_numbers(
         caption: &mut Option<crate::model::shape::Caption>,
-        counters: &mut [u16; 6],
+        counters: &mut [u16; 7],
         counter_index: fn(crate::model::control::AutoNumberType) -> usize,
     ) {
         if let Some(caption) = caption {
@@ -964,7 +966,7 @@ fn assign_auto_numbers_in_controls(
 
     fn assign_text_box_auto_numbers(
         text_box: &mut Option<crate::model::shape::TextBox>,
-        counters: &mut [u16; 6],
+        counters: &mut [u16; 7],
         counter_index: fn(crate::model::control::AutoNumberType) -> usize,
     ) {
         if let Some(text_box) = text_box {
@@ -977,6 +979,10 @@ fn assign_auto_numbers_in_controls(
     for ctrl in controls.iter_mut() {
         match ctrl {
             Control::AutoNumber(an) => {
+                if an.number_type == crate::model::control::AutoNumberType::TotalPage {
+                    an.assigned_number = an.number;
+                    continue;
+                }
                 let idx = counter_index(an.number_type);
                 counters[idx] += 1;
                 an.assigned_number = counters[idx];

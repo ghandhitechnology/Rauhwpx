@@ -159,6 +159,7 @@ impl LayoutEngine {
         start_cut: &[usize],
         end_cut: &[usize],
         is_block_split: bool,
+        allocated_row_heights: &[(usize, f64)],
         cell_spacing: f64,
         col_count: usize,
         row_count: usize,
@@ -523,7 +524,13 @@ impl LayoutEngine {
             } else {
                 false
             };
-            let effective_align = if (is_in_split_row || is_rowbreak_straddle) && cell_was_split {
+            let preserves_fragment_alignment = allocated_row_heights
+                .iter()
+                .any(|&(row, _)| row == cell_row);
+            let effective_align = if (is_in_split_row || is_rowbreak_straddle)
+                && cell_was_split
+                && !preserves_fragment_alignment
+            {
                 VerticalAlign::Top
             } else {
                 cell.vertical_align
@@ -1298,7 +1305,10 @@ impl LayoutEngine {
                                     {
                                         Some(NestedTableSplit {
                                             start_row: split.start_row,
-                                            end_row: split.end_row,
+                                            // mixed 컷은 높이 구간이다. 단일 행용 fragment의
+                                            // end_row=1을 다행 표에 적용하면 본문 행이 사라진다.
+                                            // 실제 행 전체를 유지하고 기존 높이 clip을 적용한다.
+                                            end_row: nested_table.row_count as usize,
                                             visible_height: split.visible_height,
                                             flow_height: split.flow_height,
                                             offset_within_start: split.offset_within_start,
@@ -1503,6 +1513,7 @@ impl LayoutEngine {
         measured_table: Option<&MeasuredTable>,
         clamp_header_negative_para_offset: bool,
         native_cellbreak_fragment_spacing_hu: Option<(i32, i32)>,
+        allocated_row_heights: &[(usize, f64)],
     ) -> f64 {
         let para = match paragraphs.get(para_index) {
             Some(p) => p,
@@ -1937,6 +1948,13 @@ impl LayoutEngine {
             }
         }
 
+        // 페이지네이터가 배정한 저장 행의 물리적 높이는 콘텐츠 컷보다 우선한다.
+        for &(row, height) in allocated_row_heights {
+            if let Some(h) = row_heights.get_mut(row) {
+                *h = height;
+            }
+        }
+
         // ── 3. 누적 위치 계산 ──
         let mut col_x = vec![0.0f64; col_count + 1];
         for i in 0..col_count {
@@ -2109,6 +2127,7 @@ impl LayoutEngine {
             start_cut,
             end_cut,
             is_block_split,
+            allocated_row_heights,
             cell_spacing,
             col_count,
             row_count,

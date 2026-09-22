@@ -9,7 +9,7 @@ use crate::model::bin_data::BinDataContent;
 use crate::model::control::Control;
 use crate::model::paragraph::Paragraph;
 use crate::model::style::{Alignment, BorderLine, CenterLine};
-use crate::model::table::{TablePageBreak, VerticalAlign};
+use crate::model::table::{Table, TablePageBreak, VerticalAlign};
 use crate::renderer::float_placement::{is_para_topbottom_float, signed_hwpunit};
 
 const ROWBREAK_OBJECT_BOTTOM_BLEED_TOLERANCE_PX: f64 = 64.0;
@@ -4762,7 +4762,7 @@ impl LayoutEngine {
                 for (cpi, para) in cell.paragraphs.iter().enumerate() {
                     if para.controls.iter().any(|c| {
                         matches!(c, Control::AutoNumber(an)
-                            if an.number_type == crate::model::control::AutoNumberType::Page)
+                            if matches!(an.number_type, crate::model::control::AutoNumberType::Page | crate::model::control::AutoNumberType::TotalPage))
                     }) {
                         if let Some(comp) = composed_paras.get_mut(cpi) {
                             self.substitute_page_auto_numbers_in_composed(para, comp, current_pn);
@@ -8884,6 +8884,62 @@ impl LayoutEngine {
     ///
     /// 셀 인덱스는 `advance_row_cut` 과 동일하게 `row_span==1` 셀을 col
     /// 오름차순 정렬한 순서다.
+    /// 저장된 페이지 경계로 나뉜 텍스트 행의 선언 높이를 보존한다.
+    /// 콘텐츠 컷만으로 조각 높이를 정하면 세로 가운데 정렬의 여유 공간이 사라진다.
+    pub(crate) fn saved_row_height_at_page_reset(
+        &self,
+        table: &Table,
+        row: usize,
+        cut: &[usize],
+        styles: &ResolvedStyleSet,
+    ) -> Option<f64> {
+        if !self.profile.get().native_hwp5_layout()
+            || table.common.treat_as_char
+            || table.row_count < 2
+            || !matches!(
+                table.page_break,
+                crate::model::table::TablePageBreak::RowBreak
+            )
+            || !table.leading_header_rows().is_empty()
+        {
+            return None;
+        }
+        let mut cells: Vec<_> = table
+            .cells
+            .iter()
+            .filter(|c| c.row as usize == row)
+            .collect();
+        cells.sort_by_key(|c| c.col);
+        let declared = cells.first()?.height;
+        if declared == 0
+            || declared >= 0x8000_0000
+            || cells.iter().any(|c| {
+                c.row_span != 1
+                    || c.height != declared
+                    || c.paragraphs.iter().any(|p| !p.controls.is_empty())
+            })
+        {
+            return None;
+        }
+        let height = hwpunit_to_px(declared as i32, self.dpi);
+        let mut has_aligned_reset = false;
+        for (i, cell) in cells.iter().enumerate() {
+            let units = self.cell_units(cell, table, styles);
+            let end = cut.get(i).copied()?.min(units.len());
+            let (_, _, top, bottom) = self.resolve_cell_padding(cell, table);
+            if units.iter().map(|u| u.height).sum::<f64>() + top + bottom >= height - 0.5 {
+                return None;
+            }
+            if units.get(end).is_some_and(|u| u.hard_break_before)
+                && !matches!(cell.vertical_align, crate::model::table::VerticalAlign::Top)
+                && units.iter().filter(|u| u.hard_break_before).count() == 1
+            {
+                has_aligned_reset = true;
+            }
+        }
+        has_aligned_reset.then_some(height)
+    }
+
     pub(crate) fn row_cut_content_height(
         &self,
         table: &crate::model::table::Table,

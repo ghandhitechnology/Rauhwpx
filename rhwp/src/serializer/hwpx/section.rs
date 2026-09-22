@@ -2610,6 +2610,7 @@ fn auto_number_type_to_str(t: AutoNumberType) -> &'static str {
         AutoNumberType::Picture => "PICTURE",
         AutoNumberType::Table => "TABLE",
         AutoNumberType::Equation => "EQUATION",
+        AutoNumberType::TotalPage => "TOTAL_PAGE",
     }
 }
 

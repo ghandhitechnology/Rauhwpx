@@ -16,6 +16,66 @@ pub(crate) fn signed_hwpunit(value: HwpUnit) -> i32 {
     value as i32
 }
 
+/// 그림 host는 전체 폭이고 다음 문단부터 어울림이 시작되는 저장 밴드.
+pub(crate) fn following_fixed_picture_wrap_band(
+    para: &Paragraph,
+    next: Option<&Paragraph>,
+    page: &crate::model::page::PageDef,
+    column_width_hu: i32,
+) -> Option<(i32, i32)> {
+    let body_width = page.width as i32 - page.margin_left as i32 - page.margin_right as i32;
+    if (body_width - column_width_hu).abs() > 1 {
+        return None;
+    }
+    let line = next?.line_segs.first()?;
+    if line.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0
+        || line.segment_width <= 0
+        || line.segment_width >= body_width - 200
+    {
+        return None;
+    }
+    let body_top = page.margin_top as i32 + page.margin_header as i32;
+    para.controls.iter().find_map(|control| {
+        let common = match control {
+            Control::Picture(picture) => &picture.common,
+            Control::Shape(shape)
+                if matches!(shape.as_ref(), crate::model::shape::ShapeObject::Picture(_)) =>
+            {
+                shape.common()
+            }
+            _ => return None,
+        };
+        if common.treat_as_char
+            || !matches!(common.text_wrap, TextWrap::Square)
+            || !matches!(common.horz_align, HorzAlign::Left)
+            || !matches!(common.vert_align, VertAlign::Top)
+        {
+            return None;
+        }
+        let left = signed_hwpunit(common.horizontal_offset)
+            - match common.horz_rel_to {
+                HorzRelTo::Paper => page.margin_left as i32,
+                HorzRelTo::Page => 0,
+                _ => return None,
+            };
+        let top = signed_hwpunit(common.vertical_offset)
+            - match common.vert_rel_to {
+                VertRelTo::Paper => body_top,
+                VertRelTo::Page => 0,
+                _ => return None,
+            };
+        let right = left + common.width as i32 + common.margin.right as i32;
+        let left = left - common.margin.left as i32;
+        let bottom = top + common.height as i32 + common.margin.bottom as i32;
+        let top = top - common.margin.top as i32;
+        let beside = (line.column_start == 0 && (line.segment_width - left).abs() <= 200)
+            || ((line.column_start - right).abs() <= 200
+                && (line.column_start + line.segment_width - body_width).abs() <= 200);
+        (beside && line.vertical_pos < bottom && line.vertical_pos + line.line_height > top)
+            .then_some((line.column_start, line.segment_width))
+    })
+}
+
 /// A non-TAC `TopAndBottom` object positioned from its host paragraph.
 pub(crate) fn is_para_topbottom_float(common: &CommonObjAttr) -> bool {
     !common.treat_as_char
