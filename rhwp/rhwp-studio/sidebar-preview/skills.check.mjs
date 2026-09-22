@@ -103,37 +103,46 @@ try {
   const storedDraggedOrder = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? 'null'), orderKey);
   assert.deepEqual(storedDraggedOrder, draggedNames, 'Pointer reorder persists the catalog order.');
 
-  // Repeated pointer reorders must cancel the prior FLIP animation before measuring again.
-  await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'no-preference' }]);
-  await page.evaluate(() => {
-    window.__skillAnimationStarts = 0;
-    window.__skillAnimationCancels = 0;
-    const nativeAnimate = Element.prototype.animate;
-    Element.prototype.animate = function (...args) {
-      const animation = nativeAnimate.apply(this, args);
-      window.__skillAnimationStarts += 1;
-      const nativeCancel = animation.cancel.bind(animation);
-      animation.cancel = () => {
-        window.__skillAnimationCancels += 1;
-        return nativeCancel();
-      };
-      return animation;
-    };
-  });
-  const rapidHandle = await page.$('.ag-skills-list [data-skill-name] .ag-skill-drag-handle');
-  assert(rapidHandle);
-  const rapidBox = await rapidHandle.boundingBox();
-  assert(rapidBox);
-  await page.mouse.move(rapidBox.x + rapidBox.width / 2, rapidBox.y + rapidBox.height / 2);
-  await page.mouse.down();
-  for (const offset of [54, 96, 138, 96, 54]) {
-    await page.mouse.move(rapidBox.x + rapidBox.width / 2, rapidBox.y + offset, { steps: 1 });
+  // The grabbed row follows the pointer, even across interrupted reorder animations.
+  {
+    const motion = 'no-preference';
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: motion }]);
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 20)));
+    const rows = await page.$$('.ag-skills-list [data-skill-name]');
+    const draggedRow = rows[0];
+    const handle = await draggedRow.$('.ag-skill-drag-handle');
+    const handleBox = await handle.boundingBox();
+    const rowBox = await draggedRow.boundingBox();
+    const lastBox = await rows.at(-1).boundingBox();
+    const x = handleBox.x + handleBox.width / 2;
+    const startY = handleBox.y + handleBox.height / 2;
+    const grabOffset = startY - rowBox.y;
+    await page.mouse.move(x, startY);
+    await page.mouse.down();
+    let previousIndex = 0;
+    for (const y of [startY + 6, startY + 20, lastBox.y + lastBox.height / 2]) {
+      await page.mouse.move(x, y);
+      const actual = await draggedRow.boundingBox();
+      assert.ok(Math.abs(actual.y - (y - grabOffset)) < 1,
+        `${motion}: grabbed row must stay under the pointer, drift=${actual.y - (y - grabOffset)}px`);
+      const index = await draggedRow.evaluate((node) => [...node.parentElement.children].indexOf(node));
+      assert.ok(index >= previousIndex, 'A downward drag must not reverse the row order.');
+      previousIndex = index;
+    }
+    assert.equal(previousIndex, rows.length - 1, 'One large pointer move reaches the last slot.');
+    const heldOrder = await names();
+    for (let frame = 0; frame < 12; frame++) {
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+      await page.mouse.move(x + (frame % 2), lastBox.y + lastBox.height / 2);
+      assert.deepEqual(await names(), heldOrder, 'Holding the pointer must not swap rows back and forth.');
+      const actual = await draggedRow.boundingBox();
+      assert.ok(Math.abs(actual.y - (lastBox.y + lastBox.height / 2 - grabOffset)) < 1,
+        'The grabbed row must not drift while sibling animations run.');
+    }
+    await page.keyboard.press('Escape');
+    await page.mouse.up();
+    assert.deepEqual(await names(), draggedNames, 'Cancelling restores the original order.');
   }
-  await page.mouse.up();
-  assert.ok(
-    await page.evaluate(() => window.__skillAnimationCancels > 0),
-    'Repeated pointer reorders cancel stale FLIP animations.',
-  );
 
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForFunction(() => window.sidebarPreview);

@@ -314,39 +314,49 @@ export function createSkillsShelf(options: {
   function beginDrag(event: PointerEvent, item: HTMLElement): void {
     if (event.button !== 0) return;
     event.preventDefault();
+    cancelReflowAnimations();
     draggingName = item.dataset.skillName ?? null;
     dragOriginalNames = [...list.querySelectorAll<HTMLElement>('[data-skill-name]')]
       .map((candidate) => candidate.dataset.skillName)
       .filter((name): name is string => Boolean(name));
-    const startY = event.clientY;
+    const pointerId = event.pointerId;
+    const grabOffset = event.clientY - item.getBoundingClientRect().top;
+    let dragTranslateY = 0;
+    item.style.top = '0px';
     item.classList.add('ag-skill-dragging');
     root.classList.add('ag-skills-dragging');
     const move = (moveEvent: PointerEvent) => {
-      if (!draggingName) return;
-      const next = item.nextElementSibling as HTMLElement | null;
-      const previous = item.previousElementSibling as HTMLElement | null;
-      const itemRect = item.getBoundingClientRect();
-      const before = capturePositions();
+      if (!draggingName || moveEvent.pointerId !== pointerId) return;
       let moved = false;
-      if (next?.dataset.skillName && moveEvent.clientY >= itemRect.bottom - 8) {
+      let next = item.nextElementSibling as HTMLElement | null;
+      while (next?.dataset.skillName && moveEvent.clientY >= next.getBoundingClientRect().top + next.getBoundingClientRect().height / 2) {
         list.insertBefore(next, item);
         moved = true;
-      } else if (previous?.dataset.skillName && moveEvent.clientY <= itemRect.top + 8) {
+        next = item.nextElementSibling as HTMLElement | null;
+      }
+      let previous = item.previousElementSibling as HTMLElement | null;
+      while (previous?.dataset.skillName && moveEvent.clientY <= previous.getBoundingClientRect().top + previous.getBoundingClientRect().height / 2) {
         list.insertBefore(item, previous);
         moved = true;
+        previous = item.previousElementSibling as HTMLElement | null;
       }
-      if (moved) animateReflow(before);
+      const nextTop = item.getBoundingClientRect().top - dragTranslateY;
+      dragTranslateY = moveEvent.clientY - grabOffset - nextTop;
+      item.style.top = `${dragTranslateY}px`;
+      if (moved) item.classList.add('ag-skill-dragging');
     };
     let ended = false;
-    const end = () => {
+    const end = (endEvent?: PointerEvent) => {
       if (ended) return;
+      if (endEvent && endEvent.pointerId !== pointerId) return;
       ended = true;
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', end);
       window.removeEventListener('pointercancel', end);
-      window.removeEventListener('keydown', cancel);
+      window.removeEventListener('keydown', cancel, true);
       item.classList.remove('ag-skill-dragging');
       root.classList.remove('ag-skills-dragging');
+      item.style.removeProperty('top');
       rememberOrder();
       item.classList.add('ag-skill-drag-settled');
       window.setTimeout(() => item.classList.remove('ag-skill-drag-settled'), 420);
@@ -368,7 +378,7 @@ export function createSkillsShelf(options: {
     try { item.setPointerCapture(event.pointerId); } catch { /* Pointer capture is unavailable in some test drivers. */ }
     window.addEventListener('pointerup', end);
     window.addEventListener('pointercancel', end);
-    window.addEventListener('keydown', cancel);
+    window.addEventListener('keydown', cancel, true);
   }
 
   function renderSwitch(name: string, enabled: boolean): HTMLButtonElement {
