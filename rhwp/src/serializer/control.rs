@@ -521,25 +521,36 @@ fn serialize_table(table: &Table, level: u16, records: &mut Vec<Record>) {
     }
 }
 
+/// bit 0-1 은 파서가 읽은 값과 IR 이 다를 때만 덮는다. 비표준 원본 3(CellBreak)을
+/// 무편집 왕복에서 1로 바꾸지 않기 위함이다. bit 2 는 IR 의 `repeat_header` 다.
+fn table_record_attr(table: &Table) -> u32 {
+    let raw = table.raw_table_record_attr;
+    let raw_page_break = match raw & 0x03 {
+        1 | 3 => TablePageBreak::CellBreak,
+        2 => TablePageBreak::RowBreak,
+        _ => TablePageBreak::None,
+    };
+    let mut attr = raw;
+    if raw_page_break != table.page_break {
+        let bits = match table.page_break {
+            TablePageBreak::None => 0x00,
+            TablePageBreak::CellBreak => 0x01,
+            TablePageBreak::RowBreak => 0x02,
+        };
+        attr = (attr & !0x03) | bits;
+    }
+    if table.repeat_header {
+        attr |= 0x04;
+    } else {
+        attr &= !0x04;
+    }
+    attr
+}
+
 fn serialize_table_record(table: &Table) -> Vec<u8> {
     let mut w = ByteWriter::new();
 
-    // attr (원본이 있으면 그대로, 없으면 재구성)
-    let attr = if table.raw_table_record_attr != 0 {
-        table.raw_table_record_attr
-    } else {
-        let mut a: u32 = 0;
-        match table.page_break {
-            TablePageBreak::CellBreak => a |= 0x01,
-            TablePageBreak::RowBreak => a |= 0x02,
-            TablePageBreak::None => {}
-        }
-        if table.repeat_header {
-            a |= 0x04;
-        }
-        a
-    };
-    w.write_u32(attr).unwrap();
+    w.write_u32(table_record_attr(table)).unwrap();
 
     w.write_u16(table.row_count).unwrap();
     w.write_u16(table.col_count).unwrap();

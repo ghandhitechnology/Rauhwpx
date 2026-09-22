@@ -371,9 +371,9 @@ impl Cell {
 
 impl Table {
     /// `page_break`/`repeat_header` 변경을 HWPTAG_TABLE 원본 속성(`raw_table_record_attr`)
-    /// bit 0-2 에 동기화한다. HWP5 직렬화기는 raw 속성이 0이 아니면 그대로 기록하므로,
-    /// 여기서 동기화하지 않으면 실제 .hwp 에서 파싱된 표의 쪽나눔/제목반복 편집이
-    /// 저장 시 통째로 유실된다. raw 가 0이면 직렬화기가 모델에서 재구성하므로 무해.
+    /// bit 0-2 에 동기화한다. HWP5 직렬화기는 IR 에서 그 비트를 쓰므로 저장은 이 호출
+    /// 없이도 맞다. 메모리상의 raw 덤프가 IR 과 어긋나지 않게 유지한다. raw 가 0이면
+    /// 직렬화기가 모델에서 재구성하므로 무해하다.
     pub fn sync_raw_record_attr(&mut self) {
         if self.raw_table_record_attr == 0 {
             return;
