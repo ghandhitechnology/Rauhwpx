@@ -255,6 +255,25 @@ test('순수 RawSvg 프리페치는 PageLayerTree bbox 계약으로 SVG URL을 �
   assert.equal(urls.length, 1, '내부 raster data URL이 있는 rawSvg는 별도 프리페치하지 않는다');
 });
 
+test('순수 RawSvg 프리페치는 큰 페이지의 임시 data URL 보유량을 제한한다', () => {
+  const urls: string[] = [];
+  const ops = Array.from({ length: 100 }, (_, index) => ({
+    type: 'rawSvg',
+    bbox: { x: index, y: 0, width: 10, height: 10 },
+    svg: `<path d="M${index} 0 L10 10"/>`,
+  }));
+  collectVectorRawSvgDataUrls({ root: { kind: 'leaf', ops } }, urls);
+  assert.equal(urls.length, 64);
+
+  const hugeUrls: string[] = [];
+  collectVectorRawSvgDataUrls({
+    type: 'rawSvg',
+    bbox: { x: 0, y: 0, width: 1, height: 1 },
+    svg: 'x'.repeat(1_048_577),
+  }, hugeUrls);
+  assert.equal(hugeUrls.length, 0);
+});
+
 test('CanvasKit image replay cache key includes payload fingerprint with repeated image refs', () => {
   const first = canvasKitImageCacheKey({ imageRef: 7, mime: 'image/png', base64: 'AAAA' });
   const second = canvasKitImageCacheKey({ imageRef: 7, mime: 'image/png', base64: 'BBBB' });

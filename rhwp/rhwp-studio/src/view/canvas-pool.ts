@@ -1,4 +1,8 @@
 const DEFAULT_MAX_RETAINED_BACKING_PIXELS = 8_388_608;
+// Zero-sized canvases are cheap to reuse, but retaining one for every page in a
+// long document still grows the JS heap. Keep a small warm pool for scrolling
+// without letting page count become the pool's memory limit.
+const MAX_RETAINED_CANVASES = 8;
 
 export class CanvasPool {
   private available: HTMLCanvasElement[] = [];
@@ -47,10 +51,20 @@ export class CanvasPool {
       if (exceedsBudget) {
         canvas.width = 0;
         canvas.height = 0;
-        this.available.unshift(canvas);
+        if (this.available.length < MAX_RETAINED_CANVASES) {
+          this.available.unshift(canvas);
+        }
       } else {
         this.availableBackingPixels += pixels;
-        this.available.push(canvas);
+        if (this.available.length < MAX_RETAINED_CANVASES) {
+          this.available.push(canvas);
+        } else {
+          // The backing store is already represented by the budget. Drop the
+          // DOM object when the warm pool is full rather than retaining it.
+          canvas.width = 0;
+          canvas.height = 0;
+          this.availableBackingPixels -= pixels;
+        }
       }
     }
   }

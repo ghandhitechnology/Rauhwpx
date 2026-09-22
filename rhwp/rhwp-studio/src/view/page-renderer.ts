@@ -59,6 +59,11 @@ const IMAGE_RE_RENDER_FALLBACK_DELAY_MS = 1500;
 // 이미지 decode를 빠르게 반영하되, 일반 이미지처럼 전역 반복 재렌더는 피한다.
 const RAW_SVG_EARLY_RE_RENDER_DELAYS_MS = [0, 32, 96, 240] as const;
 const HWP_UNITS_PER_CSS_PIXEL = 75;
+// Prefetch is an opportunistic decode hint. The normal renderer still handles
+// every image, so cap the temporary data-URL set to keep a pathological page
+// from retaining a second copy of its entire image payload.
+const MAX_PREFETCH_IMAGES_PER_PAGE = 256;
+const MAX_PREFETCH_DATA_URL_CHARS = 16 * 1024 * 1024;
 
 export class PageRenderer {
   private readonly imagePrefetcher = new ImagePrefetcher();
@@ -998,8 +1003,15 @@ export class PageRenderer {
       return false;
     }
     const seen = new Set<string>();
+    let seenUrlChars = 0;
     const enqueueValidated = (dataUrl: string) => {
+      if (
+        seen.has(dataUrl)
+        || seen.size >= MAX_PREFETCH_IMAGES_PER_PAGE
+        || seenUrlChars + dataUrl.length > MAX_PREFETCH_DATA_URL_CHARS
+      ) return;
       seen.add(dataUrl);
+      seenUrlChars += dataUrl.length;
     };
     const enqueueRaster = (mime: string, base64: string) => {
       try {
