@@ -392,7 +392,7 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboarding, /role', 'radiogroup'/);
   assert.match(onboarding, /dataset\.serverMode = mode/);
   assert.match(onboarding, /controller\.selectServerMode\(mode\)/);
-  assert.match(onboarding, /const selectedProvider = transferIntent\?\.selection\.agent/);
+  assert.match(onboarding, /const candidate = transferIntent\?\.selection\.agent[\s\S]*?const selectedProvider = candidate && isCloudSupportedAgent\(candidate\) \? candidate : undefined/);
   assert.match(onboarding, /controller\.spawnSandbox\(providerId, selectedProvider\)/);
   assert.match(onboarding, /captureTransferIntent\?\.\(\)/);
   assert.match(onboarding, /settled\.kind === 'sandbox-ready'\) continueTransfer\(intent\)/);
