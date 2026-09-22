@@ -521,11 +521,6 @@ fn serialize_table(table: &Table, level: u16, records: &mut Vec<Record>) {
     }
 }
 
-/// HWPTAG_TABLE attr — 원본 비트는 보존하고, IR 이 가진 bit 0-1(쪽 경계에서 나눔)·
-/// bit 2(제목 줄 자동 반복)만 IR 값으로 맞춘다. 원본 attr 를 통째로 재사용하면
-/// `setTableProperties` 로 바꾼 두 값이 저장·재파싱 뒤 원래 값으로 돌아간다.
-/// bit 0-1 은 파서가 원본에서 읽은 값과 IR 이 다를 때만 덮는다(비표준 값 3 무손실).
-/// 원본이 없으면(0) IR 에서 재구성하는 것과 같다.
 fn table_record_attr(table: &Table) -> u32 {
     let raw = table.raw_table_record_attr;
     let raw_page_break = match raw & 0x03 {

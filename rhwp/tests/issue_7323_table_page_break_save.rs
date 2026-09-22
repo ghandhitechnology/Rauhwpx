@@ -1,17 +1,3 @@
-//! Issue #7323 — 표 «쪽 경계에서 나눔»·«제목 줄 자동 반복» 편집이 HWP5 저장에서 사라진다.
-//!
-//! `setTableProperties({"pageBreak":…})`·`({"repeatHeader":…})` 는 IR(`table.page_break`·
-//! `table.repeat_header`)을 바꾸지만, `serialize_table_record` 는 `raw_table_record_attr` 가
-//! 0이 아니면 그 원본 attr 를 그대로 쓴다. 파일에서 읽은 표는 거의 늘 원본 attr 를 가지므로
-//! 메모리에서는 바뀐 값이 저장·재파싱 뒤 원래 값으로 돌아간다(HWPX 저장은 IR 파생이라 무관).
-//!
-//! 가드하는 축:
-//!   ① pageBreak 편집(0·1·2)이 HWP5 저장→재파싱에서 보존된다
-//!   ② repeatHeader 편집이 HWP5 저장→재파싱에서 보존된다
-//!   ③ 편집이 attr 의 다른 비트(bit 3 이상)를 건드리지 않는다
-//!   ④ 무편집 표의 attr 는 원본과 같다(raw 보존 경로 무회귀)
-//!
-//! fixture: `samples/2010-01-06.hwp` s0 p4 c0 — #3552 와 같은 9행 표.
 #![cfg(not(target_arch = "wasm32"))]
 
 use rhwp::model::control::Control;
@@ -52,7 +38,6 @@ fn table_at_mut(doc: &mut Document) -> &mut Table {
     }
 }
 
-/// fixture 를 열어 `json` 으로 표 속성을 바꾼 뒤 HWP5 로 저장·재파싱한다. (원본 attr, 재파싱 문서)
 fn edit_and_roundtrip(json: &str) -> (u32, Document) {
     let mut doc =
         HwpDocument::from_bytes(&sample_bytes()).unwrap_or_else(|e| panic!("파싱: {e:?}"));
@@ -109,9 +94,6 @@ fn repeat_header_edit_survives_hwp5_save() {
     );
 }
 
-/// Rauhwpx 의 `set_table_properties` 는 `Table::sync_raw_record_attr` 로 raw 를
-/// 맞춘다. 이 가드는 그 동기화 없이 IR 만 바꾼 뒤 `raw_stream` 을 비워 재구성
-/// 경로로 저장한다. 직렬화기가 bit 0-2 를 IR 에서 쓰는지 확인한다.
 #[test]
 fn unsynced_ir_edit_survives_hwp5_save() {
     let mut original =
