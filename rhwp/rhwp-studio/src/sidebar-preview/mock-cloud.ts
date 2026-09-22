@@ -91,6 +91,36 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       thread.messages = [{ role: 'user', text: `${task.documentName}의 내용을 검토해 주세요.` }];
       dashboardTimelines.set(task.sessionId, exportCloudTimeline(thread));
     });
+    const completed = state.sessions.find((task) => task.kind === 'completed');
+    if (completed) {
+      const checkpoint: CloudCheckpointPayload = {
+        sessionId: completed.sessionId,
+        documentId: completed.documentId,
+        fileName: completed.documentName,
+        kind: 'turn',
+        revision: 1,
+        turn: 1,
+        operationId: `dashboard-turn-${completed.sessionId}`,
+        bytes: new Uint8Array([1, 2, 3]),
+        byteLength: 3,
+        sha256: 'a'.repeat(64),
+      };
+      checkpoints.set(completed.sessionId, checkpoint);
+      state.mergeRequests = [{
+        sessionId: completed.sessionId,
+        documentId: completed.documentId!,
+        threadId: completed.threadId,
+        cloudStartId: completed.sessionId,
+        operationId: checkpoint.operationId,
+        revision: checkpoint.revision,
+        turn: checkpoint.turn,
+        kind: 'turn',
+        fileName: checkpoint.fileName,
+        sha256: checkpoint.sha256,
+        size: checkpoint.byteLength,
+        localAvailable: true,
+      }];
+    }
   }
   function snapshot(): CloudSnapshot {
     state.revision++;

@@ -30,7 +30,6 @@ const editingSettings = readSource('../src/ui/agent-sidebar/settings-editing.ts'
 const settingsCss = readSource('../src/ui/agent-sidebar/settings.css');
 const css = readSource('../src/ui/agent-sidebar/agent-sidebar.css');
 const buttonCss = readSource('../src/ui/agent-sidebar/sidebar-button-modern.css');
-const openCodeIcon = readSource('../public/icons/provider-opencode.svg');
 const icons = readSource('../src/ui/agent-sidebar/icons.ts');
 const editCommandsSource = readSource('../src/command/commands/edit.ts');
 const toolCommandsSource = readSource('../src/command/commands/tool.ts');
@@ -502,57 +501,28 @@ test('사이드바 버튼은 마지막에 불러온 얇고 반듯한 스타일�
   assert.match(buttonCss, /\.ag-root \.ag-send \{[\s\S]*height: var\(--ag-button-height\)/);
 });
 
-test('Grok · Cursor · OpenCode는 프로바이더 목록 · 라벨 · 아이콘 · 강조색을 모두 갖춘다', () => {
-  // 연결 목록과 입력기 피커는 일곱 프로바이더를 같은 순서로 세운다.
-  assert.deepEqual([...PROVIDER_ORDER], ['rau', 'claude', 'codex', 'pi', 'grok', 'cursor', 'opencode']);
-  assert.equal(AGENT_LABEL.rau, 'Rau');
-  assert.equal(AGENT_LABEL.grok, 'Grok');
-  assert.equal(AGENT_LABEL.cursor, 'Cursor');
-  assert.equal(AGENT_LABEL.opencode, 'OpenCode');
-  // 두 화면 모두 표를 다시 베끼지 않고 공용 모듈에서 가져다 쓴다.
+test('라이브 프로바이더는 Claude · Codex · Pi 이고 라벨 · 아이콘을 공유한다', () => {
+  assert.deepEqual([...PROVIDER_ORDER], ['claude', 'codex', 'pi']);
+  assert.equal(AGENT_LABEL.claude, 'Claude');
+  assert.equal(AGENT_LABEL.codex, 'Codex');
+  assert.equal(AGENT_LABEL.pi, 'Pi');
   for (const consumer of [settings, source]) {
     assert.match(consumer, /import \{ AGENT_LABEL, createProviderIcon, PROVIDER_ORDER \} from '\.\/providers\.ts'/);
     assert.doesNotMatch(consumer, /const AGENT_LABEL|const MASK_ICON_AGENTS|const PROVIDER_ICON_SRC/);
   }
   assert.match(settings, /for \(const agent of PROVIDER_ORDER\)/);
   assert.match(source, /for \(const agent of PROVIDER_ORDER\)/);
-  // cursor 표기는 언제나 "Cursor" 다.
-  assert.doesNotMatch(settings, /'Cursor Agent'|'cursor-agent'/);
-  // 단색 로고는 마스크로 그리므로 마스크 목록과 CSS 규칙이 함께 있어야 한다.
-  assert.deepEqual([...MASK_ICON_AGENTS], ['rau', 'codex', 'pi', 'grok', 'cursor', 'opencode']);
-  // 마스크가 아닌 프로바이더만 이미지 경로를 갖는다.
+  assert.deepEqual([...MASK_ICON_AGENTS], ['codex', 'pi']);
   assert.equal(PROVIDER_ICON_SRC.claude, '/icons/provider-claude.png');
-  assert.equal(PROVIDER_ICON_SRC.grok, undefined);
-  assert.equal(PROVIDER_ICON_SRC.cursor, undefined);
-  assert.equal(PROVIDER_ICON_SRC.opencode, undefined);
-  assert.match(css, /\.ag-provider-icon-mask\[data-agent='rau'\][\s\S]*?rau\.png/);
-  assert.match(css, /\.ag-provider-icon-mask\[data-agent='grok'\][\s\S]*?provider-grok\.svg/);
-  assert.match(css, /\.ag-provider-icon-mask\[data-agent='cursor'\][\s\S]*?provider-cursor\.svg/);
-  assert.match(css, /\.ag-provider-icon-mask\[data-agent='opencode'\][\s\S]*?provider-opencode\.svg/);
-  assert.match(openCodeIcon, /^<svg[^>]+viewBox="0 0 512 512"/);
-  assert.match(openCodeIcon, /fill-rule="evenodd"/);
-  assert.doesNotMatch(openCodeIcon, /(?:href|src)=["']https?:|data:/);
-  // 강조색은 라이트/다크 팔레트에 모두 있고 data-agent 로 갈린다.
-  assert.equal((css.match(/--ag-rau:/g) ?? []).length, 2);
-  assert.equal((css.match(/--ag-grok:/g) ?? []).length, 2);
-  assert.equal((css.match(/--ag-cursor:/g) ?? []).length, 2);
-  assert.equal((css.match(/--ag-opencode:/g) ?? []).length, 2);
-  assert.equal((css.match(/--ag-rau-wash:/g) ?? []).length, 2);
-  assert.equal((css.match(/--ag-grok-wash:/g) ?? []).length, 2);
-  assert.equal((css.match(/--ag-cursor-wash:/g) ?? []).length, 2);
-  assert.equal((css.match(/--ag-opencode-wash:/g) ?? []).length, 2);
-  assert.match(css, /\.ag-root\[data-agent='grok'\] \{\s*--ag-accent: var\(--ag-grok\);/);
-  assert.match(css, /\.ag-root\[data-agent='cursor'\] \{\s*--ag-accent: var\(--ag-cursor\);/);
-  assert.match(css, /\.ag-root\[data-agent='opencode'\] \{\s*--ag-accent: var\(--ag-opencode\);/);
-  assert.match(css, /\.ag-plan-card\.ag-grok,\n\.ag-plan-card\.ag-cursor,\n\.ag-plan-card\.ag-opencode/);
-  assert.match(css, /\.ag-review-card\.ag-grok,\n\.ag-review-card\.ag-cursor,\n\.ag-review-card\.ag-opencode/);
+  assert.equal(PROVIDER_ICON_SRC.codex, '/icons/provider-codex.png');
+  assert.match(css, /\.ag-provider-icon-mask\[data-agent='pi'\][\s\S]*?provider-pi\.svg/);
+  assert.match(css, /\.ag-root\[data-agent='codex'\] \{\s*--ag-accent: var\(--ag-codex\);/);
+  assert.match(css, /\.ag-root\[data-agent='pi'\] \{\s*--ag-accent: var\(--ag-pi\);/);
 });
 
-test('기본 제공자 선택은 일곱 프로바이더를 그대로 저장한다', () => {
-  // 예전 코드는 모르는 값을 claude 로 접어 Grok/Cursor 선택을 삼켰다.
+test('기본 제공자 선택은 라이브 프로바이더만 저장한다', () => {
   assert.match(settings, /const agent = PROVIDER_ORDER\.find\(\(name\) => name === value\) \?\? 'claude'/);
   assert.doesNotMatch(settings, /value === 'codex' \|\| value === 'pi' \? value : 'claude'/);
-  // 요금제 미터는 구독 한도가 있는 둘만 갖는다.
   assert.match(settings, /type PlanAgent = 'claude' \| 'codex'/);
   assert.match(settings, /const PLAN_AGENTS: readonly PlanAgent\[\] = \['claude', 'codex'\]/);
 });
@@ -580,8 +550,8 @@ test('cursor 모델 선택은 구독/API 과금 풀로 나뉘어 보인다', () 
   assert.match(css, /\.ag-llm-group-label \{[\s\S]*?flex-basis: 100%/);
 });
 
-test('Rau 는 목록 맨 앞이고 공통 테두리 · 로그인 전용 설정 · $0 전송 잠금을 갖는다', () => {
-  assert.equal(PROVIDER_ORDER[0], 'rau');
+test('설정 목록은 Claude 가 맨 앞이고 공통 테두리를 갖는다', () => {
+  assert.equal(PROVIDER_ORDER[0], 'claude');
   assert.match(settingsCss, /\.ag-settings-provider-row\[open\]\s*\{[^}]*border-color:\s*var\(--ag-border\)/);
   assert.match(settings, /if \(agent === 'rau'\) \{\s*\n\s*if \(oauthTitle\) oauthTitle\.textContent = 'Rau로 시작'/);
   assert.match(settings, /setupApiToggle\.hidden = true/);

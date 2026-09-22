@@ -176,8 +176,8 @@ test('startup phases map onto one placeholder label', () => {
 });
 
 
-test('Cloud provider support rejects local-only providers before transfer and preserves Astra selection', () => {
-  for (const agent of ['claude', 'codex', 'pi', 'grok', 'cursor'] as const) {
+test('Cloud provider support accepts live providers before transfer and preserves Astra selection', () => {
+  for (const agent of ['claude', 'codex', 'pi'] as const) {
     assert.equal(isCloudSupportedAgent(agent), true);
   }
   const input = {
@@ -195,8 +195,4 @@ test('Cloud provider support rejects local-only providers before transfer and pr
   assert.equal(transfer.model, 'gpt-6-astra');
   assert.equal(transfer.effort, 'max');
   assert.equal(transfer.workflow, 'question');
-  for (const agent of ['opencode', 'rau'] as const) {
-    assert.equal(isCloudSupportedAgent(agent), false);
-    assert.throws(() => buildCloudStartTransfer({ ...input, agent }), /Cloud does not support/);
-  }
 });

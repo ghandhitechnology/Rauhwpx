@@ -596,17 +596,13 @@ try {
   });
   await page.click('[aria-label="프로바이더 선택"]');
   await page.waitForSelector('.ag-config-panel.ag-open');
-  assert.equal(await page.$eval('.ag-provider-item[data-agent="opencode"]', (node) => node.disabled), true);
-  // Local-only providers stay discoverable but cannot configure Cloud sessions.
-  await page.$eval('.ag-provider-item[data-agent="opencode"]', (node) => node.click());
-  await page.$eval('.ag-provider-item[data-agent="rau"]', (node) => node.click());
-  assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
-    .filter((call) => call.method === 'cloudCommand' && call.payload.command === 'configure').length), 0);
+  const providerAgents = await page.$$eval('.ag-provider-item', (nodes) => nodes.map((node) => node.dataset.agent));
+  assert.deepEqual(providerAgents, ['claude', 'codex', 'pi']);
   await page.evaluate(() => window.__cloudWorkspaceHarness.holdNextConfiguration());
   await page.$eval('.ag-provider-item[data-agent="claude"]', (node) => node.click());
   await page.waitForFunction(() => document.querySelector('[aria-label="프로바이더 선택"]').disabled);
   assert.equal(await page.$eval('.ag-input', (node) => node.value), 'Keep this unsent draft while changing providers.');
-  await page.$eval('.ag-provider-item[data-agent="grok"]', (node) => node.click());
+  await page.$eval('.ag-provider-item[data-agent="pi"]', (node) => node.click());
   assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
     .filter((call) => call.method === 'cloudCommand' && call.payload.command === 'configure').length), 1);
   await page.evaluate(() => window.__cloudWorkspaceHarness.releaseConfiguration());
@@ -635,7 +631,7 @@ try {
   }), { agent: 'claude', model: 'haiku', effort: 'low' }, 'confirmed settings must be saved with the existing conversation');
   await page.evaluate(() => window.__cloudWorkspaceHarness.failNextConfiguration());
   await page.click('[aria-label="프로바이더 선택"]');
-  await page.$eval('.ag-provider-item[data-agent="grok"]', (node) => node.click());
+  await page.$eval('.ag-provider-item[data-agent="pi"]', (node) => node.click());
   await page.waitForFunction(() => document.querySelector('.ag-messages').textContent.includes('Provider is not connected on Cloud'));
   assert.equal(await page.$eval('.ag-root', (node) => node.dataset.agent), 'claude');
   assert.equal(await page.$eval('.ag-llm-name', (node) => node.textContent), 'Haiku 4.5');
@@ -907,7 +903,7 @@ try {
   console.log('PASS restored Cloud conversation transfer, double-click protection, read-only question workflow, multi-turn cloud messages, and unchanged local document');
   // Edit through the real local input while the Cloud conversation remains selected.
   await page.click('[data-document-view="local"]');
-  await page.evaluate(() => window.__inputHandler.moveCursorTo({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 }));
+  await page.evaluate(() => window.__inputHandler.moveCursorTo({ sectionIndex: 0, paragraphIndex: 1, charOffset: 0 }));
   await page.keyboard.type('LOCAL_DURING_CLOUD ');
   await page.waitForFunction(async () => {
     const { captureVersionSnapshot } = await import('/src/versioning/snapshot.ts');
@@ -965,13 +961,39 @@ try {
   if (process.env.CLOUD_MERGE_SCREENSHOT) await page.screenshot({ path: process.env.CLOUD_MERGE_SCREENSHOT, fullPage: true });
   // The shared unsaved handoff and table layout can both require review.
   while (await page.$('.merge-conflict-item:not(.is-resolved)')) {
+    const unresolved = await page.$$eval(
+      '.merge-conflict-item:not(.is-resolved)',
+      (items) => items.length,
+    );
     await page.click('.merge-conflict-item:not(.is-resolved)');
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll('.merge-resolution-button')]
+        .some((button) => (button.textContent ?? '').startsWith('✕ 거절')));
     await page.evaluate(() => {
+      const cardText = (label) => {
+        const card = [...document.querySelectorAll('.merge-value-card')]
+          .find((node) => node.querySelector('h3')?.textContent === label);
+        return (card?.querySelector('pre')?.textContent ?? '').trim();
+      };
       const choices = [...document.querySelectorAll('.merge-resolution-button')];
-      const both = choices.find((button) => button.textContent.startsWith('둘 다 유지: 현재 변경 먼저'));
-      (both ?? choices.find((button) => button.textContent.startsWith('현재 변경 사용'))).click();
+      const both = choices.find((button) =>
+        (button.textContent ?? '').startsWith('둘 다 유지: 현재 변경 먼저'));
+      const accept = choices.find((button) =>
+        (button.textContent ?? '').startsWith('✓ 수락'));
+      const keepLocal = choices.find((button) =>
+        (button.textContent ?? '').startsWith('✕ 거절'));
+      const incomingText = cardText('가져올 변경');
+      const incomingHasCloud = incomingText.includes('CLOUD_FINISHED');
+      const target = incomingHasCloud ? (accept ?? both) : keepLocal;
+      if (!target) {
+        throw new Error(`No merge resolution for ${document.querySelector('.merge-conflict-editor')?.textContent}`);
+      }
+      target.click();
     });
+    await page.waitForFunction((count) =>
+      document.querySelectorAll('.merge-conflict-item:not(.is-resolved)').length < count, {}, unresolved);
   }
+  console.log('Merge review list', await page.$eval('.merge-conflict-list', (node) => node.textContent));
   await page.waitForFunction(() => !document.querySelector('.merge-resolver-footer .merge-primary-button').disabled, { timeout: 30_000 }).catch(async (error) => {
     throw new Error(`Merge review: ${JSON.stringify(await page.evaluate(() => ({
       status: document.querySelector('.merge-validation-label')?.textContent,

@@ -60,7 +60,7 @@ export function createCliSetupManager({ rootDir = defaultCliSetupRoot(), spawnPr
   }
   async function install(agent, onProgress) {
     const item = assertAgent(agent); await load(); onProgress?.({ state: 'installing', phase: 'install', activity: true }); await fs.mkdir(rootDir, { recursive: true, mode: 0o700 });
-    const result = await run(npmLaunch.command, [...npmLaunch.args, 'install', '--prefix', prefixDir, `${item.package}@latest`], { env: baseEnv, timeoutMs: INSTALL_TIMEOUT_MS });
+    const result = await run(npmLaunch.command, [...npmLaunch.leadingArgs, 'install', '--prefix', prefixDir, `${item.package}@latest`], { env: baseEnv, timeoutMs: INSTALL_TIMEOUT_MS });
     if (result.code !== 0) throw setupError('AGENT_INSTALL_FAILED', cleanOutput(result.stderr || result.stdout) || 'CLI 설치에 실패했어요.'); onProgress?.({ state: 'done' }); return status(agent);
   }
   async function authenticate(agent, method, key, onProgress, { signal, onCommitted, terminal = false } = {}) {
