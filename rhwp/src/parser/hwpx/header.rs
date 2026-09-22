@@ -2228,12 +2228,13 @@ fn parse_vertical_alignment_bits(attr: &quick_xml::events::attributes::Attribute
     }
 }
 
+// OWPML LineType2의 DOT=2(파선), DASH=3(점선)은 영문 의미와 반대다.
 fn parse_border_line_type(attr: &quick_xml::events::attributes::Attribute) -> BorderLineType {
     match attr_str(attr).as_str() {
         "NONE" => BorderLineType::None,
         "SOLID" => BorderLineType::Solid,
-        "DASH" => BorderLineType::Dash,
-        "DOT" => BorderLineType::Dot,
+        "DASH" => BorderLineType::Dot,
+        "DOT" => BorderLineType::Dash,
         "DASH_DOT" => BorderLineType::DashDot,
         "DASH_DOT_DOT" => BorderLineType::DashDotDot,
         "LONG_DASH" => BorderLineType::LongDash,
@@ -2243,7 +2244,7 @@ fn parse_border_line_type(attr: &quick_xml::events::attributes::Attribute) -> Bo
         "THICK_SLIM" => BorderLineType::ThickThinDouble,
         "SLIM_THICK_SLIM" => BorderLineType::ThinThickThinTriple,
         "WAVE" => BorderLineType::Wave,
-        "DOUBLE_WAVE" => BorderLineType::DoubleWave,
+        "DOUBLEWAVE" | "DOUBLE_WAVE" => BorderLineType::DoubleWave,
         // 방출측 border_line_type_str 은 3D 계열을 이 문자열들로 낸다. 파서가 안 받으면
         // (_ => Solid) 3D 테두리가 .hwpx 왕복 시 실선으로 유실된다. 변형은 이미 model 에 존재.
         "THICK3D" => BorderLineType::Thick3D,

@@ -25,6 +25,60 @@ use crate::model::shape::{
 use crate::model::shape::{HorzAlign, HorzRelTo, VertAlign, VertRelTo};
 use crate::model::style::{Alignment, FillType};
 
+fn stored_lines_clear_fixed_picture(
+    paragraphs: &[Paragraph],
+    items: &[PageItem],
+    anchor_index: usize,
+    column_y: f64,
+    picture_top: f64,
+    picture_bottom: f64,
+    dpi: f64,
+) -> bool {
+    use crate::model::paragraph::LineSeg;
+    let Some(PageItem::FullParagraph { para_index: first }) = items.first() else {
+        return false;
+    };
+    let Some(base) = paragraphs.get(*first).and_then(|p| p.line_segs.first()) else {
+        return false;
+    };
+    if base.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0 {
+        return false;
+    }
+    let mut saw_above = false;
+    for item in items {
+        let PageItem::FullParagraph { para_index } = item else {
+            continue;
+        };
+        if *para_index < anchor_index {
+            continue;
+        }
+        let Some(para) = paragraphs.get(*para_index) else {
+            return false;
+        };
+        if para.line_segs.is_empty() {
+            return false;
+        }
+        for seg in &para.line_segs {
+            if seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0
+                || seg.vertical_pos < base.vertical_pos
+                || seg.line_height <= 0
+            {
+                return false;
+            }
+            let top = column_y + hwpunit_to_px(seg.vertical_pos - base.vertical_pos, dpi);
+            let bottom = top + hwpunit_to_px(seg.line_height, dpi);
+            if bottom <= picture_top + 0.5 {
+                saw_above = true;
+            } else if top >= picture_bottom - 0.5 {
+                return saw_above && *para_index > anchor_index;
+            } else {
+                return false;
+            }
+        }
+    }
+    false
+}
+
 /// 글상자에 공백이 아닌 실제 텍스트가 한 글자라도 있는지.
 fn textbox_has_visible_text(text_box: &TextBox) -> bool {
     text_box
@@ -2713,7 +2767,7 @@ impl LayoutEngine {
             for (pi, para) in textbox_paragraphs[..para_count].iter().enumerate() {
                 if para.controls.iter().any(|c| {
                     matches!(c, crate::model::control::Control::AutoNumber(an)
-                        if an.number_type == crate::model::control::AutoNumberType::Page)
+                        if matches!(an.number_type, crate::model::control::AutoNumberType::Page | crate::model::control::AutoNumberType::TotalPage))
                 }) {
                     if let Some(comp) = composed_paras.get_mut(pi) {
                         self.substitute_page_auto_numbers_in_composed(para, comp, current_pn);
@@ -3764,6 +3818,25 @@ impl LayoutEngine {
                 let effective_ref = effective_common.as_ref().unwrap_or(common);
                 let (bottom_y, shape_y) =
                     self.calc_shape_bottom_y(effective_ref, col_area, body_area);
+
+                // 용지/쪽 기준 그림의 저장 줄 사다리가 이미 위·아래 공간을 피하면
+                // 별도 post-jump는 그림 높이를 이중 계상한다. 같은 쪽의 모든 중간
+                // 줄이 배제 영역 밖에 있고 그림 아래 후속 줄까지 확인된 경우만
+                // 저장 좌표에 맡긴다. 재편집/합성 줄에는 적용하지 않는다.
+                if matches!(ctrl, Control::Picture(_))
+                    && !self.profile.get().session_edited()
+                    && stored_lines_clear_fixed_picture(
+                        paragraphs,
+                        items,
+                        *para_index,
+                        col_area.y,
+                        shape_y,
+                        bottom_y,
+                        self.dpi,
+                    )
+                {
+                    continue;
+                }
 
                 // 본문 시작 근처만 고려 (페이지 하단 개체는 제외)
                 let threshold_y = col_area.y + col_area.height / 3.0;

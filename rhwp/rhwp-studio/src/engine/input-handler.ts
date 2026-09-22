@@ -438,6 +438,10 @@ export class InputHandler {
     ref: { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellPath?: CellPathLike; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } };
     origHorzOffset: number;
     origVertOffset: number;
+    /** 글자처럼 취급(tac) 그림의 인라인 이동 드래그 — 드롭 시 컨트롤 위치를 옮긴다. */
+    inlineTac?: boolean;
+    /** 드래그 시작 시 소스 그림의 논리(캐럿) 위치 — undo 의 원본 자리. */
+    originCharOffset?: number;
     startPageX: number;
     startPageY: number;
     lastPageX: number;

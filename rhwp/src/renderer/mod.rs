@@ -44,8 +44,8 @@ pub mod style_resolver;
 pub mod svg;
 pub mod svg_fragment;
 pub mod svg_layer;
-pub mod typeset;
 mod text_replay_policy;
+pub mod typeset;
 #[cfg(target_arch = "wasm32")]
 pub mod web_canvas;
 
@@ -1230,6 +1230,8 @@ impl AutoNumberCounter {
                 self.endnote += 1;
                 self.endnote
             }
+            // 전체 쪽수는 카운터가 아니라 페이지네이션 완료 후 레이아웃에서 결정한다.
+            AutoNumberType::TotalPage => 0,
             AutoNumberType::Page => {
                 self.page += 1;
                 self.page
@@ -1246,6 +1248,7 @@ impl AutoNumberCounter {
             AutoNumberType::Footnote => self.footnote,
             AutoNumberType::Endnote => self.endnote,
             AutoNumberType::Page => self.page,
+            AutoNumberType::TotalPage => 0,
         }
     }
 

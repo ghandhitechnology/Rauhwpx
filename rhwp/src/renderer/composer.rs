@@ -1653,8 +1653,19 @@ fn stored_line_segs_structurally_coherent(para: &Paragraph) -> bool {
         if index == 0 && visible_start != 0 {
             return false;
         }
-        if index > 0 && seg.text_start <= para.line_segs[index - 1].text_start {
-            return false;
+        if index > 0 {
+            let prev = &para.line_segs[index - 1];
+            // 어울림의 빈 영역은 문자를 소비하지 않는다. 같은 text_start를 가진
+            // 빈 구간/가시 구간 쌍도 저장 줄 분할이며, 전체 폭 재조판 대상이 아니다.
+            let empty_wrap_boundary = seg.text_start == prev.text_start
+                && (seg.is_empty_segment() || prev.is_empty_segment())
+                && seg.vertical_pos >= prev.vertical_pos
+                && (seg.vertical_pos > prev.vertical_pos || seg.column_start > prev.column_start);
+            if seg.text_start < prev.text_start
+                || (seg.text_start == prev.text_start && !empty_wrap_boundary)
+            {
+                return false;
+            }
         }
     }
     true
@@ -3037,6 +3048,42 @@ mod p1_text_reflow_tests {
         let mut para = paragraph("A한漢カe\u{301}");
         reflow_line_segs(&mut para, 400.0, &styles(), 96.0);
         assert_eq!(para.line_segs.len(), 1);
+    }
+
+    #[test]
+    fn empty_wrap_segments_allow_repeated_character_boundaries() {
+        let mut para = paragraph("AB");
+        let line = LineSeg {
+            line_height: 1200,
+            text_height: 1200,
+            baseline_distance: 1000,
+            segment_width: 3000,
+            tag: LineSeg::TAG_FIRST_SEGMENT | LineSeg::TAG_EMPTY_SEGMENT,
+            ..Default::default()
+        };
+        para.line_segs = vec![
+            line.clone(),
+            LineSeg {
+                column_start: 6000,
+                tag: LineSeg::TAG_LAST_SEGMENT,
+                ..line.clone()
+            },
+            LineSeg {
+                text_start: 1,
+                vertical_pos: 1600,
+                ..line.clone()
+            },
+            LineSeg {
+                text_start: 1,
+                vertical_pos: 1600,
+                column_start: 6000,
+                tag: LineSeg::TAG_LAST_SEGMENT,
+                ..line
+            },
+        ];
+        assert!(stored_line_segs_structurally_coherent(&para));
+        para.line_segs[0].tag &= !LineSeg::TAG_EMPTY_SEGMENT;
+        assert!(!stored_line_segs_structurally_coherent(&para));
     }
 
     #[test]

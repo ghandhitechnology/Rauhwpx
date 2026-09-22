@@ -4779,6 +4779,7 @@ fn parse_num_type(s: &str) -> AutoNumberType {
         "FIGURE" | "PICTURE" => AutoNumberType::Picture,
         "TABLE" => AutoNumberType::Table,
         "EQUATION" => AutoNumberType::Equation,
+        "TOTAL_PAGE" => AutoNumberType::TotalPage,
         _ => AutoNumberType::Page,
     }
 }

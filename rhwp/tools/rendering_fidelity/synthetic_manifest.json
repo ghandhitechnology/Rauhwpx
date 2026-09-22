@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "generator": "generate_synthetic_hwpx.py",
+  "source": "samples/hwpx/ref/ref_empty.hwpx",
+  "documents": [
+    {
+      "file": "01-table-border-styles.hwpx",
+      "title": "Table borders and shared-edge precedence",
+      "features": [
+        "solid, dash, dot, dash-dot, wave, double-wave and double borders",
+        "adjacent cells with conflicting edge widths and colors"
+      ],
+      "sha256": "17aa528f4556ad51abaf0207ddeba34260d73c0ee42d142d8ce1ad16bd60cdf8"
+    },
+    {
+      "file": "02-table-merged-padding-valign.hwpx",
+      "title": "Merged cells, padding and vertical alignment",
+      "features": [
+        "row and column spans",
+        "asymmetric cell padding",
+        "top, center and bottom alignment"
+      ],
+      "sha256": "8d33c510b1ff65945f1f39ce88a74505e9740e37f1f59dd8778433ccffdff6b2"
+    },
+    {
+      "file": "03-table-nested.hwpx",
+      "title": "Nested table geometry",
+      "features": [
+        "inline table nested inside a cell",
+        "outer and inner border interaction",
+        "cell content height propagation"
+      ],
+      "sha256": "bb12d92c7b97f88316701f597bfb3ba53f29f66309cc2c6405556de24da2ab14"
+    },
+    {
+      "file": "04-latin-kerning-spacing.hwpx",
+      "title": "Latin kerning and character spacing",
+      "features": [
+        "kerning off and on",
+        "positive and negative tracking",
+        "80 percent horizontal ratio"
+      ],
+      "sha256": "e24ea29b54a0b39fd72edfc8e7138ca4302ce5fd535a4e865466973623385c71"
+    },
+    {
+      "file": "05-mixed-korean-latin.hwpx",
+      "title": "Mixed Korean, Latin and number spacing",
+      "features": [
+        "Korean/Latin boundaries",
+        "Korean/number auto-spacing",
+        "punctuation, currency and narrow width wrapping"
+      ],
+      "sha256": "62539d53dabc384a7e3c3b2e886691ec1b764061cb47da431025ba5560a91f5b"
+    },
+    {
+      "file": "06-lines-literal-decorated.hwpx",
+      "title": "Literal text decoration and drawn line styles",
+      "features": [
+        "literal underscore, hyphen and box-drawing glyphs",
+        "underline, strikeout and outline decoration",
+        "drawn solid, dashed, dotted, dash-dot, long-dash and wave lines"
+      ],
+      "sha256": "4561d1280cc325046886ca06c7dc31798265daa2b0937bc8f989b123ac3fa755"
+    },
+    {
+      "file": "07-image-inline-crop.hwpx",
+      "title": "Inline image baseline and crop",
+      "features": [
+        "as-character image in mixed text",
+        "source crop rectangle",
+        "line height expansion around inline image"
+      ],
+      "sha256": "008fbc4ee17f4909676e231ad07d5138dedabd89da6aed0e77bfecf569dc8a63"
+    },
+    {
+      "file": "08-image-square-wrapping.hwpx",
+      "title": "Floating image square wrapping",
+      "features": [
+        "left and right floating anchors",
+        "square wrap exclusion",
+        "cropped floating image with object margins",
+        "paragraph-end float anchors"
+      ],
+      "sha256": "da0caf6e60609a0ff615979ed4aabdc64e0915c49e6b818a1322244193395470"
+    },
+    {
+      "file": "09-image-layer-order.hwpx",
+      "title": "Image layer order and text overlap",
+      "features": [
+        "transparent PNG alpha",
+        "behind-text and in-front-of-text layers",
+        "overlapping objects with distinct z-order"
+      ],
+      "sha256": "2de43add68da074ecad07ac2c0522fd7dc32544cd3fe7410efabf225898e3ee5"
+    },
+    {
+      "file": "10-paragraph-tabs-line-spacing.hwpx",
+      "title": "Tab leaders and paragraph line spacing",
+      "features": [
+        "left, center and right tab stops with leaders",
+        "100 and 160 percent spacing",
+        "fixed, at-least and between-lines spacing"
+      ],
+      "sha256": "f47cf8212e087aa296d55a899f8f87a7e034e3c0a19d1ba2546c1b8b00e5baa5"
+    }
+  ]
+}

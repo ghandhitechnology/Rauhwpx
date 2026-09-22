@@ -887,15 +887,12 @@ fn test_compute_image_crop_src_issue2817_img_dim_scale() {
 
 #[test]
 fn test_compute_image_crop_src_fallback_when_original_size_missing() {
-    // original_size_hu(imgDim) 부재 시 적응 폴백(#3239): crop right/bottom
-    // (102366, 26580)이 전체 좌표 범위 = 디코딩 2320×354px 에 대응한다고 본다.
-    // pre-#2990 skia 경로(image_conv.rs)와 동일한 해석 — crop 이 전체 범위를
-    // 가리키는 그림(대부분의 무-crop 저장)은 단위와 무관하게 정확하다.
+    // imgDim 없는 구형 문서도 우측 crop 범위를 전체 이미지 폭으로 늘리면 안 된다.
     let (sx, sy, sw, sh) = compute_image_crop_src((0, 0, 102366, 26580), None, 2320.0, 354.0);
     assert!((sx - 0.0).abs() < 0.01);
     assert!((sy - 0.0).abs() < 0.01);
-    assert!((sw - 2320.0).abs() < 0.01);
-    assert!((sh - 354.0).abs() < 0.01);
+    assert!((sw - 1364.88).abs() < 0.01);
+    assert!((sh - 354.4).abs() < 0.01);
 }
 
 #[test]
@@ -921,4 +918,17 @@ fn test_compute_image_crop_src_last_resort_hu_rule() {
     assert!((sy - -2.0).abs() < 0.01);
     assert!((sw - 4.0).abs() < 0.01);
     assert!((sh - 2.0).abs() < 0.01);
+}
+
+#[test]
+fn test_compute_image_crop_src_legacy_banner_bottom_crop() {
+    // pic-crop-01.hwp: 두 그림은 같은 639×70 비트맵을 공유한다.
+    // 두 번째의 bottom만 5280→4366으로 줄었으므로 하단을 잘라야 한다.
+    let (_, _, full_w, full_h) = compute_image_crop_src((0, 0, 47940, 5280), None, 639.0, 70.0);
+    assert!((full_w - 639.0).abs() < 0.01);
+    assert!((full_h - 70.0).abs() < 0.01);
+    let (_, _, cropped_w, cropped_h) =
+        compute_image_crop_src((0, 0, 47940, 4366), None, 639.0, 70.0);
+    assert!((cropped_w - 639.2).abs() < 0.01);
+    assert!((cropped_h - 58.213333).abs() < 0.01);
 }
