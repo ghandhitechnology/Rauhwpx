@@ -49,7 +49,7 @@ test('projectSkillMarkdown reads YAML frontmatter without rewriting bytes', () =
     description: 'Use this skill for representative testing.',
     icon: null,
   });
-  assert.equal(projectSkillMarkdown('---\nname: bad-icon\ndescription: x\nicon: sparkles\n---\n\nDo it.\n').icon, null);
+  assert.equal(projectSkillMarkdown('---\nname: valid-icon\ndescription: x\nicon: sparkles\n---\n\nDo it.\n').icon, 'sparkles');
   assert.equal(projectSkillMarkdown('---\nname: extra\ndescription: x\nfoo: bar\nmetadata:\n  rhwp:\n    icon: bot\n---\n\nDo it.\n').icon, 'bot');
   assert.throws(() => projectSkillMarkdown(MARKDOWN('skill-create')), /reserved/);
   assert.throws(
