@@ -102,6 +102,39 @@ try {
   const draggedNames = await names();
   const storedDraggedOrder = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? 'null'), orderKey);
   assert.deepEqual(storedDraggedOrder, draggedNames, 'Pointer reorder persists the catalog order.');
+
+  // Repeated pointer reorders must cancel the prior FLIP animation before measuring again.
+  await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'no-preference' }]);
+  await page.evaluate(() => {
+    window.__skillAnimationStarts = 0;
+    window.__skillAnimationCancels = 0;
+    const nativeAnimate = Element.prototype.animate;
+    Element.prototype.animate = function (...args) {
+      const animation = nativeAnimate.apply(this, args);
+      window.__skillAnimationStarts += 1;
+      const nativeCancel = animation.cancel.bind(animation);
+      animation.cancel = () => {
+        window.__skillAnimationCancels += 1;
+        return nativeCancel();
+      };
+      return animation;
+    };
+  });
+  const rapidHandle = await page.$('.ag-skills-list [data-skill-name] .ag-skill-drag-handle');
+  assert(rapidHandle);
+  const rapidBox = await rapidHandle.boundingBox();
+  assert(rapidBox);
+  await page.mouse.move(rapidBox.x + rapidBox.width / 2, rapidBox.y + rapidBox.height / 2);
+  await page.mouse.down();
+  for (const offset of [54, 96, 138, 96, 54]) {
+    await page.mouse.move(rapidBox.x + rapidBox.width / 2, rapidBox.y + offset, { steps: 1 });
+  }
+  await page.mouse.up();
+  assert.ok(
+    await page.evaluate(() => window.__skillAnimationCancels > 0),
+    'Repeated pointer reorders cancel stale FLIP animations.',
+  );
+
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForFunction(() => window.sidebarPreview);
   await page.click('.ag-settings-btn');
@@ -213,6 +246,7 @@ try {
 
   // Reduced motion and the minimum sidebar width must not introduce overflow.
   await page.setViewport({ width: 280, height: 900, deviceScaleFactor: 1 });
+  await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
   await page.goto(`${origin}/?controls=0&theme=light&width=280`, { waitUntil: 'networkidle0' });
   await page.waitForFunction(() => window.sidebarPreview);
   await page.click('.ag-settings-btn');

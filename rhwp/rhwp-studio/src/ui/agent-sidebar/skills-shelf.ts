@@ -64,6 +64,7 @@ export function createSkillsShelf(options: {
   const orderStorageKey = 'rhwp-skill-order';
   const replaceDigests = new Map<string, string>();
   let reflowFrame: number | null = null;
+  const reflowAnimations = new Set<Animation>();
 
   search.addEventListener('input', () => render());
   modeButton.addEventListener('click', () => {
@@ -81,11 +82,21 @@ export function createSkillsShelf(options: {
   });
 
   function capturePositions(): Map<string, DOMRect> {
+    cancelReflowAnimations();
     const positions = new Map<string, DOMRect>();
     for (const item of list.querySelectorAll<HTMLElement>('[data-skill-name]')) {
       if (item.dataset.skillName) positions.set(item.dataset.skillName, item.getBoundingClientRect());
     }
     return positions;
+  }
+
+  function cancelReflowAnimations(): void {
+    if (reflowFrame !== null) {
+      cancelAnimationFrame(reflowFrame);
+      reflowFrame = null;
+    }
+    for (const animation of reflowAnimations) animation.cancel();
+    reflowAnimations.clear();
   }
 
   function showCatalog(before?: Map<string, DOMRect>): void {
@@ -161,10 +172,14 @@ export function createSkillsShelf(options: {
         const dx = old.left - next.left;
         const dy = old.top - next.top;
         if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
-        item.animate(
+        const animation = item.animate(
           [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0, 0)' }],
           { duration: 390, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' },
         );
+        reflowAnimations.add(animation);
+        const forget = () => reflowAnimations.delete(animation);
+        animation.addEventListener('finish', forget, { once: true });
+        animation.addEventListener('cancel', forget, { once: true });
       }
     });
   }
