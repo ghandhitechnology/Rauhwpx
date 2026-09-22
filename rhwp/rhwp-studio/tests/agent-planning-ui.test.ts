@@ -27,7 +27,7 @@ test('workflow switches use local slash commands without changing the access pro
   assert.ok(source.indexOf('const workflowInvocation = text.match') < source.indexOf('bridge.sendUserMessage(requestText, skillNameForMessage,'));
   assert.doesNotMatch(source, /ag-workflow-item|workflowGroup|workflowItems/);
   assert.doesNotMatch(css, /\.ag-workflow(?:-item)?\s*\{/);
-  assert.match(source, /composerUtilityActions\.append\(phaseBadge, permissionBtn, skillsBtn\)/);
+  assert.match(source, /composerUtilityActions\.append\(phaseBadge, permissionBtn\)/);
   assert.match(source, /composerUtilities\.append\(composerUtilityActions\)/);
   assert.doesNotMatch(css, /\.ag-composer-utilities\s*\{[^}]*flex-direction:\s*column;/s);
   assert.match(source, /permissionBtn\.textContent = unrestricted \? '전체' : '안전'/);

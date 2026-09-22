@@ -5,11 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import {
-  createCliSetupManager,
-  defaultCliSetupRoot,
-} from '../cli-setup-manager.mjs';
-import { AUTH_CODE_MAX_BYTES } from '../input-bounds.mjs';
+import { createCliSetupManager, defaultCliSetupRoot } from '../cli-setup-manager.mjs';
+import { API_KEY_MAX_BYTES, AUTH_CODE_MAX_BYTES } from '../input-bounds.mjs';
 import { createMemorySecretStore } from '../secret-store.mjs';
 
 class FakeProcess extends EventEmitter {
@@ -20,17 +17,22 @@ class FakeProcess extends EventEmitter {
     write: (value = '') => { this.input += String(value); return true; },
     end: (value = '') => { this.input += String(value); },
   };
+  killed = false;
   exitCode = null;
   signalCode = null;
 
   kill(signal = 'SIGTERM') {
+    this.killed = true;
     this.signalCode = signal;
-    queueMicrotask(() => {
-      this.emit('exit', null, signal);
-      this.emit('close', null, signal);
-    });
+    queueMicrotask(() => this.emit('close', null, signal));
     return true;
   }
+}
+
+async function tmpRoot(t) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-setup-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  return root;
 }
 
 function packageBinName(packageName) {
@@ -60,11 +62,6 @@ function fakeSpawner(prefixDir, platform = process.platform) {
         proc.emit('close', 0, null);
         return;
       }
-      if (argv.includes('login')) {
-        proc.stdout.emit('data', 'Visit https://example.test/login\n');
-        proc.emit('close', 0, null);
-        return;
-      }
       if (argv.includes('--version')) {
         proc.stdout.emit('data', `${path.basename(String(command), '.cmd')} 1.2.3\n`);
         proc.emit('close', 0, null);
@@ -79,122 +76,133 @@ function fakeSpawner(prefixDir, platform = process.platform) {
 
 test('CLI setup root follows the app data directory on each platform', () => {
   assert.equal(defaultCliSetupRoot({ RHWP_CLI_DIR: '/tmp/rhwp-cli' }), path.resolve('/tmp/rhwp-cli'));
-  assert.equal(
-    defaultCliSetupRoot({}, 'darwin', '/Users/tester'),
-    '/Users/tester/Library/Application Support/rhwp/cli',
-  );
-  assert.equal(
-    defaultCliSetupRoot({ APPDATA: 'C:\\data' }, 'win32', 'C:\\Users\\tester'),
-    path.win32.join('C:\\data', 'rhwp', 'cli'),
-  );
+  assert.equal(defaultCliSetupRoot({}, 'darwin', '/Users/tester'), '/Users/tester/Library/Application Support/rhwp/cli');
+  assert.equal(defaultCliSetupRoot({ APPDATA: 'C:\\data' }, 'win32', 'C:\\Users\\tester'), path.win32.join('C:\\data', 'rhwp', 'cli'));
   assert.equal(defaultCliSetupRoot({}, 'linux', '/home/tester'), '/home/tester/.local/share/rhwp/cli');
 });
 
-test('Codex installs into the app prefix and API login stores the key', async (t) => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-codex-'));
-  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
-  const secretStore = createMemorySecretStore();
-  const { calls, spawnProcess } = fakeSpawner(path.join(rootDir, 'prefix'));
-  const manager = await createCliSetupManager({ rootDir, spawnProcess, secretStore }).init();
-
-  const installed = await manager.install('codex');
-  assert.equal(installed.installed, true);
-  assert.match(calls[0].argv.join(' '), /@openai\/codex@latest/);
-
-  const status = await manager.authenticate('codex', 'api-key', 'openai-secret-value');
-  assert.equal(status.authenticated, true);
-  assert.equal(status.authMethod, 'api-key');
-  assert.equal(status.keyTail, 'alue');
-  assert.equal(manager.envFor('codex').OPENAI_API_KEY, 'openai-secret-value');
-  assert.equal(await secretStore.get('rhwp.codex.api-key'), 'openai-secret-value');
-  assert.match(await fs.readFile(path.join(rootDir, 'config.json'), 'utf8'), /openai-secret-value/);
+test('only supported CLI agents can reach setup operations', async (t) => {
+  const manager = await createCliSetupManager({ rootDir: await tmpRoot(t) }).init();
+  await assert.rejects(() => manager.status('cursor'), (error) => error.code === 'AGENT_SETUP_INVALID');
+  await assert.rejects(() => manager.authenticate('grok', 'api-key', 'secret'), (error) => error.code === 'AGENT_SETUP_INVALID');
+  assert.throws(() => manager.binPath('opencode'), (error) => error.code === 'AGENT_SETUP_INVALID');
 });
 
-test('Claude API setup is restored through the provider environment', async (t) => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-claude-'));
-  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
-  const secretStore = createMemorySecretStore();
-  const { spawnProcess } = fakeSpawner(path.join(rootDir, 'prefix'));
-  const manager = await createCliSetupManager({ rootDir, spawnProcess, secretStore }).init();
+test('supported CLIs install into the shared app prefix', async (t) => {
+  const rootDir = await tmpRoot(t);
+  const { calls, spawnProcess } = fakeSpawner(path.join(rootDir, 'prefix'));
+  const manager = await createCliSetupManager({ rootDir, spawnProcess }).init();
 
-  await manager.install('claude');
-  await manager.authenticate('claude', 'api-key', 'anthropic-secret');
-  assert.equal(manager.envFor('claude').ANTHROPIC_API_KEY, 'anthropic-secret');
+  assert.equal((await manager.install('codex')).installed, true);
+  assert.equal((await manager.install('claude')).installed, true);
+  assert.ok(calls.some((call) => call.argv.some((arg) => /@openai\/codex@latest/.test(arg))));
+  assert.ok(calls.some((call) => call.argv.some((arg) => /@anthropic-ai\/claude-code@latest/.test(arg))));
+});
+
+test('API keys stay provider-scoped and persist outside the public setup config', async (t) => {
+  const rootDir = await tmpRoot(t);
+  const manager = await createCliSetupManager({ rootDir, baseEnv: { ANTHROPIC_API_KEY: 'inherited', OPENAI_API_KEY: 'inherited' } }).init();
+  await manager.authenticate('claude', 'api-key', 'sk-ant-private-1234');
+
+  assert.equal(manager.envFor('claude').ANTHROPIC_API_KEY, 'sk-ant-private-1234');
+  assert.equal(manager.envFor('claude').OPENAI_API_KEY, undefined);
   assert.equal(manager.envFor('codex').ANTHROPIC_API_KEY, undefined);
+  assert.doesNotMatch(await fs.readFile(path.join(rootDir, 'config.json'), 'utf8'), /sk-ant-private-1234/);
+  assert.match(await fs.readFile(path.join(rootDir, 'secrets.json'), 'utf8'), /sk-ant-private-1234/);
+
+  const reloaded = await createCliSetupManager({ rootDir }).init();
+  assert.equal((await reloaded.status('claude')).keyTail, '1234');
 });
 
-test('config.json restores API keys on init', async (t) => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-claude-restore-'));
-  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
-  await fs.mkdir(rootDir, { recursive: true });
-  await fs.writeFile(path.join(rootDir, 'config.json'), JSON.stringify({
-    claude: { key: 'legacy-plaintext-key' },
-    codex: { key: null },
-  }));
-  const { spawnProcess } = fakeSpawner(path.join(rootDir, 'prefix'));
-  const manager = await createCliSetupManager({ rootDir, spawnProcess }).init();
-  assert.equal(manager.envFor('claude').ANTHROPIC_API_KEY, 'legacy-plaintext-key');
-});
-
-test('Codex OAuth uses device auth on every platform, never a localhost callback', async (t) => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-codex-oauth-'));
-  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
-  const { calls, spawnProcess } = fakeSpawner(path.join(rootDir, 'prefix'));
-  const manager = await createCliSetupManager({ rootDir, spawnProcess }).init();
-  await manager.install('codex');
-
-  await manager.authenticate('codex', 'oauth');
-  const login = calls.find((call) => call.argv.includes('login'));
-  assert.ok(login);
-  assert.deepEqual(login.argv, ['login']);
-});
-
-test('submitAuthCode rejects unsupported agents and oversized codes', async (t) => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-auth-code-'));
-  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
-  const manager = await createCliSetupManager({ rootDir }).init();
-  assert.throws(() => manager.submitAuthCode('pi', 'code'), /지원하지 않는 에이전트/);
-  assert.throws(
-    () => manager.submitAuthCode('claude', 'x'.repeat(AUTH_CODE_MAX_BYTES + 1)),
-    /인증 코드가 올바르지 않아요/,
-  );
-});
-
-test('cancel stops an in-flight OAuth login', async (t) => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cancel-'));
-  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
-  let releaseLogin;
-  const loginStarted = new Promise((resolve) => { releaseLogin = resolve; });
-  const spawnProcess = (command, argv) => {
-    const proc = new FakeProcess();
-    if (argv.includes('login')) {
-      queueMicrotask(() => { releaseLogin(proc); });
-      return proc;
-    }
-    queueMicrotask(() => proc.emit('close', 0, null));
-    return proc;
-  };
-  const manager = await createCliSetupManager({ rootDir, spawnProcess }).init();
-  await manager.install('codex');
-  const pending = manager.authenticate('codex', 'oauth');
-  const proc = await loginStarted;
-  assert.equal(await manager.cancel('codex'), true);
-  proc.emit('close', null, 'SIGTERM');
-  await assert.rejects(pending, /로그인/);
-});
-
-test('a provider environment carries only its own managed API key', async (t) => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-env-'));
-  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+test('vault-backed API keys are bounded and never enter fallback files', async (t) => {
+  const rootDir = await tmpRoot(t);
   const secretStore = createMemorySecretStore();
-  const { spawnProcess } = fakeSpawner(path.join(rootDir, 'prefix'));
-  const manager = await createCliSetupManager({ rootDir, spawnProcess, secretStore }).init();
-  await manager.install('claude');
-  await manager.install('codex');
+  const manager = await createCliSetupManager({ rootDir, secretStore }).init();
+  await assert.rejects(
+    () => manager.authenticate('codex', 'api-key', 'x'.repeat(API_KEY_MAX_BYTES + 1)),
+    (error) => error.code === 'AGENT_KEY_INVALID',
+  );
   await manager.authenticate('claude', 'api-key', 'anthropic-only');
   await manager.authenticate('codex', 'api-key', 'openai-only');
+  assert.equal(await secretStore.get('rhwp.codex.api-key'), 'openai-only');
+  await assert.rejects(fs.access(path.join(rootDir, 'secrets.json')), { code: 'ENOENT' });
+  assert.doesNotMatch(await fs.readFile(path.join(rootDir, 'config.json'), 'utf8'), /anthropic-only|openai-only/);
   assert.equal(manager.envFor('claude').ANTHROPIC_API_KEY, 'anthropic-only');
   assert.equal(manager.envFor('claude').OPENAI_API_KEY, undefined);
   assert.equal(manager.envFor('codex').OPENAI_API_KEY, 'openai-only');
   assert.equal(manager.envFor('codex').ANTHROPIC_API_KEY, undefined);
+});
+
+test('legacy config keys migrate before their public copy is removed', async (t) => {
+  const rootDir = await tmpRoot(t);
+  await fs.writeFile(path.join(rootDir, 'config.json'), JSON.stringify({
+    claude: { key: 'sk-ant-legacy-1234' },
+    codex: { key: 'sk-codex-legacy-5678' },
+  }));
+  const secretStore = createMemorySecretStore();
+  await createCliSetupManager({ rootDir, secretStore }).init();
+
+  assert.equal(await secretStore.get('rhwp.claude.api-key'), 'sk-ant-legacy-1234');
+  assert.equal(await secretStore.get('rhwp.codex.api-key'), 'sk-codex-legacy-5678');
+  const config = await fs.readFile(path.join(rootDir, 'config.json'), 'utf8');
+  assert.doesNotMatch(config, /sk-ant-legacy|sk-codex-legacy/);
+  assert.match(config, /"keyTail": "1234"/);
+  assert.match(config, /"keyTail": "5678"/);
+});
+
+test('Codex OAuth always uses device auth and commits only after a successful exit', async (t) => {
+  const rootDir = await tmpRoot(t);
+  const calls = [];
+  let process;
+  const manager = await createCliSetupManager({
+    rootDir,
+    spawnProcess(command, argv, options) {
+      process = new FakeProcess();
+      calls.push({ command, argv, options });
+      return process;
+    },
+  }).init();
+  let committed = false;
+  const running = manager.authenticate('codex', 'oauth', undefined, undefined, { onCommitted: () => { committed = true; } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.at(-1).argv, ['login', '--device-auth']);
+  assert.equal(committed, false);
+  process.emit('close', 0, null);
+  await running;
+  assert.equal(committed, true);
+});
+
+test('manual auth codes are bounded before reaching the owned CLI', async (t) => {
+  const rootDir = await tmpRoot(t);
+  let process;
+  const manager = await createCliSetupManager({
+    rootDir,
+    spawnProcess() { process = new FakeProcess(); return process; },
+  }).init();
+  const running = manager.authenticate('codex', 'oauth');
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(
+    () => manager.submitAuthCode('codex', 'x'.repeat(AUTH_CODE_MAX_BYTES + 1)),
+    (error) => error.code === 'AGENT_AUTH_CODE_INVALID',
+  );
+  await assert.rejects(() => manager.submitAuthCode('pi', 'code'), (error) => error.code === 'AGENT_SETUP_INVALID');
+  assert.equal(process.input, '');
+  await manager.submitAuthCode('codex', 'device-code');
+  assert.equal(process.input, 'device-code\n');
+  process.emit('close', 0, null);
+  await running;
+});
+
+test('cancel stops an in-flight OAuth login', async (t) => {
+  const rootDir = await tmpRoot(t);
+  let process;
+  const manager = await createCliSetupManager({
+    rootDir,
+    spawnProcess() { process = new FakeProcess(); return process; },
+  }).init();
+  const pending = manager.authenticate('codex', 'oauth');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await manager.cancel('codex'), true);
+  await assert.rejects(pending, /로그인/);
+  assert.equal(process.killed, true);
 });

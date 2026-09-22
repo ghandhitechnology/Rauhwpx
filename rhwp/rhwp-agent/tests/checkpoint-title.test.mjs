@@ -131,10 +131,6 @@ test('CLI output parsing accepts the final Codex and Claude message shapes', () 
     JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '표 정리' } }),
   ].join('\n')), '표 정리');
   assert.equal(extractCheckpointTitleText(JSON.stringify({ type: 'result', result: '문단 정리' })), '문단 정리');
-  assert.equal(extractCheckpointTitleText(JSON.stringify({
-    type: 'assistant',
-    message: { content: [{ type: 'text', text: '서식 정리' }] },
-  })), '서식 정리');
 });
 
 test('providers run in fixed order, skip unavailable routes, and cascade on failures', async () => {

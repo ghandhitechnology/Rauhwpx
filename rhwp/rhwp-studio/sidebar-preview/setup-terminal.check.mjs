@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 
 export async function checkSetupTerminal(page, origin) {
   for (const width of [320, 640]) {
-    await page.goto(`${origin}/?page=settings&destination=connections&surface=provider-setup&provider=claude&services=setup&width=${width}&theme=${width === 320 ? 'light' : 'dark'}`, { waitUntil: 'networkidle0' });
+    await page.goto(`${origin}/?page=settings&destination=ai&surface=provider-setup&provider=claude&services=setup&width=${width}&theme=${width === 320 ? 'light' : 'dark'}`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.ag-agent-setup-overlay.ag-open');
     // Fixture install leaves the provider unconfigured for the login step.
     await page.evaluate(async () => { await window.sidebarPreview.bridge.installAgent('claude'); });
@@ -13,7 +13,7 @@ export async function checkSetupTerminal(page, origin) {
     assert.equal(await page.$eval('.ag-setup-terminal', el => el.scrollWidth > el.clientWidth), false);
     await page.focus('.ag-setup-terminal .xterm-helper-textarea');
     await page.waitForFunction(() => document.querySelector('.ag-setup-terminal').textContent.includes('❯ Anthropic'));
-    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press(width === 320 ? 'ArrowDown' : 'ArrowUp');
     await page.waitForFunction(() => document.querySelector('.ag-setup-terminal').textContent.includes('❯ OpenAI'));
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => document.querySelector('.ag-setup-terminal').textContent.includes('브라우저에서'));

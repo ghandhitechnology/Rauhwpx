@@ -666,7 +666,7 @@ test('Windows Pi terminal cleanup starts live, drains buffered output, and allow
   assert.equal(await disposing, true);
 });
 
-test('Pi fleet events preserve child terminal status and the Pi agent name', () => {
+test('Pi fleet events preserve child terminal status and Pi identity', () => {
   const events = [];
   const mapper = createPiFleetMapper((event) => events.push(event), 'pi');
   for (const [callId, id, name] of [

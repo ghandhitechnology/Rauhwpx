@@ -13,6 +13,7 @@ const ROOT_ONLY_TOOLS = new Set([
   'present_implementation_plan',
   'register_copy_layout_template',
   'update_agent_instructions',
+  'commit_product_skill',
 ]);
 const CHILD_DOCUMENT_CATEGORIES = new Set([
   'instruction-read',

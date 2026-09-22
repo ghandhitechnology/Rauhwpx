@@ -90,14 +90,6 @@
 
 .ag-root :is(
   .ag-threads-new,
-  .ag-skills-new,
-  .ag-skill-generate,
-  .ag-skill-save,
-  .ag-skill-copy,
-  .ag-skill-secondary,
-  .ag-skill-danger,
-  .ag-skill-toggle,
-  .ag-skill-upload-label,
   .ag-workspace-exit-btn
 ) {
   border-radius: var(--ag-button-radius);

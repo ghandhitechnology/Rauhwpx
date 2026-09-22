@@ -18,7 +18,7 @@ const accountLogin = between('function beginAccountLogin(', '\nfunction resolveM
 const accountCases = between("    case 'account-login':", "    case 'account-login-cancel':");
 const flush = async () => { for (let i = 0; i < 8; i += 1) await new Promise(setImmediate); };
 
-function fixture(t, { signedIn = false } = {}) {
+function fixture(t, { signedIn = false, onFrame = null } = {}) {
   const frames = [];
   const calls = { start: [], complete: [], sync: 0 };
   let active = null;
@@ -50,7 +50,10 @@ function fixture(t, { signedIn = false } = {}) {
     hubPort: 12345, PROTOCOL_VERSION: 1,
     agentAuthCancelled: (message = 'Cancelled') => Object.assign(new Error(message), { code: 'AGENT_AUTH_CANCELLED' }),
     boundedAgentAuthCode: (code) => String(code).trim(),
-    replyToStudio: (_record, _sock, frame) => push(frame),
+    replyToStudio: (_record, _sock, frame) => {
+      push(frame);
+      onFrame?.(frame, authRuns);
+    },
     sendAccountRunFrame: (_run, frame) => push(frame),
     sendAuthRunFrame: (_run, frame) => push(frame),
     sendAccountRunError: (_run, error) => push({ type: 'account-error', code: error.code, message: error.message }),
@@ -68,10 +71,30 @@ function fixture(t, { signedIn = false } = {}) {
     send: (msg) => context.dispatch(msg, { sessionId: 'studio-1' }, {}),
   };
 }
+const entry = { type: 'account-login', requestId: 'request-1' };
+
+test('account login installs its callback waiter before publishing the browser URL', async (t) => {
+  let completedFromCallback = false;
+  const f = fixture(t, {
+    onFrame(frame, authRuns) {
+      if (frame.type !== 'account-login-started') return;
+      const run = authRuns.get('account');
+      assert.equal(typeof run?.submitProof, 'function');
+      run.submitProof({ kind: 'loopback', code: 'instant-callback' });
+      completedFromCallback = true;
+    },
+  });
+  f.send(entry);
+  await flush();
+  assert.equal(completedFromCallback, true);
+  assert.equal(f.calls.complete.length, 1, JSON.stringify(f.frames));
+  assert.equal(f.calls.complete[0].proof.kind, 'loopback');
+  assert.equal(f.calls.complete[0].proof.code, 'instant-callback');
+});
 
 test('account entrypoint commits the account using its manual callback', async (t) => {
   const f = fixture(t);
-  f.send({ type: 'account-login', requestId: 'request-1' });
+  f.send(entry);
   await flush();
   assert.equal(f.calls.start.length, 1, JSON.stringify(f.frames));
   assert.equal(f.calls.start[0].redirectUri, 'http://127.0.0.1:12345/oauth/account/callback');

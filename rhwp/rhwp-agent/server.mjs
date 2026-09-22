@@ -32,7 +32,6 @@ import {
   resolveCheckpointTitleCliRoute,
 } from './agents/checkpoint-title.mjs';
 import { SkillRegistry } from './skills.mjs';
-import { generateSkillDraft } from './skill-generator.mjs';
 import { WritingStyleStore, assertWritingStyleAppendCompatible } from './writing-style.mjs';
 import { AgentInstructionsStore } from './agent-instructions.mjs';
 import { calibrateWritingStyle } from './style-calibrator.mjs';
@@ -161,18 +160,8 @@ const PLAN_CHANGE_TEXT_LIMITS = Object.freeze({
   feedback: MAX_CHAT_MESSAGE_CHARS,
   reason: 4_000,
 });
-const SKILL_DRAFT_TEXT_LIMITS = Object.freeze({
-  goal: 8_000,
-  triggerExamples: 16_000,
-  nonTriggerExamples: 16_000,
-  resourceNotes: 16_000,
-  existingSkill: 128_000,
-  model: 256,
-});
 const MAX_SEMANTIC_REQUEST_BYTES = 512 * 1024;
 const MAX_PENDING_STUDIO_TOOL_CALLS = 64;
-// One 64 MiB snapshot expands to about 85.4 MiB as base64. Keep room for a
-// handful of small control messages without retaining a second giant frame.
 const MAX_STUDIO_QUEUED_FRAME_BYTES = 96 * 1024 * 1024;
 const MAX_STUDIO_QUEUED_MESSAGES = 64;
 // 스튜디오가 끊긴 뒤 다시 붙기를 기다려 주는 시간 — 브리지의 첫 재접속 백오프(250·500ms)보다
@@ -307,9 +296,10 @@ let sourceClaudeAuth = await resolveSourceClaudeAuth();
 function claudeRuntimeEnv(isolatedHome) {
   return {
     ...cliSetup.envFor('claude'),
-    HOME: isolatedHome,
+    HOME: process.platform === 'darwin' ? (process.env.HOME ?? os.homedir()) : isolatedHome,
     USERPROFILE: isolatedHome,
     CLAUDE_CONFIG_DIR: path.join(isolatedHome, '.claude'),
+    ...(process.platform === 'darwin' ? {} : { CLAUDE_SECURESTORAGE_CONFIG_DIR: path.join(isolatedHome, '.claude') }),
   };
 }
 // App-managed bins are available to auxiliary CLI calls as soon as installation completes.
@@ -351,6 +341,10 @@ const usageStore = await createUsageStore().init();
 const providerLimits = createProviderLimitsClient({
   homeDir: HOST_PROFILE_HOME,
   resetLedgerPath: path.join(usageStore.rootDir, 'codex-reset-ledger.json'),
+  // Anthropic rate-limits this endpoint aggressively. A manual refresh should
+  // reuse a recent successful read instead of immediately turning it into a
+  // 429 after the automatic post-login refresh.
+  forceCooldownMs: 5 * 60 * 1000,
   getProviderEnv: (agent) => cliSetup.envFor(agent),
   getAuthMethod: (agent) => cliSetupStatus[agent]?.authMethod,
   getCodexBin: () => cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
@@ -472,6 +466,14 @@ function hasOrphanActiveWork() {
 
 function broadcastToStudios(message) {
   for (const record of sessions.values()) sendJson(record.studioSocket, message);
+}
+
+function publishedSkillOutcome(outcome) {
+  if (outcome?.ok !== true || !outcome.catalog) return outcome;
+  broadcastToStudios({ v: 1, type: 'skills-catalog', catalog: outcome.catalog });
+  const rest = { ...outcome };
+  delete rest.catalog;
+  return rest;
 }
 
 function broadcastAgentInstructions(status, changedBy) {
@@ -955,6 +957,18 @@ function beginAccountLogin(record, sock, requestId) {
       pairingCode: login.pairingCode,
       expiresAt: login.expiresAt,
     };
+    // Install the callback waiter before exposing the login URL. A browser can
+    // finish an already-authenticated OAuth session immediately, so publishing
+    // first creates a small window where the callback would receive a 409.
+    const waitForProof = () => new Promise((resolve, reject) => {
+      rejectProof = reject;
+      authRun.submitProof = (value) => {
+        rejectProof = null;
+        authRun.submitProof = null;
+        resolve(value);
+      };
+    });
+    let proofPromise = waitForProof();
     authRuns.update(authRun, { phase: 'authorizing', replayableUi: authDetails });
     replyToStudio(record, sock, {
       v: 1,
@@ -967,14 +981,7 @@ function beginAccountLogin(record, sock, requestId) {
 
     let proof = null;
     while (!proof) {
-      const candidate = await new Promise((resolve, reject) => {
-        rejectProof = reject;
-        authRun.submitProof = (value) => {
-          rejectProof = null;
-          authRun.submitProof = null;
-          resolve(value);
-        };
-      });
+      const candidate = await proofPromise;
       if (!isLiveAuthRun()) throw agentAuthCancelled();
       authRuns.update(authRun, { phase: 'redeeming' });
       try {
@@ -989,6 +996,7 @@ function beginAccountLogin(record, sock, requestId) {
         authRuns.update(authRun, { phase: 'authorizing' });
         sendAccountRunError(authRun, error, 'DEVICE_PROOF_INVALID');
         progress(authDetails);
+        proofPromise = waitForProof();
       }
     }
   })().then(
@@ -3439,85 +3447,45 @@ async function handleStudioMessage(record, sock, msg) {
       return;
     }
     case 'skills-list': {
-      void skillRegistry.list()
-        .then((catalog) => sendJson(sock, { v: 1, type: 'skills-catalog', requestId: msg.requestId ?? null, ...catalog }))
+      void skillRegistry.catalog()
+        .then((catalog) => sendJson(sock, { v: 1, type: 'skills-catalog', requestId: msg.requestId ?? null, catalog }))
         .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
       return;
     }
-    case 'skill-read': {
-      void skillRegistry.read(String(msg.name ?? ''))
-        .then((result) => sendJson(sock, { v: 1, type: 'skill-detail', requestId: msg.requestId ?? null, ...result }))
+    case 'harness-list': {
+      void skillRegistry.harness()
+        .then((rows) => sendJson(sock, { v: 1, type: 'harness-list-result', requestId: msg.requestId ?? null, rows }))
         .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
       return;
     }
-    case 'skill-save': {
-      void skillRegistry.save(msg.skill)
-        .then(async (result) => {
-          sendJson(sock, { v: 1, type: 'skill-saved', requestId: msg.requestId ?? null, ...result });
-          sendJson(sock, { v: 1, type: 'skills-catalog', ...(await skillRegistry.list()) });
-        })
-        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
-      return;
-    }
-    case 'skill-validate': {
-      void skillRegistry.validate(msg.skill)
-        .then((result) => sendJson(sock, { v: 1, type: 'skill-validated', requestId: msg.requestId ?? null, result }))
-        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
-      return;
-    }
-    case 'skill-enable': {
-      void skillRegistry.setEnabled(String(msg.name ?? ''), Boolean(msg.enabled))
-        .then((catalog) => sendJson(sock, { v: 1, type: 'skills-catalog', requestId: msg.requestId ?? null, ...catalog }))
-        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
-      return;
-    }
-    case 'skill-delete': {
-      void skillRegistry.delete(String(msg.name ?? ''))
-        .then(async (result) => {
-          sendJson(sock, { v: 1, type: 'skill-deleted', requestId: msg.requestId ?? null, ...result });
-          sendJson(sock, { v: 1, type: 'skills-catalog', ...(await skillRegistry.list()) });
-        })
-        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
-      return;
-    }
-    case 'skill-draft-request': {
-      let draftInput;
+    case 'skill-commit': {
+      let change;
       try {
-        draftInput = boundTextFields(msg, SKILL_DRAFT_TEXT_LIMITS, {
-          maxTotalChars: 160_000,
-          maxTotalBytes: MAX_SEMANTIC_REQUEST_BYTES,
-          label: 'Skill-draft request',
-        });
+        change = skillRegistry.parseChange(msg.change);
       } catch (error) {
         sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: error?.code ?? 'INVALID_REQUEST', message: String(error?.message ?? error) });
         return;
       }
-      if (!draftInput.goal.trim()) {
-        sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'INVALID_REQUEST', message: 'Skill goal is required.' });
-        return;
-      }
-      const skillHealth = providerHealth.cached();
-      const agent = msg.agent === 'codex' || msg.agent === 'pi' || msg.agent === 'claude'
-        ? msg.agent
-        : (skillHealth && skillHealth.claude?.available === false && skillHealth.codex?.available !== false
-          ? 'codex'
-          : 'claude');
-      const model = resolveModel(agent, draftInput.model);
-      sendJson(sock, { v: 1, type: 'skill-draft-progress', requestId: msg.requestId ?? null, state: 'generating' });
-      void generateSkillDraft(
-        {
-          agent,
-          model,
-          goal: draftInput.goal,
-          triggerExamples: draftInput.triggerExamples,
-          nonTriggerExamples: draftInput.nonTriggerExamples,
-          resourceNotes: draftInput.resourceNotes,
-          existingSkill: draftInput.existingSkill || undefined,
-        },
-        auxDeps(record, agent, agent === 'claude' ? 'claude' : 'codex'),
-      )
-        .then((draft) => sendJson(sock, { v: 1, type: 'skill-draft-result', requestId: msg.requestId ?? null, draft }))
-        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'SKILL_GENERATION_FAILED', message: String(e?.message ?? e) }));
+      void skillRegistry.commit(change)
+        .then((outcome) => sendJson(sock, {
+          v: 1,
+          type: 'skill-commit-result',
+          requestId: msg.requestId ?? null,
+          outcome: publishedSkillOutcome(outcome),
+        }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
+      return;
+    }
+    case 'skill-editor-read': {
+      void skillRegistry.readEditor(String(msg.name ?? ''))
+        .then((document) => sendJson(sock, { v: 1, type: 'skill-editor-read-result', requestId: msg.requestId ?? null, document }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
+      return;
+    }
+    case 'skill-editor-save': {
+      void skillRegistry.saveEditor(String(msg.name ?? ''), String(msg.body ?? ''), String(msg.base ?? ''))
+        .then((outcome) => sendJson(sock, { v: 1, type: 'skill-editor-save-result', requestId: msg.requestId ?? null, outcome: publishedSkillOutcome(outcome) }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
       return;
     }
     case 'provider-status-request': {
@@ -3598,7 +3566,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'account-logout': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      if (authRuns.get('account') || authRuns.get('rau')) {
+      if (authRuns.get('account')) {
         replyToStudio(record, sock, {
           v: 1,
           type: 'account-error',
@@ -4429,6 +4397,18 @@ function handleMcpMessage(record, sock, msg) {
       if (tool === 'read_product_skill') {
         void skillRegistry.readResource(String(args.name ?? ''), String(args.resourcePath ?? 'SKILL.md'))
           .then(sendResult)
+          .catch((error) => sendError(error, 'SKILLS_ERROR'));
+        return;
+      }
+      if (tool === 'commit_product_skill') {
+        void skillRegistry.commit(skillRegistry.parseChange(args))
+          .then((outcome) => sendResult(publishedSkillOutcome(outcome)))
+          .catch((error) => sendError(error, 'SKILLS_ERROR'));
+        return;
+      }
+      if (tool === 'list_harness_skills') {
+        void skillRegistry.harness()
+          .then((skills) => sendResult({ skills }))
           .catch((error) => sendError(error, 'SKILLS_ERROR'));
         return;
       }
@@ -5856,7 +5836,7 @@ httpServer.on('upgrade', (req, socket, head) => {
           replayed: true,
         });
       }
-      void skillRegistry.list().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', ...catalog }));
+      void skillRegistry.catalog().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', catalog }));
       void writingStyleStore.status()
         .then((status) => sendJson(ws, { v: 1, type: 'writing-style-status', status }))
         .catch((e) => sendJson(ws, {

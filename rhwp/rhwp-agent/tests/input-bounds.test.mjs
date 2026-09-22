@@ -32,10 +32,10 @@ test('semantic request fields enforce character and UTF-8 aggregate limits', () 
   );
 });
 
-test('server applies semantic bounds before plan mutation and skill prompt construction', async () => {
+test('server applies semantic bounds before plan mutation', async () => {
   const source = await fs.readFile(new URL('../server.mjs', import.meta.url), 'utf8');
   const plan = source.indexOf('async function requestImplementationPlanChanges');
   assert.ok(source.indexOf('boundTextFields(msg, PLAN_CHANGE_TEXT_LIMITS', plan) < source.indexOf('activeSession.planning.requestChanges', plan));
-  const skill = source.indexOf("case 'skill-draft-request'");
-  assert.ok(source.indexOf('boundTextFields(msg, SKILL_DRAFT_TEXT_LIMITS', skill) < source.indexOf('generateSkillDraft(', skill));
+  assert.equal(source.includes('generateSkillDraft'), false);
+  assert.equal(source.includes("case 'skill-draft-request'"), false);
 });

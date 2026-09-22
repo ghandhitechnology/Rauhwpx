@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { parseSkillMarkdown } from '../skills.mjs';
+import { projectSkillMarkdown } from '../skills.mjs';
 
 const markdownUrl = new URL('../skills/copy-layout/SKILL.md', import.meta.url);
 const scriptUrl = new URL('../skills/copy-layout/scripts/copy_layout.py', import.meta.url);
@@ -12,7 +12,7 @@ const helperTestUrl = new URL('./copy-layout-helper.test.py', import.meta.url);
 
 test('bundled copy-layout skill is a valid explicit slash-command skill', () => {
   const markdown = readFileSync(markdownUrl, 'utf8');
-  const parsed = parseSkillMarkdown(markdown, 'copy-layout');
+  const parsed = projectSkillMarkdown(markdown, 'copy-layout');
 
   assert.equal(parsed.name, 'copy-layout');
   assert.match(parsed.description, /HWP or HWPX/);

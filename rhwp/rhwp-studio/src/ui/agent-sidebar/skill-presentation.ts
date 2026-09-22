@@ -1,6 +1,23 @@
 import type { ProductSkillIcon } from '../../agent/types.ts';
 
-export type SkillGlyph = 'skillEdit' | 'skillBot' | 'skillSystem';
+export type SkillGlyph = ProductSkillIcon;
+
+export const PRODUCT_SKILL_ICONS: readonly { value: ProductSkillIcon; label: string }[] = [
+  { value: 'pencil', label: '작성' },
+  { value: 'bot', label: '자동화' },
+  { value: 'system', label: '설정' },
+  { value: 'sparkles', label: '아이디어' },
+  { value: 'book', label: '문서' },
+  { value: 'target', label: '목표' },
+  { value: 'chart', label: '분석' },
+  { value: 'lightbulb', label: '힌트' },
+  { value: 'calendar', label: '일정' },
+  { value: 'code', label: '코드' },
+  { value: 'check', label: '완료' },
+  { value: 'heart', label: '즐겨찾기' },
+  { value: 'bolt', label: '빠른 작업' },
+  { value: 'shield', label: '검토' },
+];
 
 /**
  * Product skill의 주된 결과를 아이콘으로 구분한다. 요약처럼 요청에 따라
@@ -30,31 +47,14 @@ export function defaultSkillIconForName(name: string): ProductSkillIcon {
 }
 
 export function skillGlyphForIcon(icon: ProductSkillIcon): SkillGlyph {
-  if (icon === 'pencil') return 'skillEdit';
-  if (icon === 'bot') return 'skillBot';
-  return 'skillSystem';
+  return icon;
 }
 
-export function skillGlyphForSkill(skill: { name: string; icon?: ProductSkillIcon }): SkillGlyph {
+export function skillGlyphForSkill(skill: { name: string; icon?: ProductSkillIcon | null }): SkillGlyph {
   return skillGlyphForIcon(skill.icon ?? defaultSkillIconForName(skill.name));
 }
 
 /** Wire 요청만 비어 있지 않게 만들고, 대화 기록용 후속 문장은 그대로 둔다. */
 export function requestTextForSkillInvocation(text: string, skillName?: string): string {
   return !text && skillName ? `/${skillName}` : text;
-}
-
-/** Keep the picker authoritative while leaving malformed drafts for validation to explain. */
-export function withSkillIconFrontmatter(markdown: string, icon: ProductSkillIcon): string {
-  const opening = markdown.match(/^(\uFEFF?---\r?\n)/);
-  if (!opening) return markdown;
-  const newline = opening[0].endsWith('\r\n') ? '\r\n' : '\n';
-  const body = markdown.slice(opening[0].length);
-  const closing = body.match(/\r?\n---\r?\n/);
-  if (!closing || closing.index == null) return markdown;
-  const frontmatter = body.slice(0, closing.index);
-  const nextFrontmatter = /^icon:\s*.*$/m.test(frontmatter)
-    ? frontmatter.replace(/^icon:\s*.*$/m, `icon: ${icon}`)
-    : `${frontmatter}${newline}icon: ${icon}`;
-  return `${opening[0]}${nextFrontmatter}${body.slice(closing.index)}`;
 }

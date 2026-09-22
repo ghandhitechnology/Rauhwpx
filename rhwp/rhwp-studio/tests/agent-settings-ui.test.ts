@@ -38,7 +38,7 @@ const mainSource = readSource('../src/main.ts');
 test('설정과 버전 페이지는 무대에 다른 페이지와 나란히 선다', () => {
   assert.match(
     source,
-    /stage\.append\(\s*workspaceBar,\s*workspaceDrawerScrim,\s*compactRailHoverTarget,\s*chatPage,\s*threadsPage,\s*skillsPage,\s*referenceLibrary\.page,\s*settingsPage,\s*versionsPage,\s*reviewColumn,\s*planColumn,\s*railResize,\s*reviewResize,?\s*\)/,
+    /stage\.append\(\s*workspaceBar,\s*workspaceDrawerScrim,\s*compactRailHoverTarget,\s*chatPage,\s*threadsPage,\s*referenceLibrary\.page,\s*settingsPage,\s*versionsPage,\s*reviewColumn,\s*planColumn,\s*railResize,\s*reviewResize,?\s*\)/,
   );
   assert.match(settings, /element\.id = 'ag-settings-panel'/);
   assert.match(settings, /element\.setAttribute\('role', 'region'\)/);
@@ -139,7 +139,7 @@ test('설정 적용 버튼은 카드 없이 콘텐츠 하단에 머문다', () =
   assert.doesNotMatch(footerRule, /bottom:|z-index:|border:|border-radius:|box-shadow:|backdrop-filter:/);
 });
 
-test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', () => {
+test('설정은 편집·AI·스킬 목적지와 업무별 묶음을 갖는다', () => {
   for (const title of ['연결', '새 대화 기본값', '글쓰기 보정', '템플릿', '사용량']) {
     assert.match(settings, new RegExp(`createSection\\('${title}'\\)`));
   }
@@ -147,8 +147,11 @@ test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', 
     assert.match(editingSettings, new RegExp(`group\\('${title}'`));
   }
   assert.match(settings, /\{ id: 'editing', label: '편집' \}/);
-  assert.match(settings, /\{ id: 'ai', label: 'AI 설정' \}/);
-  assert.match(settings, /\{ id: 'connections', label: 'AI 연결' \}/);
+  assert.match(settings, /\{ id: 'ai', label: 'AI' \}/);
+  assert.match(settings, /\{ id: 'skills', label: '스킬' \}/);
+  assert.match(settings, /aiContent\.prepend\(connectionContent\)/);
+  assert.match(source, /composerUtilityActions\.append\(phaseBadge, permissionBtn\)/);
+  assert.match(source, /skillsSettings: skillsShelf\.root/);
   assert.doesNotMatch(settings, /'product'/);
   assert.match(settingsCss, /\.ag-settings-section-title/);
 });
@@ -436,7 +439,7 @@ test('프로바이더 사용량 표는 압축된 호출 수와 토큰을 표시�
 test('직접 한도 새로고침은 기존 연결 목적지에 있고 프록시 설정을 제거한다', () => {
   assert.doesNotMatch(settings, /connectCliproxy|disconnectCliproxy|CLIProxyAPI|remote-management/);
   assert.match(settings, /void refreshUsage\(true\)/);
-  assert.match(settings, /currentDestination !== 'connections'/);
+  assert.match(settings, /currentDestination !== 'ai'/);
   assert.match(settings, /document.removeEventListener\('visibilitychange', syncUsagePolling\)/);
 });
 
@@ -524,16 +527,13 @@ test('기본 제공자 선택은 라이브 프로바이더만 저장한다', () 
   assert.match(settings, /const PLAN_AGENTS: readonly PlanAgent\[\] = \['claude', 'codex'\]/);
 });
 
-test('grok · cursor · opencode 사용량도 세션 · 오늘 · 주간 토큰으로 보인다', () => {
-  assert.match(settings, /const API_USAGE_AGENTS: readonly AgentName\[\] = \['grok', 'cursor', 'opencode'\]/);
-  assert.match(settings, /function renderApiUsage\(\): void/);
-  assert.match(settings, /renderPiUsage\(\);\s*\n\s*renderApiUsage\(\);/);
-  assert.match(settings, /formatUsageWindow\('Session', providerUsage\.session\)/);
+test('Claude · Codex · Pi 사용량은 세션 · 오늘 · 주간 토큰으로 보인다', () => {
+  assert.doesNotMatch(settings, /API_USAGE_AGENTS|function renderApiUsage/);
+  assert.match(settings, /function renderPiUsage\(\): void/);
+  assert.match(settings, /quotaCards\.render\(usage\);\s*\n\s*renderPiUsage\(\);\s*\n\s*for \(const agent of PLAN_AGENTS\)/);
+  assert.match(settings, /formatUsageWindow\('Session', providerUsage\?\.session \?\? null\)/);
   assert.match(settings, /ui\.models\.replaceChildren\(\.\.\.buildModelRows\(providerUsage, agent\)\)/);
-  // 요금제 셀렉트는 붙지 않는다 — API 사용량 한 가지뿐이다.
   assert.doesNotMatch(settings, /USAGE_PLANS\[agent\]\s*\?\?/);
-  // 설정을 마쳤거나 기록이 있을 때만 자리를 차지한다.
-  assert.match(settings, /ui\.root\.hidden = turns === 0/);
   assert.match(settingsCss, /\.ag-settings-usage-block\[hidden\]/);
 });
 
@@ -567,12 +567,10 @@ test('설정 목록은 Claude 가 맨 앞이고 공통 테두리를 갖는다', 
 
 test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대를 함께 보여 준다', () => {
   assert.match(settings, /setupAccountTitle = el\('h3', 'ag-agent-setup-section-title', '로그인된 계정'\)/);
-  assert.match(settings, /setupAccountEmail\.textContent = status\?\.account/);
-  assert.match(settings, /계정 이메일을 확인할 수 없습니다/);
-  assert.doesNotMatch(settings, /연결된 키 \*\*\*\*/);
+  assert.match(settings, /accountStatus\?\.account\?\.email \?\? '로그인됨'/);
   assert.match(settings, /체험 크레딧을 다 썼어요\. 다른 모델을 연결해 주세요\./);
-  // 잔량 막대는 사용량 갱신마다 다시 그린다.
-  assert.match(settings, /renderUsage\(\): void \{\s*\n\s*quotaCards.render\(usage\);\s*\n\s*renderRauUsage\(\);\s*\n\s*renderRauAccount\(\);/);
+  assert.doesNotMatch(settings, /연결된 키 \*\*\*\*/);
+  assert.match(settings, /renderUsage\(\): void \{\s*\n\s*quotaCards.render\(usage\);\s*\n\s*renderPiUsage\(\);/);
   assert.match(settingsCss, /\.ag-agent-setup-account \{[\s\S]*?border-radius: 12px/);
   assert.match(settingsCss, /\.ag-agent-setup-account-meter \.ag-settings-meter-track \{[\s\S]*?height: 8px/);
 });
