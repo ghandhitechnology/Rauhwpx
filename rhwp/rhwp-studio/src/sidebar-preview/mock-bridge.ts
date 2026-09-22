@@ -126,9 +126,10 @@ export function createMockBridge(report: (message: string) => void) {
     request((requestId) =>
       emit({ type: 'writing-style-result', requestId, status: data.writing }),
     );
+  const terminalOptions = ['Anthropic', 'OpenAI'];
   let terminalRun: { id: string; agent: T.AgentName; step: number; choice: number } | null = null;
   const terminalMenu = () => `\x1b[2J\x1b[H\x1b[36m◆  ${terminalRun?.agent ?? 'CLI'} 로그인\x1b[0m\r\n\r\n`
-    + ['Anthropic', 'OpenAI'].map((name, index) => `  ${index === terminalRun?.choice ? '❯' : ' '} ${name}`).join('\r\n')
+    + terminalOptions.map((name, index) => `  ${index === terminalRun?.choice ? '❯' : ' '} ${name}`).join('\r\n')
     + '\r\n\r\n  Enter 키로 선택하세요.';
   const authenticate = (provider: T.AgentName) => {
     if (provider === 'pi') {
@@ -357,7 +358,8 @@ export function createMockBridge(report: (message: string) => void) {
       if (provider !== terminalRun?.agent || terminalRun?.id !== authRunId) return;
       if (input.includes('\x03')) { bridge.cancelAgentSetup(provider, authRunId); return; }
       if (terminalRun.step === 0 && /\x1b\[[AB]/.test(input)) {
-        terminalRun.choice = (terminalRun.choice + (input.includes('\x1b[B') ? 1 : 2)) % 3;
+        const direction = input.includes('\x1b[B') ? 1 : terminalOptions.length - 1;
+        terminalRun.choice = (terminalRun.choice + direction) % terminalOptions.length;
         emit({ type: 'agent-setup-terminal', agent: provider, authRunId, data: terminalMenu() });
         return;
       }
