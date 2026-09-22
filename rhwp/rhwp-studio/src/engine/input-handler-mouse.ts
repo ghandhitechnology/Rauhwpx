@@ -1538,6 +1538,11 @@ export function onDblClick(this: any, e: MouseEvent): void {
       this.eventBus.emit('equation-edit-request', { sec: ref.sec, ppi: ref.ppi, ci: ref.ci });
       return;
     }
+    if (ref && ref.type === 'ole') {
+      e.preventDefault();
+      this.eventBus.emit('equation-edit-request', { sec: ref.sec, ppi: ref.ppi, ci: ref.ci });
+      return;
+    }
     // 글상자 객체 → 텍스트 편집 진입
     if (ref && ref.type === 'shape') {
       e.preventDefault();
