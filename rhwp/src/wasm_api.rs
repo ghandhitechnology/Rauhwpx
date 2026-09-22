@@ -4200,6 +4200,28 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 글자처럼 취급 그림 컨트롤을 같은 구역 내 새 캐럿 위치로 이동한다.
+    ///
+    /// 반환: JSON `{"ok":true,"paraIdx":N,"controlIdx":N,"moved":bool}`
+    #[wasm_bindgen(js_name = movePictureControl)]
+    pub fn move_picture_control(
+        &mut self,
+        section_idx: u32,
+        from_para_idx: u32,
+        from_control_idx: u32,
+        to_para_idx: u32,
+        to_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.move_picture_control_native(
+            section_idx as usize,
+            from_para_idx as usize,
+            from_control_idx as usize,
+            to_para_idx as usize,
+            to_char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// [Task #1171 / PR #1254] 표 셀/글상자 내부 Picture 삭제 (by_path).
     #[wasm_bindgen(js_name = deleteCellPictureControlByPath)]
     pub fn delete_cell_picture_control_by_path(
