@@ -334,6 +334,75 @@
 .ag-reference-upload-chip.ag-ready { border-color: color-mix(in srgb, var(--ag-ok) 40%, var(--ag-border)); }
 .ag-reference-upload-chip.ag-error { border-color: color-mix(in srgb, var(--ag-err) 55%, var(--ag-border)); }
 
+.ag-reference-upload-chip.ag-image {
+  position: relative;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  padding: 2px;
+}
+
+.ag-reference-upload-chip.ag-image .ag-reference-upload-preview {
+  width: 100%;
+  height: 100%;
+}
+
+.ag-reference-upload-chip.ag-image .ag-reference-upload-chip-name,
+.ag-reference-upload-chip.ag-image .ag-reference-upload-chip-state {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.ag-reference-upload-chip.ag-image .ag-reference-upload-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+  padding: 5px;
+  background: color-mix(in srgb, #000 72%, transparent);
+  color: #fff;
+  opacity: 0;
+  transition: opacity 120ms var(--ag-motion-out), transform 90ms var(--ag-motion-out);
+}
+
+.ag-reference-upload-chip.ag-image .ag-reference-upload-remove .ag-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ag-reference-upload-chip.ag-image:hover .ag-reference-upload-remove,
+.ag-reference-upload-chip.ag-image:focus-within .ag-reference-upload-remove {
+  opacity: 1;
+}
+
+.ag-reference-upload-chip.ag-image .ag-reference-upload-remove:hover,
+.ag-reference-upload-chip.ag-image .ag-reference-upload-remove:active {
+  background: color-mix(in srgb, #000 88%, transparent);
+}
+
+.ag-reference-upload-chip.ag-image .ag-reference-upload-remove:active { transform: scale(0.94); }
+
+.ag-reference-upload-chip.ag-image .ag-reference-upload-retry {
+  position: absolute;
+  left: 3px;
+  bottom: 3px;
+  z-index: 2;
+  width: 20px;
+  min-height: 20px;
+  padding: 3px;
+  border: 0;
+  border-radius: 50%;
+  background: color-mix(in srgb, #000 70%, transparent);
+  color: #fff;
+}
+
 .ag-reference-file-focused {
   outline: 2px solid var(--ag-focus);
   outline-offset: 2px;
@@ -363,6 +432,9 @@
   color: var(--ag-text-muted);
   cursor: pointer;
 }
+
+.ag-reference-upload-retry[hidden],
+.ag-reference-upload-remove[hidden] { display: none; }
 
 .ag-reference-upload-retry:hover,
 .ag-reference-upload-remove:hover { background: var(--ag-hover); }
@@ -442,6 +514,17 @@
   }
   .ag-reference-quick-uploads > .ag-reference-upload-chip {
     animation: ag-attachment-fade-in 90ms var(--ag-motion-out) both;
+  }
+  .ag-reference-upload-chip.ag-image .ag-reference-upload-remove {
+    transform: none;
+    transition: none;
+  }
+  .ag-reference-upload-chip.ag-image .ag-reference-upload-remove:active { transform: none; }
+}
+
+@media (hover: none) {
+  .ag-reference-upload-chip.ag-image .ag-reference-upload-remove {
+    opacity: 1;
   }
 }
 
