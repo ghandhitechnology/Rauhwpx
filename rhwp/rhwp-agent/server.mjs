@@ -587,8 +587,8 @@ const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi']);
 const OPENROUTER_AGENTS = new Set(['pi']);
 const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
 
-const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
-const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra']);
+const CLAUDE_MODELS = new Set(['claude-fable-5-1', 'claude-opus-5-5', 'opus', 'fable', 'sonnet', 'haiku']);
+const CODEX_MODELS = new Set(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
 const DEFAULT_MODEL = {
   claude: 'sonnet',
   codex: 'gpt-5.6-sol',

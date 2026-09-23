@@ -3,7 +3,6 @@ name: Deploy website to GitHub Pages
 on:
   push:
     branches:
-      - worktree-website
       - main
     paths:
       - website/**
@@ -13,16 +12,28 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: pages
-  cancel-in-progress: false
-
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out website source
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Check local links and assets
+        run: python3 website/check.py
+
   deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: check
     permissions:
       contents: read
       pages: write
       id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

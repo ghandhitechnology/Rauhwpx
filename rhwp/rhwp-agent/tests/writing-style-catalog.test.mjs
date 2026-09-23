@@ -34,6 +34,17 @@ test('Astra calibration selection survives catalog reload with max effort', () =
   assert.deepEqual(buildWritingStyleCatalog({ ...options, currentSelection: selection }).defaultSelection, selection);
 });
 
+test('new Codex and Claude models resolve for calibration', () => {
+  for (const selection of [
+    { agent: 'codex', model: 'gpt-6-sol', effort: 'max' },
+    { agent: 'codex', model: 'gpt-6-luna', effort: 'high' },
+    { agent: 'claude', model: 'claude-opus-5-5', effort: 'medium' },
+    { agent: 'claude', model: 'claude-fable-5-1', effort: 'high' },
+  ]) {
+    assert.deepEqual(resolveWritingStyleSelection(selection), selection);
+  }
+});
+
 test('calibration selection rejects unavailable providers and stale models without fallback', () => {
   assert.throws(
     () => resolveWritingStyleSelection({ agent: 'codex', model: 'gpt-5.6-sol' }, { health, piStatus }),
