@@ -277,6 +277,18 @@ const CLIPBOARD_IMAGE_EXTENSION: Readonly<Record<string, string>> = {
   'image/gif': 'gif',
 };
 
+function imageFileName(source: File, type: string, label: string, stamp: string, index: number): string {
+  const extension = CLIPBOARD_IMAGE_EXTENSION[type];
+  const suppliedName = source.name.trim();
+  const suppliedExtension = suppliedName.split('.').pop()?.toLowerCase();
+  const hasMatchingExtension = extension === 'jpg'
+    ? suppliedExtension === 'jpg' || suppliedExtension === 'jpeg'
+    : suppliedExtension === extension;
+  return hasMatchingExtension
+    ? suppliedName
+    : `${label} ${stamp}${index ? `-${index + 1}` : ''}.${extension}`;
+}
+
 function clipboardImageFiles(data: DataTransfer | null): File[] {
   if (!data) return [];
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -288,17 +300,21 @@ function clipboardImageFiles(data: DataTransfer | null): File[] {
     const type = (item.type || source.type).toLowerCase();
     const extension = CLIPBOARD_IMAGE_EXTENSION[type];
     if (!extension) continue;
-    const suppliedName = source.name.trim();
-    const suppliedExtension = suppliedName.split('.').pop()?.toLowerCase();
-    const hasMatchingExtension = extension === 'jpg'
-      ? suppliedExtension === 'jpg' || suppliedExtension === 'jpeg'
-      : suppliedExtension === extension;
-    const name = hasMatchingExtension
-      ? suppliedName
-      : `붙여넣은 이미지 ${stamp}${files.length ? `-${files.length + 1}` : ''}.${extension}`;
+    const name = imageFileName(source, type, '붙여넣은 이미지', stamp, files.length);
     files.push(new File([source], name, { type, lastModified: Date.now() }));
   }
   return files;
+}
+
+function droppedFiles(data: DataTransfer | null): File[] {
+  if (!data) return [];
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return Array.from(data.files, (file, index) => {
+    const type = file.type.toLowerCase();
+    if (!CLIPBOARD_IMAGE_EXTENSION[type]) return file;
+    const name = imageFileName(file, type, '드롭한 이미지', stamp, index);
+    return name === file.name ? file : new File([file], name, { type, lastModified: file.lastModified });
+  });
 }
 
 function transferHasFiles(data: DataTransfer | null): boolean {
@@ -3268,7 +3284,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (!transferHasFiles(event.dataTransfer)) return;
     event.preventDefault();
     event.stopPropagation();
-    const files = [...(event.dataTransfer?.files ?? [])];
+    const files = droppedFiles(event.dataTransfer);
     clearAttachmentDrag();
     if (canStageComposerAttachments() && files.length > 0) referenceLibrary.stageDraftFiles(files);
   };

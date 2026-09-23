@@ -599,6 +599,22 @@ try {
         throw new Error('Delete failed');
     });
   });
+  await step('Dragging an image without a filename extension stages it as an attachment', async () => {
+    await open();
+    const drop = await page.evaluate(() => {
+      const data = new DataTransfer();
+      data.items.add(new File(['image bytes'], 'image-from-browser', { type: 'image/png' }));
+      const input = document.querySelector('.ag-input');
+      input.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: data }));
+      input.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: data }));
+      const event = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data });
+      input.dispatchEvent(event);
+      return { prevented: event.defaultPrevented, types: [...data.types] };
+    });
+    assert.deepEqual(drop, { prevented: true, types: ['Files'] });
+    await page.waitForSelector('.ag-reference-upload-chip', { visible: true });
+    assert.match(await page.$eval('.ag-reference-upload-chip-name', (node) => node.textContent), /^드롭한 이미지 .+\.png$/);
+  });
   await step(
     'Settings, fake account login/logout, templates, and writing style',
     async () => {
