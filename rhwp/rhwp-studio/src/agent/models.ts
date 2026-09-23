@@ -10,12 +10,14 @@ function isSupportedAgent(agent: AgentName): agent is 'claude' | 'codex' | 'pi' 
 }
 export const AGENT_MODELS: Record<StaticAgentName, readonly AgentModelOption[]> = {
   claude: [
-    { id: 'fable', label: 'Fable 5' }, { id: 'opus', label: 'Opus 5' },
+    { id: 'claude-fable-5-1', label: 'Fable 5.1' }, { id: 'fable', label: 'Fable 5' },
+    { id: 'claude-opus-5-5', label: 'Opus 5.5' }, { id: 'opus', label: 'Opus 5' },
     { id: 'sonnet', label: 'Sonnet 5' }, { id: 'haiku', label: 'Haiku 4.5' },
   ],
   codex: [
-    { id: 'gpt-6-astra', label: 'Astra' }, { id: 'gpt-5.6-sol', label: 'Sol' },
-    { id: 'gpt-5.6-terra', label: 'Terra' }, { id: 'gpt-5.6-luna', label: 'Luna' },
+    { id: 'gpt-6-astra', label: 'Astra' }, { id: 'gpt-6-sol', label: 'Sol 6' },
+    { id: 'gpt-6-luna', label: 'Luna 6' }, { id: 'gpt-5.6-sol', label: 'Sol 5.6' },
+    { id: 'gpt-5.6-terra', label: 'Terra' }, { id: 'gpt-5.6-luna', label: 'Luna 5.6' },
   ],
 } as const;
 
