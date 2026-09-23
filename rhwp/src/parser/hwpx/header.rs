@@ -2432,6 +2432,22 @@ mod tests {
     }
 
     #[test]
+    fn hwpunitchar_char_unit_restores_the_odd_stored_bit() {
+        let xml = r#"<hh:head><hh:paraPr id="0"><hp:switch>
+          <hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">
+            <hh:margin><hc:intent value="-1310" unit="HWPUNIT"/><hc:left value="0" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/><hc:prev value="0" unit="HWPUNIT"/><hc:next value="80" unit="CHAR"/></hh:margin>
+          </hp:case><hp:default><hh:margin><hc:intent value="-2620" unit="HWPUNIT"/><hc:left value="0" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/><hc:prev value="0" unit="HWPUNIT"/><hc:next value="161" unit="HWPUNIT"/></hh:margin></hp:default>
+        </hp:switch></hh:paraPr></hh:head>"#;
+        let (parsed, _) = parse_hwpx_header(xml).unwrap();
+        let shape = &parsed.para_shapes[0];
+        assert_eq!(shape.indent, -2620);
+        assert_eq!(shape.margin_left, 0);
+        assert_eq!(shape.margin_right, 0);
+        assert_eq!(shape.spacing_before, 0);
+        assert_eq!(shape.spacing_after, 161);
+    }
+
+    #[test]
     fn pinned_hancom_version_probes_import_observed_spacing_and_keep_it_on_save() {
         let sources: &[(&[u8], (i32, i32))] = &[
             (include_bytes!("../../../tests/fixtures/editing_parity/mac-hancom-12.30.0/body-paragraph-spacing/edited.hwpx"), (600, 300)),
