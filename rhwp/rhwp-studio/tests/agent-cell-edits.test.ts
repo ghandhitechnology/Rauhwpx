@@ -235,6 +235,41 @@ test('find_text: 셀 내부 매치는 cell 주소를 포함한다', async () => 
   assert.equal(m.charOffset, 0);
 });
 
+test('find_text: 중첩 표 매치는 최외곽 cell 과 전체 cellPath 를 반환한다', async () => {
+  const { executor, wasm } = makeExecutor();
+  wasm.nestedTableParas.add('2:0');
+  const nestedCells = [['nested target']];
+  Object.assign(wasm, {
+    getCellParagraphCountByPath: (_s: number, _p: number, pathJson: string) => {
+      const path = JSON.parse(pathJson) as Array<{ cellIndex: number }>;
+      return nestedCells[path[path.length - 1].cellIndex].length;
+    },
+    getCellParagraphLengthByPath: (_s: number, _p: number, pathJson: string) => {
+      const path = JSON.parse(pathJson) as Array<{ cellIndex: number; cellParaIndex: number }>;
+      const target = path[path.length - 1];
+      return nestedCells[target.cellIndex][target.cellParaIndex].length;
+    },
+    getTextInCellByPath: (_s: number, _p: number, pathJson: string, off: number, count: number) => {
+      const path = JSON.parse(pathJson) as Array<{ cellIndex: number; cellParaIndex: number }>;
+      const target = path[path.length - 1];
+      return nestedCells[target.cellIndex][target.cellParaIndex].slice(off, off + count);
+    },
+  });
+  const result = await executor.execute('find_text', { query: 'target' }, 'claude') as {
+    matches: Array<{ cell?: CellAddr; cellPath?: Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }>; paraIdx: number; charOffset: number }>;
+  };
+  assert.equal(result.matches.length, 1);
+  const match = result.matches[0];
+  const path = [
+    { controlIndex: 0, cellIndex: 2, cellParaIndex: 0 },
+    { controlIndex: 0, cellIndex: 0, cellParaIndex: 0 },
+  ];
+  assert.deepEqual(match.cell, CELL_FOO);
+  assert.deepEqual(match.cellPath, path);
+  assert.equal(match.paraIdx, 0);
+  assert.equal(match.charOffset, 7);
+});
+
 test('find_text: 본문 매치에는 cell 이 없다', async () => {
   const { executor } = makeExecutor();
   const r = (await executor.execute('find_text', { query: 'Intro' }, 'claude')) as {
@@ -354,23 +389,32 @@ test('delete_range: 한 문단 안의 셀 삭제는 중첩 표 탐침과 무관�
   assert.equal(r['deletedTables'], undefined);
 });
 
-test('delete_range: 본문 다문단 범위는 삼킨 표 수를 deletedTables 로 알린다', async () => {
-  const { executor } = makeExecutor();
-  const r = (await executor.execute('delete_range', {
+test('delete_range: 본문 범위가 표를 삼키면 편집 전에 막는다', async () => {
+  const { executor, pendingCalls } = makeExecutor();
+  await expectToolError(executor.execute('delete_range', {
     expectedRevision: 1, sectionIdx: 0,
     startParaIdx: 0, startCharOffset: 0, endParaIdx: 2, endCharOffset: 0,
-  }, 'claude')) as { deletedTables?: number; note: string };
-  assert.equal(r.deletedTables, 1); // 표는 본문 문단 1 에 있다
-  assert.match(r.note, /1 table sat between the range endpoints/);
+  }, 'claude'), 'TABLE_IN_BODY_RANGE');
+  assert.equal(pendingCalls.length, 0);
 });
 
-test('delete_range: 표를 지나지 않는 본문 범위에는 deletedTables 가 없다', async () => {
-  const { executor } = makeExecutor();
-  const r = (await executor.execute('delete_range', {
+test('replace_range: 본문 범위가 표를 삼키면 편집 전에 막는다', async () => {
+  const { executor, pendingCalls } = makeExecutor();
+  await expectToolError(executor.execute('replace_range', {
+    expectedRevision: 1, sectionIdx: 0,
+    startParaIdx: 0, startCharOffset: 0, endParaIdx: 2, endCharOffset: 0,
+    text: 'replacement',
+  }, 'claude'), 'TABLE_IN_BODY_RANGE');
+  assert.equal(pendingCalls.length, 0);
+});
+
+test('delete_range: 표 앞에서 끝나는 본문 범위는 허용한다', async () => {
+  const { executor, pendingCalls } = makeExecutor();
+  await executor.execute('delete_range', {
     expectedRevision: 1, sectionIdx: 0,
     startParaIdx: 0, startCharOffset: 0, endParaIdx: 1, endCharOffset: 0,
-  }, 'claude')) as Record<string, unknown>;
-  assert.equal(r['deletedTables'], undefined);
+  }, 'claude');
+  assert.equal(pendingCalls.length, 1);
 });
 
 test('cell 검증: 표가 없는 문단/범위 밖 cellIdx/범위 밖 오프셋 → INVALID_ARGS', async () => {
@@ -521,7 +565,7 @@ test('get_selection: 1중첩(깊이 1) 셀은 기존대로 write 가능한 cell 
   assert.equal(r.nested, undefined);
 });
 
-test('get_selection: 중첩 표(깊이 2)에서는 cell 주소를 생략하고 nested/cellPath 로 알린다', async () => {
+test('get_selection: 중첩 표(깊이 2)에서 cell 과 cellPath 를 함께 준다', async () => {
   const path = [
     { parentParaIndex: 1, controlIndex: 0, cellIndex: 2, cellParaIndex: 0 },
     { parentParaIndex: 0, controlIndex: 0, cellIndex: 3, cellParaIndex: 1 },
@@ -535,11 +579,143 @@ test('get_selection: 중첩 표(깊이 2)에서는 cell 주소를 생략하고 n
     cursor: { cell?: unknown; paraIdx: number; charOffset: number; nested?: boolean; cellPath?: unknown };
     nested?: boolean; note?: string;
   };
-  assert.equal(r.cursor.cell, undefined); // 최외곽 셀 주소 + 최내곽 문단 인덱스 혼용 금지
+  assert.deepEqual(r.cursor.cell, CELL_FOO); // 최외곽 셀 주소
   assert.equal(r.cursor.nested, true);
   assert.equal(r.cursor.paraIdx, 1); // 최내곽 셀 문단
   assert.equal(r.cursor.charOffset, 4);
   assert.deepEqual(r.cursor.cellPath, path);
   assert.equal(r.nested, true);
-  assert.ok(r.note && r.note.includes('get_structure'));
+  assert.ok(r.note && r.note.includes('copy both cell and cellPath'));
+});
+
+// ─── 안전 프로필: 중첩 표 셀의 staged 텍스트 편집 ──────────────
+
+function makeNestedSafeHarness() {
+  const { wasm, body, cells } = makeCellWasm();
+  const nested = ['inner'];
+  const cellPath = [
+    { parentParaIndex: 1, controlIndex: 0, cellIndex: 2, cellParaIndex: 0 },
+    { parentParaIndex: 0, controlIndex: 0, cellIndex: 0, cellParaIndex: 0 },
+  ];
+  wasm.nestedTableParas.add('2:0');
+  const calls: string[] = [];
+  const okJson = (extra: Record<string, unknown> = {}) => JSON.stringify({ ok: true, ...extra });
+  const pathPara = (json: string) => {
+    const path = JSON.parse(json) as Array<{ cellParaIndex: number }>;
+    assert.equal(path.length, 2, 'nested cell path must reach the inner table');
+    return path[1].cellParaIndex;
+  };
+  let snapshotId = 0;
+  const snapshots = new Map<number, { body: string[]; cells: string[][]; nested: string[] }>();
+  Object.assign(wasm, {
+    getCellParagraphCountByPath: () => nested.length,
+    getCellParagraphLengthByPath: (_s: number, _p: number, json: string) => nested[pathPara(json)].length,
+    getTextInCellByPath: (_s: number, _p: number, json: string, off: number, count: number) =>
+      nested[pathPara(json)].slice(off, off + count),
+    insertTextInCellByPath: (_s: number, _p: number, json: string, off: number, value: string) => {
+      calls.push('insertTextInCellByPath');
+      const p = pathPara(json);
+      nested[p] = nested[p].slice(0, off) + value + nested[p].slice(off);
+      return okJson({ charOffset: off + value.length });
+    },
+    deleteRangeInCellByPath: (_s: number, _p: number, json: string, sp: number, so: number, ep: number, eo: number) => {
+      calls.push('deleteRangeInCellByPath');
+      nested.splice(sp, ep - sp + 1, nested[sp].slice(0, so) + nested[ep].slice(eo));
+      return okJson({ paraIdx: sp, charOffset: so });
+    },
+    getCellCharPropertiesAtByPath: () => ({}),
+    getCellParaPropertiesAtByPath: () => ({ pageBreakBefore: false }),
+    applyCharFormatInCellByPath: () => {
+      calls.push('applyCharFormatInCellByPath');
+      return okJson();
+    },
+    saveSnapshot: () => {
+      const id = ++snapshotId;
+      snapshots.set(id, { body: structuredClone(body), cells: structuredClone(cells), nested: structuredClone(nested) });
+      return id;
+    },
+    restoreSnapshot: (id: number) => {
+      const saved = snapshots.get(id)!;
+      body.splice(0, body.length, ...structuredClone(saved.body));
+      cells.splice(0, cells.length, ...structuredClone(saved.cells));
+      nested.splice(0, nested.length, ...structuredClone(saved.nested));
+    },
+    discardSnapshot: (id: number) => { snapshots.delete(id); },
+  });
+  const eventBus = new EventBus();
+  const inputHandler = {
+    executeOperation: (op: { operation?: (w: unknown) => unknown }) => { op.operation?.(wasm); },
+    getCursorPosition: () => ({ sectionIndex: 0, paragraphIndex: 1, charOffset: 0 }),
+    getSelection: () => null,
+  };
+  const pending = new PendingEditManager({
+    wasm: wasm as never, eventBus, inputHandler: inputHandler as never,
+    canvasView: {} as never, overlay: { setOps: () => {}, clear: () => {} } as never,
+  });
+  const revision = new RevisionTracker(eventBus);
+  const executor = new AgentToolExecutor({
+    wasm: wasm as never, inputHandler: inputHandler as never,
+    documentState: { isDirty: () => false } as never, revision, pending,
+  });
+  const safe = { permissionProfile: 'safe' as const, workflow: 'direct' as const };
+  return { executor, pending, revision, safe, body, cells, nested, cellPath, calls };
+}
+
+test('safe mode insert_text stages text inside a nested table cell', async () => {
+  const h = makeNestedSafeHarness();
+  const result = await h.executor.execute('insert_text', {
+    expectedRevision: h.revision.revision, sectionIdx: 0,
+    cell: CELL_FOO, cellPath: h.cellPath, paraIdx: 0, charOffset: 2, text: 'X',
+  }, 'claude', h.safe) as { changeSetId: string };
+  assert.equal(h.nested[0], 'inXner');
+  assert.equal(h.cells[2][0], 'foo', 'outer host cell must survive');
+  assert.equal(h.cells[3][0], 'bar', 'sibling cell must survive');
+  assert.equal(h.body[1], '', 'outer table paragraph must survive');
+  assert.ok(h.calls.includes('insertTextInCellByPath'));
+  assert.equal(h.pending.hasPending(), true);
+  h.pending.reject(result.changeSetId);
+  assert.equal(h.nested[0], 'inner');
+});
+
+test('nested cellPath reads the inner cell and rejects a mismatched outer address', async () => {
+  const h = makeNestedSafeHarness();
+  const read = await h.executor.execute('get_text_range', {
+    sectionIdx: 0, cell: CELL_FOO, cellPath: h.cellPath, paraIdx: 0,
+  }, 'claude', h.safe) as { text: string };
+  assert.equal(read.text, 'inner');
+  await expectToolError(h.executor.execute('insert_text', {
+    expectedRevision: h.revision.revision, sectionIdx: 0,
+    cell: CELL_BARBAZ, cellPath: h.cellPath, paraIdx: 0, charOffset: 0, text: 'bad',
+  }, 'claude', h.safe), 'INVALID_ARGS');
+  assert.equal(h.nested[0], 'inner');
+  assert.equal(h.cells[3][0], 'bar');
+});
+
+test('safe mode replace_range stages and rejects text inside a nested table cell', async () => {
+  const h = makeNestedSafeHarness();
+  const result = await h.executor.execute('replace_range', {
+    expectedRevision: h.revision.revision, sectionIdx: 0, cell: CELL_FOO, cellPath: h.cellPath,
+    startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 3, text: 'upd',
+  }, 'claude', h.safe) as { changeSetId: string };
+  assert.equal(h.nested[0], 'upder');
+  assert.equal(h.cells[2][0], 'foo');
+  assert.equal(h.cells[3][0], 'bar');
+  assert.equal(h.body[1], '');
+  assert.ok(h.calls.includes('deleteRangeInCellByPath'));
+  assert.equal(h.pending.hasPending(), true);
+  h.pending.reject(result.changeSetId);
+  assert.equal(h.nested[0], 'inner');
+});
+
+test('safe mode apply_char_format targets a nested table cell', async () => {
+  const h = makeNestedSafeHarness();
+  const result = await h.executor.execute('apply_char_format', {
+    expectedRevision: h.revision.revision, sectionIdx: 0,
+    cell: CELL_FOO, cellPath: h.cellPath, paraIdx: 0,
+    startOffset: 0, endOffset: 5, bold: true,
+  }, 'claude', h.safe) as { changeSetId: string };
+  assert.ok(h.calls.includes('applyCharFormatInCellByPath'));
+  assert.equal(h.pending.hasPending(), true);
+  h.pending.reject(result.changeSetId);
+  assert.equal(h.nested[0], 'inner');
 });

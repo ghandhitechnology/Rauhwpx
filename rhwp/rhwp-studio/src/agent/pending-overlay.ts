@@ -135,8 +135,19 @@ function createEnterGlyph(): SVGSVGElement {
 
 function rangeKey(range: DocRange | undefined): string {
   if (!range) return '';
-  const cell = range.cell ? `c${range.cell.paraIdx}/${range.cell.controlIdx}/${range.cell.cellIdx}` : '';
+  const cell = range.cell
+    ? `c${range.cell.paraIdx}/${range.cell.controlIdx}/${range.cell.cellIdx}${range.cell.path
+      ? `/${range.cell.path.map((entry) => `${entry.controlIndex}.${entry.cellIndex}.${entry.cellParaIndex}`).join('/')}`
+      : ''}`
+    : '';
   return `s${range.sectionIdx}${cell}:${range.startParaIdx}.${range.startCharOffset}-${range.endParaIdx}.${range.endCharOffset}`;
+}
+
+function cellPathAt(cell: CellAddr, paraIdx: number): string {
+  const path = cell.path ?? [];
+  return JSON.stringify(path.map((entry, index) => index === path.length - 1
+    ? { ...entry, cellParaIndex: paraIdx }
+    : entry));
 }
 
 /**
@@ -360,7 +371,13 @@ export class PendingOverlayRenderer {
 
   private rangeRects(range: DocRange): SelectionRect[] {
     const cell = range.cell;
-    return cell
+    return cell?.path
+      ? this.deps.wasm.getSelectionRectsByPath(
+        range.sectionIdx, cell.paraIdx, cell.path,
+        range.startParaIdx, range.startCharOffset,
+        range.endParaIdx, range.endCharOffset,
+      )
+      : cell
       ? this.deps.wasm.getSelectionRectsInCell(
         range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
         range.startParaIdx, range.startCharOffset,
@@ -375,7 +392,9 @@ export class PendingOverlayRenderer {
 
   private paragraphLength(range: DocRange, paraIdx: number): number {
     const cell = range.cell;
-    return cell
+    return cell?.path
+      ? this.deps.wasm.getCellParagraphLengthByPath(range.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx))
+      : cell
       ? this.deps.wasm.getCellParagraphLength(
         range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx,
       )
@@ -384,7 +403,9 @@ export class PendingOverlayRenderer {
 
   private caretRectAt(range: DocRange, paraIdx: number, charOffset: number): SelectionRect {
     const cell = range.cell;
-    const rect = cell
+    const rect = cell?.path
+      ? this.deps.wasm.getCursorRectByPath(range.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), charOffset)
+      : cell
       ? this.deps.wasm.getCursorRectInCell(
         range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset,
       )
@@ -419,7 +440,9 @@ export class PendingOverlayRenderer {
   private rangeText(range: DocRange, paraIdx: number, start: number, count: number): string {
     if (count <= 0) return '';
     const cell = range.cell;
-    return cell
+    return cell?.path
+      ? this.deps.wasm.getTextInCellByPath(range.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), start, count)
+      : cell
       ? this.deps.wasm.getTextInCell(
         range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
         paraIdx, start, count,
@@ -430,7 +453,11 @@ export class PendingOverlayRenderer {
   private cursorRect(op: ReplaceOverlayOp, scalarOffset: number): SelectionRect {
     const point = pointAtNewScalarOffset(op.range, op.newText, scalarOffset);
     const cell = op.range.cell;
-    const rect = cell
+    const rect = cell?.path
+      ? this.deps.wasm.getCursorRectByPath(
+        op.range.sectionIdx, cell.paraIdx, cellPathAt(cell, point.paraIdx), point.charOffset,
+      )
+      : cell
       ? this.deps.wasm.getCursorRectInCell(
         op.range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
         point.paraIdx, point.charOffset,
@@ -741,10 +768,23 @@ export class PendingOverlayRenderer {
     if (position.sectionIndex !== range.sectionIdx) return false;
     let paraIdx = position.paragraphIndex;
     if (range.cell) {
-      if (position.parentParaIndex !== range.cell.paraIdx
-        || position.controlIndex !== range.cell.controlIdx
-        || position.cellIndex !== range.cell.cellIdx) return false;
-      paraIdx = position.cellParaIndex ?? position.paragraphIndex;
+      if (position.parentParaIndex !== range.cell.paraIdx) return false;
+      if (range.cell.path) {
+        const path = position.cellPath;
+        if (!path || path.length !== range.cell.path.length
+          || !path.every((entry, index) => {
+            const target = range.cell!.path![index];
+            return entry.controlIndex === target.controlIndex
+              && entry.cellIndex === target.cellIndex
+              && (index === path.length - 1 || entry.cellParaIndex === target.cellParaIndex);
+          })) return false;
+        paraIdx = path[path.length - 1].cellParaIndex;
+      } else {
+        if (position.controlIndex !== range.cell.controlIdx
+          || position.cellIndex !== range.cell.cellIdx
+          || (position.cellPath?.length ?? 0) > 1) return false;
+        paraIdx = position.cellParaIndex ?? position.paragraphIndex;
+      }
     } else if (position.parentParaIndex !== undefined) {
       return false;
     }
@@ -828,6 +868,15 @@ export class PendingOverlayRenderer {
       }
       case 'para': {
         if (ref.cell) {
+          if (ref.cell.path) {
+            const len = wasm.getCellParagraphLengthByPath(
+              ref.sectionIdx, ref.cell.paraIdx, cellPathAt(ref.cell, ref.paraIdx),
+            );
+            return wasm.getSelectionRectsByPath(
+              ref.sectionIdx, ref.cell.paraIdx, ref.cell.path,
+              ref.paraIdx, 0, ref.paraIdx, len,
+            );
+          }
           const len = wasm.getCellParagraphLength(ref.sectionIdx, ref.cell.paraIdx, ref.cell.controlIdx, ref.cell.cellIdx, ref.paraIdx);
           return wasm.getSelectionRectsInCell(
             ref.sectionIdx, ref.cell.paraIdx, ref.cell.controlIdx, ref.cell.cellIdx,

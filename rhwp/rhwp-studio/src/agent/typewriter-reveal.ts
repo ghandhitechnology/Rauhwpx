@@ -2,7 +2,7 @@ import type { WasmBridge } from '../core/wasm-bridge.ts';
 import type { EventBus } from '../core/event-bus.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
 import type { SelectionRect } from '../core/types.ts';
-import type { AgentName, DocRange } from './types.ts';
+import type { AgentName, CellAddr, DocRange } from './types.ts';
 import {
   computeExactTextDiff,
   pointAtNewScalarOffset,
@@ -82,6 +82,13 @@ interface RevealItem {
 
 function scalarLen(s: string): number {
   return [...s].length;
+}
+
+function cellPathAt(cell: CellAddr, paraIdx: number): string {
+  const path = cell.path ?? [];
+  return JSON.stringify(path.map((entry, index) => index === path.length - 1
+    ? { ...entry, cellParaIndex: paraIdx }
+    : entry));
 }
 
 /**
@@ -452,7 +459,12 @@ export class AgentTypewriterReveal {
     const cell = r.cell;
     const wasm = this.deps.wasm;
     item.cachedRects = measureInkRange(r, {
-      rects: () => cell
+      rects: () => cell?.path
+        ? wasm.getSelectionRectsByPath(
+          r.sectionIdx, cell.paraIdx, cell.path,
+          r.startParaIdx, r.startCharOffset, r.endParaIdx, r.endCharOffset,
+        )
+        : cell
         ? wasm.getSelectionRectsInCell(
           r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
           r.startParaIdx, r.startCharOffset, r.endParaIdx, r.endCharOffset,
@@ -460,14 +472,18 @@ export class AgentTypewriterReveal {
         : wasm.getSelectionRects(
           r.sectionIdx, r.startParaIdx, r.startCharOffset, r.endParaIdx, r.endCharOffset,
         ),
-      paragraphLength: (paraIdx) => cell
+      paragraphLength: (paraIdx) => cell?.path
+        ? wasm.getCellParagraphLengthByPath(r.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx))
+        : cell
         ? wasm.getCellParagraphLength(
           r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx,
         )
         : wasm.getParagraphLength(r.sectionIdx, paraIdx),
       text: (paraIdx, start, count) => {
         if (count <= 0) return '';
-        return cell
+        return cell?.path
+          ? wasm.getTextInCellByPath(r.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), start, count)
+          : cell
           ? wasm.getTextInCell(
             r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
             paraIdx, start, count,
@@ -475,7 +491,9 @@ export class AgentTypewriterReveal {
           : wasm.getTextRange(r.sectionIdx, paraIdx, start, count);
       },
       caret: (paraIdx, offset) => {
-        const rect = cell
+        const rect = cell?.path
+          ? wasm.getCursorRectByPath(r.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), offset)
+          : cell
           ? wasm.getCursorRectInCell(
             r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, offset,
           )
@@ -494,7 +512,11 @@ export class AgentTypewriterReveal {
       r, item.text, item.hunkStart + Math.max(0, Math.min(scalarOffset, item.textLen)),
     );
     const cell = r.cell;
-    const rect = cell
+    const rect = cell?.path
+      ? this.deps.wasm.getCursorRectByPath(
+        r.sectionIdx, cell.paraIdx, cellPathAt(cell, point.paraIdx), point.charOffset,
+      )
+      : cell
       ? this.deps.wasm.getCursorRectInCell(
         r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, point.paraIdx, point.charOffset,
       )

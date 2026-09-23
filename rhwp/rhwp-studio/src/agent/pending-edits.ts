@@ -257,7 +257,12 @@ export class PendingEditManager {
     const deletedText = this.captureRangeText(range);
     let charShapeId: number | null = null;
     try {
-      const props = range.cell
+      const props = range.cell?.path
+        ? wasm.getCellCharPropertiesAtByPath(
+          range.sectionIdx, range.cell.paraIdx, this.cellPathAt(range.cell, range.startParaIdx),
+          range.startCharOffset,
+        )
+        : range.cell
         ? wasm.getCellCharPropertiesAt(
           range.sectionIdx, range.cell.paraIdx, range.cell.controlIdx, range.cell.cellIdx,
           range.startParaIdx, range.startCharOffset,
@@ -269,7 +274,9 @@ export class PendingEditManager {
     const paraShapeIds: number[] = [];
     for (let p = range.startParaIdx; p <= range.endParaIdx; p++) {
       try {
-        const props = range.cell
+        const props = range.cell?.path
+          ? wasm.getCellParaPropertiesAtByPath(range.sectionIdx, range.cell.paraIdx, this.cellPathAt(range.cell, p))
+          : range.cell
           ? wasm.getCellParaPropertiesAt(range.sectionIdx, range.cell.paraIdx, range.cell.controlIdx, range.cell.cellIdx, p)
           : wasm.getParaPropertiesAt(range.sectionIdx, p);
         paraShapeIds.push(typeof props.paraShapeId === 'number' ? props.paraShapeId : -1);
@@ -366,7 +373,11 @@ export class PendingEditManager {
     }
     // 역서식은 시작 지점 단일 샘플 근사 — 혼합 서식 범위에서는 부정확할 수 있다 (Phase-1 한계).
     const cell = range.cell;
-    const props: CharProperties = cell
+    const props: CharProperties = cell?.path
+      ? this.deps.wasm.getCellCharPropertiesAtByPath(
+        range.sectionIdx, cell.paraIdx, this.cellPathAt(cell, range.startParaIdx), range.startCharOffset,
+      )
+      : cell
       ? this.deps.wasm.getCellCharPropertiesAt(
         range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
         range.startParaIdx, range.startCharOffset,
@@ -1247,29 +1258,48 @@ export class PendingEditManager {
 
   // ─── 컨테이너(본문/셀) 추상 접근자 ─────────────────────
 
+  private cellPathAt(cell: CellAddr, para: number): string {
+    return JSON.stringify(cell.path?.map((entry, index) => index === cell.path!.length - 1
+      ? { ...entry, cellParaIndex: para }
+      : entry));
+  }
+
   private containerParaCount(sec: number, cell?: CellAddr): number {
     const wasm = this.deps.wasm;
-    return cell
+    return cell?.path
+      ? wasm.getCellParagraphCountByPath(sec, cell.paraIdx, this.cellPathAt(cell, 0))
+      : cell
       ? wasm.getCellParagraphCount(sec, cell.paraIdx, cell.controlIdx, cell.cellIdx)
       : wasm.getParagraphCount(sec);
   }
 
   private containerParaLen(sec: number, para: number, cell?: CellAddr): number {
     const wasm = this.deps.wasm;
-    return cell
+    return cell?.path
+      ? wasm.getCellParagraphLengthByPath(sec, cell.paraIdx, this.cellPathAt(cell, para))
+      : cell
       ? wasm.getCellParagraphLength(sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, para)
       : wasm.getParagraphLength(sec, para);
   }
 
   private containerText(sec: number, para: number, off: number, count: number, cell?: CellAddr): string {
     const wasm = this.deps.wasm;
-    return cell
+    return cell?.path
+      ? wasm.getTextInCellByPath(sec, cell.paraIdx, this.cellPathAt(cell, para), off, count)
+      : cell
       ? wasm.getTextInCell(sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, para, off, count)
       : wasm.getTextRange(sec, para, off, count);
   }
 
   private deleteRangeRaw(r: DocRange): { ok: boolean } {
     const wasm = this.deps.wasm;
+    if (r.cell?.path) {
+      const raw = wasm.deleteRangeInCellByPath(
+        r.sectionIdx, r.cell.paraIdx, this.cellPathAt(r.cell, r.startParaIdx),
+        r.startParaIdx, r.startCharOffset, r.endParaIdx, r.endCharOffset,
+      );
+      return this.parseOk(raw, 'deleteRangeInCellByPath') as { ok: boolean };
+    }
     return r.cell
       ? wasm.deleteRangeInCell(
         r.sectionIdx, r.cell.paraIdx, r.cell.controlIdx, r.cell.cellIdx,
@@ -1280,7 +1310,12 @@ export class PendingEditManager {
 
   private applyFormatRaw(range: DocRange, format: CharFormatProps): string {
     const wasm = this.deps.wasm;
-    return range.cell
+    return range.cell?.path
+      ? wasm.applyCharFormatInCellByPath(
+        range.sectionIdx, range.cell.paraIdx, this.cellPathAt(range.cell, range.startParaIdx),
+        range.startCharOffset, range.endCharOffset, JSON.stringify(format),
+      )
+      : range.cell
       ? wasm.applyCharFormatInCell(
         range.sectionIdx, range.cell.paraIdx, range.cell.controlIdx, range.cell.cellIdx,
         range.startParaIdx, range.startCharOffset, range.endCharOffset, JSON.stringify(format),
@@ -1968,7 +2003,7 @@ export class PendingEditManager {
           } else if ((o.type === 'paraFormat' || o.type === 'applyStyle' || o.type === 'insertEquation')
             && o.cell && o.sectionIdx === sectionIdx
             && o.cell.paraIdx === paraIdx && hit(o.cell.controlIdx)) {
-            o.cell = { ...o.cell, controlIdx: o.cell.controlIdx + delta };
+            o.cell = this.shiftCellControl(o.cell, delta);
           } else if (o.type === 'insertNote'
             && o.sectionIdx === sectionIdx && o.anchor
             && o.anchor.paraIdx === paraIdx && hit(o.anchor.controlIdx)) {
@@ -1986,10 +2021,20 @@ export class PendingEditManager {
         if (op.kind === 'template') continue;
         const c = op.range.cell;
         if (c && op.range.sectionIdx === sectionIdx && c.paraIdx === paraIdx && hit(c.controlIdx)) {
-          op.range.cell = { ...c, controlIdx: c.controlIdx + delta };
+          op.range.cell = this.shiftCellControl(c, delta);
         }
       }
     }
+  }
+
+  private shiftCellControl(cell: CellAddr, delta: 1 | -1): CellAddr {
+    return {
+      ...cell,
+      controlIdx: cell.controlIdx + delta,
+      ...(cell.path ? { path: cell.path.map((entry, index) => index === 0
+        ? { ...entry, controlIndex: entry.controlIndex + delta }
+        : entry) } : {}),
+    };
   }
 
   /** 셀에 멀티라인 텍스트 채우기 (createTable cells[][] 전용 — 새 표라 셀 문단은 1개) */
@@ -2054,7 +2099,12 @@ export class PendingEditManager {
     // wasm 은 삽입 후 오프셋을 스칼라 단위로 반환한다 — JS .length(UTF-16) 대신
     // 반환값을 쓰면 astral 문자에서도 오프셋이 어긋나지 않는다.
     const insertLine = (p: number, o: number, line: string): number => {
-      const res = cell
+      const res = cell?.path
+        ? this.parseOk(
+          wasm.insertTextInCellByPath(sec, cell.paraIdx, this.cellPathAt(cell, p), o, line),
+          'insertTextInCellByPath',
+        )
+        : cell
         ? this.parseOk(
           wasm.insertTextInCell(sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, p, o, line),
           'insertTextInCell',
@@ -2065,7 +2115,12 @@ export class PendingEditManager {
     // 에이전트의 `\n`은 한 논리 삽입 안의 줄 경계다. 논리 분할은 Enter 상속에서
     // 강제 쪽/단 나눔만 빼고 엔진이 처리하므로, 분할 뒤 교정 서식 호출이 없다.
     const splitPara = (p: number, o: number) => {
-      if (cell) {
+      if (cell?.path) {
+        this.parseOk(
+          wasm.splitParagraphInCellByPath(sec, cell.paraIdx, this.cellPathAt(cell, p), o),
+          'splitParagraphInCellByPath',
+        );
+      } else if (cell) {
         this.parseOk(
           wasm.splitParagraphInCellLogical(sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, p, o),
           'splitParagraphInCellLogical',
@@ -2341,7 +2396,12 @@ export class PendingEditManager {
         const shapeId = op.paraShapeIds[i];
         if (shapeId < 0) continue;
         try {
-          if (op.range.cell) {
+          if (op.range.cell?.path) {
+            wasm.setCellParaShapeIdByPath(
+              op.range.sectionIdx, op.range.cell.paraIdx,
+              this.cellPathAt(op.range.cell, start.paraIdx + i), shapeId,
+            );
+          } else if (op.range.cell) {
             wasm.setCellParaShapeId(
               op.range.sectionIdx, op.range.cell.paraIdx, op.range.cell.controlIdx, op.range.cell.cellIdx,
               start.paraIdx + i, shapeId,
@@ -2405,7 +2465,12 @@ export class PendingEditManager {
       const from = p === range.startParaIdx ? range.startCharOffset : 0;
       const to = p === range.endParaIdx ? range.endCharOffset : len;
       if (to <= from) continue;
-      const raw = range.cell
+      const raw = range.cell?.path
+        ? wasm.setCharShapeIdInCellByPath(
+          range.sectionIdx, range.cell.paraIdx, this.cellPathAt(range.cell, p),
+          from, to, charShapeId,
+        )
+        : range.cell
         ? wasm.setCharShapeIdInCell(
           range.sectionIdx, range.cell.paraIdx, range.cell.controlIdx, range.cell.cellIdx,
           p, from, to, charShapeId,

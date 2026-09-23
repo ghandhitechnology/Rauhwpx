@@ -36,7 +36,7 @@ export const BATCHABLE_EDIT_TOOL_NAMES = Object.freeze([
   'insert_equation',
 ]);
 export const OFFSET_CAVEAT = 'charOffset counts text characters only; paragraphs containing inline controls (tables/pictures) may have offsets that do not map 1:1 to what you see — prefer find_text to locate exact offsets.';
-export const CELL_NOTE = "To target text INSIDE a table cell, pass the optional cell parameter (assemble it from the table entry's paraIdx/controlIdx in get_structure tables[] plus the cell's cellIdx, or copy a find_text match verbatim); paragraph indexes and offsets are then relative to that cell.";
+export const CELL_NOTE = "To target text INSIDE a table cell, pass cell (assemble it from the table entry's paraIdx/controlIdx in get_structure tables[] plus the cell's cellIdx, or copy a find_text match). For a nested table cell, copy BOTH cell and cellPath from get_selection. Paragraph indexes and offsets are relative to the innermost cell.";
 
 export function cellParam() {
   return z.object({
@@ -44,6 +44,14 @@ export function cellParam() {
     controlIdx: z.number().int().min(0).describe('Table control index within that paragraph'),
     cellIdx: z.number().int().min(0).describe('Flat cell index (row-major; merged cells count once)'),
   }).optional().describe('Table cell address. When present, paraIdx/startParaIdx/endParaIdx and offsets refer to paragraphs INSIDE this cell. Assemble it from the TABLE entry in get_structure tables[] (its paraIdx/controlIdx) plus the target cell\'s cellIdx — the per-cell entries in get_structure do NOT carry paraIdx/controlIdx; only a find_text match contains a complete cell object you can copy verbatim.');
+}
+
+export function cellPathParam() {
+  return z.array(z.object({
+    controlIndex: z.number().int().min(0),
+    cellIndex: z.number().int().min(0),
+    cellParaIndex: z.number().int().min(0),
+  })).min(1).max(8).optional().describe('Nested table path from get_selection. Pass together with cell; the final cellParaIndex is replaced by the tool paragraph index.');
 }
 
 /** edit_table set_zone_borders 의 테두리 한 변 스펙. */
@@ -379,7 +387,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_structure',
-    description: `Entry-point tool: returns the document outline — every section and paragraph with its address (sectionIdx/paraIdx), length and a text preview. Sections also carry tables[]: each table's location (paraIdx/controlIdx), dimensions, and every cell with its cellIdx, row/col and cell paragraph text — use those addresses as the cell parameter of read/write tools to work with text inside tables. Call this first to learn addresses and the current revision. ${REVISION_NOTE}`,
+    description: `Entry-point tool: returns the document outline — every section and paragraph with its address (sectionIdx/paraIdx), length and a text preview. Sections also carry top-level tables[]: each table's location (paraIdx/controlIdx), dimensions, and every cell with its cellIdx, row/col and cell paragraph text — use those addresses as the cell parameter of read/write tools. For nested table text, use find_text to obtain both cell and cellPath, or get_selection when the cursor is in the target cell. Call this first to learn addresses and the current revision. ${REVISION_NOTE}`,
     shape: {
       maxPreviewChars: z.number().int().min(0).max(500).default(120).optional()
         .describe('Max preview characters per paragraph (default 120, max 500)'),
@@ -396,11 +404,12 @@ const BASE_TOOL_DEFINITIONS = [
       charOffset: z.number().int().min(0).default(0).optional().describe('Start offset within the paragraph (default 0)'),
       count: z.number().int().min(0).optional().describe('Number of chars to read (default: to end of paragraph)'),
       cell: cellParam(),
+      cellPath: cellPathParam(),
     },
   },
   {
     name: 'get_selection',
-    description: `Get the user's current cursor position and selection (if any) with document addresses. ${REVISION_NOTE}`,
+    description: `Get the user's current cursor position and selection (if any) with document addresses. Inside a nested table, copy both cell and cellPath from a returned point to staged cell text tools. ${REVISION_NOTE}`,
     shape: {},
   },
   {
@@ -425,7 +434,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'find_text',
-    description: `Search the document body AND table cell text for a string; returns matches with exact addresses (sectionIdx, paraIdx, charOffset, length) plus surrounding context. Matches inside a table cell carry a cell object — pass it verbatim as the cell parameter of read/write tools (paraIdx of such a match is the paragraph index inside the cell). A match never spans paragraphs: the query only matches text within a single paragraph. Use this to locate precise offsets before editing. ${REVISION_NOTE}`,
+    description: `Search the document body AND table cell text, including nested cells, for a string; returns exact addresses (sectionIdx, paraIdx, charOffset, length) plus context. Table cell matches carry cell; nested matches also carry cellPath. Pass both fields to read/write tools for a nested match. paraIdx is relative to the matched cell. A match never spans paragraphs. Use this to locate precise offsets before editing. ${REVISION_NOTE}`,
     shape: {
       query: z.string().min(1),
       caseSensitive: z.boolean().default(false).optional(),
@@ -450,6 +459,7 @@ const BASE_TOOL_DEFINITIONS = [
       sectionIdx: z.number().int().min(0),
       paraIdx: z.number().int().min(0),
       cell: cellParam(),
+      cellPath: cellPathParam(),
     },
   },
   {
@@ -460,6 +470,7 @@ const BASE_TOOL_DEFINITIONS = [
       paraIdx: z.number().int().min(0),
       charOffset: z.number().int().min(0),
       cell: cellParam(),
+      cellPath: cellPathParam(),
     },
   },
   {
@@ -529,6 +540,7 @@ const BASE_TOOL_DEFINITIONS = [
       charOffset: z.number().int().min(0),
       text: z.string().min(1).max(10000),
       cell: cellParam(),
+      cellPath: cellPathParam(),
     },
   },
   {
@@ -577,7 +589,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'delete_range',
-    description: `Delete a text range. The text is removed immediately, so re-reads no longer show it and coordinates after the range shift — the response's collapsedAt gives the collapse point for inserting replacement text. To rewrite a section, prefer replace_range (one atomic op). ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    description: `Delete a text range. The text is removed immediately, so re-reads no longer show it and coordinates after the range shift — the response's collapsedAt gives the collapse point for inserting replacement text. Body ranges that cross a table are rejected; use cell/cellPath to edit inside it. To rewrite a section, prefer replace_range (one atomic op). ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -586,11 +598,12 @@ const BASE_TOOL_DEFINITIONS = [
       endParaIdx: z.number().int().min(0),
       endCharOffset: z.number().int().min(0),
       cell: cellParam(),
+      cellPath: cellPathParam(),
     },
   },
   {
     name: 'replace_range',
-    description: `Replace a text range: the old text is swapped for the new text immediately. Prefer this over delete_range + insert_text — it is one atomic op and preserves formatting. ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    description: `Replace a text range: the old text is swapped for the new text immediately. Body ranges that cross a table are rejected; use cell/cellPath to edit inside it. Prefer this over delete_range + insert_text — it is one atomic op and preserves formatting. ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -600,6 +613,7 @@ const BASE_TOOL_DEFINITIONS = [
       endCharOffset: z.number().int().min(0),
       text: z.string().min(1).max(10000),
       cell: cellParam(),
+      cellPath: cellPathParam(),
     },
   },
   {
@@ -612,6 +626,7 @@ const BASE_TOOL_DEFINITIONS = [
       startOffset: z.number().int().min(0),
       endOffset: z.number().int().min(0),
       cell: cellParam(),
+      cellPath: cellPathParam(),
       bold: z.boolean().optional(),
       italic: z.boolean().optional(),
       underline: z.boolean().optional(),
