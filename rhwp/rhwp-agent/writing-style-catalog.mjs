@@ -10,6 +10,7 @@ const CODEX_MODELS = Object.freeze([
 ]);
 
 const CLAUDE_MODELS = Object.freeze([
+  { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
   { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
   { id: 'opus', name: 'Claude Opus', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
   { id: 'fable', name: 'Claude Fable', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },

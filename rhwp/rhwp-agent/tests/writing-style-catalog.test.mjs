@@ -39,6 +39,7 @@ test('new Codex and Claude models resolve for calibration', () => {
     { agent: 'codex', model: 'gpt-6-sol', effort: 'max' },
     { agent: 'codex', model: 'gpt-6-luna', effort: 'high' },
     { agent: 'claude', model: 'claude-opus-5-5', effort: 'medium' },
+    { agent: 'claude', model: 'claude-fable-5-1', effort: 'high' },
   ]) {
     assert.deepEqual(resolveWritingStyleSelection(selection), selection);
   }
