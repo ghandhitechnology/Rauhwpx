@@ -1301,7 +1301,7 @@ fn parse_para_shape_switch(
                         b"margin" | b"intent" | b"left" | b"right" | b"prev" | b"next" => {
                             // margin 하위 요소들: <left value="..." />, <prev value="..." /> 등
                             let tag_name = local;
-                            // [#6875]
+                            // 한컴은 홀수 저장값의 case 절반을 unit="CHAR" 로 표시한다. [#6875]
                             let mut val = None;
                             let mut char_unit = false;
                             for attr in ce.attributes().flatten() {
