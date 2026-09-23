@@ -64,3 +64,20 @@ test('bringShapeToFront 는 z순서 변경을 executeOperation snapshot 으로 �
   assert.match(body, /operationType:\s*'changeZOrder'/, 'changeZOrder 로 분류');
   assert.match(body, /wasm\.changeObjectZOrder\s*\(/, '뮤테이션 자체는 operation 콜백에 존재');
 });
+
+test('연결선 클릭은 z순서나 문서를 바꾸지 않고 선택만 한다', () => {
+  const body = fnBody(mouseSrc, 'function selectLineObjectFromHit');
+  assert.doesNotMatch(body, /bringShapeToFront\(/, '단순 클릭은 선을 맨 앞으로 옮기면 안 됨');
+  assert.doesNotMatch(body, /executeOperation\(/, '단순 클릭은 Undo 항목을 만들면 안 됨');
+  assert.match(body, /enterPictureObjectSelectionRef\(/, '선 객체 선택으로 진입');
+});
+
+test('본문 클릭은 연결선 hit를 표/글상자 hit-test보다 먼저 소비한다', () => {
+  const body = fnBody(mouseSrc, 'export function onClick');
+  const earlyLine = body.indexOf("earlyObjectHit?.type === 'line'");
+  const wasmHit = body.indexOf('this.wasm.hitTest(pageIdx, pageX, pageY)');
+  assert.notEqual(earlyLine, -1, 'early line 분기가 있어야 한다');
+  assert.notEqual(wasmHit, -1, '본문 hitTest가 있어야 한다');
+  assert.ok(earlyLine < wasmHit, '선 선택을 본문 컨테이너 hit보다 먼저 확정해야 한다');
+  assert.match(body, /selectLineObjectFromHit\.call\(this, earlyObjectHit\)/);
+});

@@ -112,7 +112,7 @@ test('selection identity and hit conversion retain the complete object address',
   assert.equal(sameAddressedObject(nested, { ...nested }), true);
   assert.match(cursor, /sameAddressedObject\(r, ref\)/);
   assert.match(cursor, /enterPictureObjectSelectionRef\(ref: PictureSelectionRef\)/);
-  assert.match(mouse, /enterPictureObjectSelectionRef\(\{ \.\.\.picHit, type: 'line' \}\)/);
+  assert.match(mouse, /enterPictureObjectSelectionRef\(\{ \.\.\.(?:picHit|lineHit), type: 'line' \}\)/);
   assert.match(mouse, /enterPictureObjectSelectionRef\(\{ \.\.\.picHit, type: 'shape' \}\)/);
   assert.match(mouse, /enterPictureObjectSelectionRef\(textBoxHit\)/);
   assert.match(input, /findShapeByOuterClick\([\s\S]*item\.cellPath[\s\S]*item\.noteRef[\s\S]*item\.memoRef/);

@@ -80,6 +80,10 @@ test('대체 영문 배열과 수정자 없는 입력을 보존한다', () => {
   assert.equal(command({ key: '+', code: 'Equal', ctrlKey: true, shiftKey: true }), 'view:zoom-in');
 });
 
+test('Command+Z는 macOS에서도 되돌리기로 매핑한다', () => {
+  assert.equal(command({ key: 'z', code: 'KeyZ', metaKey: true }, 'mac'), 'edit:undo');
+});
+
 
 test('AltGr 문자 입력은 Ctrl+Alt 서식 단축키로 처리하지 않는다', () => {
   const event = key({ key: 'ą', code: 'KeyA', ctrlKey: true, altKey: true });

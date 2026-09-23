@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 
 import {
   clearObjectEditingPage,
+  objectSelectionViewportBox,
   summarizeObjectSelection,
 } from '../src/engine/object-selection-page.ts';
 
@@ -59,4 +60,22 @@ test('표 개체 선택 해제 리스너는 렌더 clear helper로 편집 페이
 
   assert.match(listener, /this\.clearTableObjectSelectionRender\(\)/);
   assert.doesNotMatch(listener, /this\.tableObjectRenderer\?\.clear\(\)/);
+});
+
+test('두 쪽 보기에서는 선택 핸들도 실제 선택 쪽의 left를 쓴다', () => {
+  const page7 = objectSelectionViewportBox(
+    { pageIndex: 6, x: 100, y: 200, w: 50, h: 40 },
+    1,
+    24,
+    840,
+  );
+  const page8 = objectSelectionViewportBox(
+    { pageIndex: 7, x: 100, y: 200, w: 50, h: 40 },
+    1,
+    1024,
+    840,
+  );
+
+  assert.deepEqual(page7, { left: 124, top: 1040, width: 50, height: 40 });
+  assert.deepEqual(page8, { left: 1124, top: 1040, width: 50, height: 40 });
 });

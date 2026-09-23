@@ -1639,12 +1639,13 @@ export class CursorState {
     missing?: boolean,
     memoRef?: any,
     innerControlIdx?: number,
+    pageIndex?: number,
   ): void {
     this.exitTableObjectSelection();
     this._pictureObjectSelected = true;
     this.selectedPictureRef = {
       sec, ppi, ci, type, cellIdx, cellParaIdx, innerControlIdx, outerTableControlIdx,
-      cellPath, noteRef, memoRef, headerFooter, missing,
+      cellPath, noteRef, memoRef, headerFooter, missing, pageIndex,
     };
     this.selectedPictureRefs = [{ ...this.selectedPictureRef }];
   }
@@ -1665,6 +1666,7 @@ export class CursorState {
       ref.missing,
       ref.memoRef,
       ref.innerControlIdx,
+      ref.pageIndex,
     );
   }
 

@@ -630,6 +630,8 @@ export interface ObjectRef {
   headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
   /** 이미지 데이터가 없는 placeholder 개체. */
   missing?: boolean;
+  /** 마우스 hit 당시의 실제 page layout. 동일 주소의 분할 항목 선택에 사용한다. */
+  pageIndex?: number;
 }
 
 /** WASM getShapeProperties() 반환 타입 */
