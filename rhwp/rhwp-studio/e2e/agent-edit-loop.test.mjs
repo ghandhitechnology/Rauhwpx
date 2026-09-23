@@ -772,6 +772,17 @@ try {
         JSON.stringify(after.layout) === JSON.stringify(previewLayout),
         `approve 전후 page map 동일 (preview=${JSON.stringify(previewLayout)}, approved=${JSON.stringify(after.layout)})`,
       );
+      const undoIdentity = await page.evaluate(() => {
+        const ih = window.__inputHandler;
+        const entry = ih.getAgentUndoEntry();
+        return {
+          captured: entry !== null,
+          wrongEntryRejected: ih.undoAgentTurn({}) === false,
+          entryUnchanged: ih.getAgentUndoEntry() === entry,
+        };
+      });
+      assert(undoIdentity.captured && undoIdentity.wrongEntryRejected && undoIdentity.entryUnchanged,
+        '승인한 에이전트 턴의 undo 정체성을 확인하고 다른 항목의 되돌리기를 거부');
       const refreshedLayout = await page.evaluate((paras) => {
         const w = window.__wasm;
         w.refreshLayout();

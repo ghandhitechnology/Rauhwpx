@@ -4914,7 +4914,7 @@ body.ag-fullscreen-open .ag-collapse-tab,
 }
 
 .ag-fullscreen .ag-review-resize {
-  right: calc(var(--ag-review-w, 480px) + 6px);
+  right: calc(var(--ag-review-w, 560px) + 6px);
 }
 
 .ag-fullscreen .ag-rail-resize::after,
@@ -5442,19 +5442,19 @@ body.ag-col-resizing {
 }
 
 .ag-fullscreen.ag-review-drawer-open:not(.ag-review-collapsed) .ag-stage {
-  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr) var(--ag-review-w, 480px);
+  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr) var(--ag-review-w, 560px);
 }
 
 .ag-fullscreen.ag-rail-collapsed.ag-review-drawer-open:not(.ag-review-collapsed) .ag-stage {
-  grid-template-columns: 0 minmax(0, 1fr) var(--ag-review-w, 480px);
+  grid-template-columns: 0 minmax(0, 1fr) var(--ag-review-w, 560px);
 }
 
 .ag-fullscreen.ag-plan-drawer-open:not(.ag-plan-collapsed) .ag-stage {
-  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr) var(--ag-review-w, 480px);
+  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr) var(--ag-review-w, 560px);
 }
 
 .ag-fullscreen.ag-rail-collapsed.ag-plan-drawer-open:not(.ag-plan-collapsed) .ag-stage {
-  grid-template-columns: 0 minmax(0, 1fr) var(--ag-review-w, 480px);
+  grid-template-columns: 0 minmax(0, 1fr) var(--ag-review-w, 560px);
 }
 
 /* A class mirrors the compact breakpoint so an in-flight grid transition
@@ -6256,7 +6256,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 .ag-fullscreen .ag-review-resize {
   top: 48px;
-  right: calc(var(--ag-review-w, 480px) - 3px);
+  right: calc(var(--ag-review-w, 560px) - 3px);
 }
 
 .ag-fullscreen .ag-rail-resize {
@@ -6456,7 +6456,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   left: auto;
   z-index: 12;
   grid-row: auto;
-  width: min(var(--ag-review-w, 480px), 88vw);
+  width: min(var(--ag-review-w, 560px), 88vw);
   border-left: 1px solid var(--ag-border);
   box-shadow: var(--n-elev-3);
   opacity: 0;

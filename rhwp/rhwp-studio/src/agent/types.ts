@@ -1273,4 +1273,4 @@ export type PendingEditsChangeEvent =
   | { type: 'set-finalized'; changeSetId: string }
   | { type: 'approved'; changeSetId: string }
   | { type: 'rejected'; changeSetId: string }
-  | { type: 'invalidated'; reason: string };
+  | { type: 'invalidated'; reason: string; changeSetId?: string; droppedOpIds?: string[] };

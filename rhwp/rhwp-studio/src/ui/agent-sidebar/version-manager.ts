@@ -1,6 +1,7 @@
 import './versions.css';
 
 import { confirmSheet } from './sheet.ts';
+import type { DiffItem } from '../../compare/types.ts';
 import { createIcon } from './icons.ts';
 
 export type VersionTab = 'history' | 'branches' | 'shelves';
@@ -87,6 +88,9 @@ export interface VersionManagerController {
   restore(commitId: string): Promise<void>;
   adopt(commitId: string): Promise<void>;
   compare(commitId: string): Promise<void>;
+  diffWorkingTree(): Promise<DiffItem[]>;
+  diffCommit(commitId: string): Promise<DiffItem[]>;
+  discardUncommitted(): Promise<void>;
   amendTitle(commitId: string, title: string): Promise<void>;
   createBranch(name: string, fromCommitId?: string): Promise<void>;
   switchBranch(name: string): Promise<void>;

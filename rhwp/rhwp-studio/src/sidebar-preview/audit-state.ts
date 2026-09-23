@@ -26,6 +26,7 @@ function select(id: string, value: string): void {
 
 /** Prepare fixtures through the same controls used in the shipping sidebar. */
 export async function applyAuditState(preview: SidebarPreview, params: URLSearchParams): Promise<void> {
+  if (params.get('permission') === 'unrestricted') preview.bridge.setPermissionProfile('unrestricted');
   const browserbase = params.get('browserbase');
   if (browserbase === 'ready' || browserbase === 'setup' || browserbase === 'error')
     preview.setBrowserbaseState(browserbase === 'ready' ? 'connected' : browserbase);
@@ -80,6 +81,15 @@ export async function applyAuditState(preview: SidebarPreview, params: URLSearch
     if (!row.open) await click(`${rowSelector} summary`);
   }
   if (surface && surfaces[surface]) await click(surfaces[surface]);
+  if (surface === 'changes') {
+    document.querySelector('.ag-settings-page')!.dispatchEvent(
+      new CustomEvent('ag-settings-expand-request', { bubbles: true }),
+    );
+    await until(() => document.querySelector('.ag-root.ag-fullscreen'), 'full-screen workspace');
+    await click('.ag-workspace-settings-back');
+    await click('.ag-environment-changes');
+    await until(() => document.querySelector('.ag-root.ag-review-drawer-open'), 'changes drawer');
+  }
   if (params.get('terminal') === '1' && surface === 'provider-setup' && params.get('provider') === 'claude') {
     await click('.ag-agent-setup-pane:not([hidden]) .ag-agent-setup-primary');
     await until(() => document.querySelector('.ag-setup-terminal:not([hidden]) .xterm'), 'login terminal');

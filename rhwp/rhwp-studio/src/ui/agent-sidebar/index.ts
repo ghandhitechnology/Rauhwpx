@@ -9,6 +9,10 @@
 import './motion.css';
 import './agent-sidebar.css';
 import { confirmSheet } from './sheet.ts';
+import { createChangesDrawer, renderPendingOpDiff, renderPendingOpsDiff, summarizeDiffItems } from './changes-drawer.ts';
+import { TurnChanges } from './turn-changes.ts';
+import type { DiffItem } from '../../compare/types.ts';
+import type { DocumentPosition } from '../../core/types.ts';
 
 import type { EventBus } from '../../core/event-bus.ts';
 import type { SidebarBridge } from '../../agent/bridge.ts';
@@ -18,7 +22,6 @@ import type {
   AgentStreamEvent,
   AgentWorkflow,
   AgentWorkflowState,
-  DocRange,
   PermissionProfile,
   ServiceTier,
   PendingChangeSet,
@@ -88,7 +91,7 @@ import {
 } from '../../agent/chat-status.ts';
 import { createChevron, createColumnIcon } from '../chevron.ts';
 import { showActionMenu } from '../action-menu.ts';
-import { createHieumGlyph, createIcon, createStopIcon, OP_ICON } from './icons.ts';
+import { createHieumGlyph, createIcon, createStopIcon } from './icons.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
 import { createEffortSlider } from './effort-slider.ts';
 import { createSubagentFleet, isSpawnToolName } from './subagent-fleet.ts';
@@ -213,6 +216,9 @@ export interface AgentSidebarDeps {
   isEditingCloudDraft?: (sessionId: string) => boolean;
   /** 현재 문서의 로컬 커밋과 브랜치를 관리한다. */
   versionController?: VersionManagerController;
+  getAgentUndoEntry?: () => object | null;
+  undoAgentTurn?: (entry: object) => boolean;
+  navigateToChange?: (position: DocumentPosition, anchor?: DiffItem['rightAnchor']) => void;
   /** 기존 RHWP 문서 이력 대화상자를 연다. */
   openClassicVersionControl?: () => void;
 }
@@ -378,7 +384,7 @@ const RAIL_WIDTH_KEY = 'rhwp-agent-rail-width';
 const RAIL_WIDTH_DEFAULT = 264;
 const RAIL_WIDTH_MIN = 200;
 const REVIEW_WIDTH_KEY = 'rhwp-agent-review-width';
-const REVIEW_WIDTH_DEFAULT = 480;
+const REVIEW_WIDTH_DEFAULT = 560;
 const REVIEW_WIDTH_MIN = 320;
 
 function maxRailWidth(viewportWidth = window.innerWidth): number {
@@ -446,9 +452,6 @@ const CONN_LABEL: Record<ConnectionState, string> = {
   replaced: '다른 탭에서 사용 중',
 };
 
-/** 리뷰 카드에 개별 표시할 최대 op 수 (초과분은 "외 N건"으로 축약). */
-const MAX_REVIEW_OP_LINES = 6;
-
 /* ── 작업 방식 (Direct / Plan / Question) ─────────────────
    계약은 `agent/types.ts`(AgentWorkflow · AgentPhase · StructuredPlan ·
    AgentWorkflowState)와 `agent/bridge.ts`(getWorkflowState · setWorkflow ·
@@ -497,90 +500,6 @@ function prettyJson(s: string): string {
   } catch {
     return s;
   }
-}
-
-const OBJECT_OP_LABELS: Record<string, string> = {
-  createTable: '표 만들기',
-  insertImage: '그림 삽입',
-  insertEquation: '수식 삽입',
-  tableStructure: '표 구조 변경',
-  tableStructureMarked: '표 구조 변경(승인 시 적용)',
-  deleteTable: '표 삭제(승인 시 적용)',
-  setCellProps: '셀 속성(승인 시 적용)',
-  setTableProps: '표 속성(승인 시 적용)',
-  setColumnWidths: '열 폭 설정(승인 시 적용)',
-  fitToPage: '쪽 폭 맞춤(승인 시 적용)',
-  setZoneProps: '셀 범위 테두리/배경(승인 시 적용)',
-  applyFormula: '계산식 결과 입력(승인 시 적용)',
-  setCaption: '캡션 설정(승인 시 적용)',
-  paraFormat: '문단 서식',
-  applyStyle: '스타일 적용(승인 시 적용)',
-  pageLayout: '쪽 설정',
-  headerFooter: '머리말/꼬리말',
-  insertNote: '각주/미주 삽입',
-  setNoteText: '각주/미주 수정',
-  bookmark: '책갈피',
-};
-
-function opPreview(op: PendingOp): string {
-  switch (op.kind) {
-    case 'insert':
-    case 'delete':
-      return op.text.replace(/\n/g, '⏎');
-    case 'replace':
-      // 빈 새 텍스트 = 즉시 적용된 삭제
-      if (op.text.length === 0) return op.deletedText.replace(/\n/g, '⏎');
-      return `${op.deletedText.replace(/\n/g, '⏎')} → ${op.text.replace(/\n/g, '⏎')}`;
-    case 'format':
-      return JSON.stringify(op.format);
-    case 'field':
-      return `${op.name} → ${op.newValue}`;
-    case 'template':
-      return `${op.label} · template r${op.templateRevision}`;
-    case 'object': {
-      const label = OBJECT_OP_LABELS[op.obj.type] ?? op.obj.type;
-      if (op.obj.type === 'createTable') return `${label} ${op.obj.rows}×${op.obj.cols}`;
-      if (op.obj.type === 'insertEquation') return `${label} ${op.obj.script.slice(0, 40)}`;
-      if (op.obj.type === 'tableStructure' || op.obj.type === 'tableStructureMarked') {
-        return `${label}: ${op.obj.op}`;
-      }
-      if (op.obj.type === 'insertNote') {
-        return `${op.obj.noteKind === 'endnote' ? '미주' : '각주'} 삽입: ${op.obj.text.slice(0, 40)}`;
-      }
-      if (op.obj.type === 'setNoteText') return `${label}: ${op.obj.text.slice(0, 40)}`;
-      if (op.obj.type === 'bookmark') {
-        const opName = op.obj.op === 'add' ? '추가' : op.obj.op === 'delete' ? '삭제' : '이름 변경';
-        return `${label} ${opName}${op.obj.name ? `: ${op.obj.name}` : ''}`;
-      }
-      return label;
-    }
-  }
-}
-
-/**
- * op 좌표 readout — `§1 ¶42 c0–18`. 편집이 어디에 걸리는지 카드가 스스로
- * 말하게 한다(본문 좌표계, 0-based). 셀 안이면 셀 인덱스를 앞에 붙인다.
- */
-function opAddress(range: DocRange): string {
-  const section = `§${range.sectionIdx + 1}`;
-  const cell = range.cell ? ` ▦${range.cell.cellIdx}` : '';
-  const sameParagraph = range.startParaIdx === range.endParaIdx;
-  const para = sameParagraph
-    ? `¶${range.startParaIdx}`
-    : `¶${range.startParaIdx}–${range.endParaIdx}`;
-  const chars = sameParagraph
-    ? ` c${range.startCharOffset}–${range.endCharOffset}`
-    : ` c${range.startCharOffset}→${range.endCharOffset}`;
-  return `${section}${cell} ${para}${chars}`;
-}
-
-/** 부호 열(−/+)을 가진 diff 한 줄. 부호는 장식이 아니라 정렬 기준이다. */
-function buildDiffLine(kind: 'add' | 'del' | 'ctx', text: string): HTMLElement {
-  const line = el('div', `ag-diff-line ag-diff-${kind}`);
-  const sign = el('span', 'ag-diff-sign', kind === 'add' ? '+' : kind === 'del' ? '−' : '·');
-  sign.setAttribute('aria-hidden', 'true');
-  line.append(sign, el('span', 'ag-diff-text', truncate(text.replace(/\n/g, '⏎'), 120)));
-  return line;
 }
 
 /**
@@ -779,6 +698,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let desktopEnvironmentPanelOpen = environmentPanelOpen;
   // 검토 drawer는 focus mode에 들어갈 때마다 닫힌 상태로 시작하며,
   // 환경 패널의 `변경 사항` 행을 눌렀을 때만 열린다.
+  const turnChanges = new TurnChanges();
+  let turnOwnerThreadId: string | null = null;
+  let workingDiff: DiffItem[] = [];
+  let changesRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   let reviewColCollapsed = true;
   let planColCollapsed = true;
   let planMinimized = false;
@@ -3384,6 +3307,31 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   reviewColumnHeading.append(reviewColumnTitle, reviewColumnMeta);
   reviewColumnHead.append(reviewColumnHeading, reviewColumnClose);
   reviewColumn.appendChild(reviewColumnHead);
+  const changesDrawer = createChangesDrawer({
+    versionController,
+    isEditing: () => bridge.getEditingLease().active || mergeResolverLocked,
+    onNavigate: (item) => {
+      const location = item.contextOnRight ?? item.path;
+      if (location.paragraph === undefined) return;
+      navigateToChange({ sectionIndex: location.section, paragraphIndex: location.paragraph, charOffset: 0 }, item.rightAnchor);
+    },
+    onWorkingDiff: (items) => {
+      workingDiff = items;
+      updateReviewControl(bridge.pendingEdits.getChangeSets());
+    },
+  });
+  reviewColumn.append(changesDrawer.element);
+
+  function scheduleChangesRefresh(): void {
+    clearTimeout(changesRefreshTimer);
+    changesRefreshTimer = setTimeout(() => { void changesDrawer.refresh(); }, 300);
+  }
+
+  function navigateToChange(position: DocumentPosition, anchor?: DiffItem['rightAnchor']): void {
+    if (!deps.navigateToChange) return;
+    if (fullscreen) setFullscreen(false);
+    window.requestAnimationFrame(() => deps.navigateToChange?.(position, anchor));
+  }
 
   const planColumn = el('aside', 'ag-plan-column');
   planColumn.id = 'ag-plan-column';
@@ -3750,6 +3698,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     environmentPlan.setAttribute('aria-expanded', planActive ? 'true' : 'false');
     reviewColumn.setAttribute('aria-hidden', changesActive ? 'false' : 'true');
     reviewColumn.inert = !changesActive;
+    changesDrawer.setOpen(changesActive);
     planColumn.setAttribute('aria-hidden', planActive ? 'false' : 'true');
     planColumn.inert = !planActive;
     reviewResize.setAttribute('aria-hidden', detailActive ? 'false' : 'true');
@@ -3841,13 +3790,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function updateReviewControl(changeSets: readonly PendingChangeSet[]): void {
-    const diff = summarizePendingDiffs(changeSets);
-    pendingReviewOpCount = diff.opCount;
+    const pending = summarizePendingDiffs(changeSets);
+    pendingReviewOpCount = pending.opCount;
+    const working = summarizeDiffItems(workingDiff);
+    const diff = pending.opCount > 0 ? pending : {
+      additions: working.additions, deletions: working.deletions,
+      nonTextChanges: workingDiff.filter((item) => item.kind !== 'text').length,
+    };
     const hasPending = pendingReviewOpCount > 0;
+    const hasOtherChanges = !hasPending && workingDiff.length === 0 && versionController?.getState().dirty === true;
     reviewColumnTitle.textContent = '변경 사항';
     reviewColumnMeta.textContent = hasPending
       ? `${pendingReviewOpCount}개 변경 검토 대기`
-      : '대기 중인 변경 없음';
+      : workingDiff.length ? `${workingDiff.length}개 커밋되지 않은 변경` : hasOtherChanges ? '커밋되지 않은 변경' : '모든 변경이 커밋되었습니다';
     const hasTextDiff = diff.additions > 0 || diff.deletions > 0;
     environmentAdditions.hidden = diff.additions === 0;
     environmentAdditions.textContent = `+${diff.additions.toLocaleString('ko-KR')}`;
@@ -3856,12 +3811,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     environmentDiffNeutral.hidden = hasTextDiff;
     environmentDiffNeutral.textContent = hasPending
       ? `${diff.nonTextChanges || pendingReviewOpCount}개 변경`
-      : '변경 없음';
+      : workingDiff.length ? `${workingDiff.length}개 변경` : hasOtherChanges ? '변경 있음' : '변경 없음';
     environmentChanges.setAttribute(
       'aria-label',
-      hasPending
+      hasPending || workingDiff.length > 0
         ? `변경 사항 열기, 추가 ${diff.additions}자, 삭제 ${diff.deletions}자, 기타 ${diff.nonTextChanges}개`
-        : '변경 사항 열기, 대기 중인 변경 없음',
+        : hasOtherChanges ? '변경 사항 열기, 커밋되지 않은 변경' : '변경 사항 열기, 대기 중인 변경 없음',
     );
     const hasPlan = activePlan !== null && chatWorkflow === 'plan';
     environmentPlan.disabled = !hasPlan;
@@ -3997,7 +3952,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       applyRailWidth(railWidth, { persist: false });
       applyReviewWidth(reviewWidth, { persist: false });
       // 변경 사항과 계획은 각각의 환경 drawer에 둔다.
-      reviewColumn.appendChild(review);
+      changesDrawer.reviewSlot.appendChild(review);
       planColumn.appendChild(planSurface);
       reviewColCollapsed = true;
       planColCollapsed = true;
@@ -7025,6 +6980,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function handleAgentEvent(event: AgentStreamEvent): void {
     switch (event.type) {
       case 'turn-start':
+        turnOwnerThreadId = currentThread.id;
+        turnChanges.begin(currentThread.id);
+        rebuildReview();
         // 이전 턴이 비정상 종료돼 남긴 실행 상태를 먼저 닫는다.
         sweepUnresolvedToolRows();
         sweepActivityTranscripts();
@@ -7501,45 +7459,28 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
    * 대기 편집 한 건 = 주소가 붙은 오퍼레이션. 머리줄이 좌표를 말하고
    * 아랫줄이 실제 -/+ diff 를 보여준다 — 요약 문장 대신 검토 가능한 형태.
    */
-  function buildReviewOp(op: PendingOp): HTMLElement {
-    const entry = el('div', `ag-review-op ag-review-op-${op.kind}`);
-    const head = el('div', 'ag-op-head');
-    // 빈 새 텍스트의 replace = 즉시 적용된 삭제 — 삭제로 표시한다
-    const displayKind = op.kind === 'replace' && op.text.length === 0 ? 'delete' : op.kind;
-    const glyph = el('span', `ag-op-glyph ag-op-${displayKind}`);
-    glyph.appendChild(createIcon(OP_ICON[displayKind] ?? 'replace'));
-    // 좌표가 있는 op 만 주소를 말한다. 필드/개체는 대상 이름이 곧 주소다.
-    const addr = op.kind === 'field'
-      ? op.name
-      : op.kind === 'template'
-        ? op.label
-      : op.kind === 'object'
-        ? (OBJECT_OP_LABELS[op.obj.type] ?? op.obj.type)
-        : opAddress(op.range);
-    head.append(glyph, el('span', 'ag-op-addr', addr));
-    entry.appendChild(head);
-
-    const diff = el('div', 'ag-op-diff');
-    switch (op.kind) {
-      case 'replace':
-        diff.appendChild(buildDiffLine('del', op.deletedText));
-        if (op.text.length > 0) diff.appendChild(buildDiffLine('add', op.text));
-        break;
-      case 'insert':
-        diff.appendChild(buildDiffLine('add', op.text));
-        break;
-      case 'delete':
-        diff.appendChild(buildDiffLine('del', op.text));
-        break;
-      case 'field':
-        diff.append(buildDiffLine('del', op.oldValue), buildDiffLine('add', op.newValue));
-        break;
-      default:
-        // 서식/개체는 텍스트 diff 가 없다 — 중립 줄로 내용만 보인다.
-        diff.appendChild(buildDiffLine('ctx', opPreview(op)));
-        break;
+  function buildReviewOp(op: PendingOp, canNavigate = true): HTMLElement {
+    const entry = renderPendingOpDiff(op);
+    const range = 'range' in op ? op.range : null;
+    const obj = op.kind === 'object' ? op.obj : null;
+    const cell = range?.cell ?? (obj && 'cell' in obj ? obj.cell : undefined);
+    const paragraph = range?.startParaIdx ?? (obj && 'paraIdx' in obj ? obj.paraIdx : undefined);
+    const section = range?.sectionIdx ?? (obj && 'sectionIdx' in obj ? obj.sectionIdx : undefined);
+    const position: DocumentPosition | null = paragraph !== undefined && section !== undefined ? {
+      sectionIndex: section,
+      paragraphIndex: paragraph,
+      charOffset: range?.startCharOffset ?? 0,
+      ...(cell ? { parentParaIndex: cell.paraIdx, controlIndex: cell.controlIdx,
+        cellIndex: cell.cellIdx, cellParaIndex: paragraph,
+        cellPath: cell.path?.map((part, index) => index === cell.path!.length - 1
+          ? { ...part, cellParaIndex: paragraph } : part) } : {}),
+    } : null;
+    if (position && canNavigate && deps.navigateToChange) {
+      const jump = el('button', 'ag-changes-text-button ag-changes-jump', '문단으로 이동');
+      jump.type = 'button';
+      jump.addEventListener('click', () => navigateToChange(position));
+      entry.querySelector('.ag-changes-item-title')?.append(jump);
     }
-    entry.appendChild(diff);
     return entry;
   }
 
@@ -8016,14 +7957,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       el('span', 'ag-review-count', `${String(set.ops.length).padStart(2, '0')}건`),
     );
     summary.appendChild(title);
-    for (const op of set.ops.slice(0, MAX_REVIEW_OP_LINES)) {
-      summary.appendChild(buildReviewOp(op));
-    }
-    if (set.ops.length > MAX_REVIEW_OP_LINES) {
-      summary.appendChild(
-        el('div', 'ag-review-more', `외 ${set.ops.length - MAX_REVIEW_OP_LINES}건`),
-      );
-    }
+    summary.append(renderPendingOpsDiff(set.ops, buildReviewOp));
     card.appendChild(summary);
 
     const actions = el('div', 'ag-review-actions');
@@ -8125,7 +8059,33 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         collapseLeavingReviewCard(card, height);
       }
     }
-    if (reviewSets.length === 0) {
+    const latestTurn = turnChanges.get(currentThread.id, currentDocumentId);
+    if (reviewSets.length === 0 && latestTurn?.applied) {
+      const card = el('div', 'ag-review-card ag-applied-turn');
+      const head = el('div', 'ag-review-title');
+      head.append(el('span', 'ag-review-title-text', `${AGENT_LABEL[latestTurn.set.agent]} 편집`),
+        el('span', 'ag-changes-applied', '적용됨'));
+      card.append(head);
+      const canNavigate = latestTurn.undoEntry !== null && deps.getAgentUndoEntry?.() === latestTurn.undoEntry;
+      card.append(renderPendingOpsDiff(latestTurn.set.ops, (op) => buildReviewOp(op, canNavigate)));
+      const entry = latestTurn.undoEntry;
+      if (entry && deps.getAgentUndoEntry?.() === entry && deps.undoAgentTurn) {
+        const undo = el('button', 'ag-changes-secondary ag-changes-undo', '되돌리기');
+        undo.type = 'button';
+        undo.disabled = bridge.getEditingLease().active || mergeResolverLocked;
+        undo.addEventListener('click', () => {
+          if (bridge.getEditingLease().active || mergeResolverLocked) return;
+          if (deps.undoAgentTurn?.(entry)) {
+            latestTurn.applied = false;
+            latestTurn.undoEntry = null;
+            rebuildReview();
+            scheduleChangesRefresh();
+          }
+        });
+        card.append(undo);
+      }
+      review.append(card);
+    } else if (reviewSets.length === 0) {
       const empty = el('div', 'ag-review-empty');
       const emptyIcon = el('div', 'ag-review-empty-icon');
       emptyIcon.appendChild(createIcon('changes'));
@@ -8176,14 +8136,31 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     rebuildSlashMenu();
   }).catch(() => { /* WebSocket catalog event retries after reconnect. */ });
   const unsubPending = bridge.pendingEdits.onChange((e: PendingEditsChangeEvent) => {
+    turnChanges.capture(e, bridge.pendingEdits.getChangeSets(), turnOwnerThreadId ?? currentThread.id,
+      currentDocumentId, deps.getAgentUndoEntry?.() ?? null);
+    scheduleChangesRefresh();
     if (e.type === 'invalidated') {
       systemMessage(`대기 중인 에이전트 편집이 해제되었습니다 (${e.reason})`);
     }
     rebuildReview();
   });
-  const unsubEditingLease = bridge.onEditingLeaseChange(() => rebuildReview());
+  const unsubEditingLease = bridge.onEditingLeaseChange(() => {
+    rebuildReview();
+    changesDrawer.refreshEditingState();
+    scheduleChangesRefresh();
+  });
   const contextUnsubs = eventBus
     ? [
+        eventBus.on('document-mutated', () => {
+          scheduleChangesRefresh();
+          const latest = turnChanges.get(currentThread.id, currentDocumentId);
+          if (latest?.undoEntry && deps.getAgentUndoEntry?.() !== latest.undoEntry) {
+            review.querySelector('.ag-changes-undo')?.remove();
+            review.querySelectorAll('.ag-applied-turn .ag-changes-jump').forEach((jump) => jump.remove());
+          }
+        }),
+        eventBus.on('history-jumped', () => { turnChanges.clear(); rebuildReview(); scheduleChangesRefresh(); }),
+        eventBus.on('document-swapped', () => { turnChanges.clear(); rebuildReview(); scheduleChangesRefresh(); }),
         eventBus.on('document-context-changed', updateDocumentContext),
         eventBus.on('cursor-format-changed', updateDocumentContext),
         eventBus.on('picture-object-selection-changed', updateDocumentContext),
@@ -8191,6 +8168,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         eventBus.on('merge-resolver-lock-changed', (locked) => {
           mergeResolverLocked = locked === true;
           root.classList.toggle('ag-merge-resolver-locked', mergeResolverLocked);
+          changesDrawer.refreshEditingState();
+          rebuildReview();
           updateComposer();
         }),
         eventBus.on('versions:open', () => {
@@ -8349,6 +8328,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       unsubChatStatus();
       unsubPending();
       unsubEditingLease();
+      clearTimeout(changesRefreshTimer);
+      changesDrawer.dispose();
+      turnChanges.clear();
       unsubscribeHancomGitVisibility();
       contextUnsubs.forEach((unsub) => unsub());
       messagesMutationObserver?.disconnect();
