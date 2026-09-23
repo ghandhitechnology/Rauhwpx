@@ -143,6 +143,12 @@ impl ParagraphMarginUnits {
             Self::LegacyDoubled => value,
         }
     }
+
+    /// HwpUnitChar case 여백. `unit="CHAR"` 는 홀수 저장값의 최하위 비트다.
+    fn case_margin_child_to_ir(self, value: i32, unit: &str) -> i32 {
+        self.case_value_to_ir(value)
+            .saturating_add(i32::from(unit == "CHAR"))
+    }
 }
 
 pub(super) fn parse_hwpx_header_with_margin_units(
@@ -1303,11 +1309,11 @@ fn parse_para_shape_switch(
                             let tag_name = local;
                             // 한컴은 홀수 저장값의 case 절반을 unit="CHAR" 로 표시한다. [#6875]
                             let mut val = None;
-                            let mut char_unit = false;
+                            let mut unit = String::new();
                             for attr in ce.attributes().flatten() {
                                 match attr.key.as_ref() {
                                     b"value" => val = Some(parse_i32(&attr)),
-                                    b"unit" => char_unit = attr_str(&attr) == "CHAR",
+                                    b"unit" => unit = attr_str(&attr),
                                     _ => {}
                                 }
                             }
@@ -1316,9 +1322,7 @@ fn parse_para_shape_switch(
                                     // XML <1.4 already uses doubled margin units,
                                     // even inside an HwpUnitChar case. Newer
                                     // packages use effective HWPUNIT values.
-                                    let val2x = margin_units
-                                        .case_value_to_ir(val)
-                                        .saturating_add(i32::from(char_unit));
+                                    let val2x = margin_units.case_margin_child_to_ir(val, &unit);
                                     match tag_name {
                                         b"left" => ps.margin_left = val2x,
                                         b"right" => ps.margin_right = val2x,
