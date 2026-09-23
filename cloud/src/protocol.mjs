@@ -191,8 +191,8 @@ export function parseProviderSelection(value) {
   if (!PROVIDERS.includes(provider)) throw new CloudError('INVALID_PROVIDER', 'Provider is not supported');
   const model = string(input.model, 'model', { max: 256, pattern: /^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/ });
   const models = {
-    claude: ['opus', 'fable', 'sonnet', 'haiku'],
-    codex: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra'],
+    claude: ['claude-opus-5-5', 'opus', 'fable', 'sonnet', 'haiku'],
+    codex: ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'],
   };
   if (models[provider] && !models[provider].includes(model)) {
     throw new CloudError('INVALID_MODEL', 'Model is not supported by this provider');
