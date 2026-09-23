@@ -41,6 +41,17 @@ fn test_parse_para_text_simple() {
 }
 
 #[test]
+fn hwp_hyphen_control_remains_distinct_from_literal_hyphen() {
+    let data = [0x0018u16, 0x002D, 0x0020, 0x005Fu16, 0x000D]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let (text, offsets, _, _, _) = parse_para_text(&data);
+    assert_eq!(text, "\u{00AD}- _");
+    assert_eq!(offsets, vec![0, 1, 2, 3]);
+}
+
+#[test]
 fn test_parse_para_text_korean() {
     let (text, offsets, _, _, _) = parse_para_text(&make_para_text_data("한글 테스트입니다."));
     assert_eq!(text, "한글 테스트입니다.");

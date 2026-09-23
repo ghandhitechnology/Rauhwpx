@@ -103,6 +103,13 @@ impl DocumentCore {
         } else {
             1000
         };
+        let (_, natural_height, natural_baseline) =
+            crate::renderer::equation::intrinsic_metrics_hwp_with_font(
+                &script, font_size, "HYhwpEQ",
+            );
+        let baseline = ((natural_baseline as f64 / natural_height.max(1) as f64) * 100.0)
+            .round()
+            .clamp(1.0, 100.0) as i16;
         common.ctrl_id = CTRL_EQUATION;
         if common.description.is_empty() {
             common.description = "레거시 OLE 수식에서 변환한 수식입니다.".to_string();
@@ -112,7 +119,7 @@ impl DocumentCore {
             script: script.clone(),
             font_size,
             color: 0,
-            baseline: 85,
+            baseline,
             version_info: "Equation Version 60".to_string(),
             font_name: "HYhwpEQ".to_string(),
             ..Default::default()
@@ -416,13 +423,20 @@ impl DocumentCore {
         }
         Self::apply_common_obj_attr_from_json(&mut eq.common, props_json);
 
-        let (width, height) = crate::renderer::equation::intrinsic_size_hwp_with_font(
-            &eq.script,
-            eq.font_size,
-            &eq.font_name,
-        );
+        let (width, height, baseline) =
+            crate::renderer::equation::intrinsic_metrics_hwp_with_version(
+                &eq.script,
+                eq.font_size,
+                &eq.font_name,
+                &eq.version_info,
+            );
         eq.common.width = width;
         eq.common.height = height;
+        if json_i32(props_json, "baseline").is_none() && height > 0 {
+            eq.baseline = ((baseline as f64 / height as f64) * 100.0)
+                .round()
+                .clamp(1.0, 100.0) as i16;
+        }
 
         // raw_ctrl_data 무효화: serialize_equation_control 은 raw_ctrl_data 가 비어있지 않으면
         // 원본 CTRL_HEADER 바이트를 그대로 방출한다. 편집한 eq.common(크기/위치/treat_as_char)이

@@ -1074,6 +1074,7 @@ export interface LayerPageBackgroundOp {
   type: 'pageBackground';
   bbox: LayerBounds;
   backgroundColor?: string;
+  gradient?: LayerGradientFill;
   borderColor?: string;
   borderWidth?: number;
 }
@@ -1184,6 +1185,15 @@ export interface LayerShapeStyle {
   opacity?: number;
 }
 
+export interface LayerGradientFill {
+  gradientType: number;
+  angle: number;
+  centerX: number;
+  centerY: number;
+  colors: string[];
+  positions: number[];
+}
+
 export interface LayerLineOp {
   type: 'line';
   bbox: LayerBounds;
@@ -1199,12 +1209,14 @@ export interface LayerRectangleOp {
   bbox: LayerBounds;
   cornerRadius?: number;
   style?: LayerShapeStyle;
+  gradient?: LayerGradientFill;
 }
 
 export interface LayerEllipseOp {
   type: 'ellipse';
   bbox: LayerBounds;
   style?: LayerShapeStyle;
+  gradient?: LayerGradientFill;
 }
 
 export type LayerPathCommand =
@@ -1234,6 +1246,7 @@ export interface LayerPathOp {
   bbox: LayerBounds;
   commands?: LayerPathCommand[];
   style?: LayerShapeStyle;
+  gradient?: LayerGradientFill;
   lineStyle?: LayerLineStyle;
   transform?: LayerPathTransform;
 }
@@ -1264,6 +1277,7 @@ export interface LayerEquationOp {
   color?: string;
   fontSize?: number;
   fontName?: string;
+  versionInfo?: string;
   layoutBox?: LayerEquationLayoutBox;
 }
 

@@ -942,11 +942,12 @@ impl PaintOp {
                 write_bbox(buf, *bbox);
                 let _ = write!(
                     buf,
-                    ",\"svgContent\":{},\"color\":{},\"fontSize\":{:.3},\"fontName\":{},\"layoutBox\":",
+                    ",\"svgContent\":{},\"color\":{},\"fontSize\":{:.3},\"fontName\":{},\"versionInfo\":{},\"layoutBox\":",
                     json_escape(&equation.svg_content),
                     json_escape(&equation.color_str),
                     equation.font_size,
-                    json_escape(&equation.font_name)
+                    json_escape(&equation.font_name),
+                    json_escape(&equation.version_info)
                 );
                 write_equation_layout_box(buf, &equation.layout_box);
                 buf.push('}');
@@ -4379,6 +4380,7 @@ mod tests {
                             color: 0x00000000,
                             font_size: 12.0,
                             font_name: "serif".to_string(),
+                            version_info: "Equation Version 60".to_string(),
                             section_index: None,
                             para_index: None,
                             control_index: None,

@@ -2563,25 +2563,6 @@ impl LayoutEngine {
         });
     }
 
-    /// 이미 렌더된 인라인 이미지 노드의 y 좌표를 dy만큼 이동 (캡션 Top 보정)
-    fn offset_inline_image_y(
-        node: &mut RenderNode,
-        para_index: usize,
-        control_index: usize,
-        dy: f64,
-    ) {
-        for child in node.children.iter_mut() {
-            if let RenderNodeType::Image(ref img) = child.node_type {
-                if img.para_index == Some(para_index) && img.control_index == Some(control_index) {
-                    child.bbox.y += dy;
-                    return;
-                }
-            }
-            // 재귀 탐색 (line_node 등 하위 노드)
-            Self::offset_inline_image_y(child, para_index, control_index, dy);
-        }
-    }
-
     /// 번호 카운터를 진행시킨다 (이전 페이지 문단의 번호 재계산용).
     pub fn advance_numbering(&self, numbering_id: u16, level: u8) {
         self.numbering_state
@@ -2955,17 +2936,23 @@ impl LayoutEngine {
         // 82.1px 위 = A3 환산 116.2, 종전 118.5 가 맞고 변경값 100.6 은 틀림).
         // 쪽번호 같은 인라인 필드는 줄 안에서 자리를 차지하므로 줄 높이에 이미 들어
         // 있다 — 배제 대상은 **자기 높이를 갖는 개체**(표·도형·그림)뿐이다.
-        let text_only_footer = !hf_paragraphs.is_empty()
+        let reliable_band_height = !hf_paragraphs.is_empty()
             && hf_paragraphs.iter().all(|para| {
                 !para.line_segs.is_empty()
-                    && !para.controls.iter().any(|c| {
-                        matches!(
-                            c,
-                            Control::Table(_) | Control::Shape(_) | Control::Picture(_)
-                        )
+                    && para
+                        .line_segs
+                        .iter()
+                        .all(|seg| seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0)
+                    && !para.controls.iter().any(|c| match c {
+                        Control::Table(_) => true,
+                        Control::Picture(pic) => !pic.common.treat_as_char,
+                        Control::Shape(shape) => {
+                            shape.common().affect_line_spacing && !shape.common().treat_as_char
+                        }
+                        _ => false,
                     })
             });
-        let vert_align = if text_only_footer {
+        let vert_align = if reliable_band_height {
             (list_attr >> 21) & 0b11
         } else {
             0
@@ -3001,6 +2988,9 @@ impl LayoutEngine {
                 .controls
                 .iter()
                 .any(|c| matches!(c, Control::Picture(_)));
+            // Preserve this paragraph's starting point while its text and pictures
+            // advance the flow cursor below.
+            let shape_anchor_y = y_offset;
             if has_table {
                 for (ci, ctrl) in para.controls.iter().enumerate() {
                     if let Control::Table(t) = ctrl {
@@ -3128,30 +3118,13 @@ impl LayoutEngine {
                     );
                 }
             } else if has_shape {
-                // Shape 컨트롤 렌더링 (머리말/꼬리말 내 글상자 등)
-                for (ci, ctrl) in para.controls.iter().enumerate() {
-                    if let Control::Shape(_) = ctrl {
-                        self.layout_shape(
-                            tree,
-                            area_node,
-                            hf_paragraphs,
-                            i,
-                            ci,
-                            0, // section_index
-                            styles,
-                            area,
-                            body_area,
-                            paper_area,
-                            y_offset,
-                            Alignment::Left,
-                            bin_data_content,
-                            &std::collections::HashMap::new(),
-                            is_header,
-                        );
-                    }
-                }
-                // 텍스트도 함께 렌더링
-                if !para.text.is_empty() {
+                // The paragraph pass establishes TAC shape positions. Keep its reserved
+                // paragraph key separate from body paragraphs on the same page.
+                if !para.text.is_empty()
+                    || para.controls.iter().any(|ctrl| {
+                        matches!(ctrl, Control::Shape(shape) if shape.common().treat_as_char)
+                    })
+                {
                     let comp = self.compose_header_footer_paragraph(para, page_number);
                     y_offset = self.layout_paragraph(
                         tree,
@@ -3164,8 +3137,8 @@ impl LayoutEngine {
                         0,
                         usize::MAX - i,
                         None,
+                        Some(bin_data_content),
                         None,
-                        None, // 머리말/꼬리말 컨텍스트 — wrap zone 무관
                     );
                 }
             } else {
@@ -3185,6 +3158,75 @@ impl LayoutEngine {
                     None,
                     None, // 머리말/꼬리말 컨텍스트 — wrap zone 무관
                 );
+            }
+            // 한 문단에는 그림과 도형이 함께 들어갈 수 있다. 그림 분기에서
+            // 문단을 처리했더라도 모든 Shape를 원래 문단 기준점에 배치한다.
+            if has_shape {
+                for (ci, ctrl) in para.controls.iter().enumerate() {
+                    if let Control::Shape(shape) = ctrl {
+                        let inline_pos =
+                            tree.get_inline_shape_position(0, usize::MAX - i, ci, None);
+                        // Band alignment positions line content. A floating
+                        // Para-relative shape uses the original band origin,
+                        // whether or not a picture shares its paragraph.
+                        let floating_anchor_y = if !is_header
+                            && !shape.common().treat_as_char
+                            && matches!(shape.common().vert_rel_to, VertRelTo::Para)
+                        {
+                            shape_anchor_y
+                                - match vert_align {
+                                    1 => slack / 2.0,
+                                    2 => slack,
+                                    _ => 0.0,
+                                }
+                        } else {
+                            shape_anchor_y
+                        };
+                        // A floating Shape sharing a footer paragraph with inline pictures
+                        // is positioned from the last saved line's content bottom. The
+                        // trailing line spacing belongs to the next flow position, not the
+                        // object's Para-relative origin.
+                        let para_anchor_y = if !is_header
+                            && has_picture
+                            && !shape.common().treat_as_char
+                            && matches!(shape.common().vert_rel_to, VertRelTo::Para)
+                        {
+                            para.line_segs.first().zip(para.line_segs.last()).map_or(
+                                floating_anchor_y,
+                                |(first, last)| {
+                                    floating_anchor_y
+                                        + hwpunit_to_px(
+                                            (last.vertical_pos - first.vertical_pos
+                                                + last.line_height
+                                                - last.line_spacing)
+                                                .max(0),
+                                            self.dpi,
+                                        )
+                                },
+                            )
+                        } else {
+                            floating_anchor_y
+                        };
+                        self.layout_shape(
+                            tree,
+                            area_node,
+                            hf_paragraphs,
+                            i,
+                            ci,
+                            0, // section_index
+                            styles,
+                            area,
+                            body_area,
+                            paper_area,
+                            para_anchor_y,
+                            Alignment::Left,
+                            bin_data_content,
+                            &std::collections::HashMap::new(),
+                            is_header,
+                            inline_pos,
+                        );
+                    }
+                }
             }
             if y_offset >= area.y + area.height {
                 break;
@@ -3829,6 +3871,7 @@ impl LayoutEngine {
                                         bin_data_content,
                                         &std::collections::HashMap::new(),
                                         false,
+                                        None,
                                     );
                                 }
                                 Control::Picture(pic) => {
@@ -8952,6 +8995,23 @@ impl LayoutEngine {
                             hwpunit_to_px(pic.shape_attr.current_height as i32, self.dpi),
                         );
                         let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
+                        let pic_box_w = hwpunit_to_px(
+                            super::composer::inline_picture_occupied_width_hu(pic),
+                            self.dpi,
+                        );
+                        let pic_box_h = super::layout::paragraph_layout::tac_object_box_height_px(
+                            pic_h,
+                            &pic.caption,
+                            self.dpi,
+                        ) + hwpunit_to_px(
+                            i32::from(pic.common.margin.top) + i32::from(pic.common.margin.bottom),
+                            self.dpi,
+                        );
+                        let pic_inset_x =
+                            hwpunit_to_px(i32::from(pic.common.margin.left), self.dpi);
+                        let pic_inset_y = super::layout::paragraph_layout::tac_picture_top_inset_px(
+                            pic, self.dpi,
+                        );
                         // 같은 paragraph 의 sibling wrap=TopAndBottom 개체(tac=false)가
                         // 차지하는 vertical 영역만큼 picture y 보정.
                         let sibling_reserved_hu =
@@ -8993,7 +9053,7 @@ impl LayoutEngine {
                             comp,
                             styles,
                             para_y_for_pic,
-                            pic_h,
+                            pic_box_h,
                         );
                         let para_style_id = comp
                             .map(|c| c.para_style_id as usize)
@@ -9032,8 +9092,8 @@ impl LayoutEngine {
                         }
                         let para_margin_right =
                             para_style_ref.map(|s| s.margin_right).unwrap_or(0.0);
-                        let avail_w =
-                            (col_area.width - effective_margin_left - para_margin_right).max(pic_w);
+                        let avail_w = (col_area.width - effective_margin_left - para_margin_right)
+                            .max(pic_box_w);
                         // [Task #1151 v9 결함 D] pic_x 결정:
                         // - 단일 picture: 기존 alignment 그대로
                         // - 시퀀스 첫 picture: total_tac_width 기반 alignment + state 초기화
@@ -9046,7 +9106,7 @@ impl LayoutEngine {
                             let line_right = col_area.x + effective_margin_left + avail_w;
                             // [Task #1151 v9 Stage 24] line wrap: cursor_x + pic_w > avail 면
                             // 다음 line 으로 wrap (cursor_x reset, line_top_y advance).
-                            if cur + pic_w > line_right + 0.5 {
+                            if cur + pic_box_w > line_right + 0.5 {
                                 if let Some(state) = para_inline_state.get_mut(&para_index) {
                                     state.cursor_x = col_area.x + effective_margin_left;
                                     state.line_top_y += state.line_height;
@@ -9073,10 +9133,12 @@ impl LayoutEngine {
                                 Alignment::Center | Alignment::Distribute => {
                                     col_area.x
                                         + effective_margin_left
-                                        + (avail_w - pic_w).max(0.0) / 2.0
+                                        + (avail_w - pic_box_w).max(0.0) / 2.0
                                 }
                                 Alignment::Right => {
-                                    col_area.x + effective_margin_left + (avail_w - pic_w).max(0.0)
+                                    col_area.x
+                                        + effective_margin_left
+                                        + (avail_w - pic_box_w).max(0.0)
                                 }
                                 _ => col_area.x + effective_margin_left,
                             }
@@ -9134,9 +9196,12 @@ impl LayoutEngine {
                             None,
                         );
                         let already_registered = registered_inline_pos.is_some();
+                        let effective_pic_x = registered_inline_pos
+                            .map(|(registered_x, _)| registered_x)
+                            .unwrap_or(pic_x + pic_inset_x);
                         let effective_pic_y = registered_inline_pos
                             .map(|(_, registered_y)| registered_y)
-                            .unwrap_or(pic_y);
+                            .unwrap_or(pic_y + pic_inset_y);
                         // paragraph_layout 이 이미 emit 한 인라인 그림은 실제 bbox 높이와 같은
                         // common.height 기준으로 content bottom 을 판정한다.
                         let effective_pic_h = if already_registered {
@@ -9149,19 +9214,19 @@ impl LayoutEngine {
                         if !is_single_pic {
                             let entry = para_inline_state.entry(para_index).or_insert(
                                 super::layout::paragraph_layout::ParaInlineState {
-                                    cursor_x: pic_x + pic_w,
+                                    cursor_x: pic_x + pic_box_w,
                                     line_top_y: pic_y,
-                                    line_height: pic_h,
+                                    line_height: pic_box_h,
                                 },
                             );
                             if is_subsequent_in_seq {
-                                entry.cursor_x = pic_x + pic_w;
-                                entry.line_height = entry.line_height.max(pic_h);
+                                entry.cursor_x = pic_x + pic_box_w;
+                                entry.line_height = entry.line_height.max(pic_box_h);
                             } else {
                                 // 첫 picture: 초기화 (기존 값 덮어쓰기)
-                                entry.cursor_x = pic_x + pic_w;
+                                entry.cursor_x = pic_x + pic_box_w;
                                 entry.line_top_y = pic_y;
-                                entry.line_height = pic_h;
+                                entry.line_height = pic_box_h;
                             }
                         }
 
@@ -9199,7 +9264,12 @@ impl LayoutEngine {
                                     external_path: pic.image_attr.external_path.clone(),
                                     ..ImageNode::new_shared(bin_data_id, image_data)
                                 }),
-                                BoundingBox::new(pic_x, pic_y, pic_w, pic_h),
+                                BoundingBox::new(
+                                    pic_x + pic_inset_x,
+                                    pic_y + pic_inset_y,
+                                    pic_w,
+                                    pic_h,
+                                ),
                             );
                             // Task #347: 같은 문단의 InFrontOfText 표가 이미 렌더되어
                             // col_node.children에 들어있으면 그 앞에 끼워넣어 z-order 보존
@@ -9220,8 +9290,8 @@ impl LayoutEngine {
                                 para_index,
                                 control_index,
                                 None,
-                                pic_x,
-                                pic_y,
+                                effective_pic_x,
+                                pic_y + pic_inset_y,
                             );
                             if !has_real_text {
                                 // [Task #462] LINE_SEG 의 lh+ls 를 advance 로 사용 — 이미지 박스
@@ -9241,7 +9311,7 @@ impl LayoutEngine {
                                                 self.dpi,
                                             )
                                         })
-                                        .unwrap_or(pic_h);
+                                        .unwrap_or(pic_box_h);
                                     if is_single_pic || is_last_in_seq {
                                         // 시퀀스 마지막: state 의 line_height (시퀀스 최대 height) 기반 advance
                                         let line_top_y = para_inline_state
@@ -9251,7 +9321,7 @@ impl LayoutEngine {
                                         let line_height = para_inline_state
                                             .get(&para_index)
                                             .map(|s| s.line_height)
-                                            .unwrap_or(pic_h);
+                                            .unwrap_or(pic_box_h);
                                         result_y = line_top_y + line_advance.max(line_height);
                                     }
                                     // 중간 picture: result_y = y_offset (그대로 유지, line 4527 의 default)
@@ -9267,7 +9337,7 @@ impl LayoutEngine {
                                 .line_segs
                                 .first()
                                 .map(|ls| hwpunit_to_px(ls.line_height + ls.line_spacing, self.dpi))
-                                .unwrap_or(pic_h);
+                                .unwrap_or(pic_box_h);
                             if is_single_pic || is_last_in_seq {
                                 // 시퀀스 마지막: state 의 line_height (시퀀스 최대 height) 기반 advance
                                 let line_top_y = para_inline_state
@@ -9277,20 +9347,26 @@ impl LayoutEngine {
                                 let line_height = para_inline_state
                                     .get(&para_index)
                                     .map(|s| s.line_height)
-                                    .unwrap_or(pic_h);
+                                    .unwrap_or(pic_box_h);
                                 result_y = line_top_y + line_advance.max(line_height);
                             }
                             // 중간 picture: result_y = y_offset (그대로 유지, line 4527 의 default)
                         }
 
-                        let mut pic_content_bottom = effective_pic_y + effective_pic_h;
+                        let mut pic_content_bottom = effective_pic_y
+                            + effective_pic_h
+                            + hwpunit_to_px(i32::from(pic.common.margin.bottom), self.dpi);
                         if let Some(ref caption) = pic.caption {
                             use crate::model::shape::CaptionDirection;
                             let caption_spacing = hwpunit_to_px(caption.spacing as i32, self.dpi);
                             let caption_h = self.calculate_caption_height(&pic.caption, styles);
                             let cap_y = match caption.direction {
-                                CaptionDirection::Bottom => pic_content_bottom + caption_spacing,
-                                CaptionDirection::Top => effective_pic_y,
+                                CaptionDirection::Bottom => {
+                                    effective_pic_y + effective_pic_h + caption_spacing
+                                }
+                                CaptionDirection::Top => {
+                                    effective_pic_y - caption_h - caption_spacing
+                                }
                                 CaptionDirection::Left | CaptionDirection::Right => {
                                     let baseline_px = para
                                         .line_segs
@@ -9302,15 +9378,6 @@ impl LayoutEngine {
                                         + caption_spacing
                                 }
                             };
-                            if caption.direction == CaptionDirection::Top {
-                                let dy = caption_h + caption_spacing;
-                                Self::offset_inline_image_y(
-                                    col_node,
-                                    para_index,
-                                    control_index,
-                                    dy,
-                                );
-                            }
                             let cell_ctx = CellContext {
                                 parent_para_index: para_index,
                                 path: vec![CellPathEntry {
@@ -9326,7 +9393,7 @@ impl LayoutEngine {
                                 caption,
                                 styles,
                                 col_area,
-                                pic_x,
+                                effective_pic_x,
                                 pic_w,
                                 cap_y,
                                 &mut self.auto_counter.borrow_mut(),
@@ -9342,8 +9409,7 @@ impl LayoutEngine {
                             // [Task #864 Stage F] caption 이 차지한 영역까지 result_y 진행.
                             // 미진행 시 다음 paragraph 가 caption 위에 그려져 겹침
                             // (HWP3 sample14 page 4 "Visual Block을 이용한 대소문자 변경"
-                            // 가 본문 "먼저 원하는 구간을..." 와 겹침). Bottom 만 진행 (Top
-                            // 은 위에서 offset_inline_image_y 로 image 전체를 밀어서 처리).
+                            // 가 본문 "먼저 원하는 구간을..." 와 겹침). Bottom 만 진행.
                             //
                             // [Task #957] 빈 caption (text 없음 + controls 없음) 은 SVG 에 invisible.
                             // pic_y = para_start_y[para_idx] 가 has_prior_tac 로 인해 후속 위치로
@@ -10410,6 +10476,7 @@ impl LayoutEngine {
                     bin_data_content,
                     &overflow_map,
                     false,
+                    None,
                 );
                 insert_before_para_text(
                     col_node,
@@ -10438,6 +10505,7 @@ impl LayoutEngine {
                     bin_data_content,
                     &overflow_map,
                     false,
+                    None,
                 );
                 if let Some(layer) = ctrl.and_then(|ctrl| match ctrl {
                     Control::Shape(shape) => Some(Self::render_layer_from_common(
@@ -10478,6 +10546,7 @@ impl LayoutEngine {
                     bin_data_content,
                     &overflow_map,
                     false,
+                    None,
                 );
                 if let Some(layer) = ctrl
                     .and_then(Self::control_common_attr)

@@ -840,12 +840,17 @@ impl WebCanvasRenderer {
         } else if run.rotation != 0.0 {
             let cx = bbox.x + bbox.width / 2.0;
             let cy = bbox.y + bbox.height / 2.0;
-            let font_weight = if run.style.bold { "bold " } else { "" };
             let font_style_str = if run.style.italic { "italic " } else { "" };
             let font_size = if run.style.font_size > 0.0 {
                 run.style.font_size
             } else {
                 12.0
+            };
+            let faux_bold_width = super::faux_bold_stroke_width(&run.style, font_size);
+            let font_weight = if run.style.bold && faux_bold_width.is_none() {
+                "bold "
+            } else {
+                ""
             };
             let font_family = super::canvas_font_family_chain(&run.style.font_family);
             let font = format!(
@@ -860,11 +865,10 @@ impl WebCanvasRenderer {
             self.ctx.set_text_align("center");
             self.ctx.set_text_baseline("middle");
             let _ = self.ctx.fill_text(run.display_or_text(), 0.0, 0.0);
-            if run.style.bold {
-                // 합성 굵기 (draw_text 의 synthetic_bold 와 동일 근거)
+            if let Some(stroke_width) = faux_bold_width {
                 self.ctx
                     .set_stroke_style_str(&color_to_css(run.style.color));
-                self.ctx.set_line_width((font_size * 0.04).clamp(0.25, 1.4));
+                self.ctx.set_line_width(stroke_width);
                 self.ctx.set_line_join("round");
                 let _ = self.ctx.stroke_text(run.display_or_text(), 0.0, 0.0);
             }
@@ -1194,16 +1198,10 @@ impl WebCanvasRenderer {
     }
 
     fn render_equation(&mut self, bbox: &BoundingBox, eq: &EquationNode) {
-        let scale_x = if eq.layout_box.width > 0.0 && bbox.width > 0.0 {
-            bbox.width / eq.layout_box.width
-        } else {
-            1.0
-        };
+        // 저장 control 폭은 문단 advance다. 추정 수식 폭에 맞춰 글립을 늘리면
+        // 원본 서체의 숫자/변수 획과 비례가 달라지므로 font_size를 유지한다.
         self.ctx.save();
         let _ = self.ctx.translate(bbox.x, bbox.y);
-        if (scale_x - 1.0).abs() > 0.01 {
-            let _ = self.ctx.scale(scale_x, 1.0);
-        }
         super::equation::canvas_render::render_equation_canvas(
             &self.ctx,
             &eq.layout_box,
@@ -1212,6 +1210,7 @@ impl WebCanvasRenderer {
             &eq.color_str,
             eq.font_size,
             &eq.font_name,
+            &eq.version_info,
         );
         self.ctx.restore();
     }
@@ -2309,7 +2308,6 @@ impl Renderer for WebCanvasRenderer {
         let text = &expand_pua_old_hangul_canvas(text);
 
         // 글꼴 설정
-        let font_weight = if style.bold { "bold " } else { "" };
         let font_style = if style.italic { "italic " } else { "" };
         let base_font_size = if style.font_size > 0.0 {
             style.font_size
@@ -2324,6 +2322,12 @@ impl Renderer for WebCanvasRenderer {
             (base_font_size * 0.7, y + base_font_size * 0.15)
         } else {
             (base_font_size, y)
+        };
+        let faux_bold_width = super::faux_bold_stroke_width(style, font_size);
+        let font_weight = if style.bold && faux_bold_width.is_none() {
+            "bold "
+        } else {
+            ""
         };
 
         let font_family = super::canvas_font_family_chain(&style.font_family);
@@ -2381,13 +2385,10 @@ impl Renderer for WebCanvasRenderer {
         } else {
             // 기본 렌더링 (효과 없음)
             self.ctx.set_fill_style_str(&color_to_css(style.color));
-            // 합성 굵기: 웹폰트는 regular 웨이트만 등록되고 Canvas2D 는 CSS 와 달리
-            // faux bold 를 합성하지 않으므로, ctx.font 의 "bold" 만으로는 굵게가
-            // 그려지지 않는다. 글리프 fill 위에 동일 색 얇은 stroke 를 덧그려 근사한다.
-            let synthetic_bold = style.bold;
-            if synthetic_bold {
+            let synthetic_bold = faux_bold_width.is_some();
+            if let Some(stroke_width) = faux_bold_width {
                 self.ctx.set_stroke_style_str(&color_to_css(style.color));
-                self.ctx.set_line_width((font_size * 0.04).clamp(0.25, 1.4));
+                self.ctx.set_line_width(stroke_width);
                 self.ctx.set_line_join("round");
             }
             if canvas_uses_native_run_shaping(self.native_run_shaping, text, style) {
@@ -2439,7 +2440,7 @@ impl Renderer for WebCanvasRenderer {
                         let fallback_font = format!(
                             "{}{}{:.3}px 'Malgun Gothic','맑은 고딕',sans-serif",
                             if style.italic { "italic " } else { "" },
-                            if style.bold { "bold " } else { "" },
+                            font_weight,
                             font_size
                         );
                         self.ctx.set_font(&fallback_font);
@@ -3013,10 +3014,10 @@ impl WebCanvasRenderer {
             }
         };
 
-        // 합성 굵기 (draw_text 의 synthetic_bold 와 동일 근거): 효과 pass 도
-        // fill 위에 동일 색 stroke 를 덧그려 굵게를 근사한다.
-        let bold_stroke = style.bold;
-        let bold_w = (font_size * 0.04).clamp(0.25, 1.4);
+        // 효과 글자도 일반 글자와 같은 Bold 서체 선택 규칙을 따른다.
+        let faux_bold_width = super::faux_bold_stroke_width(style, font_size);
+        let bold_stroke = faux_bold_width.is_some();
+        let bold_w = faux_bold_width.unwrap_or(0.0);
         if bold_stroke {
             self.ctx.set_line_join("round");
         }

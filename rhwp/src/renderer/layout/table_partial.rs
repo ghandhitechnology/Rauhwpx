@@ -1,6 +1,8 @@
 //! 페이지 분할 표 레이아웃 (layout_partial_table)
 
-use super::super::composer::compose_paragraph;
+use super::super::composer::{
+    compose_paragraph, inline_picture_occupied_width_hu, ComposedParagraph,
+};
 use super::super::height_measurer::MeasuredTable;
 use super::super::page_layout::LayoutRect;
 use super::super::render_tree::*;
@@ -9,14 +11,17 @@ use super::super::{hwpunit_to_px, ShapeStyle};
 use super::border_rendering::{
     build_row_col_x, collect_cell_borders, render_edge_borders, render_transparent_borders,
 };
-use super::table_layout::{calc_nested_split_rows, NestedTableSplit};
+use super::table_layout::{
+    calc_nested_split_rows, effective_margin_left_line,
+    native_rowbreak_para_float_uses_outer_margin_box, NestedTableSplit,
+};
 use super::text_measurement::{estimate_text_width, resolved_to_text_style};
 use super::utils::find_bin_data;
 use super::{
     repeats_native_empty_host_rowbreak_fragment_margin, stored_float_anchor_offset_px, CellContext,
     CellPathEntry, LayoutEngine,
 };
-use crate::document_core::queries::rendering::is_projected_cell_stack_picture_paragraph;
+use crate::document_core::queries::rendering::projected_cell_stack_continuation_outer_top_hu;
 use crate::model::bin_data::BinDataContent;
 use crate::model::control::Control;
 use crate::model::paragraph::Paragraph;
@@ -29,55 +34,142 @@ use crate::renderer::float_placement::{
 
 // 표 수평 정렬 보조 타입은 table_layout.rs에 통합됨
 
-fn suppress_projected_cell_stack_picture_fallback(
-    paragraph: &Paragraph,
-    control_index: usize,
-    registered_inline_position: bool,
-) -> bool {
-    registered_inline_position
-        && is_projected_cell_stack_picture_paragraph(paragraph, control_index)
+/// Text before an inline control occupies the same line as the control.
+/// The partial-cell control fallback paints objects separately from its text
+/// pass, so it must advance past that text before positioning the object.
+fn inline_control_preceding_text_width(
+    composed: &ComposedParagraph,
+    styles: &ResolvedStyleSet,
+    previous_control_pos: usize,
+    control_pos: usize,
+) -> f64 {
+    let Some(line) = composed
+        .lines
+        .iter()
+        .rev()
+        .find(|line| line.char_start <= control_pos)
+    else {
+        return 0.0;
+    };
+    let start = previous_control_pos.max(line.char_start);
+    if control_pos <= start {
+        return 0.0;
+    }
+    let mut width = 0.0;
+    let mut run_start = line.char_start;
+    for run in &line.runs {
+        let run_end = run_start + run.text.chars().count();
+        let from = start.max(run_start);
+        let to = control_pos.min(run_end);
+        if from < to {
+            let text: String = run
+                .text
+                .chars()
+                .skip(from - run_start)
+                .take(to - from)
+                .filter(|&ch| ch != '\u{FFFC}')
+                .collect();
+            let style = resolved_to_text_style(styles, run.char_style_id, run.lang_index);
+            width += estimate_text_width(&text, &style);
+        }
+        run_start = run_end;
+        if run_start >= control_pos {
+            break;
+        }
+    }
+    width
+}
+
+/// The inline fallback centers the whole visible line, including text around
+/// its controls. For multi-line paragraphs the legacy fallback advances all
+/// controls in one sequence, so retain its existing origin until it can place
+/// each line independently.
+fn partial_cell_inline_start_x(
+    area: &LayoutRect,
+    alignment: Alignment,
+    control_width: f64,
+    composed: &ComposedParagraph,
+    styles: &ResolvedStyleSet,
+    left_margin: f64,
+) -> f64 {
+    let text_width = if composed.lines.len() == 1 {
+        composed.lines[0]
+            .runs
+            .iter()
+            .map(|run| {
+                let text: String = run.text.chars().filter(|&ch| ch != '\u{FFFC}').collect();
+                let style = resolved_to_text_style(styles, run.char_style_id, run.lang_index);
+                estimate_text_width(&text, &style)
+            })
+            .sum()
+    } else {
+        0.0
+    };
+    let line_width = control_width + text_width;
+    match alignment {
+        Alignment::Center | Alignment::Distribute => {
+            area.x + (area.width - line_width).max(0.0) / 2.0
+        }
+        Alignment::Right => area.x + (area.width - line_width).max(0.0),
+        _ => area.x + left_margin,
+    }
 }
 
 #[cfg(test)]
-mod projected_cell_stack_fallback_tests {
-    use super::suppress_projected_cell_stack_picture_fallback;
-    use crate::document_core::queries::rendering::CELL_FLOATING_STACK_PROJECTION_TAG;
-    use crate::model::control::Control;
-    use crate::model::image::Picture;
-    use crate::model::paragraph::{LineSeg, Paragraph};
-    use crate::model::shape::TextWrap;
-
-    fn projected_picture_paragraph() -> Paragraph {
-        let mut picture = Picture::default();
-        picture.common.treat_as_char = true;
-        picture.common.text_wrap = TextWrap::Square;
-        Paragraph {
-            controls: vec![Control::Picture(Box::new(picture))],
-            line_segs: vec![LineSeg {
-                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE | CELL_FLOATING_STACK_PROJECTION_TAG,
-                ..Default::default()
-            }],
-            ..Default::default()
-        }
-    }
+mod inline_fallback_alignment_tests {
+    use super::*;
+    use crate::renderer::composer::{ComposedLine, ComposedTextRun};
 
     #[test]
-    fn suppresses_only_a_registered_projected_picture_fallback() {
-        let projected = projected_picture_paragraph();
-        assert!(suppress_projected_cell_stack_picture_fallback(
-            &projected, 0, true
-        ));
-        assert!(!suppress_projected_cell_stack_picture_fallback(
-            &projected, 0, false
-        ));
-
-        let mut ordinary_tac = projected;
-        ordinary_tac.line_segs[0].tag &= !CELL_FLOATING_STACK_PROJECTION_TAG;
-        assert!(!suppress_projected_cell_stack_picture_fallback(
-            &ordinary_tac,
-            0,
-            true
-        ));
+    fn centered_and_right_inline_picture_share_the_text_line_width() {
+        let styles = ResolvedStyleSet::default();
+        let composed = ComposedParagraph {
+            lines: vec![ComposedLine {
+                runs: vec![ComposedTextRun {
+                    text: "AB\u{FFFC}CD".into(),
+                    ..Default::default()
+                }],
+                line_height: 1200,
+                baseline_distance: 1000,
+                segment_width: 0,
+                column_start: 0,
+                line_spacing: 0,
+                has_line_break: false,
+                char_start: 0,
+            }],
+            para_style_id: 0,
+            inline_controls: vec![],
+            numbering_text: None,
+            tac_controls: vec![(2, 3600, 0)],
+            footnote_positions: vec![],
+            tab_extended: vec![],
+        };
+        let area = LayoutRect {
+            x: 100.0,
+            y: 200.0,
+            width: 200.0,
+            height: 50.0,
+        };
+        let style = resolved_to_text_style(&styles, 0, 0);
+        let text_width = estimate_text_width("ABCD", &style);
+        let before_width = inline_control_preceding_text_width(&composed, &styles, 0, 2);
+        assert!((before_width - estimate_text_width("AB", &style)).abs() < 0.01);
+        let picture_slot_width = 48.0;
+        for (alignment, fraction) in [(Alignment::Center, 0.5), (Alignment::Right, 1.0)] {
+            let start = partial_cell_inline_start_x(
+                &area,
+                alignment,
+                picture_slot_width,
+                &composed,
+                &styles,
+                0.0,
+            );
+            let expected = area.x + (area.width - picture_slot_width - text_width) * fraction;
+            assert!((start - expected).abs() < 0.01);
+            let picture_x = start + before_width + 6.0; // 6px outer left margin
+            let expected_picture_x = expected + estimate_text_width("AB", &style) + 6.0;
+            assert!((picture_x - expected_picture_x).abs() < 0.01);
+        }
     }
 }
 
@@ -464,8 +556,10 @@ impl LayoutEngine {
                         total += spacing_after;
                     }
                     if start < end {
-                        total +=
-                            self.paragraph_cell_non_inline_controls_flow_height(&para.controls);
+                        total += self.paragraph_cell_non_inline_controls_flow_height(
+                            &para.controls,
+                            inner_width,
+                        );
                     }
                 }
                 total
@@ -709,7 +803,7 @@ impl LayoutEngine {
                     .iter()
                     .map(|ctrl| match ctrl {
                         Control::Picture(pic) if pic.common.treat_as_char => {
-                            hwpunit_to_px(pic.common.width as i32, self.dpi)
+                            hwpunit_to_px(inline_picture_occupied_width_hu(pic), self.dpi)
                         }
                         Control::Shape(shape) if shape.common().treat_as_char => {
                             hwpunit_to_px(shape.common().width as i32, self.dpi)
@@ -790,25 +884,45 @@ impl LayoutEngine {
                 // 이 문단의 컨트롤(이미지/도형/중첩테이블) 배치
                 // 제목행 반복 셀에서는 컨트롤을 건너뜀 (이미지/도형 중복 방지)
                 if !is_repeated_header_cell {
-                    let para_alignment = styles
-                        .para_styles
-                        .get(para.para_shape_id as usize)
-                        .map(|s| s.alignment)
-                        .unwrap_or(Alignment::Left);
+                    let para_style = styles.para_styles.get(para.para_shape_id as usize);
+                    let para_alignment = para_style.map(|s| s.alignment).unwrap_or(Alignment::Left);
 
                     // 인라인 컨트롤의 시작 X 위치 (정렬 기반)
-                    let mut inline_x = match para_alignment {
-                        Alignment::Center | Alignment::Distribute => {
-                            inner_area.x + (inner_area.width - total_inline_width).max(0.0) / 2.0
-                        }
-                        Alignment::Right => {
-                            inner_area.x + (inner_area.width - total_inline_width).max(0.0)
-                        }
-                        _ => inner_area.x,
-                    };
+                    let mut inline_x = partial_cell_inline_start_x(
+                        &inner_area,
+                        para_alignment,
+                        total_inline_width,
+                        composed,
+                        styles,
+                        effective_margin_left_line(
+                            para_style.map(|s| s.margin_left).unwrap_or(0.0),
+                            para_style.map(|s| s.indent).unwrap_or(0.0),
+                            start_line,
+                        ),
+                    );
                     let mut rendered_top_and_bottom_non_inline = false;
+                    let control_positions = para.control_text_positions();
+                    let mut previous_inline_control_pos = 0usize;
 
                     for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
+                        let is_inline = match ctrl {
+                            Control::Picture(pic) => pic.common.treat_as_char,
+                            Control::Shape(shape) => shape.common().treat_as_char,
+                            Control::Equation(eq) => eq.common.treat_as_char,
+                            Control::Table(nested) => nested.common.treat_as_char,
+                            _ => false,
+                        };
+                        if is_inline {
+                            if let Some(&position) = control_positions.get(ctrl_idx) {
+                                inline_x += inline_control_preceding_text_width(
+                                    composed,
+                                    styles,
+                                    previous_inline_control_pos,
+                                    position,
+                                );
+                                previous_inline_control_pos = position;
+                            }
+                        }
                         match ctrl {
                             Control::Picture(pic) => {
                                 if !pic.common.treat_as_char
@@ -819,53 +933,41 @@ impl LayoutEngine {
                                 }
                                 if pic.common.treat_as_char {
                                     let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
-                                    // layout_composed_paragraph에서 텍스트 흐름 안에 렌더링됐는지 확인:
-                                    // 이미지 위치가 실제 run 범위에 포함될 때만 스킵
-                                    let composed_run_will_render_inline =
-                                        composed.tac_controls.iter().any(|&(abs_pos, _, ci)| {
-                                            ci == ctrl_idx
-                                                && composed.lines.iter().any(|line| {
-                                                    let line_chars: usize = line
-                                                        .runs
-                                                        .iter()
-                                                        .map(|r| r.text.chars().count())
-                                                        .sum();
-                                                    abs_pos >= line.char_start
-                                                        && abs_pos < line.char_start + line_chars
-                                                })
-                                        });
-                                    // [#2004] The projected empty-cell stack is painted by
-                                    // paragraph_layout even though it has no text run. Its signed
-                                    // horizontal offset is already applied to the registered
-                                    // inline position; emitting this legacy line-top fallback
-                                    // again would cover that image at the unshifted cell origin.
-                                    let projected_inline_already_rendered =
-                                        suppress_projected_cell_stack_picture_fallback(
-                                            para,
+                                    let margin_left =
+                                        hwpunit_to_px(i32::from(pic.common.margin.left), self.dpi);
+                                    let margin_right =
+                                        hwpunit_to_px(i32::from(pic.common.margin.right), self.dpi);
+                                    let slot_w = hwpunit_to_px(
+                                        inline_picture_occupied_width_hu(pic),
+                                        self.dpi,
+                                    );
+                                    // paragraph_layout registers every inline picture it paints,
+                                    // including empty host lines and boundary controls. The full
+                                    // cell path uses this same registration to avoid a second image.
+                                    let will_render_inline = tree
+                                        .get_inline_shape_position(
+                                            section_index,
+                                            cp_idx,
                                             ctrl_idx,
-                                            tree.get_inline_shape_position(
-                                                section_index,
-                                                cp_idx,
-                                                ctrl_idx,
-                                                Some(&cell_context),
-                                            )
-                                            .is_some(),
-                                        );
-                                    let will_render_inline = composed_run_will_render_inline
-                                        || projected_inline_already_rendered;
+                                            Some(&cell_context),
+                                        )
+                                        .is_some();
                                     if !will_render_inline {
                                         // 단독 이미지(텍스트 없는 문단): 직접 렌더링
                                         let pic_h =
                                             hwpunit_to_px(pic.common.height as i32, self.dpi);
                                         // [Task #477] 셀 폭 초과 시 비율 유지 클램프
-                                        let clamped_w = pic_w.min(inner_area.width);
+                                        let clamped_w = pic_w.min(
+                                            (inner_area.width - margin_left - margin_right)
+                                                .max(0.0),
+                                        );
                                         let clamped_h = if pic_w > 0.0 {
                                             pic_h * (clamped_w / pic_w)
                                         } else {
                                             pic_h
                                         };
                                         let pic_area = LayoutRect {
-                                            x: inline_x,
+                                            x: inline_x + margin_left,
                                             y: para_y_before_compose,
                                             width: clamped_w,
                                             height: clamped_h,
@@ -883,10 +985,10 @@ impl LayoutEngine {
                                             Some(ctrl_idx),
                                             Some(&cell_context),
                                         );
-                                        inline_x += clamped_w;
+                                        inline_x += margin_left + clamped_w + margin_right;
                                         continue;
                                     }
-                                    inline_x += pic_w;
+                                    inline_x += slot_w;
                                 } else {
                                     // 비인라인 이미지: TopAndBottom+Para 는 row height 증가와
                                     // 무관하게 LINE_SEG 기준 anchor 를 유지한다.
@@ -1130,8 +1232,11 @@ impl LayoutEngine {
                                         shape.common().text_wrap,
                                         crate::model::shape::TextWrap::TopAndBottom
                                     );
-                                    let mut shape_flow_h =
-                                        self.cell_non_inline_control_flow_height(shape.common());
+                                    let mut shape_flow_h = self
+                                        .cell_non_inline_control_flow_height(
+                                            shape.common(),
+                                            inner_area.width,
+                                        );
                                     if is_top_and_bottom_shape {
                                         rendered_top_and_bottom_non_inline = true;
                                         shape_flow_h = 0.0;
@@ -1162,6 +1267,12 @@ impl LayoutEngine {
                             Control::Equation(eq) => {
                                 // 분할 표 내 수식: 항상 글자처럼 인라인 배치
                                 let eq_w = hwpunit_to_px(eq.common.width as i32, self.dpi);
+                                let eq_advance = hwpunit_to_px(
+                                    crate::renderer::equation::occupied_width_hwp(eq),
+                                    self.dpi,
+                                );
+                                let eq_margin_x =
+                                    hwpunit_to_px(eq.common.margin.left as i32, self.dpi);
                                 let eq_h = hwpunit_to_px(eq.common.height as i32, self.dpi);
 
                                 // 빈 runs 셀 + TAC 수식: paragraph_layout(Task #287 경로)이
@@ -1177,14 +1288,18 @@ impl LayoutEngine {
                                     )
                                     .is_some();
                                 if already_rendered_inline {
-                                    inline_x += eq_w;
+                                    inline_x += eq_advance;
                                     continue;
                                 }
 
                                 let (eq_x, eq_y) = {
-                                    let x = inline_x;
-                                    inline_x += eq_w;
-                                    (x, para_y_before_compose)
+                                    let x = inline_x + eq_margin_x;
+                                    inline_x += eq_advance;
+                                    (
+                                        x,
+                                        para_y_before_compose
+                                            + hwpunit_to_px(eq.common.margin.top as i32, self.dpi),
+                                    )
                                 };
 
                                 let tokens =
@@ -1197,7 +1312,11 @@ impl LayoutEngine {
                                         font_size_px,
                                         &eq.font_name,
                                     )
-                                    .layout(&ast);
+                                    .with_version(&eq.version_info)
+                                    .layout_in_control_width(
+                                        &ast,
+                                        hwpunit_to_px(eq.common.width as i32, self.dpi),
+                                    );
                                 let color_str =
                                     super::super::equation::svg_render::eq_color_to_svg(eq.color);
                                 let svg_content =
@@ -1217,6 +1336,7 @@ impl LayoutEngine {
                                         color: eq.color,
                                         font_size: font_size_px,
                                         font_name: eq.font_name.clone(),
+                                        version_info: eq.version_info.clone(),
                                         section_index: Some(section_index),
                                         para_index: Some(para_index),
                                         control_index: Some(control_index),
@@ -1434,6 +1554,16 @@ impl LayoutEngine {
                         para_y +=
                             self.paragraph_top_and_bottom_non_inline_flow_height(&para.controls);
                     }
+                    self.layout_cell_picture_captions(
+                        tree,
+                        &mut cell_node,
+                        para,
+                        styles,
+                        &inner_area,
+                        bin_data_content,
+                        section_index,
+                        &cell_context,
+                    );
                 }
 
                 if has_table_ctrl && mixed_nested_split.is_none() {
@@ -1534,6 +1664,15 @@ impl LayoutEngine {
             para_index,
             control_index,
         );
+        let repeat_rowbreak_outer_top = is_continuation
+            // The render-only picture-stack projection adds this inset before
+            // calling layout_partial_table; reopening it here would double it.
+            && projected_cell_stack_continuation_outer_top_hu(table, true) == 0
+            && native_rowbreak_para_float_uses_outer_margin_box(
+                table,
+                self.profile.get().native_hwp5_layout(),
+                0,
+            );
         let saved_residual_split_hu = native_single_cell_rowbreak_saved_residual_split_hu(
             self.profile.get().native_hwp5_layout(),
             para,
@@ -1646,6 +1785,13 @@ impl LayoutEngine {
                 flow_base
                     + hwpunit_to_px(table.outer_margin_top as i32, self.dpi)
                     + effective_vertical_offset
+            } else if repeat_rowbreak_outer_top {
+                let flow_base = if prev_table_end.is_finite() {
+                    (y_start + effective_vertical_offset).max(prev_table_end)
+                } else {
+                    y_start + effective_vertical_offset
+                };
+                flow_base + hwpunit_to_px(table.outer_margin_top as i32, self.dpi)
             } else if let Some((outer_top, _)) = native_cellbreak_fragment_spacing_hu {
                 // issue2063: this native CellBreak contract repeats a visible outer-top inset on
                 // every fragment. Pagination reserves the same inset; keep the painted box in
@@ -1952,6 +2098,46 @@ impl LayoutEngine {
         for &(row, height) in allocated_row_heights {
             if let Some(h) = row_heights.get_mut(row) {
                 *h = height;
+            }
+        }
+
+        // A saved line can paint below the unit-sum height assigned by typeset.
+        // Keep the final split row's cell clip, fill, and border around that
+        // authored line box when its visible saved lines form one page run.
+        if self.profile.get().native_hwp5_layout()
+            && matches!(
+                table.page_break,
+                crate::model::table::TablePageBreak::RowBreak
+            )
+            && !table.common.treat_as_char
+            && !is_block_split
+            && !end_cut.is_empty()
+            && end_row > start_row
+        {
+            let last_row = end_row - 1;
+            let mut cells: Vec<_> = table
+                .cells
+                .iter()
+                .filter(|cell| cell.row as usize == last_row && cell.row_span == 1)
+                .collect();
+            cells.sort_by_key(|cell| cell.col);
+            for (index, cell) in cells.iter().enumerate() {
+                let start = if last_row == start_row {
+                    start_cut.get(index).copied().unwrap_or(0)
+                } else {
+                    0
+                };
+                let Some(end) = end_cut.get(index).copied() else {
+                    continue;
+                };
+                if end <= start {
+                    continue;
+                }
+                if let Some(height) =
+                    self.saved_cell_cut_line_extent_height(cell, table, styles, start, end)
+                {
+                    row_heights[last_row] = row_heights[last_row].max(height);
+                }
             }
         }
 

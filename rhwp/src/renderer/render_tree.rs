@@ -1313,6 +1313,8 @@ pub struct EquationNode {
     pub font_size: f64,
     /// 문서에 선언된 수식 글꼴 이름
     pub font_name: String,
+    /// 원본 수식 버전. 빈 구형 EQEDIT는 HFT 수식 서체를 사용한다.
+    pub version_info: String,
     /// 소속 구역 인덱스
     pub section_index: Option<usize>,
     /// 수식 컨트롤을 소유한 문단 인덱스

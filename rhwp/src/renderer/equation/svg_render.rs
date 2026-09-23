@@ -29,10 +29,7 @@ pub fn render_equation_svg_with_font(
     font_name: Option<&str>,
 ) -> String {
     let mut svg = String::new();
-    let family = font_name.filter(|name| !name.trim().is_empty()).map_or_else(
-        || "'Latin Modern Math', 'STIX Two Text', 'STIX Two Math', 'Times New Roman', 'Times', serif".to_string(),
-        |name| format!("'{}', 'Latin Modern Math', 'STIX Two Math', serif", escape_xml(name)),
-    );
+    let family = escape_xml(&super::font::equation_css_font_family(font_name));
     svg.push_str(&format!("<g font-family=\"{}\">", family));
     render_box(
         &mut svg,
@@ -141,7 +138,7 @@ fn render_box(
             // 분자
             render_box(svg, numer, x, y, color, fs, italic, bold);
             // 분수선 — baseline에서 axis_height 위에 배치
-            let line_y = y + lb.baseline - fs * super::layout::AXIS_HEIGHT;
+            let line_y = y + super::layout::fraction_line_y(numer, fs);
             let line_thick = fs * 0.04;
             svg.push_str(&format!(
                 "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{}\" stroke-width=\"{:.2}\"/>\n",

@@ -6,7 +6,22 @@
 use super::ast::MatrixStyle;
 use super::layout::*;
 use super::symbols::{DecoKind, FontStyleKind};
+use wasm_bindgen::prelude::*;
 use web_sys::CanvasRenderingContext2d;
+
+struct EquationFont {
+    source: String,
+    family: String,
+    hft: bool,
+}
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(catch, js_namespace = globalThis, js_name = resolveEquationFontFamily)]
+    fn resolve_equation_font_family(source: &str, glyphs: &str) -> Result<Option<String>, JsValue>;
+    #[wasm_bindgen(catch, js_namespace = globalThis, js_name = resolveEquationLiteralFont)]
+    fn resolve_equation_literal_font(text: &str) -> Result<JsValue, JsValue>;
+}
 
 /// 수식을 Canvas에 렌더링
 pub fn render_equation_canvas(
@@ -17,7 +32,13 @@ pub fn render_equation_canvas(
     color: &str,
     base_font_size: f64,
     font_family: &str,
+    version_info: &str,
 ) {
+    let font_family = EquationFont {
+        source: font_family.to_string(),
+        family: super::font::equation_css_font_family(Some(font_family)),
+        hft: version_info.is_empty() && super::font::is_legacy_equation_font(font_family),
+    };
     // 진입점 default: italic=true (hwpeq 변수 기본 스타일).
     // FontStyle::Roman(`rm`) 적용 영역에서는 자식 렌더링 시 italic=false 로 전환된다.
     render_box(
@@ -29,7 +50,7 @@ pub fn render_equation_canvas(
         base_font_size,
         true,
         false,
-        font_family,
+        &font_family,
     );
 }
 
@@ -42,7 +63,7 @@ fn render_box(
     fs: f64,
     italic: bool,
     bold: bool,
-    font_family: &str,
+    font_family: &EquationFont,
 ) {
     let x = parent_x + lb.x;
     let y = parent_y + lb.y;
@@ -65,24 +86,43 @@ fn render_box(
                     '\u{3000}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{AC00}'..='\u{D7AF}'
                 )
             });
-            set_font(ctx, fi, !has_cjk && italic, bold, font_family);
             ctx.set_fill_style_str(color);
-            let _ = ctx.fill_text(text, x, y + lb.baseline);
+            if font_family.hft && !text.is_ascii() {
+                draw_legacy_literal(ctx, text, x, y + lb.baseline, fi, italic, bold, font_family);
+                return;
+            }
+            draw_text(
+                ctx,
+                text,
+                x,
+                y + lb.baseline,
+                fi,
+                !has_cjk && italic,
+                bold,
+                font_family,
+            );
         }
         LayoutKind::Number(text) => {
             // [Issue #900] svg_render.rs Number arm 과 동기화 — fs 사용.
             let fi = fs;
-            set_font(ctx, fi, false, bold, font_family);
             ctx.set_fill_style_str(color);
-            let _ = ctx.fill_text(text, x, y + lb.baseline);
+            draw_text(ctx, text, x, y + lb.baseline, fi, false, bold, font_family);
         }
         LayoutKind::Symbol(text) => {
             // [Issue #900] svg_render.rs Symbol arm 과 동기화 — fs 사용.
             let fi = fs;
-            set_font(ctx, fi, false, false, font_family);
             ctx.set_fill_style_str(color);
             ctx.set_text_align("center");
-            let _ = ctx.fill_text(text, x + lb.width / 2.0, y + lb.baseline);
+            draw_text(
+                ctx,
+                text,
+                x + lb.width / 2.0,
+                y + lb.baseline,
+                fi,
+                false,
+                false,
+                font_family,
+            );
             ctx.set_text_align("start");
         }
         LayoutKind::MathSymbol(text) => {
@@ -92,22 +132,29 @@ fn render_box(
             if super::layout::is_integral_symbol(text) {
                 draw_integral(ctx, x, y, fs, color);
             } else {
-                set_font(ctx, fs, false, false, font_family);
                 ctx.set_fill_style_str(color);
-                let _ = ctx.fill_text(text, x, y + lb.baseline);
+                draw_text(
+                    ctx,
+                    text,
+                    x,
+                    y + lb.baseline,
+                    fs,
+                    italic && super::font::is_greek_variable(text),
+                    false,
+                    font_family,
+                );
             }
         }
         LayoutKind::Function(name) => {
             // [Issue #900] svg_render.rs Function arm 과 동기화 — fs 사용.
             let fi = fs;
-            set_font(ctx, fi, false, false, font_family);
             ctx.set_fill_style_str(color);
-            let _ = ctx.fill_text(name, x, y + lb.baseline);
+            draw_text(ctx, name, x, y + lb.baseline, fi, false, false, font_family);
         }
         LayoutKind::Fraction { numer, denom } => {
             render_box(ctx, numer, x, y, color, fs, italic, bold, font_family);
             // 분수선 — baseline에서 axis_height 위에 배치 (SVG 경로와 동일)
-            let line_y = y + lb.baseline - fs * super::layout::AXIS_HEIGHT;
+            let line_y = y + super::layout::fraction_line_y(numer, fs);
             let line_thick = fs * 0.04;
             ctx.set_stroke_style_str(color);
             ctx.set_line_width(line_thick);
@@ -223,7 +270,6 @@ fn render_box(
                 } else {
                     BIG_OP_SCALE
                 };
-            set_font(ctx, op_fs, false, false, font_family);
             ctx.set_fill_style_str(color);
             if is_integral {
                 // Task #1317: 적분 기호는 stroke path 로 렌더(geom SSOT).
@@ -238,7 +284,7 @@ fn render_box(
                 let op_x =
                     x + (center_w - super::layout::estimate_text_width(symbol, op_fs, false)) / 2.0;
                 let op_y = y + sup_h + op_fs * 0.8;
-                let _ = ctx.fill_text(symbol, op_x, op_y);
+                draw_text(ctx, symbol, op_x, op_y, op_fs, false, false, font_family);
             }
             // 위/아래 첨자 — LayoutBox 자식 좌표 사용 (적분/일반 공통)
             if let Some(sup_box) = sup {
@@ -274,9 +320,8 @@ fn render_box(
             // 전체 높이라 base 의 1.5~2 배가 되어 lim 글자가 비정상으로 커지는 정황.
             let name = if *is_upper { "Lim" } else { "lim" };
             let fi = fs;
-            set_font(ctx, fi, false, false, font_family);
             ctx.set_fill_style_str(color);
-            let _ = ctx.fill_text(name, x, y + fi * 0.8);
+            draw_text(ctx, name, x, y + fi * 0.8, fi, false, false, font_family);
             if let Some(sub_box) = sub {
                 render_box(
                     ctx,
@@ -336,9 +381,8 @@ fn render_box(
             let paren_w = if use_glyph { fs * 0.333 } else { fs * 0.27 };
             if !left.is_empty() {
                 if use_glyph && (left == "(" || left == ")") {
-                    set_font(ctx, fs, false, false, font_family);
                     ctx.set_fill_style_str(color);
-                    let _ = ctx.fill_text(left, x, y + lb.baseline);
+                    draw_text(ctx, left, x, y + lb.baseline, fs, false, false, font_family);
                 } else {
                     draw_stretch_bracket(ctx, left, x, y, paren_w, lb.height, color, fs);
                 }
@@ -347,9 +391,17 @@ fn render_box(
             if !right.is_empty() {
                 let right_x = x + lb.width - paren_w;
                 if use_glyph && (right == "(" || right == ")") {
-                    set_font(ctx, fs, false, false, font_family);
                     ctx.set_fill_style_str(color);
-                    let _ = ctx.fill_text(right, right_x, y + lb.baseline);
+                    draw_text(
+                        ctx,
+                        right,
+                        right_x,
+                        y + lb.baseline,
+                        fs,
+                        false,
+                        false,
+                        font_family,
+                    );
                 } else {
                     draw_stretch_bracket(ctx, right, right_x, y, paren_w, lb.height, color, fs);
                 }
@@ -387,6 +439,159 @@ fn render_box(
     }
 }
 
+/// PUA는 로드와 cmap이 확인된 세션 서체에만 전달한다. 누락 시 원래 Unicode로 fallback한다.
+fn draw_text(
+    ctx: &CanvasRenderingContext2d,
+    text: &str,
+    x: f64,
+    y: f64,
+    size: f64,
+    italic: bool,
+    bold: bool,
+    font: &EquationFont,
+) {
+    if font.hft && draw_hft_text(ctx, text, x, y, size, italic, bold) {
+        return;
+    }
+    if super::font::is_legacy_equation_font(&font.source) {
+        let mapped: Vec<(char, bool)> = text
+            .chars()
+            .map(|c| super::font::legacy_equation_glyph(c, italic))
+            .collect();
+        let glyphs: String = mapped.iter().map(|(c, _)| *c).collect();
+        if let Ok(Some(family)) = resolve_equation_font_family(&font.source, &glyphs) {
+            let family = format!("'{}'", family.replace('\\', "\\\\").replace('\'', "\\'"));
+            let alignment = ctx.text_align();
+            let mut runs: Vec<(String, bool, f64)> = Vec::new();
+            for (character, skew) in mapped {
+                if let Some(run) = runs.last_mut().filter(|run| run.1 == skew) {
+                    run.0.push(character);
+                } else {
+                    runs.push((character.to_string(), skew, 0.0));
+                }
+            }
+            let mut width = 0.0;
+            for (text, skew, advance) in &mut runs {
+                set_font(ctx, size, *skew, bold, &family);
+                *advance = ctx.measure_text(text).map(|m| m.width()).unwrap_or(0.0);
+                width += *advance;
+            }
+            let mut pen = x - if alignment == "center" {
+                width / 2.0
+            } else {
+                0.0
+            };
+            ctx.set_text_align("start");
+            for (text, skew, advance) in runs {
+                set_font(ctx, size, skew, bold, &family);
+                let _ = ctx.fill_text(&text, pen, y);
+                pen += advance;
+            }
+            ctx.set_text_align(&alignment);
+            return;
+        }
+    }
+    set_font(ctx, size, italic, bold, &font.family);
+    let _ = ctx.fill_text(text, x, y);
+}
+
+fn draw_legacy_literal(
+    ctx: &CanvasRenderingContext2d,
+    text: &str,
+    x: f64,
+    y: f64,
+    size: f64,
+    italic: bool,
+    bold: bool,
+    font: &EquationFont,
+) {
+    let mut pen = x;
+    for character in text.chars() {
+        let glyph = character.to_string();
+        if character.is_ascii() {
+            if !draw_hft_text(ctx, &glyph, pen, y, size, italic, bold) {
+                set_font(ctx, size, italic, bold, &font.family);
+                let _ = ctx.fill_text(&glyph, pen, y);
+            }
+        } else {
+            let resolved = resolve_equation_literal_font(&glyph)
+                .ok()
+                .and_then(|value| {
+                    let family = js_sys::Reflect::get(&value, &JsValue::from_str("family"))
+                        .ok()?
+                        .as_string()?;
+                    let scale = js_sys::Reflect::get(&value, &JsValue::from_str("emScale"))
+                        .ok()?
+                        .as_f64()?;
+                    (scale.is_finite() && scale > 0.0 && scale <= 1.0).then_some((family, scale))
+                });
+            if let Some((family, scale)) = resolved {
+                let family = format!("'{}'", family.replace('\\', "\\\\").replace('\'', "\\'"));
+                set_font(ctx, size * scale, false, bold, &family);
+            } else {
+                // literal을 수식 bank의 다른 자형으로 바꾸지 않는다.
+                set_font(ctx, size, false, bold, &font.family);
+            }
+            let _ = ctx.fill_text(&glyph, pen, y);
+        }
+        pen += ctx.measure_text(&glyph).map(|m| m.width()).unwrap_or(0.0);
+    }
+}
+
+fn draw_hft_text(
+    ctx: &CanvasRenderingContext2d,
+    text: &str,
+    x: f64,
+    y: f64,
+    size: f64,
+    italic: bool,
+    bold: bool,
+) -> bool {
+    let latin = if italic { "HSUSRI" } else { "HSUSR" };
+    let mut runs: Vec<(String, String, f64)> = Vec::new();
+    for character in text.chars() {
+        let glyph = character.to_string();
+        let banks = if italic {
+            vec![latin, "HSUSFL", "HSUSSP"]
+        } else {
+            vec![latin, "HSUSSP"]
+        };
+        let family = banks
+            .into_iter()
+            .find_map(|bank| resolve_equation_font_family(bank, &glyph).ok().flatten());
+        let Some(family) = family else {
+            return false;
+        };
+        if let Some(run) = runs.last_mut().filter(|run| run.0 == family) {
+            run.1.push(character);
+        } else {
+            runs.push((family, glyph, 0.0));
+        }
+    }
+    let alignment = ctx.text_align();
+    let mut width = 0.0;
+    for (family, text, advance) in &mut runs {
+        *family = format!("'{}'", family.replace('\\', "\\\\").replace('\'', "\\'"));
+        // HFT italic bank의 곡선 자체가 기울어져 있다.
+        set_font(ctx, size, false, bold, family);
+        *advance = ctx.measure_text(text).map(|m| m.width()).unwrap_or(0.0);
+        width += *advance;
+    }
+    let mut pen = x - if alignment == "center" {
+        width / 2.0
+    } else {
+        0.0
+    };
+    ctx.set_text_align("start");
+    for (family, text, advance) in runs {
+        set_font(ctx, size, false, bold, &family);
+        let _ = ctx.fill_text(&text, pen, y);
+        pen += advance;
+    }
+    ctx.set_text_align(&alignment);
+    true
+}
+
 fn set_font(
     ctx: &CanvasRenderingContext2d,
     size: f64,
@@ -396,11 +601,7 @@ fn set_font(
 ) {
     let style = if italic { "italic " } else { "" };
     let weight = if bold { "bold " } else { "" };
-    // svg_render.rs 의 EQ_FONT_FAMILY 와 동일 스택 유지. (Task #280)
-    ctx.set_font(&format!(
-        "{}{}{:.1}px \"{}\", 'Latin Modern Math', 'STIX Two Text', 'STIX Two Math', 'Times New Roman', 'Times', serif",
-        style, weight, size, font_family.replace(['\\', '"'], ""),
-    ));
+    ctx.set_font(&format!("{}{}{:.3}px {}", style, weight, size, font_family,));
 }
 
 /// 적분 기호(∫)를 stroke path 로 렌더 (Task #1317).

@@ -165,6 +165,10 @@ impl EqNode {
                     .into_iter()
                     .map(|c| c.simplify())
                     .filter(|c| !matches!(c, EqNode::Empty))
+                    .flat_map(|child| match child {
+                        EqNode::Row(parts) => parts,
+                        other => vec![other],
+                    })
                     .collect();
                 if children.len() == 1 {
                     children.into_iter().next().unwrap()

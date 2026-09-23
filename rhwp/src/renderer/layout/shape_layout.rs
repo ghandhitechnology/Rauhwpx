@@ -25,6 +25,11 @@ use crate::model::shape::{
 use crate::model::shape::{HorzAlign, HorzRelTo, VertAlign, VertRelTo};
 use crate::model::style::{Alignment, FillType};
 
+fn rectangle_corner_radius_px(round_rate: u8, width: f64, height: f64) -> f64 {
+    let short_side = width.min(height).max(0.0);
+    (short_side * f64::from(round_rate) / 100.0).min(short_side / 2.0)
+}
+
 fn stored_lines_clear_fixed_picture(
     paragraphs: &[Paragraph],
     items: &[PageItem],
@@ -793,6 +798,7 @@ impl LayoutEngine {
         bin_data_content: &[BinDataContent],
         overflow_map: &std::collections::HashMap<(usize, usize), Vec<Paragraph>>,
         clamp_negative_para_offset: bool,
+        inline_pos_override: Option<(f64, f64)>,
     ) {
         let para = match paragraphs.get(para_index) {
             Some(p) => p,
@@ -816,14 +822,16 @@ impl LayoutEngine {
             // 인라인 좌표 없으면 기존 방식 (정렬 기반 단독 배치)
             let eq_w = hwpunit_to_px(eq.common.width as i32, self.dpi);
             let eq_h = hwpunit_to_px(eq.common.height as i32, self.dpi);
+            let eq_advance =
+                hwpunit_to_px(crate::renderer::equation::occupied_width_hwp(eq), self.dpi);
             let eq_x = match alignment {
                 Alignment::Center | Alignment::Distribute => {
-                    col_area.x + (col_area.width - eq_w).max(0.0) / 2.0
+                    col_area.x + (col_area.width - eq_advance).max(0.0) / 2.0
                 }
-                Alignment::Right => col_area.x + (col_area.width - eq_w).max(0.0),
+                Alignment::Right => col_area.x + (col_area.width - eq_advance).max(0.0),
                 _ => col_area.x,
-            };
-            let eq_y = para_y;
+            } + hwpunit_to_px(eq.common.margin.left as i32, self.dpi);
+            let eq_y = para_y + hwpunit_to_px(eq.common.margin.top as i32, self.dpi);
 
             // 수식 스크립트 → AST → 레이아웃 → SVG 조각
             let tokens = super::super::equation::tokenizer::tokenize(&eq.script);
@@ -831,7 +839,8 @@ impl LayoutEngine {
             let font_size_px = hwpunit_to_px(eq.font_size as i32, self.dpi);
             let layout_box =
                 super::super::equation::layout::EqLayout::with_font(font_size_px, &eq.font_name)
-                    .layout(&ast);
+                    .with_version(&eq.version_info)
+                    .layout_in_control_width(&ast, hwpunit_to_px(eq.common.width as i32, self.dpi));
             let color_str = super::super::equation::svg_render::eq_color_to_svg(eq.color);
             let svg_content = super::super::equation::svg_render::render_equation_svg_with_font(
                 &layout_box,
@@ -849,6 +858,7 @@ impl LayoutEngine {
                     color: eq.color,
                     font_size: font_size_px,
                     font_name: eq.font_name.clone(),
+                    version_info: eq.version_info.clone(),
                     section_index: Some(section_index),
                     para_index: Some(para_index),
                     control_index: Some(control_index),
@@ -931,7 +941,11 @@ impl LayoutEngine {
         // 인라인 Shape: paragraph_layout에서 계산된 좌표가 있으면 사용
         let inline_pos = common
             .treat_as_char
-            .then(|| tree.get_inline_shape_position(section_index, para_index, control_index, None))
+            .then(|| {
+                inline_pos_override.or_else(|| {
+                    tree.get_inline_shape_position(section_index, para_index, control_index, None)
+                })
+            })
             .flatten();
         let floating_pos = (!common.treat_as_char)
             .then(|| tree.get_floating_shape_position(section_index, para_index, control_index))
@@ -1256,7 +1270,7 @@ impl LayoutEngine {
                 }
                 commands.push(PathCommand::ClosePath);
                 let node_id = tree.next_id();
-                let node = RenderNode::new(
+                let mut node = RenderNode::new(
                     node_id,
                     RenderNodeType::Path(PathNode::new(commands, style, gradient)),
                     BoundingBox::new(
@@ -1265,6 +1279,26 @@ impl LayoutEngine {
                         (max_x - min_x).max(0.0),
                         (max_y - min_y).max(0.0),
                     ),
+                );
+                let empty_map = std::collections::HashMap::new();
+                self.layout_textbox_content(
+                    tree,
+                    &mut node,
+                    &rect.drawing,
+                    min_x,
+                    min_y,
+                    (max_x - min_x).max(0.0),
+                    (max_y - min_y).max(0.0),
+                    section_index,
+                    para_index,
+                    control_index,
+                    styles,
+                    bin_data_content,
+                    &empty_map,
+                    parent_cell_path,
+                    child.common().treat_as_char,
+                    true,
+                    textbox_vpos_origin_hu(child.common(), true),
                 );
                 parent.children.push(node);
             }
@@ -1410,11 +1444,7 @@ impl LayoutEngine {
                     style.stroke_color = None;
                     style.stroke_width = 0.0;
                 }
-                let round_px = if rect.round_rate > 0 {
-                    (rect.round_rate as f64 / 100.0) * render_w.min(render_h) / 2.0
-                } else {
-                    0.0
-                };
+                let round_px = rectangle_corner_radius_px(rect.round_rate, render_w, render_h);
                 let node_id = tree.next_id();
                 let mut node = RenderNode::new(
                     node_id,
@@ -1475,6 +1505,19 @@ impl LayoutEngine {
                 } else {
                     1.0
                 };
+                // HWP lines may store a negative current width/height to preserve the
+                // drawn endpoint order. The frame size is absolute, so put a reflected
+                // axis origin at its far edge before mapping line and connector points.
+                let reverse_x = (sa.current_width as i32) < 0;
+                let reverse_y = (sa.current_height as i32) < 0;
+                let line_point = |point: crate::model::Point| {
+                    let x = hwpunit_to_px(point.x, self.dpi) * sx;
+                    let y = hwpunit_to_px(point.y, self.dpi) * sy;
+                    (
+                        render_x + if reverse_x { render_w - x } else { x },
+                        render_y + if reverse_y { render_h - y } else { y },
+                    )
+                };
 
                 // 연결선: 제어점이 있으면 Path로, 없으면 Line으로 렌더링
                 if let Some(ref conn) = line.connector {
@@ -1501,16 +1544,11 @@ impl LayoutEngine {
                         }
                         // 제어점으로 경로 생성
                         let mut commands = Vec::new();
-                        let conn_x1 = render_x + hwpunit_to_px(line.start.x, self.dpi) * sx;
-                        let conn_y1 = render_y + hwpunit_to_px(line.start.y, self.dpi) * sy;
-                        let conn_x2 = render_x + hwpunit_to_px(line.end.x, self.dpi) * sx;
-                        let conn_y2 = render_y + hwpunit_to_px(line.end.y, self.dpi) * sy;
+                        let (conn_x1, conn_y1) = line_point(line.start);
+                        let (conn_x2, conn_y2) = line_point(line.end);
                         let connector_point_xy =
                             |cp: &crate::model::shape::ConnectorControlPoint| {
-                                (
-                                    render_x + hwpunit_to_px(cp.x, self.dpi) * sx,
-                                    render_y + hwpunit_to_px(cp.y, self.dpi) * sy,
-                                )
+                                line_point(crate::model::Point { x: cp.x, y: cp.y })
                             };
                         let first_control_is_start = conn
                             .control_points
@@ -1665,10 +1703,8 @@ impl LayoutEngine {
                             }
                             _ => {}
                         }
-                        let x1 = render_x + hwpunit_to_px(line.start.x, self.dpi) * sx;
-                        let y1 = render_y + hwpunit_to_px(line.start.y, self.dpi) * sy;
-                        let x2 = render_x + hwpunit_to_px(line.end.x, self.dpi) * sx;
-                        let y2 = render_y + hwpunit_to_px(line.end.y, self.dpi) * sy;
+                        let (x1, y1) = line_point(line.start);
+                        let (x2, y2) = line_point(line.end);
                         let node_id = tree.next_id();
                         let mut line_node = LineNode::new(x1, y1, x2, y2, line_style);
                         line_node.section_index = Some(section_index);
@@ -1688,10 +1724,8 @@ impl LayoutEngine {
                 } else {
                     // 일반 직선
                     let line_style = drawing_to_line_style(&line.drawing);
-                    let x1 = render_x + hwpunit_to_px(line.start.x, self.dpi) * sx;
-                    let y1 = render_y + hwpunit_to_px(line.start.y, self.dpi) * sy;
-                    let x2 = render_x + hwpunit_to_px(line.end.x, self.dpi) * sx;
-                    let y2 = render_y + hwpunit_to_px(line.end.y, self.dpi) * sy;
+                    let (x1, y1) = line_point(line.start);
+                    let (x2, y2) = line_point(line.end);
                     let node_id = tree.next_id();
                     let mut line_node = LineNode::new(x1, y1, x2, y2, line_style);
                     line_node.section_index = Some(section_index);
@@ -3254,6 +3288,11 @@ impl LayoutEngine {
                     Control::Equation(eq) => {
                         // 글상자 내 수식: 항상 글자처럼 인라인 배치
                         let eq_w = hwpunit_to_px(eq.common.width as i32, self.dpi);
+                        let eq_advance = hwpunit_to_px(
+                            crate::renderer::equation::occupied_width_hwp(eq),
+                            self.dpi,
+                        );
+                        let eq_margin_x = hwpunit_to_px(eq.common.margin.left as i32, self.dpi);
                         let eq_h = hwpunit_to_px(eq.common.height as i32, self.dpi);
                         // [Task #962] 글상자 내부 paragraph 의 inline equation 은
                         // paragraph_layout 가 layout_composed_paragraph 경로에서 정확한
@@ -3285,12 +3324,16 @@ impl LayoutEngine {
                             .is_some()
                         {
                             // paragraph_layout 가 이미 emit — inline_x 만 advance
-                            inline_x += eq_w;
+                            inline_x += eq_advance;
                         } else {
                             let (eq_x, eq_y) = {
-                                let x = inline_x;
-                                inline_x += eq_w;
-                                (x, para_start_y)
+                                let x = inline_x + eq_margin_x;
+                                inline_x += eq_advance;
+                                (
+                                    x,
+                                    para_start_y
+                                        + hwpunit_to_px(eq.common.margin.top as i32, self.dpi),
+                                )
                             };
 
                             let tokens = super::super::equation::tokenizer::tokenize(&eq.script);
@@ -3300,7 +3343,11 @@ impl LayoutEngine {
                                 font_size_px,
                                 &eq.font_name,
                             )
-                            .layout(&ast);
+                            .with_version(&eq.version_info)
+                            .layout_in_control_width(
+                                &ast,
+                                hwpunit_to_px(eq.common.width as i32, self.dpi),
+                            );
                             let color_str =
                                 super::super::equation::svg_render::eq_color_to_svg(eq.color);
                             let svg_content =
@@ -3320,6 +3367,7 @@ impl LayoutEngine {
                                     color: eq.color,
                                     font_size: font_size_px,
                                     font_name: eq.font_name.clone(),
+                                    version_info: eq.version_info.clone(),
                                     section_index: Some(section_index),
                                     para_index: Some(para_index),
                                     control_index: Some(ctrl_idx_in_para),
@@ -4065,6 +4113,14 @@ mod tests {
     use super::*;
     use crate::model::paragraph::{CharShapeRef, LineSeg};
     use crate::renderer::style_resolver::{ResolvedCharStyle, ResolvedParaStyle};
+
+    #[test]
+    fn rectangle_round_rate_uses_short_side_and_caps_at_semicircle() {
+        assert_eq!(rectangle_corner_radius_px(0, 80.0, 30.0), 0.0);
+        assert_eq!(rectangle_corner_radius_px(30, 80.0, 30.0), 9.0);
+        assert_eq!(rectangle_corner_radius_px(50, 80.0, 30.0), 15.0);
+        assert_eq!(rectangle_corner_radius_px(100, 80.0, 30.0), 15.0);
+    }
 
     #[test]
     fn wmf_svg_document_is_positioned_without_recursive_svg_data_uri() {

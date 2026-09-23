@@ -223,6 +223,8 @@ export interface WebCanvasImageCacheStats {
 }
 
 import { fontFamilyChainForDisplay } from './font-substitution';
+import { createEquationFontResolver, createEquationLiteralFontResolver, createEquationTextMeasurer } from './equation-font';
+import { getImportedLocalFontBytes, resolveLocalFont } from './local-fonts';
 import type { FileSystemFileHandleLike } from '@/command/file-system-access';
 import {
   connectSubsecondDevtools,
@@ -262,6 +264,21 @@ let canvasFontSubstitutionInstalled = false;
 function installCanvasFontSubstitution(): void {
   if (canvasFontSubstitutionInstalled) return;
   if (typeof CanvasRenderingContext2D === 'undefined') return;
+
+  (globalThis as Record<string, unknown>).resolveEquationFontFamily = createEquationFontResolver(
+    resolveLocalFont,
+    getImportedLocalFontBytes,
+  );
+
+  (globalThis as Record<string, unknown>).resolveEquationLiteralFont = createEquationLiteralFontResolver(
+    resolveLocalFont,
+    getImportedLocalFontBytes,
+  );
+
+  (globalThis as Record<string, unknown>).measureEquationText = createEquationTextMeasurer(
+    resolveLocalFont,
+    getImportedLocalFontBytes,
+  );
 
   const proto = CanvasRenderingContext2D.prototype;
   const descriptor = Object.getOwnPropertyDescriptor(proto, 'font');

@@ -8,25 +8,10 @@ use super::font_lookup::{
 
 use crate::renderer::equation::ast::MatrixStyle;
 use crate::renderer::equation::layout::{
-    integral_geom, is_integral_symbol, LayoutBox, LayoutKind, AXIS_HEIGHT, BIG_OP_SCALE,
+    integral_geom, is_integral_symbol, LayoutBox, LayoutKind, BIG_OP_SCALE,
     INTEGRAL_SCALE, SCRIPT_SCALE,
 };
 use crate::renderer::equation::symbols::{DecoKind, FontStyleKind};
-
-/// Keep the native equation stack aligned with the SVG/canvas equation paths.
-///
-/// STIX Two Math exposes only a regular face on macOS. Choosing it before
-/// STIX Two Text therefore turns EqEdit's default italic variables upright.
-/// STIX Two Text has real italic faces and is also the first portable fallback
-/// used by the other equation renderers when Latin Modern Math is unavailable.
-const EQ_FONT_FAMILIES: &[&str] = &[
-    "Latin Modern Math",
-    "STIX Two Text",
-    "STIX Two Math",
-    "Times New Roman",
-    "Times",
-    "serif",
-];
 
 pub fn render_equation(
     canvas: &Canvas,
@@ -37,17 +22,20 @@ pub fn render_equation(
     origin_y: f64,
     color: u32,
     base_font_size: f64,
+    font_name: &str,
 ) {
+    let font_families = crate::renderer::equation::font::equation_font_families(Some(font_name));
     render_box(
         canvas,
         font_mgr,
         system_families,
+        &font_families,
         layout,
         origin_x,
         origin_y,
         colorref_to_skia(color, 1.0),
         base_font_size,
-        false,
+        true,
         false,
     );
 }
@@ -56,6 +44,7 @@ fn render_box(
     canvas: &Canvas,
     font_mgr: &FontMgr,
     system_families: &SystemFontFamilies,
+    font_families: &[&str],
     lb: &LayoutBox,
     parent_x: f64,
     parent_y: f64,
@@ -74,6 +63,7 @@ fn render_box(
                     canvas,
                     font_mgr,
                     system_families,
+                    font_families,
                     child,
                     x,
                     y,
@@ -89,11 +79,12 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 text,
                 x,
                 y + lb.baseline,
                 font_size_from_box(lb, fs),
-                true,
+                italic && !text.chars().any(|c| matches!(c, '\u{3000}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{AC00}'..='\u{D7AF}')),
                 bold,
                 color,
                 false,
@@ -104,6 +95,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 text,
                 x,
                 y + lb.baseline,
@@ -119,6 +111,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 text,
                 x + lb.width / 2.0,
                 y + lb.baseline,
@@ -139,11 +132,12 @@ fn render_box(
                     canvas,
                     font_mgr,
                     system_families,
+                    font_families,
                     text,
                     x,
                     y + lb.baseline,
                     font_size_from_box(lb, fs),
-                    false,
+                    italic && crate::renderer::equation::font::is_greek_variable(text),
                     false,
                     color,
                     false,
@@ -155,6 +149,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 name,
                 x,
                 y + lb.baseline,
@@ -170,6 +165,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 numer,
                 x,
                 y,
@@ -178,7 +174,7 @@ fn render_box(
                 italic,
                 bold,
             );
-            let line_y = y + lb.baseline - fs * AXIS_HEIGHT;
+            let line_y = y + crate::renderer::equation::layout::fraction_line_y(numer, fs);
             canvas.draw_line(
                 ((x + fs * 0.05) as f32, line_y as f32),
                 ((x + lb.width - fs * 0.05) as f32, line_y as f32),
@@ -188,6 +184,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 denom,
                 x,
                 y,
@@ -202,6 +199,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 top,
                 x,
                 y,
@@ -214,6 +212,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 bottom,
                 x,
                 y,
@@ -248,6 +247,7 @@ fn render_box(
                     canvas,
                     font_mgr,
                     system_families,
+                    font_families,
                     index,
                     sign_x,
                     y,
@@ -261,6 +261,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 body,
                 x,
                 y,
@@ -275,6 +276,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 base,
                 x,
                 y,
@@ -287,6 +289,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 sup,
                 x,
                 y,
@@ -301,6 +304,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 base,
                 x,
                 y,
@@ -313,6 +317,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 sub,
                 x,
                 y,
@@ -327,6 +332,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 base,
                 x,
                 y,
@@ -339,6 +345,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 sub,
                 x,
                 y,
@@ -351,6 +358,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 sup,
                 x,
                 y,
@@ -380,6 +388,7 @@ fn render_box(
                     canvas,
                     font_mgr,
                     system_families,
+                    font_families,
                     symbol,
                     op_x,
                     op_y,
@@ -395,6 +404,7 @@ fn render_box(
                     canvas,
                     font_mgr,
                     system_families,
+                    font_families,
                     sup,
                     x,
                     y,
@@ -409,6 +419,7 @@ fn render_box(
                     canvas,
                     font_mgr,
                     system_families,
+                    font_families,
                     sub,
                     x,
                     y,
@@ -425,6 +436,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 name,
                 x,
                 y + fs * 0.8,
@@ -439,6 +451,7 @@ fn render_box(
                     canvas,
                     font_mgr,
                     system_families,
+                    font_families,
                     sub,
                     x,
                     y,
@@ -461,6 +474,7 @@ fn render_box(
                     canvas,
                     font_mgr,
                     system_families,
+                    font_families,
                     bracket_chars.0,
                     x,
                     y,
@@ -473,6 +487,7 @@ fn render_box(
                     canvas,
                     font_mgr,
                     system_families,
+                    font_families,
                     bracket_chars.1,
                     x + lb.width - fs * 0.3,
                     y,
@@ -488,6 +503,7 @@ fn render_box(
                         canvas,
                         font_mgr,
                         system_families,
+                        font_families,
                         cell,
                         x,
                         y,
@@ -504,6 +520,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 over,
                 x,
                 y,
@@ -516,6 +533,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 arrow,
                 x,
                 y,
@@ -529,6 +547,7 @@ fn render_box(
                     canvas,
                     font_mgr,
                     system_families,
+                    font_families,
                     under,
                     x,
                     y,
@@ -545,6 +564,7 @@ fn render_box(
                     canvas,
                     font_mgr,
                     system_families,
+                    font_families,
                     left,
                     x,
                     y,
@@ -557,6 +577,7 @@ fn render_box(
                     canvas,
                     font_mgr,
                     system_families,
+                    font_families,
                     right,
                     x,
                     y,
@@ -576,6 +597,7 @@ fn render_box(
                         canvas,
                         font_mgr,
                         system_families,
+                        font_families,
                         left,
                         x,
                         y + lb.baseline,
@@ -590,6 +612,7 @@ fn render_box(
                         canvas,
                         font_mgr,
                         system_families,
+                        font_families,
                         left,
                         x,
                         y,
@@ -604,6 +627,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 body,
                 x,
                 y,
@@ -619,6 +643,7 @@ fn render_box(
                         canvas,
                         font_mgr,
                         system_families,
+                        font_families,
                         right,
                         right_x,
                         y + lb.baseline,
@@ -633,6 +658,7 @@ fn render_box(
                         canvas,
                         font_mgr,
                         system_families,
+                        font_families,
                         right,
                         right_x,
                         y,
@@ -649,6 +675,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 body,
                 x,
                 y,
@@ -675,6 +702,7 @@ fn render_box(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 body,
                 x,
                 y,
@@ -692,6 +720,7 @@ fn draw_text(
     canvas: &Canvas,
     font_mgr: &FontMgr,
     system_families: &SystemFontFamilies,
+    font_families: &[&str],
     text: &str,
     x: f64,
     baseline_y: f64,
@@ -704,13 +733,58 @@ fn draw_text(
     if text.is_empty() {
         return;
     }
+    // 해당 legacy face와 cmap이 모두 있을 때만 PUA로 바꾼다.
+    if let Some(family) = font_families
+        .first()
+        .filter(|name| crate::renderer::equation::font::is_legacy_equation_font(name))
+    {
+        if let Some(typeface) =
+            match_system_family_style(font_mgr, system_families, family, FontStyle::normal())
+        {
+            let mapped: Vec<_> = text
+                .chars()
+                .map(|c| crate::renderer::equation::font::legacy_equation_glyph(c, italic))
+                .collect();
+            let glyphs: String = mapped.iter().map(|(c, _)| *c).collect();
+            if typeface_covers_text(&typeface, &glyphs) {
+                let mut runs: Vec<(String, bool)> = Vec::new();
+                for (character, skew) in mapped {
+                    if let Some(run) = runs.last_mut().filter(|run| run.1 == skew) {
+                        run.0.push(character);
+                    } else {
+                        runs.push((character.to_string(), skew));
+                    }
+                }
+                let mut font = Font::new(typeface, font_size as f32);
+                font.set_edging(font::Edging::AntiAlias);
+                font.set_embolden(bold);
+                let mut paint = Paint::default();
+                paint.set_anti_alias(true);
+                paint.set_color(color);
+                let width = font.measure_str(&glyphs, Some(&paint)).0 as f64;
+                let mut pen = x - if centered { width / 2.0 } else { 0.0 };
+                for (run, skew) in runs {
+                    font.set_skew_x(if skew { -0.2 } else { 0.0 });
+                    canvas.draw_str(&run, (pen as f32, baseline_y as f32), &font, &paint);
+                    pen += font.measure_str(&run, Some(&paint)).0 as f64;
+                }
+                return;
+            }
+        }
+    }
     let font_style = match (bold, italic) {
         (true, true) => FontStyle::bold_italic(),
         (true, false) => FontStyle::bold(),
         (false, true) => FontStyle::italic(),
         (false, false) => FontStyle::normal(),
     };
-    let typeface = equation_typeface_for_text(font_mgr, system_families, font_style, text);
+    let typeface = equation_typeface_for_text_in_families(
+        font_families,
+        font_mgr,
+        system_families,
+        font_style,
+        text,
+    );
     let mut font = if let Some(typeface) = typeface {
         Font::new(typeface, font_size as f32)
     } else {
@@ -734,21 +808,6 @@ fn draw_text(
     canvas.draw_str(text, (draw_x as f32, baseline_y as f32), &font, &paint);
 }
 
-fn equation_typeface_for_text(
-    font_mgr: &FontMgr,
-    system_families: &SystemFontFamilies,
-    font_style: FontStyle,
-    text: &str,
-) -> Option<Typeface> {
-    equation_typeface_for_text_in_families(
-        EQ_FONT_FAMILIES,
-        font_mgr,
-        system_families,
-        font_style,
-        text,
-    )
-}
-
 fn equation_typeface_for_text_in_families(
     families: &[&str],
     font_mgr: &FontMgr,
@@ -759,6 +818,7 @@ fn equation_typeface_for_text_in_families(
     families
         .iter()
         .copied()
+        .filter(|family| !crate::renderer::equation::font::is_legacy_equation_font(family))
         .filter_map(|family| {
             match_system_family_style(font_mgr, system_families, family, font_style)
         })
@@ -776,6 +836,7 @@ fn draw_stretch_bracket(
     canvas: &Canvas,
     font_mgr: &FontMgr,
     system_families: &SystemFontFamilies,
+    font_families: &[&str],
     bracket: &str,
     x: f64,
     y: f64,
@@ -878,6 +939,7 @@ fn draw_stretch_bracket(
                 canvas,
                 font_mgr,
                 system_families,
+                font_families,
                 bracket,
                 mid_x,
                 y + h * 0.7,
@@ -1059,21 +1121,6 @@ fn colorref_to_skia(color: u32, alpha_scale: f32) -> Color {
 mod tests {
     use super::*;
     use crate::renderer::skia::font_lookup::collect_system_families;
-
-    #[test]
-    fn native_equation_family_order_matches_portable_equation_renderers() {
-        assert_eq!(
-            EQ_FONT_FAMILIES,
-            [
-                "Latin Modern Math",
-                "STIX Two Text",
-                "STIX Two Math",
-                "Times New Roman",
-                "Times",
-                "serif",
-            ]
-        );
-    }
 
     #[test]
     fn installed_stix_text_italic_precedes_regular_only_math_face() {

@@ -30,6 +30,414 @@ fn a4_page_def() -> PageDef {
     }
 }
 
+#[test]
+fn embedded_table_inline_picture_reserves_outer_margins_around_ink() {
+    use crate::model::image::Picture;
+    use crate::model::Padding;
+
+    let engine = LayoutEngine::with_default_dpi();
+    let pic = Picture {
+        common: CommonObjAttr {
+            width: 3600,
+            height: 1800,
+            margin: Padding {
+                left: 900,
+                right: 450,
+                top: 450,
+                ..Default::default()
+            },
+            treat_as_char: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let table = Table {
+        row_count: 1,
+        col_count: 1,
+        cells: vec![Cell {
+            col_span: 1,
+            row_span: 1,
+            width: 7200,
+            height: 3600,
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Picture(Box::new(pic))],
+                line_segs: vec![LineSeg {
+                    line_height: 1800,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        common: CommonObjAttr {
+            width: 7200,
+            height: 3600,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut tree = PageRenderTree::new(0, 600.0, 800.0);
+    let mut parent = RenderNode::new(
+        tree.next_id(),
+        RenderNodeType::TextBox,
+        BoundingBox::new(100.0, 200.0, 200.0, 100.0),
+    );
+    engine.layout_embedded_table(
+        &mut tree,
+        &mut parent,
+        &table,
+        &ResolvedStyleSet::default(),
+        &LayoutRect {
+            x: 100.0,
+            y: 200.0,
+            width: 200.0,
+            height: 100.0,
+        },
+        200.0,
+        None,
+        &[],
+        Alignment::Left,
+    );
+    let image = parent.children[0].children[0]
+        .children
+        .iter()
+        .find(|node| matches!(&node.node_type, RenderNodeType::Image(_)))
+        .expect("embedded table picture");
+    assert!((image.bbox.x - 112.0).abs() < 0.01);
+    assert!((image.bbox.width - 48.0).abs() < 0.01);
+    assert!((image.bbox.y - 206.0).abs() < 0.01);
+}
+
+#[test]
+fn cell_picture_caption_attaches_to_matching_image_frame() {
+    use crate::model::image::Picture;
+    use crate::model::shape::{Caption, CaptionDirection};
+    use crate::renderer::render_tree::{CaptionControlKind, ImageNode};
+    use crate::renderer::style_resolver::{ResolvedCharStyle, ResolvedParaStyle};
+
+    let engine = LayoutEngine::with_default_dpi();
+    let context = CellContext {
+        parent_para_index: 4,
+        path: vec![CellPathEntry {
+            control_index: 2,
+            cell_index: 1,
+            cell_para_index: 0,
+            text_direction: 0,
+        }],
+    };
+    let caption = Caption {
+        direction: CaptionDirection::Bottom,
+        spacing: 720,
+        paragraphs: vec![Paragraph {
+            text: "Figure A".into(),
+            line_segs: vec![LineSeg {
+                line_height: 1200,
+                text_height: 1100,
+                baseline_distance: 850,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let para = Paragraph {
+        controls: vec![Control::Picture(Box::new(Picture {
+            caption: Some(caption),
+            ..Default::default()
+        }))],
+        ..Default::default()
+    };
+    let mut tree = PageRenderTree::new(0, 600.0, 800.0);
+    let mut cell_node = RenderNode::new(
+        tree.next_id(),
+        RenderNodeType::TextBox,
+        BoundingBox::new(80.0, 150.0, 400.0, 300.0),
+    );
+    let mut unrelated = ImageNode::new(1, None);
+    unrelated.control_index = Some(0);
+    unrelated.cell_context = Some(CellContext {
+        parent_para_index: 4,
+        path: vec![CellPathEntry {
+            cell_index: 0,
+            ..context.path[0]
+        }],
+    });
+    cell_node.children.push(RenderNode::new(
+        tree.next_id(),
+        RenderNodeType::Image(unrelated),
+        BoundingBox::new(90.0, 175.0, 100.0, 50.0),
+    ));
+    let mut image = ImageNode::new(1, None);
+    image.control_index = Some(0);
+    image.cell_context = Some(context.clone());
+    cell_node.children.push(RenderNode::new(
+        tree.next_id(),
+        RenderNodeType::Image(image),
+        BoundingBox::new(120.0, 220.0, 100.0, 50.0),
+    ));
+    let styles = ResolvedStyleSet {
+        char_styles: vec![ResolvedCharStyle::default()],
+        para_styles: vec![ResolvedParaStyle::default()],
+        ..Default::default()
+    };
+    engine.layout_cell_picture_captions(
+        &mut tree,
+        &mut cell_node,
+        &para,
+        &styles,
+        &LayoutRect {
+            x: 80.0,
+            y: 150.0,
+            width: 400.0,
+            height: 300.0,
+        },
+        &[],
+        0,
+        &context,
+    );
+
+    let captions: Vec<_> = cell_node
+        .children
+        .iter()
+        .filter_map(|node| {
+            if let RenderNodeType::TextLine(line) = &node.node_type {
+                line.caption_owner.map(|owner| (node, owner))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(captions.len(), 1);
+    let (line, owner) = captions[0];
+    assert_eq!(owner.control_kind, CaptionControlKind::Image);
+    assert!((line.bbox.x - 120.0).abs() < 0.5);
+    assert!(line.bbox.y >= 270.0 + 720.0 * 96.0 / 7200.0 - 0.5);
+    assert!(line.children.iter().any(
+        |child| matches!(&child.node_type, RenderNodeType::TextRun(run) if run.text == "Figure A")
+    ));
+}
+
+#[test]
+fn mixed_footer_picture_and_line_keeps_both_controls_at_paragraph_anchor() {
+    use crate::model::image::Picture;
+    use crate::model::shape::{DrawingObjAttr, LineShape, ShapeComponentAttr, ShapeObject};
+    use crate::model::Point;
+
+    let engine = LayoutEngine::with_default_dpi();
+    let footer = Paragraph {
+        controls: vec![
+            Control::Picture(Box::new(Picture {
+                common: CommonObjAttr {
+                    width: 720,
+                    height: 720,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })),
+            Control::Shape(Box::new(ShapeObject::Line(LineShape {
+                common: CommonObjAttr {
+                    width: 7200,
+                    height: 18,
+                    vertical_offset: (-1798_i32) as u32,
+                    vert_rel_to: VertRelTo::Para,
+                    ..Default::default()
+                },
+                start: Point { x: 0, y: 0 },
+                end: Point { x: 100, y: 100 },
+                drawing: DrawingObjAttr {
+                    shape_attr: ShapeComponentAttr {
+                        original_width: 100,
+                        original_height: 100,
+                        current_width: 7200,
+                        current_height: (-18_i32) as u32,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            }))),
+        ],
+        line_segs: vec![LineSeg {
+            line_height: 2373,
+            line_spacing: 112,
+            text_height: 2373,
+            baseline_distance: 2017,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut tree = PageRenderTree::new(0, 600.0, 800.0);
+    let mut footer_node = RenderNode::new(
+        tree.next_id(),
+        RenderNodeType::Footer,
+        BoundingBox::new(80.0, 700.0, 440.0, 80.0),
+    );
+    let area = LayoutRect {
+        x: 80.0,
+        y: 700.0,
+        width: 440.0,
+        height: 80.0,
+    };
+    let paper = LayoutRect {
+        x: 0.0,
+        y: 0.0,
+        width: 600.0,
+        height: 800.0,
+    };
+    engine.layout_header_footer_paragraphs(
+        &mut tree,
+        &mut footer_node,
+        &[footer],
+        &[],
+        &ResolvedStyleSet::default(),
+        &area,
+        &area,
+        &paper,
+        None,
+        0,
+        1,
+        &[],
+        None,
+        None,
+        false,
+        0,
+        0,
+    );
+    let picture = footer_node
+        .children
+        .iter()
+        .find(|node| matches!(node.node_type, RenderNodeType::Placeholder(_)))
+        .expect("mixed footer picture must render");
+    let line = footer_node
+        .children
+        .iter()
+        .find(|node| matches!(node.node_type, RenderNodeType::Line(_)))
+        .expect("mixed footer line must render");
+    let expected_y = area.y + (2373.0 - 112.0 - 1798.0) * 96.0 / 7200.0;
+    assert!(
+        (line.bbox.y - expected_y).abs() < 1.0,
+        "Para-relative line must use the saved content bottom without trailing spacing"
+    );
+    let RenderNodeType::Line(stroke) = &line.node_type else {
+        unreachable!()
+    };
+    assert!(
+        stroke.y1 > stroke.y2,
+        "signed line height must preserve endpoint order"
+    );
+    assert!(picture.bbox.width > 0.0);
+}
+
+#[test]
+fn footer_floating_para_shape_ignores_band_alignment_with_or_without_picture() {
+    use crate::model::image::Picture;
+    use crate::model::shape::{LineShape, ShapeObject};
+    use crate::model::Point;
+
+    let render_line_y = |has_picture: bool, bottom_aligned: bool| {
+        let engine = LayoutEngine::with_default_dpi();
+        let mut controls = Vec::new();
+        if has_picture {
+            controls.push(Control::Picture(Box::new(Picture {
+                common: CommonObjAttr {
+                    width: 720,
+                    height: 720,
+                    treat_as_char: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })));
+        }
+        controls.push(Control::Shape(Box::new(ShapeObject::Line(LineShape {
+            common: CommonObjAttr {
+                width: 7200,
+                height: 18,
+                vert_rel_to: VertRelTo::Para,
+                ..Default::default()
+            },
+            start: Point { x: 0, y: 0 },
+            end: Point { x: 7200, y: 0 },
+            ..Default::default()
+        }))));
+        let footer = Paragraph {
+            text: "Footer".into(),
+            char_count: 7,
+            controls,
+            line_segs: vec![LineSeg {
+                line_height: 1000,
+                text_height: 1000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut tree = PageRenderTree::new(0, 600.0, 800.0);
+        let area = LayoutRect {
+            x: 80.0,
+            y: 700.0,
+            width: 440.0,
+            height: 80.0,
+        };
+        let paper = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 800.0,
+        };
+        let mut footer_node = RenderNode::new(
+            tree.next_id(),
+            RenderNodeType::Footer,
+            BoundingBox::new(area.x, area.y, area.width, area.height),
+        );
+        engine.layout_header_footer_paragraphs(
+            &mut tree,
+            &mut footer_node,
+            &[footer],
+            &[],
+            &ResolvedStyleSet::default(),
+            &area,
+            &area,
+            &paper,
+            None,
+            0,
+            1,
+            &[],
+            None,
+            None,
+            false,
+            if bottom_aligned { 2 << 21 } else { 0 },
+            6000,
+        );
+        let shape_y = footer_node
+            .children
+            .iter()
+            .find(|node| matches!(node.node_type, RenderNodeType::Line(_)))
+            .expect("footer line must render")
+            .bbox
+            .y;
+        let text_y = footer_node
+            .children
+            .iter()
+            .find(|node| matches!(node.node_type, RenderNodeType::TextLine(_)))
+            .expect("footer text must render")
+            .bbox
+            .y;
+        (shape_y, text_y)
+    };
+
+    for has_picture in [false, true] {
+        let (top_y, top_text_y) = render_line_y(has_picture, false);
+        let (bottom_y, bottom_text_y) = render_line_y(has_picture, true);
+        assert!(
+            (bottom_y - top_y).abs() < 0.01,
+            "floating shape anchor shifted with footer band alignment (picture={has_picture})"
+        );
+        assert!(
+            bottom_text_y > top_text_y + 20.0,
+            "footer text must move within the declared band (picture={has_picture})"
+        );
+    }
+}
+
 fn native_whitespace_coanchored_table_pair() -> Paragraph {
     let table = |treat_as_char: bool, horz_rel_to: HorzRelTo| Table {
         row_count: 2,
@@ -2940,8 +3348,8 @@ where
     find(header, predicate).expect("matching header child should be rendered")
 }
 
-fn render_tree_with_header_control_with_profile(
-    control: Control,
+fn render_tree_with_header_paragraph_with_profile(
+    header_paragraph: Paragraph,
     profile: crate::model::provenance::LayoutCompatibilityProfile,
 ) -> PageRenderTree {
     use crate::model::header_footer::Header;
@@ -2952,10 +3360,7 @@ fn render_tree_with_header_control_with_profile(
     let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
     let paragraphs = vec![Paragraph {
         controls: vec![Control::Header(Box::new(Header {
-            paragraphs: vec![Paragraph {
-                controls: vec![control],
-                ..Default::default()
-            }],
+            paragraphs: vec![header_paragraph],
             ..Default::default()
         }))],
         ..Default::default()
@@ -2995,8 +3400,109 @@ fn render_tree_with_header_control_with_profile(
     )
 }
 
+fn render_tree_with_header_control_with_profile(
+    control: Control,
+    profile: crate::model::provenance::LayoutCompatibilityProfile,
+) -> PageRenderTree {
+    render_tree_with_header_paragraph_with_profile(
+        Paragraph {
+            controls: vec![control],
+            ..Default::default()
+        },
+        profile,
+    )
+}
+
 fn render_tree_with_header_control(control: Control) -> PageRenderTree {
     render_tree_with_header_control_with_profile(control, Default::default())
+}
+
+#[test]
+fn header_tac_group_is_rendered_with_its_text_line() {
+    let label = ShapeObject::Rectangle(RectangleShape {
+        drawing: crate::model::shape::DrawingObjAttr {
+            shape_attr: crate::model::shape::ShapeComponentAttr {
+                original_width: 8_052,
+                original_height: 1_816,
+                render_sx: 2.0,
+                render_sy: 1.2,
+                render_b: 0.09,
+                render_c: 0.04,
+                ..Default::default()
+            },
+            text_box: Some(crate::model::shape::TextBox {
+                paragraphs: vec![Paragraph {
+                    text: "Performance Assessment".into(),
+                    char_count: 23,
+                    line_segs: vec![LineSeg {
+                        line_height: 1_000,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let group = crate::model::shape::GroupShape {
+        common: CommonObjAttr {
+            treat_as_char: true,
+            width: 18_011,
+            height: 2_582,
+            text_wrap: TextWrap::TopAndBottom,
+            horz_rel_to: HorzRelTo::Para,
+            vert_rel_to: VertRelTo::Para,
+            ..Default::default()
+        },
+        children: vec![label],
+        ..Default::default()
+    };
+    let tree = render_tree_with_header_paragraph_with_profile(
+        Paragraph {
+            text: "A\u{FFFC}B".into(),
+            char_count: 4,
+            controls: vec![Control::Shape(Box::new(ShapeObject::Group(group)))],
+            line_segs: vec![LineSeg {
+                line_height: 2_582,
+                text_height: 2_582,
+                baseline_distance: 2_195,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        Default::default(),
+    );
+
+    let group_box = first_header_child_bbox(&tree, |kind| matches!(kind, RenderNodeType::Group(_)));
+    assert!(group_box.width > 200.0, "group bbox={group_box:?}");
+    let header = tree
+        .root
+        .children
+        .iter()
+        .find(|node| matches!(node.node_type, RenderNodeType::Header))
+        .unwrap();
+    let line = header
+        .children
+        .iter()
+        .find_map(|node| match &node.node_type {
+            RenderNodeType::TextLine(line) => Some(line),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        (line.baseline - hwpunit_to_px(2_195, 96.0)).abs() < 0.01,
+        "text alongside a header logo must retain the authored baseline"
+    );
+    fn has_label(node: &RenderNode) -> bool {
+        matches!(&node.node_type, RenderNodeType::TextRun(run) if run.text.contains("Performance Assessment"))
+            || node.children.iter().any(has_label)
+    }
+    assert!(
+        has_label(&tree.root),
+        "affine group child text must be rendered"
+    );
 }
 
 #[test]

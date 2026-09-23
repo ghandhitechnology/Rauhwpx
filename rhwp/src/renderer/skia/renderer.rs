@@ -1258,38 +1258,17 @@ impl SkiaLayerRenderer {
                             }
                         }
                         PaintOp::Equation { bbox, equation } => {
-                            canvas.save();
-                            let scale_x = if equation.layout_box.width > 0.0 && bbox.width > 0.0 {
-                                bbox.width / equation.layout_box.width
-                            } else {
-                                1.0
-                            };
-                            if (scale_x - 1.0).abs() > 0.01 {
-                                canvas.translate((bbox.x as f32, bbox.y as f32));
-                                canvas.scale((scale_x as f32, 1.0));
-                                render_equation(
-                                    canvas,
-                                    &self.font_mgr,
-                                    &self.system_families,
-                                    &equation.layout_box,
-                                    0.0,
-                                    0.0,
-                                    equation.color,
-                                    equation.font_size,
-                                );
-                            } else {
-                                render_equation(
-                                    canvas,
-                                    &self.font_mgr,
-                                    &self.system_families,
-                                    &equation.layout_box,
-                                    bbox.x,
-                                    bbox.y,
-                                    equation.color,
-                                    equation.font_size,
-                                );
-                            }
-                            canvas.restore();
+                            render_equation(
+                                canvas,
+                                &self.font_mgr,
+                                &self.system_families,
+                                &equation.layout_box,
+                                bbox.x,
+                                bbox.y,
+                                equation.color,
+                                equation.font_size,
+                                &equation.font_name,
+                            );
                         }
                         PaintOp::FormObject { bbox, form } => {
                             self.draw_form_control(canvas, *bbox, form);
@@ -3581,6 +3560,7 @@ mod tests {
             color: 0x000000ff,
             font_size,
             font_name: "serif".to_string(),
+            version_info: "Equation Version 60".to_string(),
             section_index: Some(0),
             para_index: Some(0),
             control_index: Some(0),
@@ -3630,6 +3610,7 @@ mod tests {
             color: 0x0000aa00,
             font_size,
             font_name: "serif".to_string(),
+            version_info: "Equation Version 60".to_string(),
             section_index: Some(0),
             para_index: Some(0),
             control_index: Some(0),

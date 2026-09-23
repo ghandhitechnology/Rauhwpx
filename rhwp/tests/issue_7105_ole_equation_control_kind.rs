@@ -183,6 +183,22 @@ fn issue_7105_legacy_ole_equation_promotes_to_editable_native_equation_and_survi
         "같은 슬롯이 native 수식이어야 한다"
     );
 
+    let rhwp::model::control::Control::Equation(equation) =
+        &core.document().sections[sec].paragraphs[para].controls[ctrl]
+    else {
+        panic!("equation")
+    };
+    let (_, height, baseline) = rhwp::renderer::equation::intrinsic_metrics_hwp_with_font(
+        &equation.script,
+        equation.font_size,
+        &equation.font_name,
+    );
+    assert_eq!(
+        equation.baseline,
+        ((baseline as f64 / height as f64) * 100.0).round() as i16,
+        "promoted equations must derive their authored baseline from the converted layout"
+    );
+
     core.set_equation_properties_native(sec, para, ctrl, None, None, r#"{"script":"a over b"}"#)
         .expect("edit script");
 
