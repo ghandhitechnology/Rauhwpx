@@ -234,11 +234,13 @@ export function findPictureAtClick(this: any,
     // [Task #1171, #7333] 글상자 컨테이너와 그 안의 cellPath picture가 겹치면 picture를
     // 우선 선택한다. 다만 같은 문단의 **독립 전경 Shape**까지 컨테이너로 취급하면, #7333
     // 8쪽에서 작은 주석 도형을 눌러도 뒤의 스크린샷 picture가 선택된다. cellPath의 조상인
-    // Shape에만 기존 picture 우선을 적용하고, 독립 Shape는 먼저 선택한다.
+    // Shape에만 기존 picture 우선을 적용하고, 독립 Shape는 중첩 그림보다 앞선다.
+    // 독립 Shape가 다른 본문 그림/묶음과 겹치면 (#1280) (plane, zOrder, stableIndex)로 고른다.
     // BehindText 그림은 기존 2차 패스 정책 유지로 제외.
     {
       const hitShapes: any[] = [];
       const nestedPictures: any[] = [];
+      const unrelatedForeground: any[] = [];
       for (const ctrl of layout.controls) {
         if (ctrl.secIdx === undefined || ctrl.wrap === 'behindText' || isMasterPageDecoration(ctrl)) continue;
         const inBox = pageX >= ctrl.x && pageX <= ctrl.x + ctrl.w &&
@@ -246,12 +248,20 @@ export function findPictureAtClick(this: any,
         if (!inBox) continue;
         if (ctrl.type === 'shape') hitShapes.push(ctrl);
         else if ((ctrl.type === 'image' || ctrl.type === 'equation') && ctrl.cellPath) nestedPictures.push(ctrl);
+        else if (!ctrl.cellPath && (ctrl.type === 'image' || ctrl.type === 'equation' ||
+          ctrl.type === 'group' || ctrl.type === 'ole')) {
+          unrelatedForeground.push(ctrl);
+        }
       }
-      const foregroundShape = hitShapes
-        .filter((shape) => !nestedPictures.some((picture) =>
-          isNestedCellDescendantOfControl(shape, picture)))
-        .reduce((top: any, shape: any) => top === null || isAboveControl(shape, top) ? shape : top, null);
-      if (foregroundShape) return controlToRef(foregroundShape, pageIdx);
+      const independentShapes = hitShapes.filter((shape) => !nestedPictures.some((picture) =>
+        isNestedCellDescendantOfControl(shape, picture)));
+      if (independentShapes.length > 0) {
+        const topIndependent = [...independentShapes, ...unrelatedForeground].reduce(
+          (top: any, ctrl: any) => top === null || isAboveControl(ctrl, top) ? ctrl : top,
+          null,
+        );
+        if (topIndependent) return controlToRef(topIndependent, pageIdx);
+      }
 
       const nestedPic = nestedPictures.reduce(
         (top: any, picture: any) => top === null || isAboveControl(picture, top) ? picture : top,

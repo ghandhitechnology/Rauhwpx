@@ -81,3 +81,14 @@ test('본문 클릭은 연결선 hit를 표/글상자 hit-test보다 먼저 소�
   assert.ok(earlyLine < wasmHit, '선 선택을 본문 컨테이너 hit보다 먼저 확정해야 한다');
   assert.match(body, /selectLineObjectFromHit\.call\(this, earlyObjectHit\)/);
 });
+
+test('Shift+연결선 클릭은 기존 개체 선택에 토글하고 Undo를 만들지 않는다', () => {
+  const body = fnBody(mouseSrc, 'export function onClick');
+  const earlyLine = body.indexOf("earlyObjectHit?.type === 'line'");
+  assert.notEqual(earlyLine, -1);
+  const slice = body.slice(earlyLine, body.indexOf('selectLineObjectFromHit.call(this, earlyObjectHit)', earlyLine) + 80);
+  assert.match(slice, /e\.shiftKey && this\.cursor\.isInPictureObjectSelection\(\)/);
+  assert.match(slice, /togglePictureObjectSelection\(\{\s*\.\.\.earlyObjectHit,\s*type:\s*'line'\s*\}\)/);
+  assert.doesNotMatch(slice, /bringShapeToFront\(/);
+  assert.doesNotMatch(slice, /executeOperation\(/);
+});

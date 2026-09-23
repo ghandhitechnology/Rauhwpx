@@ -1192,6 +1192,17 @@ export function onClick(this: any, e: MouseEvent): void {
     return;
   }
   if (earlyObjectHit?.type === 'line') {
+    // Shift+클릭 다중 선택은 아래 late picHit 토글에 도달하기 전에 소비되므로
+    // 여기서 기존 선택을 닫지 않고 토글한다. 선은 z-order/Undo를 만들지 않는다.
+    if (e.shiftKey && this.cursor.isInPictureObjectSelection()) {
+      this.cursor.togglePictureObjectSelection({ ...earlyObjectHit, type: 'line' });
+      this.caret.hide();
+      this.selectionRenderer.clear();
+      this.renderPictureObjectSelection();
+      this.eventBus.emit('picture-object-selection-changed', this.cursor.isInPictureObjectSelection());
+      this.textarea.focus();
+      return;
+    }
     selectLineObjectFromHit.call(this, earlyObjectHit);
     return;
   }

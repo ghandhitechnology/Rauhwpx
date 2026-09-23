@@ -148,6 +148,9 @@ export function isLineControlHit(control: {
   }
   if (![x1, y1, x2, y2].every(Number.isFinite)) return false;
   if (pointToSegmentDistance(pageX, pageY, x1, y1, x2, y2) <= threshold) return true;
+  // Hangul 연결선은 layout에 connectorType이 없고, 렌더러는 꺽임/곡선도 type:'line'으로
+  // 그린다. 끝점 대각선만 보면 표 셀 연결선 클릭이 빗나간다. bbox가 있으면 흔한 꺽임·곡선
+  // 후보를 추가로 본다. 직접 선만 있는 짧은 막대(w/h ≤ 2)는 끝점 구간만 쓴다.
   if (!(Number(control.w) > 2 && Number(control.h) > 2)) return false;
 
   const mx = Number(control.x) + Number(control.w) / 2;

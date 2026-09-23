@@ -36,6 +36,13 @@ test('8쪽 화살표의 실제 선 경로는 이를 덮는 도형 경계보다 �
   assert.equal(isLineControlHit(arrow, 360, 620), false);
 });
 
+test('꺽인 연결선 후보 경로는 끝점 대각선 밖에서도 적중한다', () => {
+  // layout control에는 connectorType이 없다. Hangul 꺽임선은 여전히 type:'line'이다.
+  const elbow = { x: 0, y: 0, w: 100, h: 100, x1: 0, y1: 0, x2: 100, y2: 100 };
+  assert.equal(isLineControlHit(elbow, 50, 0), true);
+  assert.equal(isLineControlHit(elbow, 50, 50), true);
+});
+
 test('글상자 control은 그 안의 cellPath 그림의 조상으로 유지한다', () => {
   const textBox = { secIdx: 0, paraIdx: 141, controlIdx: 3 };
   const pictureInTextBox = {
@@ -91,4 +98,6 @@ test('findPictureAtClick은 선 경로를 도형 bbox보다 먼저 판정한다'
   assert.notEqual(nested, -1, '독립 전경 도형/중첩 그림 조상 판정이 있어야 한다');
   assert.ok(lineHit < nested, '선 경로를 글상자/그림 bbox보다 먼저 봐야 한다');
   assert.match(body, /controlToRef\(topLine, pageIdx\)/);
+  assert.match(body, /unrelatedForeground/, '독립 도형은 본문 그림/묶음과 z-order를 비교해야 한다');
+  assert.match(body, /isAboveControl\(ctrl, top\)/, '독립 도형과 무관 전경 후보를 같은 정렬키로 고른다');
 });
