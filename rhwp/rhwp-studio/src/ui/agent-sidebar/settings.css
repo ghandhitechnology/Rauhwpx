@@ -1596,6 +1596,17 @@
   display: none;
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  .ag-settings-pane:not([hidden]) {
+    animation: ag-settings-pane-arrive var(--ag-dur-base) var(--ag-ease-out) both;
+  }
+}
+
+@keyframes ag-settings-pane-arrive {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 .ag-settings-destination-content {
   box-sizing: border-box;
   width: min(100%, 820px);
@@ -1712,6 +1723,10 @@
   font: inherit;
   font-size: var(--font-size-sm, 11px);
   cursor: pointer;
+  transition:
+    background-color var(--ag-dur-fast) var(--ag-ease-out),
+    color var(--ag-dur-fast) var(--ag-ease-out),
+    box-shadow var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-settings-segment.ag-active {

@@ -328,6 +328,14 @@
   color: var(--ag-text-muted);
   font: italic 600 11px/1 Georgia, 'Times New Roman', serif;
   cursor: pointer;
+  transition:
+    border-color var(--ag-dur-fast) var(--ag-ease-out),
+    color var(--ag-dur-fast) var(--ag-ease-out),
+    background-color var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-cloud-setup-option-info:hover {
+  background: var(--ag-hover);
 }
 
 .ag-cloud-setup-option-info[aria-expanded='true'] {

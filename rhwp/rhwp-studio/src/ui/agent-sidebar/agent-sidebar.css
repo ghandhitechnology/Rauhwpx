@@ -2572,6 +2572,9 @@ button.ag-skill-copy {
   cursor: pointer;
   font: inherit;
   font-size: var(--font-size-sm, 11px);
+  transition:
+    border-color var(--ag-dur-fast) var(--ag-ease-out),
+    background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-msg-attachment:hover:not(:disabled) {
@@ -2644,6 +2647,9 @@ button.ag-skill-copy {
   cursor: pointer;
   font: inherit;
   text-align: left;
+  transition:
+    border-color var(--ag-dur-fast) var(--ag-ease-out),
+    background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-msg-plan-action:hover {
@@ -2895,6 +2901,7 @@ button.ag-skill-copy {
   height: 12px;
   color: currentColor;
   transform: rotate(180deg);
+  transition: transform var(--ag-dur-base) var(--ag-ease-out);
 }
 
 .ag-activity-collapsed .ag-activity-chevron {
@@ -3180,7 +3187,7 @@ button.ag-skill-copy {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ag-msg-assistant.ag-msg-enter,
+  .ag-msg.ag-msg-enter,
   .ag-progress-step,
   .ag-activity,
   .ag-tool-row,
