@@ -48,6 +48,17 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
   assert.doesNotMatch(mcpStdio, /destructiveHint:\s*true/);
 });
 
+test('nested table paths are accepted on staged cell text tools', () => {
+  const path = [
+    { controlIndex: 0, cellIndex: 2, cellParaIndex: 0 },
+    { controlIndex: 1, cellIndex: 3, cellParaIndex: 0 },
+  ];
+  for (const name of ['get_text_range', 'get_para_format', 'get_char_format',
+    'insert_text', 'delete_range', 'replace_range', 'apply_char_format']) {
+    assert.deepEqual(byName.get(name).shape.cellPath.parse(path), path, name);
+  }
+});
+
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
   assert.equal(direct.size, 70);

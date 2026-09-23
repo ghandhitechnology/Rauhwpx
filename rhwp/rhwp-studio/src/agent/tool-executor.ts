@@ -44,12 +44,6 @@ const DOC_NOT_LOADED_MESSAGE = '문서가 로드되지 않았습니다';
 /** 중첩 표 탐침에서 훑을 셀 문단 컨트롤 수 — 셀 문단의 컨트롤은 보통 한둘이다 */
 const NESTED_TABLE_PROBE_CONTROLS = 4;
 
-/** 본문 범위가 표를 통째로 삼킬 때 붙이는 결과 note 조각 */
-function tableRangeNote(deletedTables: number): string {
-  if (deletedTables <= 0) return '';
-  return ` ${deletedTables} table${deletedTables === 1 ? '' : 's'} sat between the range endpoints and went with it.`;
-}
-
 const MAX_SVG_BYTES = 800_000;
 // WebSocket text frames cap at 100 MiB. Base64 expands by 4/3, so 64 MiB
 // leaves room for the protocol envelope while still covering normal HWP/HWPX files.
@@ -303,7 +297,12 @@ function reqString(args: Record<string, unknown>, key: string): string {
 /** 선택적 cell 인자 파싱 — 존재하면 좌표계가 셀 내부 문단 기준으로 바뀐다 */
 function optCell(args: Record<string, unknown>): CellAddr | undefined {
   const v = args['cell'];
-  if (v === undefined || v === null) return undefined;
+  if (v === undefined || v === null) {
+    if (args['cellPath'] !== undefined) {
+      throw new AgentToolError('INVALID_ARGS', 'cellPath requires the outer table cell address in cell');
+    }
+    return undefined;
+  }
   const rec = asRecord(v);
   for (const key of ['paraIdx', 'controlIdx', 'cellIdx'] as const) {
     const val = rec[key];
@@ -314,11 +313,41 @@ function optCell(args: Record<string, unknown>): CellAddr | undefined {
       );
     }
   }
-  return {
+  const cell: CellAddr = {
     paraIdx: rec['paraIdx'] as number,
     controlIdx: rec['controlIdx'] as number,
     cellIdx: rec['cellIdx'] as number,
   };
+  if (args['cellPath'] !== undefined) {
+    const rawPath = args['cellPath'];
+    if (!Array.isArray(rawPath) || rawPath.length < 1 || rawPath.length > 8) {
+      throw new AgentToolError('INVALID_ARGS', 'cellPath must contain 1..8 table cell entries');
+    }
+    cell.path = rawPath.map((entry, index) => {
+      const segment = asRecord(entry);
+      for (const key of ['controlIndex', 'cellIndex', 'cellParaIndex'] as const) {
+        if (typeof segment[key] !== 'number' || !Number.isSafeInteger(segment[key]) || (segment[key] as number) < 0) {
+          throw new AgentToolError('INVALID_ARGS', `cellPath[${index}].${key} must be a nonnegative integer`);
+        }
+      }
+      return {
+        controlIndex: segment['controlIndex'] as number,
+        cellIndex: segment['cellIndex'] as number,
+        cellParaIndex: segment['cellParaIndex'] as number,
+      };
+    });
+    if (cell.path[0].controlIndex !== cell.controlIdx || cell.path[0].cellIndex !== cell.cellIdx) {
+      throw new AgentToolError('INVALID_ARGS', 'cellPath starts at a different table cell than cell');
+    }
+  }
+  return cell;
+}
+
+function cellPathAt(cell: CellAddr, paraIdx: number): string {
+  const path = cell.path?.map((entry) => ({ ...entry }));
+  if (!path?.length) throw new AgentToolError('INVALID_ARGS', 'cellPath is required for nested cell access');
+  path[path.length - 1].cellParaIndex = paraIdx;
+  return JSON.stringify(path);
 }
 
 /**
@@ -623,14 +652,18 @@ export class AgentToolExecutor {
     }
     if (cell) {
       this.validateCell(sectionIdx, cell);
-      const cellParaCount = wasm.getCellParagraphCount(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx);
+      const cellParaCount = cell.path
+        ? wasm.getCellParagraphCountByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx))
+        : wasm.getCellParagraphCount(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx);
       if (paraIdx < 0 || paraIdx >= cellParaCount) {
         throw new AgentToolError(
           'INVALID_ARGS',
           `paraIdx ${paraIdx} out of range for cell ${cell.cellIdx} (0..${cellParaCount - 1})`,
         );
       }
-      const len = wasm.getCellParagraphLength(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx);
+      const len = cell.path
+        ? wasm.getCellParagraphLengthByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx))
+        : wasm.getCellParagraphLength(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx);
       if (charOffset !== undefined && (charOffset < 0 || charOffset > len)) {
         throw new AgentToolError(
           'INVALID_ARGS',
@@ -677,6 +710,13 @@ export class AgentToolExecutor {
     }
     if (cell.cellIdx < 0 || cell.cellIdx >= cellCount) {
       throw new AgentToolError('INVALID_ARGS', `cell.cellIdx ${cell.cellIdx} out of range (0..${cellCount - 1})`);
+    }
+    if (cell.path) {
+      try {
+        wasm.getCellParagraphCountByPath(sectionIdx, cell.paraIdx, JSON.stringify(cell.path));
+      } catch {
+        throw new AgentToolError('INVALID_ARGS', 'cellPath does not resolve to a table cell');
+      }
     }
   }
 
@@ -851,9 +891,11 @@ export class AgentToolExecutor {
     const count = Math.min(rawCount, remaining);
     // getTextRange/getTextInCell 은 원시 문자열을 반환한다 (JSON 아님).
     const text = count > 0
-      ? (cell
-        ? this.deps.wasm.getTextInCell(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset, count)
-        : this.deps.wasm.getTextRange(sectionIdx, paraIdx, charOffset, count))
+      ? (cell?.path
+        ? this.deps.wasm.getTextInCellByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), charOffset, count)
+        : cell
+          ? this.deps.wasm.getTextInCell(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset, count)
+          : this.deps.wasm.getTextRange(sectionIdx, paraIdx, charOffset, count))
       : '';
     return { revision: this.revision, text, paraLength };
   }
@@ -886,13 +928,17 @@ export class AgentToolExecutor {
     const toIdx = (p: DocumentPosition): SelPoint => {
       if (p.parentParaIndex !== undefined) {
         // 셀 내부: write 툴에 그대로 넘길 수 있는 cell 주소 + 셀 내부 문단 좌표.
-        // flat 필드는 최외곽 셀 기준(command.ts:229 참고)이고 cellPath 의 마지막
-        // 항목은 최내곽 셀 기준이라 축이 다르다. 중첩 표(깊이 2 이상)에서 둘을
-        // 섞으면 엉뚱한 셀에 조용히 기록되므로 cell 주소를 아예 내보내지 않는다.
+        // flat 필드는 최외곽 셀 기준이고 cellPath 마지막 항목은 최내곽 셀 기준이다.
+        // 쓰기 도구에는 둘을 함께 전달해야 중첩 셀을 정확히 지정할 수 있다.
         const path = p.cellPath ?? [];
         if (path.length > 1) {
           return {
             sectionIdx: p.sectionIndex,
+            cell: {
+              paraIdx: p.parentParaIndex,
+              controlIdx: p.controlIndex ?? path[0].controlIndex,
+              cellIdx: p.cellIndex ?? path[0].cellIndex,
+            },
             paraIdx: path[path.length - 1].cellParaIndex,
             charOffset: p.charOffset,
             nested: true,
@@ -940,9 +986,7 @@ export class AgentToolExecutor {
     }
     if (nested) {
       result['nested'] = true;
-      // 중첩 표 좌표는 3필드 cell 인자로 표현할 수 없다 — 에이전트가 flat 주소를
-      // 지어내지 않도록 note 로 명시하고 get_structure 재조회를 요구한다.
-      const nestedNote = 'cursor is inside a nested table; nested cells cannot be addressed with the 3-field cell argument (paraIdx/controlIdx/cellIdx), so no cell address is returned — re-derive coordinates with get_structure before writing. cellPath is diagnostic only.';
+      const nestedNote = 'cursor is inside a nested table; copy both cell and cellPath from the cursor or selection point into staged text tools. Paragraph indexes and offsets refer to the innermost cell.';
       result['note'] = result['note'] ? `${nestedNote} ${result['note'] as string}` : nestedNote;
     }
     if (sel && startPoint && endPoint) {
@@ -1066,14 +1110,24 @@ export class AgentToolExecutor {
     const caseSensitive = args['caseSensitive'] === true;
     const maxResults = Math.min(Math.max(optInt(args, 'maxResults', 50), 1), 200);
     const { matches, truncated } = this.collectTextMatches(query, caseSensitive, maxResults);
-    return { revision: this.revision, matches, truncated };
+    return {
+      revision: this.revision,
+      matches: matches.map((match) => match.cell?.path
+        ? { ...match, cell: {
+          paraIdx: match.cell.paraIdx,
+          controlIdx: match.cell.controlIdx,
+          cellIdx: match.cell.cellIdx,
+        } }
+        : match),
+      truncated,
+    };
   }
 
   /** 본문+셀 전수 텍스트 검색 — find_text / replace_all 공용 스캐너 */
   private collectTextMatches(query: string, caseSensitive: boolean, maxResults: number): {
     matches: Array<{
       sectionIdx: number; paraIdx: number; charOffset: number; length: number;
-      context: string; cell?: CellAddr;
+      context: string; cell?: CellAddr; cellPath?: CellPathEntry[];
     }>;
     truncated: boolean;
   } {
@@ -1089,6 +1143,7 @@ export class AgentToolExecutor {
       length: number;
       context: string;
       cell?: CellAddr;
+      cellPath?: CellPathEntry[];
     }> = [];
     let truncated = false;
     const pushMatches = (sec: number, para: number, text: string, cell?: CellAddr): boolean => {
@@ -1105,7 +1160,10 @@ export class AgentToolExecutor {
           length: [...hit[0]].length,
           context: text.slice(Math.max(0, hit.index - 30), Math.min(text.length, hit.index + hit[0].length + 30)),
         };
-        if (cell) m.cell = cell;
+        if (cell) {
+          m.cell = cell;
+          if (cell.path) m.cellPath = cell.path;
+        }
         matches.push(m);
       }
       return true;
@@ -1122,6 +1180,44 @@ export class AgentToolExecutor {
     }
     // 표 셀 내부 텍스트도 검색한다 — 매치에는 write 툴에 그대로 넘길 수 있는 cell 주소가 실린다.
     if (!truncated) {
+      const MAX_NESTED_DEPTH = 4;
+      const MAX_NESTED_PROBES = 4096;
+      const MAX_NESTED_PARAGRAPHS = 5000;
+      let probes = 0;
+      let nestedParagraphs = 0;
+      const scanNested = (sectionIdx: number, tableParaIdx: number, outer: CellAddr,
+        hostPath: CellPathEntry[], depth: number): void => {
+        if (truncated || depth >= MAX_NESTED_DEPTH) return;
+        for (let controlIndex = 0; controlIndex < NESTED_TABLE_PROBE_CONTROLS; controlIndex++) {
+          if (++probes > MAX_NESTED_PROBES) { truncated = true; return; }
+          const tablePath = [...hostPath, { controlIndex, cellIndex: 0, cellParaIndex: 0 }];
+          let cellCount: number;
+          try {
+            cellCount = wasm.getTableDimensionsByPath(sectionIdx, tableParaIdx, JSON.stringify(tablePath)).cellCount;
+          } catch { continue; }
+          for (let cellIndex = 0; cellIndex < cellCount; cellIndex++) {
+            const path = [...hostPath, { controlIndex, cellIndex, cellParaIndex: 0 }];
+            let paragraphCount: number;
+            try {
+              paragraphCount = wasm.getCellParagraphCountByPath(sectionIdx, tableParaIdx, JSON.stringify(path));
+            } catch { continue; }
+            for (let cp = 0; cp < paragraphCount; cp++) {
+              if (++nestedParagraphs > MAX_NESTED_PARAGRAPHS) { truncated = true; return; }
+              path[path.length - 1] = { controlIndex, cellIndex, cellParaIndex: cp };
+              const pathJson = JSON.stringify(path);
+              try {
+                const len = wasm.getCellParagraphLengthByPath(sectionIdx, tableParaIdx, pathJson);
+                if (len > 0) {
+                  const text = wasm.getTextInCellByPath(sectionIdx, tableParaIdx, pathJson, 0, len);
+                  if (!pushMatches(sectionIdx, cp, text, { ...outer, path: [...path] })) return;
+                }
+              } catch { /* 접근 실패한 셀 문단은 건너뛴다 */ }
+              scanNested(sectionIdx, tableParaIdx, outer, path, depth + 1);
+              if (truncated) return;
+            }
+          }
+        }
+      };
       cellScan: for (const t of this.listTables()) {
         try {
           const dims = wasm.getTableDimensions(t.sectionIdx, t.paraIdx, t.controlIdx);
@@ -1133,6 +1229,11 @@ export class AgentToolExecutor {
               if (len === 0) continue;
               const text = wasm.getTextInCell(t.sectionIdx, t.paraIdx, t.controlIdx, cellIdx, cp, 0, len);
               if (!pushMatches(t.sectionIdx, cp, text, cell)) break cellScan;
+            }
+            for (let cp = 0; cp < cellParaCount; cp++) {
+              scanNested(t.sectionIdx, t.paraIdx, cell,
+                [{ controlIndex: t.controlIdx, cellIndex: cellIdx, cellParaIndex: cp }], 1);
+              if (truncated) break cellScan;
             }
           }
         } catch {
@@ -1478,9 +1579,11 @@ export class AgentToolExecutor {
     const cell = optCell(args);
     this.validateAddress(sectionIdx, paraIdx, undefined, cell);
     const { wasm } = this.deps;
-    const props = cell
-      ? wasm.getCellParaPropertiesAt(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx)
-      : wasm.getParaPropertiesAt(sectionIdx, paraIdx);
+    const props = cell?.path
+      ? wasm.getCellParaPropertiesAtByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx))
+      : cell
+        ? wasm.getCellParaPropertiesAt(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx)
+        : wasm.getParaPropertiesAt(sectionIdx, paraIdx);
     const pxToPt = (px: number | undefined): number | undefined =>
       (typeof px === 'number' ? Math.round(px * 72 / 96 * 10) / 10 : undefined);
     return {
@@ -1509,9 +1612,11 @@ export class AgentToolExecutor {
     const cell = optCell(args);
     this.validateAddress(sectionIdx, paraIdx, charOffset, cell);
     const { wasm } = this.deps;
-    const props = cell
-      ? wasm.getCellCharPropertiesAt(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset)
-      : wasm.getCharPropertiesAt(sectionIdx, paraIdx, charOffset);
+    const props = cell?.path
+      ? wasm.getCellCharPropertiesAtByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), charOffset)
+      : cell
+        ? wasm.getCellCharPropertiesAt(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset)
+        : wasm.getCharPropertiesAt(sectionIdx, paraIdx, charOffset);
     return {
       revision: this.revision,
       fontFamily: props.fontFamily,
@@ -1693,9 +1798,11 @@ export class AgentToolExecutor {
   private readPostEditDigest(sectionIdx: number, paraIdx: number, charOffset: number, cell?: CellAddr): string {
     try {
       const { wasm } = this.deps;
-      return cell
-        ? wasm.getTextInCell(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset, 200)
-        : wasm.getTextRange(sectionIdx, paraIdx, charOffset, 200);
+      return cell?.path
+        ? wasm.getTextInCellByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), charOffset, 200)
+        : cell
+          ? wasm.getTextInCell(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset, 200)
+          : wasm.getTextRange(sectionIdx, paraIdx, charOffset, 200);
     } catch {
       return '';
     }
@@ -1705,9 +1812,11 @@ export class AgentToolExecutor {
   private pageOfParagraph(sectionIdx: number, paraIdx: number, cell?: CellAddr): number | null {
     const { wasm } = this.deps;
     try {
-      const rect = cell
-        ? wasm.getCursorRectInCell(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, 0)
-        : wasm.getCursorRect(sectionIdx, paraIdx, 0);
+      const rect = cell?.path
+        ? wasm.getCursorRectByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), 0)
+        : cell
+          ? wasm.getCursorRectInCell(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, 0)
+          : wasm.getCursorRect(sectionIdx, paraIdx, 0);
       return rect && typeof rect.pageIndex === 'number' ? rect.pageIndex : null;
     } catch {
       return null;
@@ -2272,8 +2381,11 @@ export class AgentToolExecutor {
     const { wasm } = this.deps;
     if (typeof wasm.getTableDimensionsByPath !== 'function') return false;
     for (let ctrl = 0; ctrl < NESTED_TABLE_PROBE_CONTROLS; ctrl++) {
+      const parentPath = cell.path?.map((entry) => ({ ...entry }))
+        ?? [{ controlIndex: cell.controlIdx, cellIndex: cell.cellIdx, cellParaIndex: cellParaIdx }];
+      parentPath[parentPath.length - 1].cellParaIndex = cellParaIdx;
       const pathJson = JSON.stringify([
-        { controlIndex: cell.controlIdx, cellIndex: cell.cellIdx, cellParaIndex: cellParaIdx },
+        ...parentPath,
         { controlIndex: ctrl, cellIndex: 0, cellParaIndex: 0 },
       ]);
       try {
@@ -2300,12 +2412,12 @@ export class AgentToolExecutor {
         'NESTED_TABLE_IN_RANGE',
         `The range crosses cell paragraph ${p}, which hosts a nested table. Removing that paragraph destroys the nested table and everything in it, and the review card cannot show what was lost. `
         + `Split the edit so paragraph ${p} stays intact (p${range.startParaIdx}:${range.startCharOffset}-p${p - 1} and p${p + 1}:0-p${range.endParaIdx}:${range.endCharOffset} as separate calls), `
-        + 'or target text inside the nested table\'s own cells with apply_engine_edits.',
+        + 'or target text inside the nested table with cell and cellPath from get_selection.',
       );
     }
   }
 
-  /** 본문 다문단 범위가 통째로 삼키는 최상위 표 수 (경고용 — 차단하지 않는다) */
+  /** 본문 다문단 범위가 통째로 삼키는 최상위 표 수 */
   private tablesInsideBodyRange(range: DocRange): number {
     if (range.cell || range.endParaIdx <= range.startParaIdx + 1) return 0;
     try {
@@ -2314,6 +2426,14 @@ export class AgentToolExecutor {
     } catch {
       return 0;
     }
+  }
+
+  private guardTablesInsideBodyRange(range: DocRange): void {
+    if (this.tablesInsideBodyRange(range) === 0) return;
+    throw new AgentToolError(
+      'TABLE_IN_BODY_RANGE',
+      'The body text range crosses a table and would remove it. Use cell (and cellPath for a nested table) to edit text inside a cell. Use delete_table only when the table itself should be removed.',
+    );
   }
 
   private deleteRange(args: Record<string, unknown>, agent: AgentName): unknown {
@@ -2326,8 +2446,7 @@ export class AgentToolExecutor {
     if (range.startParaIdx === range.endParaIdx && range.startCharOffset === range.endCharOffset) {
       throw new AgentToolError('INVALID_ARGS', 'Range is empty; nothing to delete');
     }
-    // 표 집계는 삭제 적용 전에 — 적용 뒤에는 페이지 레이아웃에서 이미 사라진다.
-    const deletedTables = this.tablesInsideBodyRange(range);
+    this.guardTablesInsideBodyRange(range);
     // 즉시 적용 삭제(빈 교체) — 마크 전용이던 시절엔 원문이 레이아웃에 남아
     // 편집이 많은 턴에서 미리보기 쪽나눔이 최종본과 어긋났다. 삭제된 텍스트는
     // 앵커/팝오버와 사이드바 카드로 검토하고, 거절 시 스냅샷으로 복원된다.
@@ -2344,10 +2463,9 @@ export class AgentToolExecutor {
       changeSetId: r.changeSetId,
       deletedText: r.deletedText.slice(0, 300),
       collapsedAt: { paraIdx: range.startParaIdx, charOffset: range.startCharOffset },
-      ...(deletedTables > 0 ? { deletedTables } : {}),
       postEdit: this.readPostEditDigest(range.sectionIdx, range.startParaIdx, range.startCharOffset, range.cell),
       ...(shift !== 0 ? { rebasedParaShift: shift } : {}),
-      note: `text removed from the live preview now; auto-committed on turn success and restored on turn failure. Coordinates after the range have shifted — use collapsedAt to insert replacement text.${tableRangeNote(deletedTables)} ${PENDING_NOTE}`,
+      note: `text removed from the live preview now; auto-committed on turn success and restored on turn failure. Coordinates after the range have shifted — use collapsedAt to insert replacement text. ${PENDING_NOTE}`,
     };
   }
 
@@ -2361,7 +2479,7 @@ export class AgentToolExecutor {
     if (range.startParaIdx === range.endParaIdx && range.startCharOffset === range.endCharOffset) {
       throw new AgentToolError('INVALID_ARGS', 'Range is empty; use insert_text instead');
     }
-    const deletedTables = this.tablesInsideBodyRange(range);
+    this.guardTablesInsideBodyRange(range);
     const text = reqString(args, 'text');
     if (text.length < 1 || text.length > 10_000) {
       throw new AgentToolError('INVALID_ARGS', `text must be 1..10000 chars (got ${text.length})`);
@@ -2394,10 +2512,9 @@ export class AgentToolExecutor {
         endParaIdx: r.insertedRange.endParaIdx,
         endCharOffset: r.insertedRange.endCharOffset,
       },
-      ...(deletedTables > 0 ? { deletedTables } : {}),
       postEdit: this.readPostEditDigest(range.sectionIdx, r.insertedRange.startParaIdx, r.insertedRange.startCharOffset, range.cell),
       ...(shift !== 0 ? { rebasedParaShift: shift } : {}),
-      note: deletedTables > 0 ? `${tableRangeNote(deletedTables).trim()} ${PENDING_NOTE}` : PENDING_NOTE,
+      note: PENDING_NOTE,
     };
   }
 

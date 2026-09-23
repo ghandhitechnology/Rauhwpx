@@ -11,6 +11,7 @@ import type { EventBus } from '../core/event-bus.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
+import type { CellPathEntry } from '../core/types.ts';
 
 export const AGENT_PROTOCOL_VERSION = 5;
 
@@ -906,18 +907,24 @@ export interface DocPoint {
 }
 
 /**
- * 표 셀 주소 (최상위 표만 — 중첩 표는 Phase-1 범위 밖).
+ * 표 셀 주소. path 는 중첩 표 셀의 최외곽 표부터 대상 셀까지의 경로다.
  * paraIdx = 표 컨트롤을 담은 본문 문단, cellIdx = flat 셀 인덱스.
  */
 export interface CellAddr {
   paraIdx: number;
   controlIdx: number;
   cellIdx: number;
+  path?: CellPathEntry[];
 }
 
 export function sameCell(a: CellAddr | undefined, b: CellAddr | undefined): boolean {
   if (!a || !b) return !a && !b;
-  return a.paraIdx === b.paraIdx && a.controlIdx === b.controlIdx && a.cellIdx === b.cellIdx;
+  if (a.paraIdx !== b.paraIdx || a.controlIdx !== b.controlIdx || a.cellIdx !== b.cellIdx) return false;
+  if (!a.path || !b.path) return !a.path && !b.path;
+  return a.path.length === b.path.length && a.path.every((entry, index) =>
+    entry.controlIndex === b.path![index].controlIndex
+    && entry.cellIndex === b.path![index].cellIndex
+    && (index === a.path!.length - 1 || entry.cellParaIndex === b.path![index].cellParaIndex));
 }
 
 export interface DocRange {
