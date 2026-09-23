@@ -1,14 +1,6 @@
-//! [#6875] HWPX 문단 여백의 홀수 자리를 `unit="CHAR"` 로 보존한다.
-//!
-//! `paraPr` 여백은 `<hp:switch>` 아래 `hp:default`(저장값)와 HwpUnitChar `hp:case`
-//! (저장값의 절반) 두 벌로 적힌다. 저장값이 홀수면 한컴은 case 쪽에 `unit="CHAR"` 를
-//! 붙여 최하위 비트를 남긴다. 직렬화기가 단위를 `HWPUNIT` 으로 고정하고 `x / 2` 만
-//! 적으면 한/글이 case 를 우선 읽어 문단 간격이 줄어든다 (코퍼스 07939: 558 → 545쪽).
+//! [#6875]
 //!
 //! 업스트림 [edwardkim/rhwp#7319](https://github.com/edwardkim/rhwp/pull/7319).
-//! 선호 fixture `samples/issue5714/…vietnam_labor_report.hwp` 는 이 저장소에 없다.
-//! `samples/basic/Textmail.hwp` 는 파스된 `ParaShape` 에 홀수 여백 2개와 홀수 간격
-//! 2개를 가진 저장소 실물이다.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -35,7 +27,6 @@ fn exported_header(bytes: &[u8]) -> String {
     header
 }
 
-/// `hp:case` 안의 `<hc:*>` 를 (이름, 값, 단위)로, 같은 `paraPr` 의 `hp:default` 값과 함께.
 fn case_and_default_margins(header: &str) -> Vec<(String, i64, String, i64)> {
     let mut out = Vec::new();
     for para_pr in header.split("<hh:paraPr ").skip(1) {
@@ -76,7 +67,6 @@ fn case_and_default_margins(header: &str) -> Vec<(String, i64, String, i64)> {
     out
 }
 
-/// 저장값이 홀수인 자리에만 `unit="CHAR"` 가 붙는다.
 #[test]
 fn odd_stored_margin_is_marked_with_the_char_unit() {
     let header = exported_header(&read_sample());
@@ -107,10 +97,6 @@ fn odd_stored_margin_is_marked_with_the_char_unit() {
     }
 }
 
-/// HWPX 로 쓰고 다시 읽으면 문단 여백·간격이 정확히 돌아온다.
-///
-/// 한컴이 읽는 case 표기와는 별개로, Rauhwpx 자신의 왕복이 단위 표기 변경으로
-/// 깨지지 않는지 잠근다.
 #[test]
 fn paragraph_margins_survive_the_hwpx_roundtrip_exactly() {
     let bytes = read_sample();
