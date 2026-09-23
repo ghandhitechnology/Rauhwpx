@@ -1277,16 +1277,17 @@ fn write_margin_child<W: Write>(
             &[("value", &stored.to_string()), ("unit", "HWPUNIT")],
         );
     }
-    let odd = stored % 2 != 0;
-    let value = if odd { (stored - 1) / 2 } else { stored / 2 };
-    empty_tag(
-        w,
-        name,
-        &[
-            ("value", &value.to_string()),
-            ("unit", if odd { "CHAR" } else { "HWPUNIT" }),
-        ],
-    )
+    let (value, unit) = hwpunitchar_case_margin(stored);
+    empty_tag(w, name, &[("value", &value.to_string()), ("unit", unit)])
+}
+
+/// HwpUnitChar case 여백. 홀수 저장값은 `unit="CHAR"` 로 최하위 비트를 남긴다.
+fn hwpunitchar_case_margin(stored: i32) -> (i32, &'static str) {
+    if stored % 2 != 0 {
+        ((stored - 1) / 2, "CHAR")
+    } else {
+        (stored / 2, "HWPUNIT")
+    }
 }
 
 fn alignment_str(a: Alignment) -> &'static str {
