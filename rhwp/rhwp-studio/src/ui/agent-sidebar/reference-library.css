@@ -305,6 +305,15 @@
   font-size: var(--ag-micro);
 }
 
+.ag-reference-quick-uploads > .ag-reference-upload-chip {
+  animation: ag-attachment-chip-arrive 260ms var(--ag-spring-soft) both;
+}
+
+@keyframes ag-attachment-chip-arrive {
+  from { opacity: 0; transform: translateY(5px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 .ag-reference-upload-chip-name {
   max-width: 150px;
   overflow: hidden;
@@ -378,7 +387,7 @@
   pointer-events: none;
 }
 
-.ag-root.ag-attachment-dragging::after {
+.ag-root::after {
   content: '놓아서 메시지에 첨부';
   position: absolute;
   inset: 10px;
@@ -392,6 +401,14 @@
   font-size: var(--font-size-md, 13px);
   font-weight: 650;
   pointer-events: none;
+  opacity: 0;
+  transform: scale(0.995);
+  transition: opacity 140ms var(--ag-motion-out), transform 180ms var(--ag-motion-out);
+}
+
+.ag-root.ag-attachment-dragging::after {
+  opacity: 1;
+  transform: scale(1);
 }
 
 .ag-reference-tab:focus-visible,
@@ -419,4 +436,16 @@
 
 @media (prefers-reduced-motion: reduce) {
   .ag-references-page { transition: none; }
+  .ag-root::after {
+    transform: none;
+    transition: opacity 90ms var(--ag-motion-out);
+  }
+  .ag-reference-quick-uploads > .ag-reference-upload-chip {
+    animation: ag-attachment-fade-in 90ms var(--ag-motion-out) both;
+  }
+}
+
+@keyframes ag-attachment-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
