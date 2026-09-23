@@ -2065,7 +2065,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       deps.setCloudDocumentLease?.(cloudOwned, sessionId);
       queueMicrotask(() => updateComposer());
     },
-    onTimeline: (binding, timeline) => {
+    onTimeline: (binding, timeline, liveRefresh = false) => {
       if (workspace.mode() !== 'cloud') return false;
       const key = `${cloudController.getSnapshot().profileEpoch}:${binding.sessionId}:${binding.threadId}`;
       if (key !== cloudTimelineGuardKey || currentThread.id !== binding.threadId
@@ -2077,7 +2077,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       const applied = applyCloudTimeline(timeline, {
         documentId: binding.documentId,
         fileName: timeline.thread.docKey ?? getDocumentContext?.().documentName ?? 'Cloud document',
-      }, binding.threadId);
+      }, binding.threadId, liveRefresh);
       if (!applied) return false;
       cloudTimelineGuard.accept(timeline.thread.messages);
       if (binding.threadId === localThreadId) {
@@ -2293,6 +2293,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     timeline: PortableCloudTimelineV1,
     binding: { documentId: string | null; fileName: string } | null = null,
     expectedThreadId: string | null = null,
+    liveRefresh = false,
   ): boolean {
     if (expectedThreadId && timeline.thread.id !== expectedThreadId) return false;
     const local = binding
@@ -2308,6 +2309,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (!local) return false;
     const imported = importCloudTimeline(timeline, local);
     if (!imported) return false;
+    const sameConversation = currentThread.id === imported.id && currentThread.executionMode === 'cloud';
+    const sameMessages = sameConversation
+      && JSON.stringify(imported.messages) === JSON.stringify(currentThread.messages);
+    const newMessages = imported.messages.slice(currentThread.messages.length);
+    const lastBubble = Array.from(messages.querySelectorAll<HTMLElement>('.ag-msg-assistant')).at(-1);
+    const completedStream = liveRefresh && sameConversation && !turnRunning && newMessages.length === 1
+      && newMessages[0].role === 'assistant' && !newMessages[0].kind
+      && imported.messages.slice(0, currentThread.messages.length).every((message, index) =>
+        JSON.stringify(message) === JSON.stringify(currentThread.messages[index]))
+      && lastBubble?.parentElement === messages
+      && assistantBubbleSources.get(lastBubble) === newMessages[0].text;
     imported.executionMode = 'cloud';
     if (currentThread.id === imported.id) {
       imported.cloudRestartSourceSessionId = currentThread.cloudRestartSourceSessionId;
@@ -2329,7 +2341,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     restorePlanningForThread(currentThread.id, currentThread);
     applyThreadMeta(currentThread);
-    renderMessagesFromThread(currentThread);
+    if (!sameMessages && !completedStream) renderMessagesFromThread(currentThread);
     updateComposer();
     return true;
   }
@@ -5031,7 +5043,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function renderAssistantMessage(bubble: HTMLElement, text: string): void {
     assistantBubbleSources.set(bubble, text);
-    renderChatMarkdown(bubble, text);
+    renderChatMarkdown(bubble, text, workspace.mode() === 'cloud');
     const links = Array.from(bubble.querySelectorAll<HTMLAnchorElement>('a.ag-md-link'));
     for (const link of links) {
       const artifact = parsePublishedDocumentLink(link.href);
@@ -5049,7 +5061,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         el('span', 'ag-md-artifact-hint', originalLabel),
       );
       link.replaceChildren(icon, copy, el('span', 'ag-md-artifact-action', '열기'));
-      link.addEventListener('click', (event) => {
+      link.onclick = (event) => {
         event.preventDefault();
         if (link.getAttribute('aria-busy') === 'true') return;
         link.setAttribute('aria-busy', 'true');
@@ -5061,7 +5073,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             showToast({ message: `문서를 열지 못했습니다: ${message}`, durationMs: 5000 });
           })
           .finally(() => link.removeAttribute('aria-busy'));
-      });
+      };
 
       const download = document.createElement('a');
       download.className = 'ag-md-artifact-download';

@@ -13,6 +13,7 @@ import { checkFleetPreview } from './fleet.check.mjs';
 import { checkCloudRecovery } from './cloud-recovery.check.mjs';
 import { checkCloudStream } from './cloud-stream.check.mjs';
 import { browserLaunchArgs } from '../tests/browser-support.ts';
+import { checkCloudStreaming } from './cloud-streaming.check.mjs';
 
 const studio = resolve(import.meta.dirname, '..');
 const artifacts = resolve(import.meta.dirname, 'artifacts');
@@ -143,6 +144,7 @@ try {
   }
   await step('First Cloud server creation, cancel, refresh and recreation',
     () => checkCloudSetup(page, origin, artifacts));
+  await step('Cloud streaming stays stable across snapshots and completion', () => checkCloudStreaming(page, origin));
   await step('Cloud disconnect, reconnect, rebuild, and shutdown recovery',
     () => checkCloudRecovery(page, origin, artifacts));
   await step('Cloud streamed text survives delayed timelines and terminal errors do not reconnect',

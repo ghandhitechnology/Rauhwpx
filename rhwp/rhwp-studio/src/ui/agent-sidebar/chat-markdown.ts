@@ -9,6 +9,7 @@ let katexModule: KatexModule | null = null;
 let katexLoad: Promise<void> | null = null;
 const pendingMathTargets = new Set<HTMLElement>();
 const markdownSourceByTarget = new WeakMap<HTMLElement, string>();
+const incrementalTargets = new WeakSet<HTMLElement>();
 
 /**
  * 한국어 키보드·문서에서 백슬래시가 실제 원화 기호로 들어온 LaTeX를 복구한다.
@@ -24,7 +25,7 @@ function loadKatex() {
       katexModule = module;
       for (const target of pendingMathTargets) {
         const source = markdownSourceByTarget.get(target);
-        if (source !== undefined && target.isConnected) renderChatMarkdown(target, source);
+        if (source !== undefined && target.isConnected) renderChatMarkdown(target, source, incrementalTargets.has(target));
       }
       pendingMathTargets.clear();
     })
@@ -61,14 +62,40 @@ function mayContainMath(source: string) {
   return /\$|\\[([]|[₩￦][([]/u.test(source);
 }
 
-/** 기존 내용을 교체하고 채팅용 Markdown·수식을 안전한 DOM으로 렌더링한다. */
-export function renderChatMarkdown(target: HTMLElement, source: string) {
+/** 스트리밍 중 변하지 않은 노드는 유지한다. */
+function reconcileMarkdown(target: Node, next: Node): void {
+  const incoming = Array.from(next.childNodes);
+  for (let index = 0; index < incoming.length; index++) {
+    const fresh = incoming[index];
+    const current = target.childNodes[index];
+    if (!current) target.appendChild(fresh);
+    else if (current.nodeType !== fresh.nodeType || current.nodeName !== fresh.nodeName) target.replaceChild(fresh, current);
+    else if (current.nodeType === Node.TEXT_NODE) {
+      if (current.nodeValue !== fresh.nodeValue) current.nodeValue = fresh.nodeValue;
+    } else if (current instanceof Element && fresh instanceof Element) {
+      for (const attribute of Array.from(current.attributes)) {
+        if (!fresh.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+      }
+      for (const attribute of Array.from(fresh.attributes)) {
+        if (current.getAttribute(attribute.name) !== attribute.value) current.setAttribute(attribute.name, attribute.value);
+      }
+      reconcileMarkdown(current, fresh);
+    }
+  }
+  while (target.childNodes.length > incoming.length) target.removeChild(target.lastChild!);
+}
+
+export function renderChatMarkdown(target: HTMLElement, source: string, preserveNodes = false) {
   markdownSourceByTarget.set(target, source);
-  target.replaceChildren();
-  appendMarkdown(target, source, document, {
+  if (preserveNodes) incrementalTargets.add(target);
+  else incrementalTargets.delete(target);
+  const output = preserveNodes ? document.createElement('div') : target;
+  if (!preserveNodes) target.replaceChildren();
+  appendMarkdown(output, source, document, {
     links: true,
     renderMath: renderChatMath,
   });
+  if (preserveNodes) reconcileMarkdown(target, output);
   if (!katexModule && mayContainMath(source)) {
     pendingMathTargets.add(target);
     void loadKatex();

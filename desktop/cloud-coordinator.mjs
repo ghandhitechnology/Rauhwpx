@@ -16,7 +16,7 @@ import {
   isPermanentTransferError,
   PERMANENT_TRANSFER_CODES,
 } from './cloud-provider-auth.mjs';
-import { normalizeCloudProfile, normalizeTailscaleHttpsPort } from './cloud-profile.mjs';
+import { normalizeCloudProfile, normalizeCloudProvider, normalizeTailscaleHttpsPort } from './cloud-profile.mjs';
 import { sha256Hex, writeVerifiedRecoveryFile } from './cloud-handoff.mjs';
 import { applyCloudRecovery } from './cloud-result.mjs';
 import { hasProviderAuth } from './provider-auth.mjs';
@@ -1936,7 +1936,9 @@ export class CloudCoordinator extends EventEmitter {
       this.#emit({ type: 'provision-log', line: status.message ?? 'The previous app sandbox no longer exists.' });
     }
     const provider = this.#appServerFor(providerId);
-    const cloudProvider = selectedProvider ?? current?.provider ?? 'codex';
+    // Validate before provider.spawn. A bad renderer value must never allocate
+    // a paid sandbox that the desktop cannot activate or persist.
+    const cloudProvider = normalizeCloudProvider(selectedProvider ?? current?.provider);
     this.#setSandboxLifecycle('provisioning', 'Starting an app-provided sandbox.');
     this.#emit({ type: 'sandbox-provision-started', providerId: provider.id });
     let spawned = null;

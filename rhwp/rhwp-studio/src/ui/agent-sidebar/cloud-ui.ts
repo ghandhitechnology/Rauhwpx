@@ -154,7 +154,7 @@ export interface CloudAgentUiDeps {
   onWorkspaceLock(reason: WorkspaceExecutionLock): { release(): void };
   onBeginAuthorityTransition(): { release(): void };
   onCloudBinding(binding: CloudWorkspaceBinding | null): void;
-  onTimeline(binding: CloudWorkspaceBinding, timeline: PortableCloudTimelineV1): boolean;
+  onTimeline(binding: CloudWorkspaceBinding, timeline: PortableCloudTimelineV1, liveRefresh?: boolean): boolean;
   onAgentEvent(binding: CloudWorkspaceBinding, event: AgentStreamEvent): void;
   onCheckpointPublished(checkpoint: CloudCheckpointPayload): void | Promise<void>;
   getCloudStartId?(threadId: string, sessionId: string): string | undefined;
@@ -1416,7 +1416,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         && selectionScope.threadId === scope.threadId && selectionScope.documentId === scope.documentId;
       if (binding && (bindingMatchesScope(binding) || explicitlyMounted) && snapshot.timeline.thread.id === binding.threadId
         && timelineKey !== appliedTimelineKey
-        && deps.onTimeline(binding, snapshot.timeline)) {
+        && deps.onTimeline(binding, snapshot.timeline, true)) {
         mountedBinding = binding;
         appliedTimelineKey = timelineKey;
         deps.onCloudBinding(binding);
