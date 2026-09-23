@@ -123,7 +123,7 @@ test('uses scoped Claude Keychain credentials and never falls back to another ke
   const { client } = fixture({ platform: 'darwin', env: { CLAUDE_CONFIG_DIR: '/custom/claude' },
     keychainRead: async (service) => { services.push(service); return { claudeAiOauth: { accessToken: 'scoped-secret' } }; } });
   await client.refresh();
-  const suffix = createHash('sha256').update('/custom/claude').digest('hex').slice(0, 8);
+  const suffix = createHash('sha256').update(path.resolve('/custom/claude')).digest('hex').slice(0, 8);
   assert.deepEqual(services, [`Claude Code-credentials-${suffix}`, `Claude Code-credentials-${suffix}`]);
 });
 
@@ -145,10 +145,10 @@ test('re-reads a rotated Claude login after an authentication failure', async ()
 test('selects configured Codex home first and falls back only if its auth file is missing', async () => {
   const homes = [];
   const { client } = fixture({ env: { CODEX_HOME: '/selected/codex' },
-    readCredentials: async (file) => file === '/fixture-home/.codex/auth.json' ? { tokens: { access_token: 'test', account_id: 'account' } } : null,
+    readCredentials: async (file) => file === path.resolve('/fixture-home/.codex/auth.json') ? { tokens: { access_token: 'test', account_id: 'account' } } : null,
     codexRpc: async ({ env }) => { homes.push(env.CODEX_HOME); return rpcUsage(); } });
   await client.refresh();
-  assert.deepEqual(homes, ['/fixture-home/.codex']);
+  assert.deepEqual(homes, [path.resolve('/fixture-home/.codex')]);
 });
 
 test('supplements a weekly-only RPC result with HTTP session usage and detailed reset expiry', async () => {

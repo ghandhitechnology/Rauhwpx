@@ -126,7 +126,8 @@ test('SkillRegistry creates, disables, reads, and recoverably deletes user skill
   });
   assert.equal(script.ok, true);
   const scriptMode = (await fs.stat(path.join(userRoot, 'my-skill', 'scripts', 'check.js'))).mode & 0o777;
-  assert.equal(scriptMode, 0o700);
+  // Windows has no POSIX permission bits; node reports a fixed 0o666 there.
+  assert.equal(scriptMode, process.platform === 'win32' ? 0o666 : 0o700);
   let catalog = await registry.catalog();
   assert.deepEqual(catalog.rows.map((row) => row.name), ['my-skill', 'starter']);
   assert.equal(catalog.rows.find((row) => row.name === 'my-skill').icon, null);

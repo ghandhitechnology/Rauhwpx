@@ -6,6 +6,22 @@ import { terminateAndWaitForProcessTreeExit } from './process-tree.mjs';
 const require = createRequire(import.meta.url);
 const failure = (code, message) => Object.assign(new Error(message), { code });
 
+/**
+ * node-pty on Windows keeps the ConPTY input pipe and its conout worker
+ * thread alive after the child exits until `kill()` runs. `kill()` is not
+ * safe here: it is deferred forever when the child never produced output,
+ * and otherwise re-kills the exited console PID list, which may already be
+ * reused. Release the JS-side handles directly so a finished login cannot pin
+ * hub resources or the hub's event loop.
+ */
+function releaseWindowsPty(terminal) {
+  const agent = terminal._agent;
+  if (!agent || typeof agent !== 'object') return;
+  try { agent._inSocket?.destroy(); } catch {}
+  try { agent._outSocket?.destroy(); } catch {}
+  try { agent._conoutSocketWorker?.dispose(); } catch {}
+}
+
 /** A fixed login command, never a shell. Input/output belongs to its owning auth run. */
 export function createSetupTerminal({ command, argv, env, cwd, onOutput, signal,
   timeoutMs = 10 * 60_000, spawnPty = (...args) => require('node-pty').spawn(...args),
@@ -66,6 +82,7 @@ export function createSetupTerminal({ command, argv, env, cwd, onOutput, signal,
     child.emit('exit', exitCode, signal);
     child.emit('close', exitCode, signal);
     resolveExit(exitCode);
+    if (process.platform === 'win32') releaseWindowsPty(terminal);
   });
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort();

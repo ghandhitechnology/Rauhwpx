@@ -51,7 +51,8 @@ test('SSH installer streaming rejects EPIPE instead of crashing the process', as
       input: Buffer.alloc(16 * 1024 * 1024, 0x41),
       timeoutMs: 3_000,
     }),
-    (error) => error.code === 'EPIPE' && /input failed/i.test(error.message),
+    // Windows named pipes report a closed peer as EOF rather than EPIPE.
+    (error) => ['EPIPE', 'EOF'].includes(error.code) && /input failed/i.test(error.message),
   );
 });
 

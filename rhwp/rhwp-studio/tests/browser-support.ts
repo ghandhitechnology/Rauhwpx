@@ -1,12 +1,13 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-export function browserExecutable(): string {
-  const configured = process.env.PUPPETEER_EXECUTABLE_PATH;
-  const candidates = configured ? [configured] : [
+/** Well-known Chrome/Chromium install locations on macOS, Linux, and Windows. */
+export function browserExecutableCandidates(): string[] {
+  return [
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/Applications/Chromium.app/Contents/MacOS/Chromium',
     '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',
     ...['PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA']
@@ -14,6 +15,17 @@ export function browserExecutable(): string {
         ? [join(process.env[key]!, 'Google', 'Chrome', 'Application', 'chrome.exe')]
         : []),
   ];
+}
+
+/** CHROME_PATH/PUPPETEER_EXECUTABLE_PATH override, otherwise the first installed candidate. */
+export function findBrowserExecutable(): string | undefined {
+  return [process.env.CHROME_PATH, process.env.PUPPETEER_EXECUTABLE_PATH, ...browserExecutableCandidates()]
+    .find((path) => path && existsSync(path));
+}
+
+export function browserExecutable(): string {
+  const configured = process.env.PUPPETEER_EXECUTABLE_PATH;
+  const candidates = configured ? [configured] : browserExecutableCandidates();
   const executable = candidates.find(existsSync);
   if (!executable) {
     throw new Error('Browser tests require Chrome or Chromium. Set PUPPETEER_EXECUTABLE_PATH to its executable.');

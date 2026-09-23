@@ -185,6 +185,57 @@ test('Windows leader exit after taskkill starts blocks PID-based escalation', as
   assert.equal(await cleanup, null);
 });
 
+test('Windows leader that finishes on its own is proven once taskkill misses and stdio closes', async () => {
+  const child = Object.assign(new EventEmitter(), { pid: 9882, exitCode: null, signalCode: null });
+  const taskkills = [];
+  const timers = timerHarness();
+
+  const cleanup = terminateProcessTree(child, {
+    platform: 'win32',
+    env: WINDOWS_ENV,
+    spawnProcess() {
+      const taskkill = new EventEmitter();
+      taskkills.push(taskkill);
+      return taskkill;
+    },
+    setTimer: timers.setTimer,
+  });
+  child.exitCode = 0;
+  child.emit('exit', 0, null);
+  taskkills[0].emit('close', 128, null);
+  let settled = false;
+  void cleanup.then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false, 'a missed taskkill alone is not proof while pipes may be inherited');
+  child.emit('close', 0, null);
+
+  assert.equal(await cleanup, true);
+});
+
+test('Windows leader exit with a missed taskkill but unclosed stdio stays unavailable', async () => {
+  const child = Object.assign(new EventEmitter(), { pid: 9883, exitCode: null, signalCode: null });
+  const taskkills = [];
+  const timers = timerHarness();
+
+  const cleanup = terminateProcessTree(child, {
+    platform: 'win32',
+    env: WINDOWS_ENV,
+    spawnProcess() {
+      const taskkill = new EventEmitter();
+      taskkills.push(taskkill);
+      return taskkill;
+    },
+    setTimer: timers.setTimer,
+  });
+  child.exitCode = 0;
+  child.emit('exit', 0, null);
+  taskkills[0].emit('close', 128, null);
+  timers.fire();
+  timers.fire();
+
+  assert.equal(await cleanup, null);
+});
+
 test('already-exited Windows leader fails closed without targeting a reusable pid', async () => {
   const child = Object.assign(new EventEmitter(), { pid: 9878, exitCode: 0, signalCode: null });
   const calls = [];

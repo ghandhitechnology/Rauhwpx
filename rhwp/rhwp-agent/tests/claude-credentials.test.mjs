@@ -19,7 +19,7 @@ const credential = (token, expiresAt = 1_789_000_000_000) =>
 
 test('the Keychain service name mirrors the CLI namespacing rule', () => {
   assert.equal(claudeKeychainService({ configDir: '/Users/tester/.claude', hasConfigDir: false }), 'Claude Code-credentials');
-  const suffix = createHash('sha256').update('/custom/claude').digest('hex').slice(0, 8);
+  const suffix = createHash('sha256').update(path.resolve('/custom/claude')).digest('hex').slice(0, 8);
   assert.equal(
     claudeKeychainService({ configDir: '/custom/claude', hasConfigDir: true }),
     `Claude Code-credentials-${suffix}`,
