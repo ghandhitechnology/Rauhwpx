@@ -11,18 +11,7 @@
    여는 문맥 패널이다. 색은 기존 중성 램프를 유지하고 모서리, 여백,
    활자 위계만 제품 전반의 SaaS 셸과 맞춘다. */
 
-:root {
-  --ag-sidebar-width: 480px;
-  --ag-sidebar-ease: cubic-bezier(0.2, 0.72, 0, 1);
-  --ag-sidebar-duration: 320ms;
-  --ag-motion-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --ag-motion-smooth: cubic-bezier(0.65, 0, 0.35, 1);
-  --ag-spring-soft: linear(
-    0, 0.016 2.3%, 0.141 7.2%, 0.601 16.5%, 0.815 21%,
-    0.929 25.2%, 0.987 29%, 1.025 33.5%, 1.042 38%,
-    1.027 50%, 1.013 57.5%, 1.005 67%, 1.001 79%, 1
-  );
-}
+/* 모션 토큰은 motion.css 에 있다. */
 
 /* 편집 영역(가로 눈금자 + 용지)만 밀어 사이드바와 폭을 맞춘다.
    scroll-container ResizeObserver → viewport-resize 경로가 가운데 정렬을 갱신한다. */
@@ -153,7 +142,7 @@ body.ag-sidebar-animating .ag-root {
   line-height: 1.55;
   isolation: isolate;
   contain: layout style;
-  transition: transform var(--ag-sidebar-duration) var(--ag-sidebar-ease);
+  transition: transform var(--ag-dur-slow) var(--ag-spring-edge);
   will-change: transform;
 }
 
@@ -221,7 +210,7 @@ body.ag-sidebar-animating .ag-root {
   width: 2px;
   border-radius: 1px;
   background: transparent;
-  transition: background 120ms ease, opacity 120ms ease;
+  transition: background var(--ag-dur-fast) var(--ag-ease-out), opacity var(--ag-dur-fast) var(--ag-ease-out);
   opacity: 0;
 }
 
@@ -303,9 +292,9 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   touch-action: manipulation;
   user-select: none;
   transition:
-    transform 180ms var(--ag-sidebar-ease),
-    background-color 160ms ease,
-    color 160ms ease;
+    transform var(--ag-dur-base) var(--ag-sidebar-ease),
+    background-color var(--ag-dur-fast) var(--ag-ease-out),
+    color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-rau-icon {
@@ -474,9 +463,9 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   background: var(--ag-raised);
   opacity: 0;
   transition:
-    grid-template-rows 240ms var(--ag-sidebar-ease),
-    opacity 180ms var(--ag-sidebar-ease),
-    border-color 180ms var(--ag-sidebar-ease);
+    grid-template-rows var(--ag-dur-base) var(--ag-sidebar-ease),
+    opacity var(--ag-dur-base) var(--ag-sidebar-ease),
+    border-color var(--ag-dur-base) var(--ag-sidebar-ease);
 }
 
 .ag-config-panel.ag-open {
@@ -494,7 +483,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   min-height: 0;
   overflow: hidden;
   padding: 0 10px;
-  transition: padding 240ms var(--ag-sidebar-ease);
+  transition: padding var(--ag-dur-base) var(--ag-sidebar-ease);
 }
 
 .ag-config-panel.ag-open .ag-config-panel-inner {
@@ -525,30 +514,26 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   line-height: 1.2;
 }
 
-.ag-connection-row {
-  display: flex;
-  align-items: center;
-  min-height: 24px;
-  gap: 8px;
-  padding: 0 12px 7px;
-}
-
 .ag-takeover-btn {
   height: 26px;
-  margin-left: auto;
-  padding: 0 7px;
+  padding: 0 9px;
   border: 1px solid var(--ag-border-strong);
-  border-radius: var(--ag-r-chip);
+  border-radius: 13px;
   background: var(--ag-bg);
-  color: var(--ag-text-secondary);
+  color: var(--ag-text);
   font: inherit;
   font-size: var(--font-size-sm, 11px);
+  font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
+}
+
+.ag-takeover-btn[hidden] {
+  display: none;
 }
 
 .ag-takeover-btn:hover {
   background: var(--ag-hover);
-  color: var(--ag-text);
 }
 
 .ag-takeover-btn:focus-visible {
@@ -556,68 +541,169 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   outline-offset: 1px;
 }
 
-/* ─── 연결 끊김 배너 ──────────────────────────────────
-   첫 연결 시도 중에는 아무것도 띄우지 않는다 — 실패한 뒤에만 나타나
-   남은 대기 시간을 세고, 기다리지 않고 바로 붙는 버튼을 준다. */
-.ag-conn-banner {
-  display: flex;
+/* ─── 허브 연결 점과 팝오버 ───────────────────────────
+   연결되면 점은 사라진다. 회색 맥박 = 연결 중, 빨강 = 끊김,
+   노랑 = 다른 탭에서 사용 중. 자세한 말은 팝오버 한 줄에만 둔다. */
+.ag-conn-dot {
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  gap: 8px 12px;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  margin: 12px 12px 8px;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--ag-err) 35%, var(--ag-border-strong));
+  justify-content: center;
+  width: 24px;
+  height: 30px;
+  padding: 0;
+  border: 0;
   border-radius: var(--ag-r-field);
-  background: var(--ag-raised);
-  font-size: var(--font-size-sm, 11px);
-  line-height: 1.5;
-  color: var(--ag-text);
-}
-
-.ag-conn-banner.ag-conn-banner-wait {
-  border-color: color-mix(in srgb, var(--accent-primary) 35%, var(--ag-border-strong));
-  background: var(--ag-raised);
-}
-
-.ag-conn-banner[hidden] {
-  display: none;
-}
-
-.ag-conn-banner-text {
-  flex: 1 1 180px;
-  min-width: 0;
-}
-
-.ag-conn-banner-retry {
-  flex: 0 0 auto;
-  margin-left: auto;
-  height: 26px;
-  padding: 0 9px;
-  border: 1px solid var(--accent-primary);
-  background: var(--accent-primary);
-  color: var(--n-on-accent);
-  font: inherit;
-  font-size: var(--font-size-sm, 11px);
-  font-weight: 600;
+  background: transparent;
   cursor: pointer;
 }
 
-.ag-conn-banner-retry:hover {
-  filter: var(--ag-sketch-line) brightness(0.94);
+.ag-conn-dot[hidden] {
+  display: none;
 }
 
-.ag-conn-banner-retry:focus-visible,
-.ag-hub-retry-btn:focus-visible {
+.ag-conn-dot::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ag-text-muted);
+  transition: background-color var(--ag-dur-base) var(--ag-ease-out);
+}
+
+.ag-conn-dot:hover {
+  background: var(--ag-hover);
+}
+
+.ag-conn-dot:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 
-.ag-conn-banner-hint {
-  flex: 1 1 100%;
+.ag-conn-dot[data-state='connecting']::before {
+  animation: ag-conn-pulse 1.6s ease-in-out infinite;
+}
+
+.ag-conn-dot[data-state='disconnected']::before {
+  background: var(--ag-err);
+}
+
+.ag-conn-dot[data-state='replaced']::before {
+  background: var(--ag-run);
+}
+
+@keyframes ag-conn-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.8); }
+}
+
+/* 상태 문구는 스크린리더용으로만 남긴다. */
+.ag-conn {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.ag-conn-popover {
+  position: absolute;
+  top: calc(100% - 4px);
+  right: 10px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(260px, calc(100% - 20px));
+  padding: 12px;
+  border: 0.5px solid var(--ag-border-strong);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ag-bg) 88%, transparent);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: var(--n-elev-2);
+  transform-origin: top right;
+  animation: ag-popover-in var(--ag-dur-base) var(--ag-spring) both;
+}
+
+.ag-conn-popover[hidden] {
+  display: none;
+}
+
+@keyframes ag-popover-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+
+.ag-conn-popover-text {
+  margin: 0;
+  font-size: var(--font-size-md, 13px);
+  font-weight: 600;
+  color: var(--ag-text);
+}
+
+.ag-conn-command {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 4px 10px;
+  border-radius: 8px;
+  background: var(--ag-bg-2);
+}
+
+.ag-conn-command[hidden] {
+  display: none;
+}
+
+.ag-conn-command-text {
+  flex: 1 1 auto;
   font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
+  font-size: 12px;
+  color: var(--ag-text);
+}
+
+.ag-conn-command-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: var(--ag-text-muted);
+  cursor: pointer;
+}
+
+.ag-conn-command-copy:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-conn-retry {
+  height: 30px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--ag-text);
+  color: var(--ag-bg);
+  font: inherit;
+  font-size: var(--font-size-sm, 12px);
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-conn-retry:hover {
+  opacity: 0.88;
+}
+
+.ag-conn-retry:focus-visible,
+.ag-conn-command-copy:focus-visible,
+.ag-hub-retry-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 /* 허브가 CLI 를 띄우지 못했을 때 대화 안에 놓이는 재시도 줄. */
@@ -673,7 +759,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font: inherit;
   font-size: var(--font-size-sm, 11px);
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background var(--ag-dur-fast) var(--ag-ease-out), color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-permission-btn:hover:not(:disabled),
@@ -773,8 +859,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   flex-direction: column;
   background: var(--ag-bg);
   transition:
-    opacity 240ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
-    transform 280ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    opacity var(--ag-dur-base) var(--ag-sidebar-ease, var(--ag-ease-out)),
+    transform var(--ag-dur-slow) var(--ag-sidebar-ease, var(--ag-ease-out)),
     visibility 0s linear 0s;
 }
 
@@ -795,9 +881,9 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   visibility: hidden;
   pointer-events: none;
   transition:
-    opacity 240ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
-    transform 280ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
-    visibility 0s linear 280ms;
+    opacity var(--ag-dur-base) var(--ag-sidebar-ease, var(--ag-ease-out)),
+    transform var(--ag-dur-slow) var(--ag-sidebar-ease, var(--ag-ease-out)),
+    visibility 0s linear var(--ag-dur-slow);
   z-index: 0;
 }
 
@@ -812,9 +898,9 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   visibility: hidden;
   pointer-events: none;
   transition:
-    opacity 240ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
-    transform 280ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
-    visibility 0s linear 280ms;
+    opacity var(--ag-dur-base) var(--ag-sidebar-ease, var(--ag-ease-out)),
+    transform var(--ag-dur-slow) var(--ag-sidebar-ease, var(--ag-ease-out)),
+    visibility 0s linear var(--ag-dur-slow);
   z-index: 0;
 }
 
@@ -824,8 +910,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   visibility: visible;
   pointer-events: auto;
   transition:
-    opacity 240ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
-    transform 280ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    opacity var(--ag-dur-base) var(--ag-sidebar-ease, var(--ag-ease-out)),
+    transform var(--ag-dur-slow) var(--ag-sidebar-ease, var(--ag-ease-out)),
     visibility 0s linear 0s;
   z-index: 1;
 }
@@ -838,8 +924,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   visibility: visible;
   pointer-events: auto;
   transition:
-    opacity 240ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
-    transform 280ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    opacity var(--ag-dur-base) var(--ag-sidebar-ease, var(--ag-ease-out)),
+    transform var(--ag-dur-slow) var(--ag-sidebar-ease, var(--ag-ease-out)),
     visibility 0s linear 0s;
   z-index: 1;
 }
@@ -870,10 +956,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font: 600 12px/1.2 var(--font-family, sans-serif);
   cursor: pointer;
   transition:
-    border-color 160ms var(--ag-skills-motion),
-    background-color 160ms var(--ag-skills-motion),
-    color 160ms var(--ag-skills-motion),
-    transform 180ms var(--ag-skills-motion);
+    border-color var(--ag-dur-fast) var(--ag-skills-motion),
+    background-color var(--ag-dur-fast) var(--ag-skills-motion),
+    color var(--ag-dur-fast) var(--ag-skills-motion),
+    transform var(--ag-dur-base) var(--ag-skills-motion);
 }
 
 .ag-skill-new[hidden] { display: none; }
@@ -906,7 +992,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   border-radius: 7px;
   outline: none;
   cursor: pointer;
-  transition: background-color 140ms var(--ag-skills-motion), color 140ms var(--ag-skills-motion), transform 140ms var(--ag-skills-motion);
+  transition: background-color var(--ag-dur-fast) var(--ag-skills-motion), color var(--ag-dur-fast) var(--ag-skills-motion), transform var(--ag-dur-fast) var(--ag-skills-motion);
 }
 
 .ag-skill-icon-button:hover,
@@ -930,7 +1016,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   border-radius: 12px;
   background: color-mix(in srgb, var(--ag-raised) 96%, var(--ag-bg));
   box-shadow: 0 12px 28px color-mix(in srgb, var(--ag-text) 18%, transparent);
-  animation: ag-skill-icon-picker-in 180ms var(--ag-skills-motion) both;
+  animation: ag-skill-icon-picker-in var(--ag-dur-base) var(--ag-skills-motion) both;
 }
 
 @keyframes ag-skill-icon-picker-in {
@@ -957,7 +1043,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   background: transparent;
   color: var(--ag-text-secondary);
   cursor: pointer;
-  transition: background-color 140ms var(--ag-skills-motion), border-color 140ms var(--ag-skills-motion), color 140ms var(--ag-skills-motion), transform 140ms var(--ag-skills-motion);
+  transition: background-color var(--ag-dur-fast) var(--ag-skills-motion), border-color var(--ag-dur-fast) var(--ag-skills-motion), color var(--ag-dur-fast) var(--ag-skills-motion), transform var(--ag-dur-fast) var(--ag-skills-motion);
 }
 
 .ag-skill-icon-option:hover,
@@ -1017,7 +1103,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: var(--ag-text);
   font: 12px/1.75 var(--font-family-mono, monospace);
   tab-size: 2;
-  transition: border-color 140ms, background-color 140ms;
+  transition: border-color var(--ag-dur-fast), background-color var(--ag-dur-fast);
 }
 
 .ag-skill-editor-input:focus {
@@ -1042,7 +1128,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   background: var(--ag-bg);
   color: var(--ag-text);
   font: 12px/1.4 var(--font-family, sans-serif);
-  transition: border-color 140ms, box-shadow 140ms;
+  transition: border-color var(--ag-dur-fast), box-shadow var(--ag-dur-fast);
 }
 
 .ag-skill-editor-name { font-family: var(--font-family-mono, monospace); }
@@ -1142,9 +1228,9 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   padding-inline: 9px;
   border-radius: var(--ag-r-chip);
   transition:
-    background-color 140ms var(--ag-skills-motion),
-    color 140ms var(--ag-skills-motion),
-    transform 180ms var(--ag-skills-motion);
+    background-color var(--ag-dur-fast) var(--ag-skills-motion),
+    color var(--ag-dur-fast) var(--ag-skills-motion),
+    transform var(--ag-dur-base) var(--ag-skills-motion);
 }
 
 .ag-skills-toolbar .ag-skill-text:hover,
@@ -1194,7 +1280,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-skills-import-panel.ag-skills-import-open {
-  animation: ag-skills-import-open 260ms var(--ag-skills-motion) both;
+  animation: ag-skills-import-open var(--ag-dur-base) var(--ag-skills-motion) both;
 }
 
 @keyframes ag-skills-import-open {
@@ -1231,8 +1317,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   text-align: left;
   cursor: pointer;
   transition:
-    background-color 140ms var(--ag-skills-motion),
-    border-color 140ms var(--ag-skills-motion);
+    background-color var(--ag-dur-fast) var(--ag-skills-motion),
+    border-color var(--ag-dur-fast) var(--ag-skills-motion);
 }
 
 .ag-skill-import-row:hover {
@@ -1281,9 +1367,9 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: inherit;
   text-align: left;
   transition:
-    background-color 150ms var(--ag-skills-motion),
-    border-color 150ms var(--ag-skills-motion),
-    box-shadow 180ms var(--ag-skills-motion);
+    background-color var(--ag-dur-fast) var(--ag-skills-motion),
+    border-color var(--ag-dur-fast) var(--ag-skills-motion),
+    box-shadow var(--ag-dur-base) var(--ag-skills-motion);
 }
 
 .ag-skill-item:hover,
@@ -1345,8 +1431,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: inherit;
   text-align: left;
   transition:
-    color 140ms var(--ag-skills-motion),
-    transform 180ms var(--ag-skills-motion);
+    color var(--ag-dur-fast) var(--ag-skills-motion),
+    transform var(--ag-dur-base) var(--ag-skills-motion);
 }
 
 button.ag-skill-copy {
@@ -1426,9 +1512,9 @@ button.ag-skill-copy {
   font-size: var(--font-size-sm, 11px);
   cursor: pointer;
   transition:
-    background-color 140ms var(--ag-skills-motion),
-    color 140ms var(--ag-skills-motion),
-    transform 180ms var(--ag-skills-motion);
+    background-color var(--ag-dur-fast) var(--ag-skills-motion),
+    color var(--ag-dur-fast) var(--ag-skills-motion),
+    transform var(--ag-dur-base) var(--ag-skills-motion);
 }
 
 .ag-skill-text:hover {
@@ -1455,10 +1541,10 @@ button.ag-skill-copy {
   opacity: 0.56;
   touch-action: none;
   transition:
-    background-color 140ms var(--ag-skills-motion),
-    color 140ms var(--ag-skills-motion),
-    opacity 140ms var(--ag-skills-motion),
-    transform 180ms var(--ag-skills-motion);
+    background-color var(--ag-dur-fast) var(--ag-skills-motion),
+    color var(--ag-dur-fast) var(--ag-skills-motion),
+    opacity var(--ag-dur-fast) var(--ag-skills-motion),
+    transform var(--ag-dur-base) var(--ag-skills-motion);
 }
 
 .ag-skill-drag-handle:hover,
@@ -1490,8 +1576,8 @@ button.ag-skill-copy {
   cursor: pointer;
   filter: none;
   transition:
-    background-color 160ms var(--ag-skills-motion),
-    transform 180ms var(--ag-skills-motion);
+    background-color var(--ag-dur-fast) var(--ag-skills-motion),
+    transform var(--ag-dur-base) var(--ag-skills-motion);
 }
 
 .ag-skill-toggle::after {
@@ -1504,7 +1590,7 @@ button.ag-skill-copy {
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 2px color-mix(in srgb, var(--ag-text) 20%, transparent);
-  transition: transform 180ms var(--ag-skills-motion);
+  transition: transform var(--ag-dur-base) var(--ag-skills-motion);
 }
 
 .ag-skill-toggle[aria-pressed='true'] { background: var(--ag-accent); }
@@ -1611,7 +1697,7 @@ button.ag-skill-copy {
   font-weight: 600;
   text-align: left;
   cursor: pointer;
-  transition: background-color 100ms ease;
+  transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-threads-group-btn:hover,
@@ -1665,7 +1751,7 @@ button.ag-skill-copy {
   cursor: pointer;
   opacity: 0;
   transform: translateY(-50%);
-  transition: opacity 120ms ease, color 120ms ease;
+  transition: opacity var(--ag-dur-fast) var(--ag-ease-out), color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-threads-group:hover .ag-doc-jump,
@@ -1723,7 +1809,7 @@ button.ag-skill-copy {
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background-color 140ms ease, padding-right 180ms ease;
+  transition: background-color var(--ag-dur-fast) var(--ag-ease-out), padding-right var(--ag-dur-base) var(--ag-ease-out);
 }
 
 .ag-threads-item:hover {
@@ -1777,7 +1863,7 @@ button.ag-skill-copy {
   opacity: 0;
   pointer-events: none;
   transform: translate(4px, -50%);
-  transition: opacity 140ms ease, transform 180ms ease, color 140ms ease;
+  transition: opacity var(--ag-dur-fast) var(--ag-ease-out), transform var(--ag-dur-base) var(--ag-ease-out), color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-thread-mode .ag-icon { width: 14px; height: 14px; }
@@ -1889,7 +1975,7 @@ button.ag-skill-copy {
   opacity: 0;
   pointer-events: none;
   transform: translate(4px, -50%);
-  transition: opacity 140ms ease, transform 180ms ease, color 140ms ease;
+  transition: opacity var(--ag-dur-fast) var(--ag-ease-out), transform var(--ag-dur-base) var(--ag-ease-out), color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 /* 칩 상자 없이 아이콘만 밝아진다. */
@@ -1914,7 +2000,7 @@ button.ag-skill-copy {
   opacity: 0;
   pointer-events: none;
   transform: translate(-50%, calc(-100% + 4px));
-  transition: opacity 140ms ease, transform 180ms ease;
+  transition: opacity var(--ag-dur-fast) var(--ag-ease-out), transform var(--ag-dur-base) var(--ag-ease-out);
 }
 
 .ag-thread-rename:hover + .ag-thread-rename-tooltip,
@@ -2220,7 +2306,7 @@ button.ag-skill-copy {
   height: 11px;
   color: var(--ag-text-muted);
   transform: rotate(0deg);
-  transition: transform 240ms var(--ag-sidebar-ease);
+  transition: transform var(--ag-dur-base) var(--ag-sidebar-ease);
 }
 
 .ag-composer-meta.ag-expanded .ag-summary-caret {
@@ -2244,9 +2330,9 @@ button.ag-skill-copy {
   visibility: hidden;
   pointer-events: none;
   transition:
-    opacity 160ms var(--ag-sidebar-ease, ease),
-    transform 200ms var(--ag-sidebar-ease, ease),
-    visibility 0s linear 200ms;
+    opacity var(--ag-dur-fast) var(--ag-sidebar-ease, var(--ag-ease-out)),
+    transform var(--ag-dur-base) var(--ag-sidebar-ease, var(--ag-ease-out)),
+    visibility 0s linear var(--ag-dur-slow);
 }
 
 .ag-model-open .ag-model-menu {
@@ -2255,8 +2341,8 @@ button.ag-skill-copy {
   visibility: visible;
   pointer-events: auto;
   transition:
-    opacity 160ms var(--ag-sidebar-ease, ease),
-    transform 200ms var(--ag-sidebar-ease, ease),
+    opacity var(--ag-dur-fast) var(--ag-sidebar-ease, var(--ag-ease-out)),
+    transform var(--ag-dur-base) var(--ag-sidebar-ease, var(--ag-ease-out)),
     visibility 0s linear 0s;
 }
 
@@ -2359,40 +2445,6 @@ button.ag-skill-copy {
 .ag-model-item.ag-active {
   background: var(--ag-selected);
   font-weight: 600;
-}
-
-.ag-conn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding-left: 2px;
-  font-size: var(--font-size-sm, 11px);
-  color: var(--ag-text-muted);
-  line-height: 1.3;
-}
-
-.ag-conn::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ag-text-muted);
-}
-
-.ag-conn-connected::before {
-  background: var(--ag-ok);
-}
-
-.ag-conn-connecting::before {
-  background: var(--ui-warning-border, #f0d060);
-}
-
-.ag-conn-disconnected::before {
-  background: var(--ag-err);
-}
-
-.ag-conn-replaced::before {
-  background: var(--ui-warning-border, #f0d060);
 }
 
 /* ─── 메시지 목록 ─────────────────────────────────────── */
@@ -2656,21 +2708,21 @@ button.ag-skill-copy {
   width: 10px;
   height: 10px;
   transform: rotate(-90deg);
-  transition: transform 160ms var(--ag-motion-out);
+  transition: transform var(--ag-dur-fast) var(--ag-motion-out);
 }
 
 .ag-msg-plan-action:hover .ag-msg-plan-chevron {
   transform: translateX(2px) rotate(-90deg);
 }
 
-.ag-msg-assistant.ag-msg-enter {
-  animation: ag-message-arrive 320ms var(--ag-motion-out) both;
+.ag-msg.ag-msg-enter {
+  animation: ag-message-arrive var(--ag-dur-slow) var(--ag-ease-out) both;
 }
 
 @keyframes ag-message-arrive {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
@@ -2702,7 +2754,7 @@ button.ag-skill-copy {
   flex-direction: column;
   gap: 7px;
   padding-left: 17px;
-  animation: ag-step-arrive 280ms var(--ag-motion-out) both;
+  animation: ag-step-arrive var(--ag-dur-slow) var(--ag-motion-out) both;
 }
 
 .ag-progress-step::before {
@@ -2756,7 +2808,7 @@ button.ag-skill-copy {
   border-radius: var(--ag-r-field);
   background: color-mix(in srgb, var(--ag-bg-2) 68%, transparent);
   overflow: hidden;
-  animation: ag-activity-arrive 240ms var(--ag-motion-out) both;
+  animation: ag-activity-arrive var(--ag-dur-base) var(--ag-motion-out) both;
 }
 
 @keyframes ag-activity-arrive {
@@ -2855,9 +2907,9 @@ button.ag-skill-copy {
   opacity: 1;
   transform: translateY(0);
   transition:
-    grid-template-rows 340ms var(--ag-spring-soft),
-    opacity 180ms var(--ag-motion-out),
-    transform 300ms var(--ag-motion-out);
+    grid-template-rows var(--ag-dur-slow) var(--ag-spring-soft),
+    opacity var(--ag-dur-base) var(--ag-motion-out),
+    transform var(--ag-dur-slow) var(--ag-motion-out);
 }
 
 .ag-activity-collapsed .ag-activity-collapse {
@@ -2901,7 +2953,7 @@ button.ag-skill-copy {
   background: transparent;
   font-size: var(--font-size-base, 12px);
   overflow: hidden;
-  animation: ag-step-arrive 280ms var(--ag-motion-out) both;
+  animation: ag-step-arrive var(--ag-dur-slow) var(--ag-motion-out) both;
 }
 
 @keyframes ag-step-arrive {
@@ -2968,12 +3020,12 @@ button.ag-skill-copy {
 
 .ag-tool-status.ag-ok {
   color: var(--ag-ok);
-  animation: ag-status-settle 260ms var(--ag-motion-out) both;
+  animation: ag-status-settle var(--ag-dur-base) var(--ag-motion-out) both;
 }
 
 .ag-tool-status.ag-err {
   color: var(--ag-err);
-  animation: ag-status-settle 260ms var(--ag-motion-out) both;
+  animation: ag-status-settle var(--ag-dur-base) var(--ag-motion-out) both;
 }
 
 @keyframes ag-status-settle {
@@ -3077,6 +3129,35 @@ button.ag-skill-copy {
   display: none;
 }
 
+/* 펼침 행은 높이를 부드럽게 연다 — interpolate-size 가 auto 높이를 보간한다.
+   지원하지 않는 엔진에서는 그냥 즉시 열린다. */
+.ag-root {
+  interpolate-size: allow-keywords;
+}
+
+.ag-tool-body,
+.ag-restored-task-body {
+  overflow: clip;
+  transition:
+    height var(--ag-dur-base) var(--ag-ease-out),
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
+    display var(--ag-dur-base) allow-discrete;
+}
+
+.ag-tool-body[hidden],
+.ag-restored-task-body[hidden] {
+  height: 0;
+  opacity: 0;
+}
+
+@starting-style {
+  .ag-tool-body:not([hidden]),
+  .ag-restored-task-body:not([hidden]) {
+    height: 0;
+    opacity: 0;
+  }
+}
+
 .ag-tool-args,
 .ag-tool-result {
   margin: 0;
@@ -3130,6 +3211,28 @@ button.ag-skill-copy {
 }
 
 .ag-review:empty {
+  display: none;
+}
+
+/* 승인·거절된 카드는 높이를 접으며 빠진다 (index.ts collapseLeavingReviewCard). */
+.ag-review-card.ag-review-card-leaving {
+  flex: 0 0 auto;
+  overflow: hidden;
+  transition:
+    height var(--ag-dur-base) var(--ag-ease-out),
+    margin-bottom var(--ag-dur-base) var(--ag-ease-out),
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
+    transform var(--ag-dur-base) var(--ag-ease-out);
+  pointer-events: none;
+}
+
+.ag-review-card.ag-review-card-gone {
+  margin-bottom: -12px;
+  opacity: 0;
+  transform: scale(0.98);
+}
+
+.ag-review:has(> .ag-review-card-leaving) > .ag-review-empty {
   display: none;
 }
 
@@ -3360,7 +3463,7 @@ button.ag-skill-copy {
   font-size: var(--font-size-base, 12px);
   font-weight: 600;
   cursor: pointer;
-  transition: background 120ms ease;
+  transition: background var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-change-action {
@@ -3493,11 +3596,11 @@ button.ag-skill-copy {
   border-top: 1px solid var(--ag-border);
   background: var(--ag-bg-2);
   transition:
-    grid-template-rows 320ms var(--ag-spring-soft),
-    max-height 320ms var(--ag-spring-soft),
-    padding 320ms var(--ag-spring-soft),
-    border-top-width 240ms var(--ag-motion-out),
-    background-color 240ms ease;
+    grid-template-rows var(--ag-dur-slow) var(--ag-spring-soft),
+    max-height var(--ag-dur-slow) var(--ag-spring-soft),
+    padding var(--ag-dur-slow) var(--ag-spring-soft),
+    border-top-width var(--ag-dur-base) var(--ag-motion-out),
+    background-color var(--ag-dur-base) var(--ag-ease-out);
 }
 
 .ag-plan-surface[hidden] {
@@ -3513,8 +3616,8 @@ button.ag-skill-copy {
   transform: scale(1);
   transform-origin: calc(100% - 19px) 100%;
   transition:
-    opacity 180ms var(--ag-motion-out),
-    transform 320ms var(--ag-spring-soft);
+    opacity var(--ag-dur-base) var(--ag-motion-out),
+    transform var(--ag-dur-slow) var(--ag-spring-soft);
 }
 
 .ag-plan-surface.ag-plan-minimized {
@@ -3549,9 +3652,9 @@ button.ag-skill-copy {
   transform: scale(0.35);
   cursor: pointer;
   transition:
-    opacity 120ms var(--ag-motion-out),
-    transform 220ms var(--ag-spring-soft),
-    background-color 120ms ease;
+    opacity var(--ag-dur-fast) var(--ag-motion-out),
+    transform var(--ag-dur-base) var(--ag-spring-soft),
+    background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-composer-overlay.ag-has-plan-restore .ag-plan-restore {
@@ -3621,7 +3724,7 @@ button.ag-skill-copy {
   border-radius: 0;
   background: transparent;
   box-shadow: none;
-  animation: ag-plan-enter 160ms var(--ag-motion-out) both;
+  animation: ag-plan-enter var(--ag-dur-fast) var(--ag-motion-out) both;
 }
 
 @keyframes ag-plan-enter {
@@ -4118,6 +4221,89 @@ button.ag-skill-copy {
   }
 }
 
+/* 문체 보정 권유 칩 — 입력창 바로 위, 한 줄. */
+.ag-calibration-chip {
+  display: flex;
+  align-items: center;
+  align-self: flex-start;
+  flex: 0 0 auto;
+  gap: 2px;
+  max-width: calc(100% - 24px);
+  margin: 0 12px 8px;
+  padding: 2px 2px 2px 4px;
+  border: 0.5px solid var(--ag-border-strong);
+  border-radius: 999px;
+  background: var(--ag-raised);
+  animation: ag-lift-in var(--ag-dur-slow) var(--ag-spring) both;
+}
+
+.ag-calibration-chip[hidden] {
+  display: none;
+}
+
+.ag-calibration-chip-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ag-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-calibration-chip-open:hover {
+  background: var(--ag-hover);
+}
+
+.ag-calibration-chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-calibration-chip-action {
+  flex: 0 0 auto;
+  color: var(--ag-text);
+  font-weight: 600;
+}
+
+.ag-calibration-chip-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ag-text-muted);
+  cursor: pointer;
+}
+
+.ag-calibration-chip-close:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-calibration-chip :is(button):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+@keyframes ag-lift-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
 .ag-composer {
   position: relative;
   flex: 0 0 auto;
@@ -4127,7 +4313,7 @@ button.ag-skill-copy {
   border-radius: var(--ag-r-panel);
   background: var(--ag-input-bg);
   box-shadow: var(--n-elev-2);
-  transition: border-color 140ms ease, box-shadow 140ms ease;
+  transition: border-color var(--ag-dur-fast) var(--ag-ease-out), box-shadow var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-composer-target-message {
@@ -4718,7 +4904,7 @@ button.ag-skill-copy {
   background: var(--accent-primary);
   color: var(--n-on-accent);
   cursor: pointer;
-  transition: background 120ms ease, opacity 120ms ease;
+  transition: background var(--ag-dur-fast) var(--ag-ease-out), opacity var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-send .ag-icon {
@@ -4803,7 +4989,7 @@ body.ag-fullscreen-open .ag-collapse-tab,
   display: grid;
   gap: 0;
   overflow: clip;
-  transition: grid-template-columns 240ms var(--ag-motion-out);
+  transition: grid-template-columns var(--ag-dur-base) var(--ag-motion-out);
 }
 
 /* 접은 칸은 폭만 0 이 아니라 visibility 까지 감춘다 — 잘려 보이지 않을
@@ -4816,8 +5002,8 @@ body.ag-fullscreen-open .ag-collapse-tab,
   visibility: hidden;
   opacity: 0;
   transition:
-    padding-inline 240ms var(--ag-motion-out),
-    opacity 130ms ease,
+    padding-inline var(--ag-dur-base) var(--ag-motion-out),
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
     visibility 0s linear 130ms;
 }
 
@@ -4840,7 +5026,7 @@ body.ag-fullscreen-open .ag-collapse-tab,
   background: transparent;
   cursor: col-resize;
   touch-action: none;
-  transition: left 240ms var(--ag-motion-out), right 240ms var(--ag-motion-out);
+  transition: left var(--ag-dur-base) var(--ag-motion-out), right var(--ag-dur-base) var(--ag-motion-out);
 }
 
 .ag-fullscreen .ag-rail-resize {
@@ -4862,7 +5048,7 @@ body.ag-fullscreen-open .ag-collapse-tab,
   border-radius: 1px;
   background: transparent;
   opacity: 0;
-  transition: background 120ms ease, opacity 120ms ease;
+  transition: background var(--ag-dur-fast) var(--ag-ease-out), opacity var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-fullscreen .ag-rail-resize:hover::after,
@@ -4923,8 +5109,8 @@ body.ag-col-resizing {
   /* padding-inline 을 명시해야 접힘 여백이 실제로 보간된다 —
      transition-property: padding 은 논리 longhand 를 덮지 못한다. */
   transition:
-    padding-inline 240ms var(--ag-motion-out),
-    opacity 170ms var(--ag-motion-out),
+    padding-inline var(--ag-dur-base) var(--ag-motion-out),
+    opacity var(--ag-dur-base) var(--ag-motion-out),
     visibility 0s linear 0s;
 }
 
@@ -5162,8 +5348,8 @@ body.ag-col-resizing {
 .ag-root.ag-fs-motion {
   transition:
     clip-path var(--ag-sidebar-duration) var(--ag-sidebar-ease),
-    background-color var(--ag-sidebar-duration) ease,
-    box-shadow var(--ag-sidebar-duration) ease;
+    background-color var(--ag-sidebar-duration) var(--ag-ease-out),
+    box-shadow var(--ag-sidebar-duration) var(--ag-ease-out);
   will-change: clip-path;
 }
 
@@ -5178,33 +5364,33 @@ body.ag-col-resizing {
 /* 새로 생기는 바깥 두 칸은 가장자리에서 스며든다. 가운데 대화는
    같은 노드가 그대로 이어지는 기준축이라 움직이지 않는다. */
 .ag-root.ag-fs-entering:not(.ag-rail-collapsed) .ag-threads-page {
-  animation: ag-fs-rail-in 300ms var(--ag-motion-out) 50ms both;
+  animation: ag-fs-rail-in var(--ag-dur-slow) var(--ag-motion-out) 50ms both;
 }
 
 .ag-root.ag-fs-entering:not(.ag-review-collapsed) .ag-review-column {
-  animation: ag-fs-review-in 300ms var(--ag-motion-out) 20ms both;
+  animation: ag-fs-review-in var(--ag-dur-slow) var(--ag-motion-out) 20ms both;
 }
 
 /* 돌아갈 때는 바깥 칸이 먼저 옅어지고 난 뒤 패널이 접힌다 —
    접힘 끝의 스트립이 빈 패널 톤이라 사이드바로의 교체가 깨끗하다. */
 .ag-root.ag-fs-exiting .ag-threads-page,
 .ag-root.ag-fs-exiting .ag-review-column {
-  animation: ag-fs-col-out 140ms ease both;
+  animation: ag-fs-col-out var(--ag-dur-fast) var(--ag-ease-out) both;
 }
 
 /* The fullscreen chrome should leave before its clipped shell reaches the
    sidebar-sized endpoint. Otherwise its right-hand actions survive until the
    layout swap and appear to pop into the compact header. */
 .ag-root.ag-fs-exiting .ag-workspace-bar {
-  animation: ag-fs-toolbar-out 180ms var(--ag-motion-out) both;
+  animation: ag-fs-toolbar-out var(--ag-dur-base) var(--ag-motion-out) both;
 }
 
 .ag-root.ag-fs-exiting .ag-chat-page > .ag-messages {
-  animation: ag-fs-content-out 150ms ease both;
+  animation: ag-fs-content-out var(--ag-dur-fast) var(--ag-ease-out) both;
 }
 
 .ag-root.ag-fs-exiting .ag-chat-page > .ag-composer {
-  animation: ag-fs-composer-out 180ms var(--ag-motion-out) both;
+  animation: ag-fs-composer-out var(--ag-dur-base) var(--ag-motion-out) both;
 }
 
 /* 모드 전환과 겹쳐 닫히는 오버레이가 무대 위를 한 번 더 미끄러지지
@@ -5217,31 +5403,31 @@ body.ag-col-resizing {
 /* 돌아온 사이드바는 표면보다 내부 자산이 한 박자 늦게 날아들며
    마무리된다. 전체 화면 chrome 과 compact chrome 의 교체를 가린다. */
 .ag-root.ag-fs-return .ag-stage {
-  animation: ag-fs-stage-in 220ms var(--ag-motion-out) both;
+  animation: ag-fs-stage-in var(--ag-dur-base) var(--ag-motion-out) both;
 }
 
 .ag-root.ag-fs-return .ag-header {
-  animation: ag-fs-sidebar-asset-in 220ms var(--ag-motion-out) 20ms both;
+  animation: ag-fs-sidebar-asset-in var(--ag-dur-base) var(--ag-motion-out) 20ms both;
 }
 
 .ag-root.ag-fs-return .ag-model-summary > .ag-fullscreen-btn {
-  animation: ag-fs-sidebar-button-in 180ms var(--ag-motion-out) 35ms both;
+  animation: ag-fs-sidebar-button-in var(--ag-dur-base) var(--ag-motion-out) 35ms both;
 }
 
 .ag-root.ag-fs-return .ag-model-summary > .ag-context-row {
-  animation: ag-fs-sidebar-button-in 190ms var(--ag-motion-out) 55ms both;
+  animation: ag-fs-sidebar-button-in var(--ag-dur-base) var(--ag-motion-out) 55ms both;
 }
 
 .ag-root.ag-fs-return .ag-model-summary > .ag-header-actions {
-  animation: ag-fs-sidebar-button-in 180ms var(--ag-motion-out) 75ms both;
+  animation: ag-fs-sidebar-button-in var(--ag-dur-base) var(--ag-motion-out) 75ms both;
 }
 
 .ag-root.ag-fs-return .ag-composer {
-  animation: ag-fs-sidebar-composer-in 230ms var(--ag-motion-out) 25ms both;
+  animation: ag-fs-sidebar-composer-in var(--ag-dur-base) var(--ag-motion-out) 25ms both;
 }
 
 .ag-root.ag-fs-return .ag-composer-meta > * {
-  animation: ag-fs-sidebar-button-in 180ms var(--ag-motion-out) 80ms both;
+  animation: ag-fs-sidebar-button-in var(--ag-dur-base) var(--ag-motion-out) 80ms both;
 }
 
 @keyframes ag-fs-rail-in {
@@ -5554,10 +5740,10 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   transform: translateY(-7px) scale(0.985);
   transform-origin: top right;
   transition:
-    opacity 160ms var(--ag-motion-out),
-    transform 220ms var(--ag-motion-out),
-    clip-path 220ms var(--ag-motion-out),
-    visibility 0s linear 220ms;
+    opacity var(--ag-dur-fast) var(--ag-motion-out),
+    transform var(--ag-dur-base) var(--ag-motion-out),
+    clip-path var(--ag-dur-base) var(--ag-motion-out),
+    visibility 0s linear var(--ag-dur-slow);
 }
 
 .ag-environment-panel.ag-open {
@@ -5659,7 +5845,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background var(--ag-dur-fast) var(--ag-ease-out), color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-environment-plan {
@@ -5914,11 +6100,11 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   box-shadow: var(--shadow-dropdown, 2px 2px 8px rgba(0, 0, 0, 0.15)), var(--n-elev-2);
   pointer-events: none;
   transform-origin: left center;
-  animation: ag-thread-popover-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: ag-thread-popover-in var(--ag-dur-base) var(--ag-ease-out);
   /* 행 사이를 옮겨 갈 때는 새로 만들지 않고 이 transition 으로 미끄러진다. */
   transition:
-    top 180ms cubic-bezier(0.22, 1, 0.36, 1),
-    left 180ms cubic-bezier(0.22, 1, 0.36, 1);
+    top var(--ag-dur-base) var(--ag-ease-out),
+    left var(--ag-dur-base) var(--ag-ease-out);
 }
 
 /* 에이전트 줄의 로고는 스트로크 아이콘과 같은 12px 급간을 지킨다. */
@@ -5993,7 +6179,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 /* 그룹을 펼칠 때 행이 차례로 들어온다 — delay 는 행이 인라인으로 계단을 준다. */
 .ag-threads-row.ag-row-enter {
-  animation: ag-thread-row-in 200ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation: ag-thread-row-in var(--ag-dur-base) var(--ag-ease-out) backwards;
 }
 
 @keyframes ag-thread-row-in {
@@ -6038,7 +6224,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   box-sizing: border-box;
   padding-inline-end: 0;
   background: var(--ag-bg);
-  transition: padding-inline-end 320ms var(--ag-motion-out);
+  transition: padding-inline-end var(--ag-dur-slow) var(--ag-motion-out);
 }
 
 .ag-fullscreen.ag-environment-open:not(.ag-detail-drawer-open) .ag-chat-page {
@@ -6060,8 +6246,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   border-radius: 9px;
   box-shadow: var(--n-elev-2);
   transition:
-    border-color 120ms ease,
-    box-shadow 120ms ease;
+    border-color var(--ag-dur-fast) var(--ag-ease-out),
+    box-shadow var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 /* 변경 사항은 대화를 유지한 채 오른쪽 열을 차지하는 docked drawer다. */
@@ -6088,8 +6274,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   visibility: hidden;
   pointer-events: none;
   transition:
-    opacity 140ms ease-out,
-    visibility 0s linear 240ms;
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
+    visibility 0s linear var(--ag-dur-slow);
 }
 
 .ag-fullscreen.ag-review-drawer-open:not(.ag-review-collapsed) .ag-review-column {
@@ -6097,7 +6283,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   visibility: visible;
   pointer-events: auto;
   transition:
-    opacity 160ms ease-out,
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
     visibility 0s linear 0s;
 }
 
@@ -6106,7 +6292,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   visibility: visible;
   pointer-events: auto;
   transition:
-    opacity 160ms ease-out,
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
     visibility 0s linear 0s;
 }
 
@@ -6343,7 +6529,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   visibility: hidden;
   pointer-events: none;
   transition:
-    opacity 160ms var(--ag-motion-out),
+    opacity var(--ag-dur-fast) var(--ag-motion-out),
     visibility 0s linear 180ms;
 }
 
@@ -6366,9 +6552,9 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   pointer-events: none;
   transform: translateX(calc(-100% - 12px));
   transition:
-    opacity 160ms var(--ag-motion-out),
-    transform 220ms var(--ag-motion-out),
-    visibility 0s linear 220ms;
+    opacity var(--ag-dur-fast) var(--ag-motion-out),
+    transform var(--ag-dur-base) var(--ag-motion-out),
+    visibility 0s linear var(--ag-dur-slow);
 }
 
 .ag-fullscreen.ag-workspace-compact.ag-compact-rail-open .ag-threads-page {
@@ -6398,9 +6584,9 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   pointer-events: none;
   transform: translateX(calc(100% + 12px));
   transition:
-    opacity 160ms var(--ag-motion-out),
-    transform 220ms var(--ag-motion-out),
-    visibility 0s linear 220ms;
+    opacity var(--ag-dur-fast) var(--ag-motion-out),
+    transform var(--ag-dur-base) var(--ag-motion-out),
+    visibility 0s linear var(--ag-dur-slow);
 }
 
 .ag-fullscreen.ag-workspace-compact.ag-review-drawer-open:not(.ag-review-collapsed) .ag-review-column,
@@ -6492,10 +6678,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 /* 채움·테두리가 있는 동작 버튼 */
 .ag-send,
-.ag-takeover-btn,
 .ag-threads-new,
 .ag-settings-primary,
-.ag-conn-banner-retry,
 .ag-hub-retry-btn,
 .ag-workspace-exit-btn {
   border-radius: 9px 12px 8px 13px / 12px 8px 13px 9px;
@@ -6544,7 +6728,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   border-radius: var(--ag-r-field);
   background: color-mix(in srgb, var(--ag-bg-2) 68%, transparent);
   overflow: hidden;
-  animation: ag-activity-arrive 240ms var(--ag-motion-out) both;
+  animation: ag-activity-arrive var(--ag-dur-base) var(--ag-motion-out) both;
 }
 
 .ag-fleet-toggle {
@@ -6627,7 +6811,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   height: 12px;
   color: currentColor;
   transform: rotate(180deg);
-  transition: transform 240ms var(--ag-motion-out);
+  transition: transform var(--ag-dur-base) var(--ag-motion-out);
 }
 
 .ag-fleet.ag-collapsed .ag-fleet-chevron {
@@ -6640,9 +6824,9 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   opacity: 1;
   transform: translateY(0);
   transition:
-    grid-template-rows 340ms var(--ag-spring-soft),
-    opacity 180ms var(--ag-motion-out),
-    transform 300ms var(--ag-motion-out);
+    grid-template-rows var(--ag-dur-slow) var(--ag-spring-soft),
+    opacity var(--ag-dur-base) var(--ag-motion-out),
+    transform var(--ag-dur-slow) var(--ag-motion-out);
 }
 
 .ag-fleet.ag-collapsed .ag-fleet-collapse {
@@ -6822,7 +7006,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-fleet-row {
   container: fleet-row / inline-size;
   min-width: 0;
-  animation: ag-step-arrive 280ms var(--ag-motion-out) both;
+  animation: ag-step-arrive var(--ag-dur-slow) var(--ag-motion-out) both;
 }
 
 .ag-fleet-row + .ag-fleet-row {
@@ -6925,8 +7109,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   opacity: 0;
   transform: rotate(0deg);
   transition:
-    transform 200ms var(--ag-motion-out),
-    opacity 200ms var(--ag-motion-out);
+    transform var(--ag-dur-base) var(--ag-motion-out),
+    opacity var(--ag-dur-base) var(--ag-motion-out);
 }
 
 .ag-fleet-row.ag-has-detail .ag-fleet-row-chevron {
@@ -7034,7 +7218,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   grid-template-rows: 0fr;
   visibility: hidden;
   opacity: 0;
-  transition: grid-template-rows 220ms var(--ag-motion-out), opacity 180ms ease, visibility 220ms;
+  transition: grid-template-rows var(--ag-dur-base) var(--ag-motion-out), opacity var(--ag-dur-base) var(--ag-ease-out), visibility var(--ag-dur-base);
 }
 
 .ag-fleet-row.ag-open > .ag-fleet-reveal {
@@ -7115,7 +7299,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   font-weight: 600;
   line-height: 1;
   cursor: pointer;
-  animation: ag-dock-arrive 220ms var(--ag-motion-out) both;
+  animation: ag-dock-arrive var(--ag-dur-base) var(--ag-motion-out) both;
 }
 
 .ag-fleet-dock-pill[hidden] { display: none; }
@@ -7185,7 +7369,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   height: 12px;
   color: currentColor;
   transform: rotate(0deg);
-  transition: transform 200ms var(--ag-motion-out);
+  transition: transform var(--ag-dur-base) var(--ag-motion-out);
 }
 
 /* 닫혀 있을 때는 위쪽을 가리킨다 — 펼치기 방향. */

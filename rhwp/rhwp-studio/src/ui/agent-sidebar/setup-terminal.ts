@@ -80,7 +80,7 @@ export function createSetupTerminal(options: {
       if (pending) { terminal.write(pending, () => terminal?.scrollToBottom()); pending = ''; }
       terminal.focus();
     } catch {
-      if (current === generation) screen.textContent = '로그인 창을 열지 못했어요. 취소 후 API 키로 연결해 주세요.';
+      if (current === generation) screen.textContent = '로그인 창 열기 실패 · API 키로 연결';
     } finally { if (current === generation) loading = false; }
   }
   function stopKeyPropagation(event: KeyboardEvent) { event.stopPropagation(); }

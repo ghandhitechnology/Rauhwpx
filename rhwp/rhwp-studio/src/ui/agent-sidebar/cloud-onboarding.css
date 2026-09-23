@@ -63,13 +63,13 @@
   max-height: min(720px, calc(100vh - 100px));
   overflow: hidden;
   flex-direction: column;
-  border: 1px solid var(--ag-border-strong);
-  border-radius: calc(var(--ag-r-card) + 4px);
+  border: 0.5px solid var(--ag-border-strong);
+  border-radius: 14px;
   background: var(--ag-bg);
   color: var(--ag-text);
   font: var(--font-weight-regular, 400) var(--font-size-md, 13px)/1.55 var(--font-family-ui, sans-serif);
   box-shadow: var(--n-elev-3);
-  animation: ag-cloud-setup-enter 180ms ease-out both;
+  animation: ag-cloud-setup-enter var(--ag-dur-slow) var(--ag-spring) both;
 }
 
 .ag-cloud-setup-header {
@@ -78,8 +78,8 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  padding: 22px 22px 16px;
-  border-bottom: 1px solid var(--ag-border);
+  padding: 18px 18px 12px;
+  border-bottom: 0;
 }
 
 .ag-cloud-setup-heading {
@@ -90,8 +90,9 @@
 .ag-cloud-setup-title {
   margin: 0;
   color: var(--ag-text);
-  font-size: 20px;
-  line-height: 1.25;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.3;
 }
 
 .ag-cloud-setup-close {
@@ -228,61 +229,129 @@
 
 .ag-cloud-setup-options {
   display: grid;
-  gap: 10px;
+  overflow: hidden;
+  border: 0.5px solid var(--ag-border-strong);
+  border-radius: 12px;
+  background: var(--ag-bg-2);
+}
+
+/* 옵션 한 줄 = 선택 버튼 + ⓘ. 자세한 설명은 ⓘ 로 펼친다. */
+.ag-cloud-setup-option-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+}
+
+.ag-cloud-setup-option-row + .ag-cloud-setup-option-row {
+  border-top: 0.5px solid var(--ag-border);
 }
 
 .ag-cloud-setup-option {
+  position: relative;
   display: flex;
-  align-items: flex-start;
-  gap: 11px;
-  padding: 13px;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-card);
-  background: var(--ag-bg-2);
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 10px 12px 10px 36px;
+  border: 0;
+  background: transparent;
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
+  transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+/* 라디오 표시 — 채워진 점 하나. */
+.ag-cloud-setup-option::before {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--ag-border-strong);
+  border-radius: 50%;
+  transform: translateY(-50%);
+  transition:
+    border-color var(--ag-dur-fast) var(--ag-ease-out),
+    border-width var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-cloud-setup-option.ag-selected::before {
+  border: 4.5px solid var(--accent-primary);
 }
 
 .ag-cloud-setup-option:hover {
-  border-color: color-mix(in srgb, var(--accent-primary) 40%, var(--ag-border));
+  background: var(--ag-hover);
 }
 
-.ag-cloud-setup-option.ag-selected {
-  border-color: var(--accent-primary);
-  background: color-mix(in srgb, var(--accent-primary) 9%, var(--ag-bg-2));
+.ag-cloud-setup-option:focus-visible,
+.ag-cloud-setup-option-info:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent-primary));
+  outline-offset: -2px;
 }
 
 .ag-cloud-setup-option:disabled {
-  opacity: 0.68;
+  opacity: 0.55;
   cursor: not-allowed;
-}
-
-.ag-cloud-setup-option:disabled .ag-cloud-setup-option-note {
-  color: var(--ag-text-secondary);
 }
 
 .ag-cloud-setup-option-copy {
   display: grid;
   min-width: 0;
-  gap: 3px;
+  gap: 1px;
 }
 
 .ag-cloud-setup-option-copy strong {
   font-size: var(--font-size-md, 13px);
-}
-
-.ag-cloud-setup-option-copy p {
-  margin: 0;
-  color: var(--ag-text-secondary);
-  font-size: var(--font-size-sm, 11px);
-  line-height: 1.5;
+  font-weight: 600;
 }
 
 .ag-cloud-setup-option-note {
-  color: var(--ag-text-tertiary, var(--ag-text-secondary));
+  color: var(--ag-text-muted);
   font-size: var(--font-size-sm, 11px);
+}
+
+.ag-cloud-setup-option-info {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin: 0 12px;
+  padding: 0;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ag-text-muted);
+  font: italic 600 11px/1 Georgia, 'Times New Roman', serif;
+  cursor: pointer;
+}
+
+.ag-cloud-setup-option-info[aria-expanded='true'] {
+  border-color: var(--ag-text-secondary);
+  color: var(--ag-text);
+}
+
+.ag-cloud-setup-option-detail {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0 14px 12px 36px;
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.5;
+  animation: ag-cloud-detail-in var(--ag-dur-base) var(--ag-ease-out) both;
+}
+
+.ag-cloud-setup-option-detail[hidden] {
+  display: none;
+}
+
+@keyframes ag-cloud-detail-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
 }
 
 .ag-cloud-setup-requirements {

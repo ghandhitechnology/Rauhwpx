@@ -101,10 +101,10 @@ test('sidebar and fullscreen share seamless drop and pasted-image staging', () =
 
 test('ready attachments can send without typed text and image models are gated', () => {
   assert.match(sidebar, /referenceLibrary\.allDraftsAreImages\(\)/);
-  assert.match(sidebar, /첨부한 이미지를 확인해 주세요\./);
-  assert.match(sidebar, /첨부한 파일을 확인해 주세요\./);
+  assert.match(sidebar, /'첨부 이미지 확인 필요'/);
+  assert.match(sidebar, /'첨부 파일 확인 필요'/);
   assert.match(sidebar, /modelSupportsImages\(selectedAgent, selectedModel\)/);
-  assert.match(sidebar, /현재 \$\{AGENT_LABEL\[selectedAgent\]\} 모델은 이미지 입력을 지원하지 않습니다/);
+  assert.match(sidebar, /\$\{AGENT_LABEL\[selectedAgent\]\} 현재 모델은 이미지 미지원/);
 });
 
 test('failed staged uploads retain an accessible retry bound to the selected chat scope', () => {

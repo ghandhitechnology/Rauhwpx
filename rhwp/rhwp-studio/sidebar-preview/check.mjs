@@ -443,7 +443,7 @@ try {
     );
     assert(
       !(await page.$eval('.ag-root', (element) =>
-        element.innerText.includes('작업을 마쳤습니다.'),
+        element.innerText.includes('작업 완료 · 문서 확인'),
       )),
     );
     await page.select('#connection', 'disconnected');
@@ -509,6 +509,9 @@ try {
       visible: true,
     });
     await page.click('[aria-label="sample.txt 참고자료 제거"]');
+    // 제거 확인은 사이드바 안의 확인 시트로 뜬다.
+    await page.waitForSelector('.ag-sheet-layer.ag-sheet-open .ag-sheet-confirm', { visible: true });
+    await page.click('.ag-sheet-confirm');
     await page.waitForSelector('[aria-label="sample.txt 참고자료 제거"]', {
       hidden: true,
     });
@@ -561,7 +564,7 @@ try {
       await page.click('[data-action="confirm-reset"]');
       assert.equal(await page.$eval('[data-action="confirm-reset"]', (el) => el.disabled), true);
       assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('rhwp-codex-pending-reset')).account), 'preview-codex');
-      await page.waitForFunction(() => document.querySelector('.ag-provider-quotas').textContent.includes('한도를 리셋했어요.'));
+      await page.waitForFunction(() => document.querySelector('.ag-provider-quotas').textContent.includes('한도 리셋 완료'));
       assert.match(await page.$eval('.ag-provider-quotas', (el) => el.textContent), /보관한 리셋 1개/);
       assert.equal(await page.evaluate(() => localStorage.getItem('rhwp-codex-pending-reset')), null);
       assert.equal(await page.$eval('.ag-settings-quota-card[data-provider="codex"] [role="meter"]', (el) => el.getAttribute('aria-valuenow')), '100');
@@ -676,7 +679,7 @@ try {
     assert.equal(await page.$eval('[data-action="confirm-reset"]', (el) => el.disabled), false,
       'An interrupted reset can be checked again after reload even with zero credits');
     await page.click('[data-action="confirm-reset"]');
-    await page.waitForFunction(() => document.querySelector('.ag-provider-quotas').textContent.includes('사용할 리셋 크레딧이 없어요.'));
+    await page.waitForFunction(() => document.querySelector('.ag-provider-quotas').textContent.includes('리셋 크레딧 없음'));
     assert.equal(await page.evaluate(() => localStorage.getItem('rhwp-codex-pending-reset')), null);
   });
   await step(

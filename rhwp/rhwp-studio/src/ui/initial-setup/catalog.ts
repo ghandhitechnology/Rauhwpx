@@ -22,11 +22,10 @@ export const BYOK_AGENTS = [
 ] as const satisfies readonly AgentName[];
 
 export const RAU_FAILURE_FORWARD_COPY = {
-  title: '다른 모델로 이어갈 수 있습니다',
-  body: 'Claude, Codex, Pi를 연결하거나 편집기로 계속할 수 있습니다.',
+  title: '다른 모델로 계속',
+  body: 'Claude, Codex, Pi 중 하나를 연결합니다.',
   skip: '편집기로 계속',
   retry: '다시 시도',
-  status: '계속할 제공자를 선택하세요',
 } as const;
 
 void BYOK_AGENTS;

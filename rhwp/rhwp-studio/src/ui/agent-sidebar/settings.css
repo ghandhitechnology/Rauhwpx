@@ -216,7 +216,7 @@
   border: 1px solid var(--ag-border-strong);
   border-radius: 999px;
   background: var(--ag-input-bg);
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: border-color var(--ag-dur-fast) var(--ag-ease-out), background var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-settings-toggle-track::after {
@@ -228,7 +228,7 @@
   height: 12px;
   border-radius: 50%;
   background: var(--ag-text-muted);
-  transition: transform 120ms ease, background 120ms ease;
+  transition: transform var(--ag-dur-fast) var(--ag-ease-out), background var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-settings-toggle-input:checked + .ag-settings-toggle-track {
@@ -571,7 +571,7 @@
   padding: 24px;
   background: color-mix(in srgb, #101114 54%, transparent);
   opacity: 0;
-  transition: opacity 140ms ease;
+  transition: opacity var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-template-name-overlay.ag-open {
@@ -597,7 +597,7 @@
   color: var(--ag-text);
   box-shadow: var(--n-elev-3);
   transform: translateY(8px) scale(0.985);
-  transition: transform 160ms ease;
+  transition: transform var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-template-name-overlay.ag-open .ag-template-name-dialog {
@@ -649,7 +649,7 @@
   padding: 24px;
   background: color-mix(in srgb, #101114 54%, transparent);
   opacity: 0;
-  transition: opacity 160ms ease;
+  transition: opacity var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-agent-setup-overlay.ag-open {
@@ -680,7 +680,7 @@
   color: var(--n-text);
   box-shadow: var(--n-elev-3);
   transform: translateY(10px) scale(0.985);
-  transition: transform 180ms ease;
+  transition: transform var(--ag-dur-base) var(--ag-ease-out);
 }
 
 .ag-agent-setup-overlay.ag-open .ag-agent-setup-dialog {
@@ -900,7 +900,7 @@
   height: 100%;
   border-radius: inherit;
   background: var(--accent-primary);
-  transition: width 480ms cubic-bezier(.22, .75, .2, 1);
+  transition: width var(--ag-dur-slow) var(--ag-ease-out);
 }
 
 .ag-agent-setup-progress-label {
@@ -1371,7 +1371,7 @@
 
 .ag-pi-progress .ag-settings-meter-fill {
   background: var(--ag-pi);
-  transition: width 480ms cubic-bezier(.22, .75, .2, 1);
+  transition: width var(--ag-dur-slow) var(--ag-ease-out);
 }
 
 /* 크기를 모를 때: 흐르는 줄무늬. 활동 신호가 끊기면 paused 로 멈춘다. */
@@ -1399,7 +1399,7 @@
   height: 100%;
   border-radius: 3px;
   background: var(--ag-accent);
-  transition: width 220ms var(--ag-motion-out, ease-out);
+  transition: width var(--ag-dur-base) var(--ag-motion-out, var(--ag-ease-out));
 }
 
 .ag-settings-meter-warn .ag-settings-meter-fill {
@@ -1797,7 +1797,7 @@
   flex: 0 0 auto;
   color: var(--ag-text-muted);
   transform: rotate(-90deg);
-  transition: transform 120ms ease;
+  transition: transform var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-settings-disclosure-toggle[aria-expanded='true'] .ag-settings-disclosure-chevron {
@@ -2161,7 +2161,7 @@
 .ag-settings-provider-summary,
 .ag-settings-provider-panel .ag-provider-setup-btn,
 .ag-settings-quota-refresh {
-  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease;
+  transition: background-color var(--ag-dur-fast) var(--ag-ease-out), color var(--ag-dur-fast) var(--ag-ease-out), border-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 @supports (interpolate-size: allow-keywords) {
   .ag-settings-provider-row { interpolate-size: allow-keywords; }
@@ -2169,9 +2169,9 @@
     block-size: 0;
     overflow: clip;
     opacity: 0;
-    transition: block-size 220ms cubic-bezier(.22, 1, .36, 1),
-      opacity 160ms ease,
-      content-visibility 220ms allow-discrete;
+    transition: block-size var(--ag-dur-base) var(--ag-ease-out),
+      opacity var(--ag-dur-fast) var(--ag-ease-out),
+      content-visibility var(--ag-dur-base) allow-discrete;
   }
   .ag-settings-provider-row[open]::details-content {
     block-size: auto;
@@ -2201,13 +2201,13 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .ag-settings-provider-row {
-    transition: background-color 180ms ease,
-      border-color 220ms cubic-bezier(.22, 1, .36, 1),
-      border-radius 220ms cubic-bezier(.22, 1, .36, 1);
+    transition: background-color var(--ag-dur-base) var(--ag-ease-out),
+      border-color var(--ag-dur-base) var(--ag-ease-out),
+      border-radius var(--ag-dur-base) var(--ag-ease-out);
   }
   .ag-settings-provider-summary {
-    transition: background-color 180ms ease,
-      border-radius 220ms cubic-bezier(.22, 1, .36, 1);
+    transition: background-color var(--ag-dur-base) var(--ag-ease-out),
+      border-radius var(--ag-dur-base) var(--ag-ease-out);
   }
 }
 
@@ -2247,7 +2247,7 @@
   border: 1px solid var(--ag-border-strong);
   border-radius: 12px;
   background: var(--ag-raised);
-  animation: ag-step-arrive 220ms var(--ag-motion-out) both;
+  animation: ag-step-arrive var(--ag-dur-base) var(--ag-motion-out) both;
 }
 .ag-setup-terminal[hidden] { display: none; }
 .ag-setup-terminal-header {
@@ -2283,4 +2283,216 @@
 
 .ag-settings-destination-content > .ag-settings-defaults + .ag-settings-section {
   border-top: 0;
+}
+
+/* ─── grouped inset 목록 (iOS 설정 방식) ─────────────────
+   회색 바탕 위에 흰 카드 묶음, 카드 안 행은 머리선 하나로만 나눈다.
+   위의 개별 규칙을 이 블록이 마지막에 덮는다. 색은 중성 램프 + 사이드바
+   강조색 하나만 쓴다. */
+.ag-settings-page {
+  --ag-set-bg: var(--n-surface-sunken);
+  --ag-set-card: var(--n-surface);
+  --ag-set-sep: var(--n-hairline);
+  --ag-set-radius: 12px;
+  background: var(--ag-set-bg);
+  font-family: var(--font-family-ui, -apple-system, BlinkMacSystemFont, sans-serif);
+}
+
+:root[data-theme-effective='dark'] .ag-settings-page {
+  --ag-set-bg: var(--n-canvas);
+  --ag-set-card: var(--n-surface);
+}
+
+.ag-settings-page > .ag-threads-header {
+  position: relative;
+  z-index: 2;
+  border-bottom: 0.5px solid var(--ag-set-sep);
+  background: color-mix(in srgb, var(--ag-set-bg) 78%, transparent);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+}
+
+.ag-settings-page .ag-threads-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ag-settings-page .ag-settings-body,
+.ag-settings-page .ag-settings-pane {
+  background: transparent;
+}
+
+.ag-settings-page .ag-settings-nav {
+  border-right: 0.5px solid var(--ag-set-sep);
+  background: transparent;
+}
+
+.ag-root .ag-settings-page .ag-settings-nav-button {
+  min-height: 34px;
+  border: 0;
+  border-radius: 8px;
+  font-weight: 500;
+  transition:
+    background-color var(--ag-dur-fast) var(--ag-ease-out),
+    color var(--ag-dur-fast) var(--ag-ease-out),
+    box-shadow var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-root .ag-settings-page .ag-settings-nav-button.ag-active {
+  border: 0;
+  background: var(--ag-set-card);
+  box-shadow: var(--n-elev-1);
+  color: var(--ag-text);
+  font-weight: 600;
+}
+
+/* 좁은 폭: 탭 줄을 분할 컨트롤 하나로. */
+@container settings-hub (max-width: 760px) {
+  .ag-settings-page .ag-settings-nav {
+    margin: 10px 14px 0;
+    padding: 2px;
+    gap: 0;
+    border: 0;
+    border-radius: 9px;
+    background: var(--n-fill-hover);
+  }
+
+  .ag-root .ag-settings-page .ag-settings-nav-button {
+    min-height: 28px;
+    border-radius: 7px;
+    font-size: 12px;
+  }
+
+  .ag-settings-page .ag-settings-destination-content {
+    padding: 18px 14px 88px;
+  }
+}
+
+/* 구역 = 작은 머리말 + 카드 한 장. */
+.ag-settings-page .ag-settings-destination-content > .ag-settings-section,
+.ag-settings-page .ag-settings-group {
+  gap: 6px;
+  padding: 0 0 24px;
+}
+
+.ag-settings-page .ag-settings-destination-content > .ag-settings-section + .ag-settings-section,
+.ag-settings-page .ag-settings-group + .ag-settings-group {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.ag-settings-page .ag-settings-section-title,
+.ag-settings-page .ag-settings-group-title {
+  margin: 0;
+  padding: 0 14px;
+  color: var(--ag-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.ag-settings-page .ag-settings-group-heading {
+  margin-bottom: 6px;
+}
+
+.ag-settings-page .ag-settings-group-description {
+  padding: 0 14px;
+}
+
+.ag-settings-page .ag-settings-section-body,
+.ag-settings-page .ag-settings-group-body {
+  gap: 0;
+  overflow: hidden;
+  border-radius: var(--ag-set-radius);
+  background: var(--ag-set-card);
+}
+
+.ag-settings-page .ag-settings-section-body:empty,
+.ag-settings-page .ag-settings-group-body:empty {
+  display: none;
+}
+
+/* 카드 안의 행: 자기 테두리는 걷고 머리선으로만 나눈다. */
+.ag-settings-page :is(.ag-settings-section-body, .ag-settings-group-body) > :is(
+  .ag-settings-row,
+  .ag-settings-control-row,
+  .ag-settings-resource-header,
+  .ag-settings-resource-row,
+  .ag-settings-account-card,
+  .ag-settings-quota-card
+) {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.ag-settings-page :is(.ag-settings-section-body, .ag-settings-group-body) > :is(
+  .ag-settings-row,
+  .ag-settings-control-row,
+  .ag-settings-resource-header,
+  .ag-settings-resource-row,
+  .ag-settings-quota-card,
+  .ag-settings-hub-row
+) {
+  padding: 11px 14px;
+}
+
+/* 머리선은 왼쪽 여백만큼 들여 긋는다. background-color 와 따로 둬 호버 색과 겹친다. */
+.ag-settings-page :is(.ag-settings-section-body, .ag-settings-group-body, .ag-settings-provider-list, .ag-provider-quotas) > :not([hidden]) ~ :not([hidden]) {
+  background-image: linear-gradient(var(--ag-set-sep), var(--ag-set-sep));
+  background-position: 14px 0;
+  background-size: calc(100% - 14px) 1px;
+  background-repeat: no-repeat;
+}
+
+.ag-settings-page .ag-provider-quotas {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.ag-settings-page .ag-provider-quotas > .ag-settings-quota-card {
+  margin: 0;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 0;
+}
+
+.ag-settings-page .ag-settings-account-card {
+  padding: 14px;
+}
+
+.ag-settings-page .ag-settings-provider-row {
+  border: 0;
+}
+
+.ag-settings-page .ag-settings-provider-summary {
+  min-height: 44px;
+  padding: 8px 14px;
+}
+
+.ag-settings-page .ag-settings-provider-panel {
+  padding: 2px 14px 14px;
+}
+
+.ag-settings-page .ag-settings-provider-row[open],
+.ag-settings-page .ag-settings-provider-summary:hover {
+  background-color: var(--n-fill-hover);
+}
+
+.ag-settings-page .ag-settings-primary {
+  border-radius: 8px;
+}
+
+.ag-settings-page .ag-settings-apply-footer {
+  border-top: 0.5px solid var(--ag-set-sep);
+  background: color-mix(in srgb, var(--ag-set-bg) 78%, transparent);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+}
+
+.ag-root .ag-settings-page .ag-settings-nav-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ag-accent) 60%, transparent);
+  outline-offset: -2px;
 }

@@ -1,5 +1,6 @@
 import './reference-library.css';
 
+import { confirmSheet } from './sheet.ts';
 import type { SidebarBridge } from '../../agent/bridge.ts';
 import type {
   ReferenceFile,
@@ -262,7 +263,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     else add.removeAttribute('title');
     scopeHint.hidden = activeScope === 'chat';
     if (activeScope === 'document' && !context.documentId) {
-      scopeHint.textContent = '문서를 열면 해당 문서의 모든 채팅에서 쓸 참고자료를 추가할 수 있습니다.';
+      scopeHint.textContent = '문서를 열면 추가할 수 있습니다.';
     } else if (activeScope === 'document') {
       scopeHint.textContent = `${context.documentName ?? '현재 문서'}의 모든 채팅에서 사용합니다.`;
     } else if (activeScope === 'global') {
@@ -328,7 +329,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       remove.appendChild(createIcon('close'));
       remove.disabled = file.status === 'uploading' || file.status === 'extracting' || file.status === 'indexing';
       remove.addEventListener('click', async () => {
-        if (!window.confirm(`"${file.name}" 참고자료를 제거할까요? 원본 파일은 삭제되지 않습니다.`)) return;
+        if (!await confirmSheet(remove, `“${file.name}” 제거`, '원본 파일은 그대로 둡니다.', { confirmLabel: '제거', destructive: true })) return;
         remove.disabled = true;
         status.textContent = `${file.name} 제거 중…`;
         showError();
@@ -392,7 +393,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     // its owning thread. Never probe the transient thread's chat references:
     // the hub correctly scopes them to the still-running provider thread.
     if (!isAuthorizedSessionTarget(target)) {
-      status.textContent = '답변을 기다리는 채팅의 참고자료만 사용할 수 있습니다.';
+      status.textContent = '답변 대기 중인 채팅의 참고자료만 사용합니다.';
       renderFiles([]);
       return;
     }
@@ -548,7 +549,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
         await stageOne(chip);
         status.textContent = `${file.name} 첨부 준비가 끝났습니다.`;
       } catch (caught) {
-        showError(`${file.name} 파일을 추가하지 못했습니다. 다시 시도하거나 파일을 다시 추가해 주세요. ${errorMessage(caught)}`);
+        showError(`${file.name} 추가 실패 · 다시 시도 ${errorMessage(caught)}`);
         status.textContent = `${file.name} 업로드 실패`;
       }
     });
@@ -668,7 +669,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     const failed = settled.filter((entry) => entry.status === 'rejected');
     if (failed.length > 0) {
       const first = failed[0] as PromiseRejectedResult;
-      showError(`${failed.length}개 파일을 추가하지 못했습니다. 다시 시도하거나 파일을 다시 추가해 주세요. ${errorMessage(first.reason)}`);
+      showError(`${failed.length}개 파일 추가 실패 · 다시 시도 ${errorMessage(first.reason)}`);
       status.textContent = `${settled.length - failed.length}개 추가, ${failed.length}개 실패`;
     } else {
       status.textContent = `${settled.length}개 참고자료를 추가했습니다.`;

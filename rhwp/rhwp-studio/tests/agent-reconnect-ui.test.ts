@@ -50,14 +50,15 @@ test('reconnectNow 는 허브가 뜬 뒤에 붙는다', () => {
   );
 });
 
-test('채팅에 연결 배너가 있고 실패 뒤에만 나타난다', () => {
-  assert.match(source, /const connBanner = el\('div', 'ag-conn-banner'\)/);
-  assert.match(source, /chatPage\.append\(header, connBanner, messages, review, planSurface, questionController\.root, composer\)/);
-  // 첫 시도(attempt 0)는 조용히 지나간다.
-  assert.match(source, /if \(connAttempt === 0\) \{\s*connBanner\.hidden = true;/);
-  assert.match(source, /연결하는 중… \(\$\{connAttempt\}번째 시도\)/);
-  assert.match(source, /에이전트에 연결하는 중이에요 · \$\{Math\.ceil\(remainMs \/ 1000\)\}초 후 다시 시도/);
-  assert.match(css, /\.ag-conn-banner\s*\{/);
+test('허브 연결은 헤더의 점 하나로 보이고 연결되면 사라진다', () => {
+  assert.match(source, /const connDot = el\('button', 'ag-conn-dot'\)/);
+  assert.match(source, /headerActions\.append\(connDot, takeoverBtn, versionsBtn, threadsBtn, settingsBtn\)/);
+  assert.match(source, /chatPage\.append\(header, messages, review, planSurface, questionController\.root, calibrationChip, composer\)/);
+  assert.doesNotMatch(source, /ag-conn-banner/);
+  assert.doesNotMatch(source, /번째 시도/);
+  assert.match(source, /connDot\.hidden = visual === 'connected'/);
+  assert.match(css, /\.ag-conn-dot\[data-state='connecting'\]::before \{\s*animation: ag-conn-pulse/);
+  assert.match(css, /\.ag-conn-dot\[data-state='disconnected'\]::before \{\s*background: var\(--ag-err\)/);
 });
 
 test('재연결과 스레드 복원은 대기 질문의 기록 위치를 다시 예약한다', () => {
@@ -65,30 +66,18 @@ test('재연결과 스레드 복원은 대기 질문의 기록 위치를 다시 
   assert.match(source, /questionController\.request\(liveQuestion, stored\);[\s\S]*mountQuestionTimelineAnchor\(\);/);
 });
 
-test('배너 카운트다운은 1초마다 갱신되고 정리된다', () => {
-  assert.match(source, /connCountdownTimer = window\.setInterval\(paintConnCountdown, 1000\)/);
-  assert.match(source, /function clearConnCountdown\(\): void \{[\s\S]*window\.clearInterval\(connCountdownTimer\)/);
-  // 연결됨/다른 탭 사용 중에는 타이머를 남기지 않는다.
-  assert.match(source, /if \(connState === 'connected' \|\| connState === 'replaced'\) \{\s*clearConnCountdown\(\);/);
-  assert.ok(source.includes('clearConnCountdown();\n      writingStyleCalibration.dispose();'));
+test('점을 누르면 한 줄 팝오버에서 다시 연결하고, 관리되지 않는 환경에서만 npm start 를 보인다', () => {
+  assert.match(source, /connRetry[\s\S]{0,160}bridge\.reconnectNow\(\)/);
+  assert.match(source, /el\('code', 'ag-conn-command-text', 'npm start'\)/);
+  assert.match(source, /navigator\.clipboard\?\.writeText\('npm start'\)/);
+  assert.match(source, /connCommand\.hidden = managedHub \|\| visual !== 'disconnected'/);
+  assert.doesNotMatch(source, /connCountdownTimer|setInterval\(paintConnCountdown/);
+  assert.match(source, /document\.removeEventListener\('pointerdown', onConnPopoverOutside\)/);
 });
 
-test('배너 버튼은 즉시 재연결을, 관리되지 않는 환경에서만 실행 힌트를 준다', () => {
-  assert.match(source, /connBannerRetry[\s\S]{0,160}bridge\.reconnectNow\(\)/);
-  assert.match(source, /저장소 루트에서 npm start 를 한 번 실행하세요/);
-  assert.match(source, /잠시만 기다리면 다시 붙어요/);
-  assert.match(source, /connBannerHint\.hidden = managedHub \|\| connAttempt < 6/);
-  assert.match(
-    source,
-    /connBannerText\.textContent = `연결하는 중… \(\$\{connAttempt\}번째 시도\)`;\s*connBannerRetry\.hidden = false;/,
-  );
-  assert.match(source, /ag-conn-banner-wait/);
-  assert.match(css, /\.ag-conn-banner\.ag-conn-banner-wait/);
-});
-
-test('끊김 상태도 연결 중으로 보여 재시도가 경고처럼 보이지 않는다', () => {
-  assert.match(source, /const visual = state === 'disconnected' \? 'connecting' : state/);
-  assert.match(source, /conn\.textContent = state === 'connected' \|\| state === 'replaced'/);
+test('두 번 넘게 실패해야 빨간 점이 되고 다른 탭 사용 중에는 이어받기 버튼을 준다', () => {
+  assert.match(source, /const down = connState === 'disconnected' \|\| \(connState === 'connecting' && connAttempt >= 2\)/);
+  assert.match(source, /conn\.textContent = CONN_LABEL\[state\]/);
   assert.match(source, /takeoverBtn\.hidden = state !== 'replaced'/);
   assert.match(source, /bridge\.takeOverConnection\(\)/);
   assert.match(source, /setConnection\(e\.state, \{ attempt: e\.attempt, retryInMs: e\.retryInMs \}\)/);

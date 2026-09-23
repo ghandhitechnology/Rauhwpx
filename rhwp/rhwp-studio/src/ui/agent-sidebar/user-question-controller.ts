@@ -93,7 +93,7 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
     if (questionId) {
       options.input.value = draft.otherTextByQuestionId[questionId] ?? '';
       options.input.maxLength = 2_000;
-      options.input.placeholder = '직접 답변을 입력하세요';
+      options.input.placeholder = '직접 답변 입력';
       options.input.setAttribute('aria-label', '현재 질문의 직접 답변');
     } else {
       options.input.value = '';
@@ -174,7 +174,7 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
     if (!interaction) return null;
     saveComposerOther();
     if (!allAnswered()) {
-      errorMessage = '모든 질문에 답해 주세요.';
+      errorMessage = '모든 질문에 답변이 필요합니다.';
       render();
       announce(errorMessage);
       return null;
@@ -313,7 +313,7 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
     if (result.ok) return;
     submitting = false;
     responseId = null;
-    errorMessage = result.message || '답변을 제출하지 못했습니다. 다시 시도해 주세요.';
+    errorMessage = result.message || '답변 제출 실패 · 다시 시도';
     render();
     options.onComposerModeChange(true, Boolean(composerOtherQuestionId));
     announce(errorMessage);

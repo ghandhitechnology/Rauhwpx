@@ -6,7 +6,9 @@
  * 마운트하되, 펼침 시 body.ag-sidebar-open 으로 #editor-area 를 밀어
  * 눈금자·용지가 가려지지 않고 남은 폭 기준으로 다시 가운데 정렬되게 한다.
  */
+import './motion.css';
 import './agent-sidebar.css';
+import { confirmSheet } from './sheet.ts';
 
 import type { EventBus } from '../../core/event-bus.ts';
 import type { SidebarBridge } from '../../agent/bridge.ts';
@@ -98,6 +100,7 @@ import {
 } from './settings-contract.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { maybeStartInitialSetup, type InitialSetupUi } from '../initial-setup/initial-setup.ts';
+import { loadInitialSetup, saveInitialSetup } from '../initial-setup/state.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
 import { createReferenceLibrary } from './reference-library.ts';
 import { createCloudController, type CloudController } from '../../cloud/desktop-cloud.ts';
@@ -466,16 +469,12 @@ const PLANNING_PHASE_LABEL: Record<AgentPhase, string> = {
  * 계획 모드를 처음 켤 때 한 번만 띄우는 원격 브라우저 전체 제어 경고.
  * 개별 동작마다 다시 묻지 않으므로, 여기서 범위를 명확히 말해야 한다.
  */
+const BROWSERBASE_FULL_CONTROL_TITLE = '원격 브라우저 전체 제어';
 const BROWSERBASE_FULL_CONTROL_WARNING =
-  '계획 모드는 원격 브라우저(Browserbase)를 전체 제어합니다. '
-  + '에이전트가 동작마다 다시 묻지 않고 페이지를 열고, 양식을 제출하고, '
-  + '로그인된 계정의 설정을 바꿀 수 있습니다. '
-  + '내려받는 파일은 이 채팅 전용 다운로드 폴더에만 저장됩니다. '
-  + '이 채팅에서 계획 모드를 켤까요?';
+  '에이전트가 묻지 않고 페이지를 열고, 양식을 제출하고, 로그인된 계정의 설정을 바꿀 수 있습니다. '
+  + '다운로드는 이 채팅 전용 다운로드 폴더에만 저장됩니다.';
 
-const BROWSERBASE_ENABLED_NOTICE =
-  '계획 모드를 켰습니다. 원격 브라우저는 동작마다 확인을 묻지 않고 전체 제어로 실행되며, '
-  + '양식 제출·계정 설정 변경까지 할 수 있습니다. 내려받는 파일은 이 채팅 전용 다운로드 폴더에만 저장됩니다.';
+const BROWSERBASE_ENABLED_NOTICE = '계획 모드 켜짐 · 원격 브라우저 전체 제어';
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -648,10 +647,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let selectedEffort = resolveEffortForAgent(selectedAgent, agentPrefs.defaultEffort, selectedModel);
   let selectedServiceTier: ServiceTier = resolveServiceTier(selectedAgent, null);
   let connState: ConnectionState = bridge.getConnectionState();
-  /** 지금까지 실패한 연결 시도 수 · 다음 자동 재시도 시각 (배너 카운트다운). */
+  /** 지금까지 실패한 연결 시도 수 — 점 색만 고른다. 화면에는 세지 않는다. */
   let connAttempt = 0;
-  let connRetryAt: number | null = null;
-  let connCountdownTimer: number | null = null;
   let turnRunning = bridge.isTurnRunning();
   let mergeResolverLocked = false;
   /** 지금 노란 불이 붙어 있는 스레드 — 턴이 끝나면 초록 점으로 넘긴다. */
@@ -1123,7 +1120,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       item.hidden = !connectedProviders.has(agent);
       item.disabled = cloudUnsupported;
       item.setAttribute('aria-disabled', String(cloudUnsupported));
-      item.title = cloudUnsupported ? 'Cloud에서는 사용할 수 없습니다. Local로 전환해 사용하세요.' : '';
+      item.title = cloudUnsupported ? 'Cloud 미지원 · Local에서 사용' : '';
       if (cloudUnsupported) item.dataset.unavailableReason = 'Cloud 미지원';
       else delete item.dataset.unavailableReason;
     }
@@ -1370,9 +1367,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   skillsBtn.setAttribute('aria-expanded', 'false');
   skillsBtn.setAttribute('aria-controls', 'ag-skills-panel');
 
+  /* 허브 연결 상태 — 헤더의 점 하나. 연결되면 사라지고, 누르면 한 줄 팝오버가 열린다.
+     conn 은 스크린리더와 테스트가 읽는 상태 문구다. */
+  const connDot = el('button', 'ag-conn-dot');
+  connDot.type = 'button';
+  connDot.setAttribute('aria-haspopup', 'dialog');
+  connDot.setAttribute('aria-expanded', 'false');
+  connDot.setAttribute('aria-controls', 'ag-conn-popover');
   const conn = el('span', 'ag-conn');
   conn.setAttribute('role', 'status');
   conn.setAttribute('aria-live', 'polite');
+  connDot.append(conn);
 
   const takeoverBtn = el('button', 'ag-takeover-btn', '이 탭에서 연결');
   takeoverBtn.type = 'button';
@@ -1423,7 +1428,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     openConfiguredVersionControl();
   });
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
-  headerActions.append(versionsBtn, threadsBtn, settingsBtn);
+  headerActions.append(connDot, takeoverBtn, versionsBtn, threadsBtn, settingsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
@@ -1445,10 +1450,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const contextRow = el('div', 'ag-context-row');
   contextRow.append(documentContext);
 
-  const connectionRow = el('div', 'ag-connection-row');
-  connectionRow.append(conn, takeoverBtn);
   modelSummary.append(fullscreenBtn, contextRow, headerActions);
-  header.append(modelSummary, connectionRow);
+  header.append(modelSummary);
 
   function updateDocumentContext(): void {
     const context = getDocumentContext?.();
@@ -1769,7 +1772,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function restoreLocalWorkspace(): void {
     if (!canSelectLocalWorkspace(workspace.executionLocked())) {
-      systemMessage('로컬 채팅을 쓰려면 새 채팅을 시작하세요.');
+      systemMessage('로컬 채팅은 새 채팅에서 시작합니다.');
       return;
     }
     persistComposerDraft();
@@ -1789,13 +1792,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function cloudProviderUnavailableMessage(): string | null {
     return isCloudSupportedAgent(selectedAgent) ? null
-      : `${AGENT_LABEL[selectedAgent]}는 아직 Cloud에서 사용할 수 없습니다. 로컬에서 계속하거나 Claude, Codex, pi, Grok, Cursor를 선택해 주세요.`;
+      : `${AGENT_LABEL[selectedAgent]}는 Cloud 미지원 · 다른 에이전트 선택`;
   }
 
   function correctCloudProvider(): void {
     setConfigPanelOpen(true);
     providerTrigger.focus();
-    providerTrigger.title = 'Cloud에서 사용할 에이전트를 선택해 주세요.';
+    providerTrigger.title = 'Cloud 에이전트 선택';
   }
 
   function openCloudWorkspace(trigger: HTMLElement = cloudModeButton): void {
@@ -1972,13 +1975,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     },
     onPrepareRestartConversation: async (binding) => {
       if (currentThread.id !== binding.threadId || currentDocumentId !== binding.documentId) {
-        throw new Error('작업을 시작한 문서와 대화에서 서버를 다시 만들어 주세요.');
+        throw new Error('작업을 시작한 문서와 대화에서 서버를 다시 만듭니다.');
       }
       return collectCloudReferences();
     },
     onRestartConversation: async (binding, document, references) => {
       if (currentThread.id !== binding.threadId || currentDocumentId !== binding.documentId) {
-        throw new Error('서버가 준비되었습니다. 작업을 시작한 대화에서 이어서 보내 주세요.');
+        throw new Error('서버 준비됨 · 작업을 시작한 대화에서 이어서 보냅니다.');
       }
       workspace.unlockExecution();
       workspace.select('cloud');
@@ -2032,7 +2035,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           upsertThread(imported);
         }
       }
-      if (!getThread(task.threadId)) throw new Error('저장된 대화를 불러오지 못했습니다. 다시 시도해 주세요.');
+      if (!getThread(task.threadId)) throw new Error('대화 불러오기 실패 · 다시 시도');
       if (task.documentId !== currentDocumentId) return false;
       openThread(task.threadId);
       if (currentThread.id !== task.threadId) return false;
@@ -2045,7 +2048,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }),
     onContinueEditing: deps.continueCloudEditing ?? (async (target) => {
       const editSessionId = cloudEditSessions.get(target.sessionId);
-      if (!editSessionId) throw new Error('편집 중인 Cloud 문서를 먼저 열어 주세요.');
+      if (!editSessionId) throw new Error('편집 중인 Cloud 문서를 먼저 엽니다.');
       await cloudController.continueEdit(target.sessionId, editSessionId);
       cloudEditSessions.delete(target.sessionId);
     }),
@@ -2238,7 +2241,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       return usedIds.map((id) => extraById.get(id)!);
     }
     if (connState !== 'connected') {
-      throw new Error('참고자료를 확인하려면 로컬 에이전트 연결이 필요합니다. 연결한 뒤 다시 시도하세요.');
+      throw new Error('참고자료 확인에는 로컬 에이전트 연결이 필요합니다.');
     }
     const targets = [
       { scope: 'chat' as const, scopeId: currentThread.id },
@@ -2613,7 +2616,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       return;
     }
     if (activeComposerSkill && !preserveDraft) {
-      systemMessage('Cloud에서는 로컬 스킬을 사용할 수 없습니다. 스킬을 해제한 뒤 다시 보내 주세요.');
+      systemMessage('Cloud에서는 로컬 스킬을 쓸 수 없습니다 · 스킬 해제 후 전송');
       return;
     }
     const owner = cloudDocumentOwner(cloudController.getSnapshot(), currentDocumentId);
@@ -2636,8 +2639,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (!text && !hasDrafts && !existing) return;
     if (!text) {
       text = referenceLibrary.allDraftsAreImages()
-        ? '첨부한 이미지를 확인해 주세요.'
-        : '첨부한 파일을 확인해 주세요.';
+        ? '첨부 이미지 확인 필요'
+        : '첨부 파일 확인 필요';
     }
     if (cloudWorkflow) chatWorkflow = cloudWorkflow;
     // Only a retry of the same submission reuses its id. A new worker must
@@ -2681,6 +2684,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             messageId,
           );
           const userBubble = renderUserMessage(currentThread.messages.at(-1)!);
+          userBubble.classList.add('ag-msg-enter');
           appendConversation(userBubble);
           scrollConversationToMessage(userBubble, { smooth: true });
         }
@@ -2804,29 +2808,64 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   chatPage.id = 'ag-chat-page';
   chatPage.setAttribute('aria-hidden', 'false');
 
-  /* 허브 연결이 끊겼을 때만 나타나는 줄. 첫 연결 시도(attempt 0)에는
-     아무 말도 하지 않는다 — 시작할 때마다 경고처럼 보이면 안 된다. */
-  const connBanner = el('div', 'ag-conn-banner');
-  connBanner.hidden = true;
-  connBanner.setAttribute('role', 'status');
-  connBanner.setAttribute('aria-live', 'polite');
-  const connBannerText = el('span', 'ag-conn-banner-text');
-  const connBannerRetry = el('button', 'ag-conn-banner-retry', '지금 다시 연결');
-  connBannerRetry.type = 'button';
-  connBannerRetry.addEventListener('click', () => {
-    connBannerText.textContent = '연결하는 중…';
+  /* 연결 팝오버 — 상태 한 줄, 필요할 때만 실행 명령, 다시 연결. */
+  const connPopover = el('div', 'ag-conn-popover');
+  connPopover.id = 'ag-conn-popover';
+  connPopover.hidden = true;
+  connPopover.setAttribute('role', 'dialog');
+  connPopover.setAttribute('aria-label', '허브 연결');
+  const connPopoverText = el('p', 'ag-conn-popover-text');
+  const managedHub = isDesktopApp() || Boolean((import.meta as any).env?.DEV);
+  const connCommand = el('div', 'ag-conn-command');
+  connCommand.hidden = managedHub;
+  const connCommandText = el('code', 'ag-conn-command-text', 'npm start');
+  const connCommandCopy = el('button', 'ag-conn-command-copy');
+  connCommandCopy.type = 'button';
+  connCommandCopy.setAttribute('aria-label', '명령 복사');
+  connCommandCopy.title = '복사';
+  connCommandCopy.appendChild(createIcon('copy'));
+  connCommandCopy.addEventListener('click', () => {
+    void navigator.clipboard?.writeText('npm start').then(() => {
+      connCommandCopy.replaceChildren(createIcon('check'));
+      window.setTimeout(() => connCommandCopy.replaceChildren(createIcon('copy')), 1400);
+    }).catch(() => {});
+  });
+  connCommand.append(connCommandText, connCommandCopy);
+  const connRetry = el('button', 'ag-conn-retry', '다시 연결');
+  connRetry.type = 'button';
+  connRetry.addEventListener('click', () => {
+    connPopoverText.textContent = '연결 중';
     void bridge.reconnectNow();
   });
-  const managedHub = isDesktopApp() || Boolean((import.meta as any).env?.DEV);
-  const connBannerHint = el(
-    'span',
-    'ag-conn-banner-hint',
-    managedHub
-      ? '잠시만 기다리면 다시 붙어요.'
-      : '저장소 루트에서 npm start 를 한 번 실행하세요. 터미널을 닫아도 허브는 유지됩니다.',
-  );
-  connBannerHint.hidden = true;
-  connBanner.append(connBannerText, connBannerRetry, connBannerHint);
+  connPopover.append(connPopoverText, connCommand, connRetry);
+  header.append(connPopover);
+
+  function setConnPopoverOpen(open: boolean): void {
+    if (open === !connPopover.hidden) return;
+    connPopover.hidden = !open;
+    connDot.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) {
+      renderConnStatus();
+      requestAnimationFrame(() => connRetry.focus({ preventScroll: true }));
+    }
+  }
+  connDot.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setConnPopoverOpen(Boolean(connPopover.hidden));
+  });
+  const onConnPopoverOutside = (event: PointerEvent): void => {
+    if (connPopover.hidden) return;
+    const target = event.target as Node;
+    if (connPopover.contains(target) || connDot.contains(target)) return;
+    setConnPopoverOpen(false);
+  };
+  document.addEventListener('pointerdown', onConnPopoverOutside);
+  connPopover.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    event.stopPropagation();
+    setConnPopoverOpen(false);
+    connDot.focus();
+  });
 
   const messages = el('div', 'ag-messages');
   messages.setAttribute('role', 'log');
@@ -2909,8 +2948,45 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   planSurface.append(planCardSlot);
   let initialSetup: InitialSetupUi | null = null;
   const writingStyleCalibration = createWritingStyleCalibration(bridge, {
-    onDismiss: (result) => initialSetup?.notifyCalibrationClosed(result.completed),
+    onDismiss: (result) => {
+      initialSetup?.notifyCalibrationClosed(result.completed);
+      if (result.completed) settleCalibrationChip('done');
+    },
   });
+
+  /* 문체 보정 권유 칩 — 첫 실행을 마치고 첫 답을 받은 뒤 한 번 뜬다.
+     닫거나 보정을 끝내면 다시 뜨지 않는다. */
+  const calibrationChip = el('div', 'ag-calibration-chip');
+  calibrationChip.hidden = true;
+  const calibrationChipOpen = el('button', 'ag-calibration-chip-open');
+  calibrationChipOpen.type = 'button';
+  calibrationChipOpen.append(
+    el('span', 'ag-calibration-chip-text', '원고를 올리면 내 말투로 씁니다'),
+    el('span', 'ag-calibration-chip-action', '말투 맞추기'),
+  );
+  const calibrationChipClose = el('button', 'ag-calibration-chip-close');
+  calibrationChipClose.type = 'button';
+  calibrationChipClose.setAttribute('aria-label', '닫기');
+  calibrationChipClose.appendChild(createIcon('close'));
+  calibrationChip.append(calibrationChipOpen, calibrationChipClose);
+  let writingStyleActive = false;
+  calibrationChipOpen.addEventListener('click', () => writingStyleCalibration.open());
+  calibrationChipClose.addEventListener('click', () => settleCalibrationChip('skipped'));
+
+  function settleCalibrationChip(step: 'done' | 'skipped'): void {
+    saveInitialSetup({ calibrationStep: step });
+    calibrationChip.hidden = true;
+  }
+
+  function updateCalibrationChip(): void {
+    const setup = loadInitialSetup();
+    const eligible = setup.completed
+      && setup.calibrationStep === 'pending'
+      && !writingStyleActive
+      && !turnRunning
+      && currentThread.messages.some((message) => message.role === 'assistant');
+    calibrationChip.hidden = !eligible;
+  }
   const composerUtilities = el('div', 'ag-composer-utilities');
   composerUtilities.setAttribute('aria-label', '채팅 도구');
 
@@ -2939,7 +3015,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   slashMenu.setAttribute('role', 'listbox');
   slashMenu.setAttribute('aria-label', '슬래시 명령과 스킬');
   const input = el('textarea', 'ag-input');
-  input.placeholder = '문서 작업을 입력하세요';
+  input.placeholder = '문서 작업 입력';
   input.rows = 1;
   input.setAttribute('aria-label', '에이전트 메시지 입력');
   input.setAttribute('role', 'combobox');
@@ -3062,7 +3138,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   cloudControlsResizeObserver?.observe(cloudDocumentControls);
   // 사이드바에서는 변경 검토와 계획을 분리한다. 계획은 입력기 바로 위에
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
-  chatPage.append(header, connBanner, messages, review, planSurface, questionController.root, composer);
+  chatPage.append(header, messages, review, planSurface, questionController.root, calibrationChip, composer);
 
   /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다.
    *  펼쳐진 사이드바의 현재 폭이 아니라 max-content(말줄임 바닥)로 잰다.
@@ -3976,20 +4052,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     permissionBtn.classList.toggle('ag-permission-unrestricted', unrestricted);
     permissionBtn.title = unrestricted && planReadOnly
       ? (chatWorkflow === 'question'
-        ? '질문 단계는 읽기 전용입니다. /build 로 전환하면 전체 접근을 적용합니다. 클릭하여 안전 모드로 전환'
-        : '계획 단계는 읽기 전용입니다. 승인 후 실행 단계부터 전체 접근을 적용합니다. 클릭하여 안전 모드로 전환')
+        ? '전체 접근 · 질문 단계는 읽기 전용'
+        : '전체 접근 · 계획 단계는 읽기 전용')
       : unrestricted
-      ? '에이전트가 승인 없이 문서를 편집하고, 파일·명령이 노트북 전체에 접근할 수 있습니다. 클릭하여 안전 모드로 전환'
-      : '문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영됩니다. 파일과 명령은 프로젝트 안에서만 사용합니다';
+      ? '전체 접근'
+      : '안전 · 편집은 승인 후 반영';
     refreshSidebarWidthMin();
   }
 
-  permissionBtn.addEventListener('click', () => {
+  permissionBtn.addEventListener('click', async () => {
     if (isControlLocked()) return;
     let nextProfile: PermissionProfile;
     if (permissionProfile === 'safe') {
-      const confirmed = window.confirm('전체 접근을 켜면 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이 채팅에서 계속 허용할까요?');
-      if (!confirmed) return;
+      const confirmed = await confirmSheet(permissionBtn, '전체 접근', '승인 없이 편집하고 파일에 접근합니다.', { confirmLabel: '켜기' });
+      if (!confirmed || isControlLocked() || permissionProfile !== 'safe') return;
       nextProfile = 'unrestricted';
     } else {
       nextProfile = 'safe';
@@ -4333,7 +4409,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             local: 'fast' as const,
           }]
         : []),
-      { value: '/calibration', label: '/calibration', detail: '말투를 맞출까요? 열기', local: 'calibration' },
+      { value: '/calibration', label: '/calibration', detail: '말투 맞추기', local: 'calibration' },
       { value: '/settings', label: '/settings', detail: '설정 열기 (연결·기본값·사용량)', local: 'settings' },
       { value: '/templates', label: '/templates', detail: '문서 템플릿 선택', local: 'templates' },
       { value: '/skills', label: '/skills', detail: '스킬 라이브러리 열기', local: 'skills' },
@@ -4550,8 +4626,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           return;
         }
         cloudText = referenceLibrary.allDraftsAreImages()
-          ? '첨부한 이미지를 확인해 주세요.'
-          : '첨부한 파일을 확인해 주세요.';
+          ? '첨부 이미지 확인 필요'
+          : '첨부 파일 확인 필요';
       }
       const retryCandidate = cloudMessageRetry;
       const retryAttempt: { current: { key: string; messageId: string } | null } = { current: null };
@@ -4624,6 +4700,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           resizeComposerInput();
           if (result.committed.inserted && currentThread.id === targetThread.id) {
             const userBubble = renderUserMessage(result.committed.message);
+            userBubble.classList.add('ag-msg-enter');
             appendConversation(userBubble);
             scrollConversationToMessage(userBubble, { smooth: true });
           }
@@ -4654,23 +4731,23 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (planningPhase === 'switching' || workflowTransitionPending || planActionPending
       || chatStartPendingThreadId !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
     if (selectedAgent === 'rau' && !rauSetupComplete) {
-      systemMessage('Rau 연결을 먼저 완료해 주세요.');
+      systemMessage('Rau 연결 필요');
       return;
     }
     if (selectedAgent === 'rau' && rauCreditsEmpty()) {
-      systemMessage('체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.');
+      systemMessage('체험 크레딧 소진 · 다른 모델 연결');
       return;
     }
     let text = input.value.trim();
     if ((!text && !activeComposerSkill && !referenceLibrary.hasDrafts()) || connState !== 'connected') return;
     if (referenceLibrary.hasImageDrafts() && !modelSupportsImages(selectedAgent, selectedModel)) {
-      systemMessage(`현재 ${AGENT_LABEL[selectedAgent]} 모델은 이미지 입력을 지원하지 않습니다. 이미지 지원 모델로 바꾼 뒤 다시 보내 주세요.`);
+      systemMessage(`${AGENT_LABEL[selectedAgent]} 현재 모델은 이미지 미지원 · 다른 모델 선택`);
       return;
     }
     if (!text && !activeComposerSkill) {
       text = referenceLibrary.allDraftsAreImages()
-        ? '첨부한 이미지를 확인해 주세요.'
-        : '첨부한 파일을 확인해 주세요.';
+        ? '첨부 이미지 확인 필요'
+        : '첨부 파일 확인 필요';
     }
     if (!activeComposerSkill && text.startsWith('//')) text = text.slice(1);
     const templateInvocation = activeComposerSkill ? null : text.match(/^\/templates(?:\s+([\s\S]*))?$/i);
@@ -4705,7 +4782,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         const next = command === 'plan' ? 'plan' : command === 'question' ? 'question' : 'direct';
         input.value = '';
         setSlashMenuOpen(false);
-        if (!requestWorkflow(next)) return;
+        if (!requestWorkflow(next)) {
+          if (rest) input.value = rest;
+          return;
+        }
         if (!rest) {
           input.focus();
           return;
@@ -4723,7 +4803,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       if (/^\/fast\b/i.test(text)) {
         input.value = '';
         setSlashMenuOpen(false);
-        systemMessage('지원하지 않는 /fast 인자입니다. on, off, status를 쓰거나 /fast만 입력하세요.');
+        systemMessage('/fast 인자: on, off, status');
         return;
       }
       if (text === '/calibration') { input.value = ''; writingStyleCalibration.open(); return; }
@@ -4768,6 +4848,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       skillIconForMessage,
     );
     const userBubble = renderUserMessage(userMessage);
+    userBubble.classList.add('ag-msg-enter');
     followConversation = true;
     replyPending = true;
     appendConversation(userBubble);
@@ -5512,8 +5593,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
    * 문서 보관 — 문서 파일은 남기고 그 문서의 채팅 기록을 모두 지운다.
    * 지금 열려 있는 채팅이 그 문서 소속이면 먼저 새 채팅으로 빠져나온다.
    */
-  function archiveDocumentGroup(group: DocumentThreadGroup): void {
-    if (!window.confirm('문서는 보존되지만 채팅 기록은 모두 삭제됩니다. 진행하시겠어요?')) return;
+  async function archiveDocumentGroup(group: DocumentThreadGroup): Promise<void> {
+    const confirmed = await confirmSheet(root, '채팅 기록 삭제', '이 문서의 채팅을 모두 지웁니다. 문서는 그대로 둡니다.', { confirmLabel: '삭제', destructive: true });
+    if (!confirmed) return;
     const currentInGroup = group.documentId
       ? currentThread.documentId === group.documentId
       : !currentThread.documentId && (currentThread.docKey ?? '') === (group.docKey ?? '');
@@ -5679,7 +5761,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         }, {
           label: '문서 보관',
           title: '이 문서의 채팅 기록을 모두 삭제합니다',
-          onSelect: () => archiveDocumentGroup(group),
+          onSelect: () => void archiveDocumentGroup(group),
         }]);
       };
       if (canMove) {
@@ -5801,7 +5883,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     setComposerSkill(null);
     composer.classList.add('ag-readonly');
     const note = el('div', 'ag-msg ag-msg-system ag-readonly-note',
-      `"${docLabel}" 문서의 채팅입니다. 그 문서를 연 뒤 이 채팅을 다시 선택하면 이어서 대화할 수 있습니다.`);
+      `"${docLabel}" 문서의 채팅 · 그 문서에서 이어서 대화합니다.`);
     appendConversation(note);
     scrollConversationToEnd();
     updateComposer();
@@ -6062,63 +6144,35 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     connState = state;
     if (typeof meta?.attempt === 'number') connAttempt = meta.attempt;
     if (state === 'connected') connAttempt = 0;
-    connRetryAt = typeof meta?.retryInMs === 'number' ? Date.now() + meta.retryInMs : null;
-    const visual = state === 'disconnected' ? 'connecting' : state;
-    conn.className = `ag-conn ag-conn-${visual}`;
-    conn.textContent = state === 'connected' || state === 'replaced'
-      ? CONN_LABEL[state]
-      : '연결 중…';
+    conn.textContent = CONN_LABEL[state];
     takeoverBtn.hidden = state !== 'replaced';
     if (state === 'replaced') setConfigPanelOpen(false);
-    renderConnBanner();
+    renderConnStatus();
     referenceLibrary.setConnectionState(state);
     updateComposer();
   }
 
-  function clearConnCountdown(): void {
-    if (connCountdownTimer === null) return;
-    window.clearInterval(connCountdownTimer);
-    connCountdownTimer = null;
-  }
-
-  /** "n초 후 재시도" 를 1초마다 갱신한다. 남은 시간은 예약된 백오프에서 온다. */
-  function paintConnCountdown(): void {
-    const remainMs = connRetryAt === null ? null : Math.max(0, connRetryAt - Date.now());
-    connBannerText.textContent = remainMs === null
-      ? '에이전트에 연결하는 중이에요'
-      : `에이전트에 연결하는 중이에요 · ${Math.ceil(remainMs / 1000)}초 후 다시 시도`;
-  }
-
-  function renderConnBanner(): void {
-    // 연결돼 있거나 다른 탭이 쓰는 중이면(전용 takeover 버튼이 있다) 배너는 없다.
-    if (connState === 'connected' || connState === 'replaced') {
-      clearConnCountdown();
-      connBanner.hidden = true;
+  /**
+   * 점 색: 첫 시도·잠깐의 끊김은 회색 맥박, 두 번 넘게 실패하면 빨강.
+   * 백오프 중 connecting/disconnected 가 번갈아 와도 점이 깜빡이지 않는다.
+   */
+  function renderConnStatus(): void {
+    const down = connState === 'disconnected' || (connState === 'connecting' && connAttempt >= 2);
+    const visual = connState === 'connected'
+      ? 'connected'
+      : connState === 'replaced'
+        ? 'replaced'
+        : down ? 'disconnected' : 'connecting';
+    connDot.dataset.state = visual;
+    connDot.hidden = visual === 'connected';
+    connDot.setAttribute('aria-label', CONN_LABEL[connState]);
+    connDot.title = visual === 'disconnected' ? '연결 끊김' : CONN_LABEL[connState];
+    if (visual === 'connected' || visual === 'replaced') {
+      setConnPopoverOpen(false);
       return;
     }
-    if (connState === 'connecting') {
-      clearConnCountdown();
-      // 첫 시도가 진행 중일 때는 조용히 지나간다.
-      if (connAttempt === 0) {
-        connBanner.hidden = true;
-        return;
-      }
-      connBanner.hidden = false;
-      connBanner.classList.toggle('ag-conn-banner-wait', connAttempt < 4);
-      connBannerText.textContent = `연결하는 중… (${connAttempt}번째 시도)`;
-      connBannerRetry.hidden = false;
-      connBannerHint.hidden = managedHub || connAttempt < 6;
-      return;
-    }
-    connBanner.hidden = false;
-    connBanner.classList.toggle('ag-conn-banner-wait', connAttempt < 4);
-    connBannerRetry.hidden = false;
-    connBannerHint.hidden = managedHub || connAttempt < 6;
-    paintConnCountdown();
-    clearConnCountdown();
-    if (connRetryAt !== null) {
-      connCountdownTimer = window.setInterval(paintConnCountdown, 1000);
-    }
+    connPopoverText.textContent = visual === 'disconnected' ? '허브 연결 끊김' : '연결 중';
+    connCommand.hidden = managedHub || visual !== 'disconnected';
   }
 
   function setTurnRunning(running: boolean): void {
@@ -6143,6 +6197,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function updateComposer(): void {
+    updateCalibrationChip();
     syncCloudProviderSelection();
     syncProviderMenu();
     // 다른 문서의 채팅 열람 중에는 연결/작업 상태와 무관하게 잠긴다.
@@ -6165,14 +6220,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       input.disabled = !connectionNoticeVisible || attachmentsSending;
       send.disabled = true;
       composerSkillClear.disabled = true;
-      input.placeholder = connectionNoticeVisible ? '메시지를 작성해 두세요. 연결 후 보낼 수 있습니다' : execution.message;
+      input.placeholder = connectionNoticeVisible ? '연결되면 보낼 메시지 작성' : execution.message;
     } else if (execution.kind === 'cloud-start') {
       input.disabled = attachmentsSending;
       send.disabled = activeComposerSkill !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts();
       composerSkillClear.disabled = attachmentsSending;
       input.placeholder = activeComposerSkill
         ? 'Cloud에서는 로컬 스킬을 사용할 수 없습니다'
-        : 'Cloud에서 시작할 첫 메시지를 입력하세요';
+        : 'Cloud에서 시작할 첫 메시지';
     } else if (execution.kind === 'cloud') {
       input.disabled = attachmentsSending;
       send.disabled = activeComposerSkill !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts();
@@ -6184,12 +6239,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       input.disabled = true;
       send.disabled = true;
       composerSkillClear.disabled = true;
-      input.placeholder = 'Rau 연결을 먼저 완료해 주세요.';
+      input.placeholder = 'Rau 연결 필요';
     } else if (selectedAgent === 'rau' && rauCreditsEmpty()) {
       input.disabled = connState !== 'connected';
       send.disabled = true;
       composerSkillClear.disabled = input.disabled;
-      input.placeholder = '체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.';
+      input.placeholder = '체험 크레딧 소진 · 다른 모델 연결';
     } else {
       const chatStarting = chatStartPendingThreadId !== null;
       const questionPending = questionController.hasPending();
@@ -6202,20 +6257,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         || (!questionPending && referenceLibrary.hasBlockingDrafts());
       composerSkillClear.disabled = input.disabled;
       input.placeholder = questionPending
-        ? questionUsesComposer ? '직접 답변을 입력하세요' : '위 질문에 답해 주세요'
+        ? questionUsesComposer ? '직접 답변 입력' : '위 질문에 답변'
         : workflowTransitionPending || planActionPending
         ? '전환을 적용하는 중…'
         : chatStarting
         ? '채팅을 여는 중…'
         : activeComposerSkill
-          ? '추가 요청을 입력하세요 (선택)'
+          ? '추가 요청 (선택)'
         : chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'
-          ? '계획에서 바꿀 부분을 알려주세요'
+          ? '계획에서 바꿀 부분'
           : chatWorkflow === 'question'
-            ? '질문을 입력하세요'
+            ? '질문 입력'
           : chatWorkflow === 'plan' && planningPhase === 'planning'
-            ? '구상할 내용을 입력하세요'
-            : '문서 작업을 입력하세요';
+            ? '구상할 내용 입력'
+            : '문서 작업 입력';
     }
     const questionPending = questionController.hasPending();
     const questionUsesComposer = questionController.usesComposerForOther();
@@ -6252,7 +6307,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const selectionHint = selectionLocked
       ? cloudConfigurationPending || settingsSession.kind !== 'idle' && settingsSession.configurationPending
         ? '모델 설정을 적용하는 중입니다'
-        : '연결된 대화에서 턴과 대기 중인 작업이 끝난 뒤 설정을 바꿀 수 있습니다'
+        : '진행 중인 작업이 끝나면 바꿀 수 있습니다'
       : '프로바이더 · 모델 · 추론 강도 변경 (다음 턴부터 적용)';
     providerTrigger.title = selectionHint;
     llmTrigger.title = selectionHint;
@@ -6436,7 +6491,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function systemMessage(text: string): void {
     currentThread.messages.push({ role: 'system', text, agent: selectedAgent });
     persistCurrentThread();
-    withAutoScroll(() => appendConversation(el('div', 'ag-msg ag-msg-system', text)));
+    withAutoScroll(() => appendConversation(el('div', 'ag-msg ag-msg-system ag-msg-enter', text)));
   }
 
   /** 현재 대화의 CLI 세션을 강제로 다시 띄운다 (설정 탭·스폰 실패 재시도 공용). */
@@ -6844,7 +6899,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function appendCheckDocumentMessage(agent: AgentName): void {
-    const text = '작업을 마쳤습니다. 문서를 확인해 보세요.';
+    const text = '작업 완료 · 문서 확인';
     const message = openAssistantBubble(agent);
     renderAssistantMessage(message, text);
     message.classList.add('ag-msg-enter');
@@ -7229,9 +7284,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         updateComposer();
         systemMessage(permissionProfile === 'unrestricted'
           ? chatWorkflow === 'plan' && planningPhase !== 'implementing'
-            ? '전체 접근을 켰습니다. 계획 단계는 계속 읽기 전용이며, 계획을 승인해 실행 단계로 전환하면 전체 접근을 적용합니다.'
-            : '전체 접근을 켰습니다. 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이미 검토 대기 중인 변경은 그대로 남습니다.'
-          : '안전 모드로 돌아왔습니다. 문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영되고, 파일과 명령은 프로젝트 범위로 제한됩니다.');
+            ? '전체 접근 켜짐 · 실행 단계부터 적용'
+            : '전체 접근 켜짐'
+          : '안전 모드');
         break;
       case 'service-tier-changed':
         selectedServiceTier = resolveServiceTier(selectedAgent, e.serviceTier);
@@ -7305,7 +7360,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         currentThread.activeTemplateId = e.template?.id ?? null;
         renderActiveTemplate();
         persistCurrentThread();
-        if (e.reason === 'deleted') systemMessage('이 채팅에서 사용하던 템플릿이 삭제되어 해제했습니다.');
+        if (e.reason === 'deleted') systemMessage('템플릿이 삭제되어 해제했습니다.');
         break;
       case 'pi-status':
         syncProviderMenu();
@@ -7342,8 +7397,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         updateComposer();
         break;
       case 'writing-style-status':
-      case 'writing-style-progress':
       case 'writing-style-result':
+        writingStyleActive = e.status.active === true;
+        if (writingStyleActive) calibrationChip.hidden = true;
+        break;
+      case 'writing-style-progress':
       case 'writing-style-error':
       case 'writing-style-catalog':
         break;
@@ -7558,7 +7616,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (isControlLocked() || connState !== 'connected') {
       systemMessage(
         turnRunning
-          ? '실행 중에는 작업 방식을 바꿀 수 없습니다. 먼저 중지하세요.'
+          ? '실행 중에는 작업 방식을 바꿀 수 없습니다.'
           : '전환 중에는 작업 방식을 바꿀 수 없습니다.',
       );
       updateWorkflowControl();
@@ -7567,19 +7625,25 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (next === 'plan' || next === 'question') {
       if (next === 'plan' && hasPendingDocumentEdits()) {
         systemMessage(
-          '검토 대기 중인 문서 편집이 있습니다. 먼저 승인하거나 거절한 뒤 구상 모드로 전환하세요.',
+          '검토 대기 중인 편집을 먼저 처리합니다.',
         );
         updateWorkflowControl();
         return false;
       }
       if (!browserbaseAcknowledged) {
-        if (!window.confirm(BROWSERBASE_FULL_CONTROL_WARNING)) {
-          updateWorkflowControl();
-          input.focus();
-          return false;
-        }
-        browserbaseAcknowledged = true;
-        browserbaseNoticePending = true;
+        // 처음 한 번만 묻는다. 시트는 비동기라 여기서는 멈추고, 승인되면 다시 요청한다.
+        updateWorkflowControl();
+        void confirmSheet(root, BROWSERBASE_FULL_CONTROL_TITLE, BROWSERBASE_FULL_CONTROL_WARNING, { confirmLabel: '켜기' })
+          .then((confirmed) => {
+            if (!confirmed) {
+              input.focus();
+              return;
+            }
+            browserbaseAcknowledged = true;
+            browserbaseNoticePending = true;
+            requestWorkflow(next);
+          });
+        return false;
       }
     }
     workflowTransitionPending = true;
@@ -7733,7 +7797,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       if (planningPhase === 'switching') {
         noteText = '승인했습니다. 실행 단계로 전환 중입니다…';
       } else if (planningPhase === 'implementing') {
-        noteText = '실행 중입니다. 문서 편집은 기존처럼 검토 후 승인합니다.';
+        noteText = '실행 중 · 편집은 검토 후 반영';
       } else if (!planApprovable) {
         noteText = '이전 계획입니다. 표시만 되고 승인할 수 없습니다.';
       }
@@ -7773,7 +7837,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       systemMessage(`수정 요청 실패: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
-    systemMessage('수정 요청을 보냈습니다. 바꾸고 싶은 부분을 입력창에 적어 주세요.');
+    systemMessage('수정 요청 · 바꿀 부분 입력');
     updateComposer();
     input.focus();
   }
@@ -7845,8 +7909,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         if (e.reason !== 'document-saved') {
           systemMessage(
             e.reason
-              ? `계획이 더 이상 유효하지 않습니다 (${e.reason}). 새 계획을 기다리세요.`
-              : '계획이 더 이상 유효하지 않습니다. 새 계획을 기다리세요.',
+              ? `계획 만료 (${e.reason})`
+              : '계획 만료',
           );
         }
         rebuildReview();
@@ -7988,7 +8052,28 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     updateTurnPending(activeEdit?.agent);
   }
 
+  /** 승인·거절로 사라지는 검토 카드는 제자리에서 접히며 빠진다. */
+  function collapseLeavingReviewCard(card: HTMLElement, height: number): void {
+    card.classList.add('ag-review-card-leaving');
+    card.inert = true;
+    card.style.height = `${height}px`;
+    review.prepend(card);
+    void card.offsetHeight;
+    const remove = () => card.remove();
+    requestAnimationFrame(() => {
+      card.classList.add('ag-review-card-gone');
+      card.style.height = '0px';
+      card.addEventListener('transitionend', (event) => {
+        if (event.propertyName === 'height') remove();
+      });
+      window.setTimeout(remove, 600);
+    });
+  }
+
   function rebuildReview(): void {
+    const leavingCandidates = [...review.querySelectorAll<HTMLElement>(
+      ':scope > .ag-review-card[data-set-id]:not(.ag-review-card-leaving)',
+    )].map((card) => ({ card, height: card.offsetHeight }));
     review.replaceChildren();
     planCardSlot.replaceChildren();
     // 계획과 문서 변경은 서로 다른 surface다. 긴 계획이 변경 목록을 밀어내지
@@ -8006,7 +8091,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const reviewSets = changeSets.filter((set) => set.status !== 'open');
     updateComposerActivity(changeSets);
     for (const set of reviewSets) {
-      review.appendChild(buildReviewCard(set));
+      const card = buildReviewCard(set);
+      card.dataset.setId = set.id;
+      review.appendChild(card);
+    }
+    const liveSetIds = new Set(reviewSets.map((set) => set.id));
+    const motionOk = !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    for (const { card, height } of leavingCandidates) {
+      if (motionOk && height > 0 && !liveSetIds.has(card.dataset.setId ?? '')) {
+        collapseLeavingReviewCard(card, height);
+      }
     }
     if (reviewSets.length === 0) {
       const empty = el('div', 'ag-review-empty');
@@ -8015,7 +8109,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       empty.append(
         emptyIcon,
         el('div', 'ag-review-empty-title', '변경 사항 없음'),
-        el('div', 'ag-review-empty-copy', '에이전트가 문서를 수정하면 여기에서 원문과 변경 내용을 비교할 수 있습니다.'),
+        el('div', 'ag-review-empty-copy', '에이전트가 수정하면 여기에 표시됩니다.'),
       );
       review.appendChild(empty);
     }
@@ -8117,27 +8211,27 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
    */
   async function sendInlinePrompt(submission: InlinePromptSubmission): Promise<Awaited<InlinePromptSendResponse>> {
     const prompt = submission.prompt.trim();
-    if (!prompt) return { ok: false, reason: '지시를 입력해 주세요' };
-    if (mergeResolverLocked) return { ok: false, reason: '병합 검토를 먼저 완료하거나 닫아 주세요' };
+    if (!prompt) return { ok: false, reason: '지시 입력 필요' };
+    if (mergeResolverLocked) return { ok: false, reason: '병합 검토 진행 중' };
     if (readOnlyDocLabel !== null) return { ok: false, reason: '다른 문서의 채팅을 열람 중입니다' };
     const execution = composerExecution(workspace.composerTarget());
     if (execution.kind !== 'local') {
       return {
         ok: false,
-        reason: execution.kind === 'blocked' ? execution.message : 'Cloud 모드에서는 사이드바 입력기를 사용해 주세요',
+        reason: execution.kind === 'blocked' ? execution.message : 'Cloud 모드 · 사이드바에서 입력',
       };
     }
     if (connState !== 'connected') return { ok: false, reason: '에이전트 허브에 연결되어 있지 않습니다' };
     if (selectedAgent === 'rau' && !rauSetupComplete) {
-      return { ok: false, reason: 'Rau 연결을 먼저 완료해 주세요' };
+      return { ok: false, reason: 'Rau 연결 필요' };
     }
     if (selectedAgent === 'rau' && rauCreditsEmpty()) {
-      return { ok: false, reason: '체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.' };
+      return { ok: false, reason: '체험 크레딧 소진 · 다른 모델 연결' };
     }
     if (turnRunning) return { ok: false, reason: '에이전트가 응답 중입니다' };
     if (planningPhase === 'switching' || workflowTransitionPending || planActionPending
       || chatStartPendingThreadId !== null || attachmentsSending) {
-      return { ok: false, reason: '잠시 후 다시 시도해 주세요' };
+      return { ok: false, reason: '잠시 후 다시 시도' };
     }
     setCollapsed(false);
     if (threadsPanelOpen) setThreadsPanelOpen(false);
@@ -8189,7 +8283,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       await referenceLibrary.discardInlineFiles(staged);
       attachmentsSending = false;
       updateComposer();
-      return { ok: false, reason: '선택 자료를 보내지 못했습니다. 다시 시도해 주세요.' };
+      return { ok: false, reason: '선택 자료 전송 실패 · 다시 시도' };
     }
     const userMessage = recordUserMessage(prompt, messageAttachments, {
       label: submission.selection.label,
@@ -8199,6 +8293,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       revision: submission.selection.revision,
     }, undefined, undefined, undefined, messageId);
     const userBubble = renderUserMessage(userMessage);
+    userBubble.classList.add('ag-msg-enter');
     followConversation = true;
     replyPending = true;
     appendConversation(userBubble);
@@ -8276,7 +8371,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         cancelAnimationFrame(resizeMoveRaf);
         resizeMoveRaf = null;
       }
-      clearConnCountdown();
+      document.removeEventListener('pointerdown', onConnPopoverOutside);
       writingStyleCalibration.dispose();
       settingsPanel.dispose();
       versionManagerPage?.dispose();

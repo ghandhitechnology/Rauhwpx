@@ -36,12 +36,12 @@ export function createProviderQuota(bridge: SidebarBridge, accept: (usage: Usage
     try {
       localStorage.setItem(resetStorageKey, JSON.stringify(request));
     } catch {
-      feedback.textContent = '리셋 요청을 저장하지 못했어요. 브라우저 저장소를 사용할 수 있는지 확인해 주세요.';
+      feedback.textContent = '리셋 요청 저장 실패 · 브라우저 저장소 확인';
       feedback.hidden = false;
       return;
     }
     busy = true;
-    feedback.textContent = '리셋을 적용하고 있어요…';
+    feedback.textContent = '리셋 적용 중…';
     render(summary);
     try {
       const result = await bridge.consumeCodexReset(request.key, request.account);
@@ -50,12 +50,12 @@ export function createProviderQuota(bridge: SidebarBridge, accept: (usage: Usage
       summary = result.usage;
       accept(result.usage);
       feedback.textContent = {
-        reset: '한도를 리셋했어요.', nothingToReset: '리셋할 사용량이 없어요.',
-        noCredit: '사용할 리셋 크레딧이 없어요.', alreadyRedeemed: '이미 처리한 리셋이에요.',
+        reset: '한도 리셋 완료', nothingToReset: '리셋할 사용량 없음',
+        noCredit: '리셋 크레딧 없음', alreadyRedeemed: '이미 처리한 리셋',
       }[result.outcome];
     } catch (error) {
       if (disposed) return;
-      feedback.textContent = `리셋을 확인하지 못했어요. 다시 시도해 주세요. ${error instanceof Error ? error.message : ''}`;
+      feedback.textContent = `리셋 확인 실패 · 다시 시도 ${error instanceof Error ? error.message : ''}`;
     } finally {
       busy = false;
       if (!disposed) render(summary);
@@ -83,15 +83,15 @@ export function createProviderQuota(bridge: SidebarBridge, accept: (usage: Usage
       refreshButton.setAttribute('aria-busy', String(refreshing));
       refreshButton.append(createIcon('refresh'));
       refreshButton.onclick = refresh;
-      actions.append(node('span', 'ag-settings-usage-updated', quota?.updatedAt ? `${formatRelativeTime(quota.updatedAt)} 조회` : '아직 조회하지 않았어요'), refreshButton);
+      actions.append(node('span', 'ag-settings-usage-updated', quota?.updatedAt ? `${formatRelativeTime(quota.updatedAt)} 조회` : '조회 전'), refreshButton);
       header.append(identity, actions);
       card.append(header);
       const stale = !!quota?.updatedAt && Date.now() - quota.updatedAt > 120_000;
       card.dataset.state = quota?.status ?? 'unavailable';
       if (quota?.status !== 'ok' || stale) {
         card.append(node('p', 'ag-settings-note', quota?.status === 'error'
-          ? `한도를 불러오지 못했어요. ${quota.error ?? '새로고침해 주세요.'}`
-          : stale ? '이전 조회 결과예요. 새로고침해 주세요.' : '연결된 계정의 한도 정보를 사용할 수 없어요.'));
+          ? `한도 불러오기 실패 ${quota.error ?? ''}`.trim()
+          : stale ? '이전 조회 결과 · 새로고침' : '한도 정보 없음'));
       }
       for (const [key, label] of [['session', '5시간'], ['week', '주간 한도']] as const) {
         if (agent === 'codex' && key === 'session' && quota?.planType?.trim().toLowerCase() === 'pro') continue;
@@ -123,7 +123,7 @@ export function createProviderQuota(bridge: SidebarBridge, accept: (usage: Usage
         if (credits) card.append(node('p', 'ag-settings-note', `보관한 리셋 ${credits.availableCount}개${credits.nextExpiresAt ? `, 다음 만료 ${new Date(credits.nextExpiresAt).toLocaleString()}` : ''}`));
         const canReset = (credits?.availableCount ?? 0) > 0 && quota.status === 'ok' && !!quota.accountKey && !stale;
         if (confirmation) {
-          card.append(node('p', 'ag-settings-note', '보관한 리셋 1개를 사용해 Codex 한도를 리셋할까요?'));
+          card.append(node('p', 'ag-settings-note', '보관한 리셋 1개로 Codex 한도를 리셋합니다.'));
           const confirm = node('button', 'ag-settings-primary', busy ? '리셋 중…' : '리셋 1개 사용');
           confirm.type = 'button';
           confirm.dataset.action = 'confirm-reset';
@@ -177,7 +177,7 @@ export function createProviderQuota(bridge: SidebarBridge, accept: (usage: Usage
       button.setAttribute('aria-busy', String(refreshing));
       button.append(createIcon('refresh'));
       button.onclick = refresh;
-      actions.append(node('span', 'ag-settings-usage-updated', balance?.updatedAt ? `${formatRelativeTime(balance.updatedAt)} 조회` : '아직 조회하지 않았어요'), button);
+      actions.append(node('span', 'ag-settings-usage-updated', balance?.updatedAt ? `${formatRelativeTime(balance.updatedAt)} 조회` : '조회 전'), button);
       header.append(identity, actions);
       card.append(header);
       const knownBalance = typeof balance?.balanceUsd === 'number' && Number.isFinite(balance.balanceUsd);
@@ -213,8 +213,8 @@ export function createProviderQuota(bridge: SidebarBridge, accept: (usage: Usage
       const stale = !!balance?.updatedAt && Date.now() - balance.updatedAt > 120_000;
       if (balance?.status !== 'ok' || stale || (!knownBalance && windows.length === 0)) {
         card.append(node('p', 'ag-settings-note', balance?.error || (stale
-          ? '이전 조회 결과예요. 새로고침해 주세요.'
-          : balance?.status === 'error' ? '잔액을 불러오지 못했어요.' : '연결된 계정의 잔액 정보를 사용할 수 없어요.')));
+          ? '이전 조회 결과 · 새로고침'
+          : balance?.status === 'error' ? '잔액 불러오기 실패' : '잔액 정보 없음')));
       }
       cards.push(card);
     }
