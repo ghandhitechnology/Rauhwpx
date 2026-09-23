@@ -43,6 +43,39 @@ const WEB_IMAGE_CACHE_MAX_ENTRIES: usize = 200;
 const DECODED_CANVAS_CACHE_MAX_PIXELS: usize = 16_777_216;
 const HTML_IMAGE_CACHE_MAX_SOURCE_BYTES: usize = 33_554_432;
 
+/// Native Hangul paints a thin horizontal/vertical rule as one opaque device pixel.
+/// Keep the document coordinates and widths for layout; align only screen paint.
+fn pixel_aligned_hairline(position: f64, width: f64, scale: f64) -> Option<(f64, f64)> {
+    if !position.is_finite()
+        || !width.is_finite()
+        || !scale.is_finite()
+        || width <= 0.0
+        || scale <= 0.0
+        || width * scale > 1.0 + 1e-9
+    {
+        return None;
+    }
+    Some((((position * scale).round() + 0.5) / scale, 1.0 / scale))
+}
+
+fn pixel_aligned_hairline_rect(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    stroke_width: f64,
+    scale: f64,
+) -> Option<(f64, f64, f64, f64, f64)> {
+    if width * scale < 2.0 || height * scale < 2.0 {
+        return None;
+    }
+    let (left, device_width) = pixel_aligned_hairline(x, stroke_width, scale)?;
+    let (top, _) = pixel_aligned_hairline(y, stroke_width, scale)?;
+    let (right, _) = pixel_aligned_hairline(x + width, stroke_width, scale)?;
+    let (bottom, _) = pixel_aligned_hairline(y + height, stroke_width, scale)?;
+    Some((left, top, right - left, bottom - top, device_width))
+}
+
 /// Canvas 폰트의 실측 폭을 레이아웃 advance에 맞출 때 적용할 배율을 계산한다.
 ///
 /// 음수 자간은 다음 글자의 시작 위치만 당기는 속성이다. 이를 글자 자체의 폭 제한으로
@@ -466,6 +499,8 @@ pub struct WebCanvasRenderer {
     /// The current TextRun has a shaped glyph sidecar. Canvas cannot address
     /// its glyph ids, so replay the Unicode fallback as one browser-shaped run.
     native_run_shaping: bool,
+    /// Legacy 자식 노드는 상위 도형의 변환을 상속하므로 전체 깊이를 추적한다.
+    active_shape_transform_depth: usize,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -476,6 +511,14 @@ impl WebCanvasRenderer {
             .get_context("2d")?
             .ok_or_else(|| JsValue::from_str("Failed to get 2d context"))?
             .dyn_into::<CanvasRenderingContext2d>()?;
+        // macOS 기본 font smoothing은 원본 outline보다 획을 두껍게 만든다.
+        // CanvasKit과 같은 outline 기준으로 그리고 저장된 advance는 유지한다.
+        // 이 속성이 없는 브라우저에서는 기존 렌더링으로 동작한다.
+        let _ = js_sys::Reflect::set(
+            ctx.as_ref(),
+            &JsValue::from_str("textRendering"),
+            &JsValue::from_str("geometricPrecision"),
+        );
 
         Ok(Self {
             ctx,
@@ -489,6 +532,7 @@ impl WebCanvasRenderer {
             active_replay_plane: None,
             render_profile: RenderProfile::Screen,
             native_run_shaping: false,
+            active_shape_transform_depth: 0,
         })
     }
 
@@ -1478,13 +1522,14 @@ impl WebCanvasRenderer {
     }
 
     /// 도형 변환(회전/대칭)이 있으면 ctx.save() + translate/rotate/scale을 적용한다.
-    fn open_shape_transform(&self, transform: &ShapeTransform, bbox: &BoundingBox) {
+    fn open_shape_transform(&mut self, transform: &ShapeTransform, bbox: &BoundingBox) {
         if !transform.has_transform() {
             return;
         }
         let cx = bbox.x + bbox.width / 2.0;
         let cy = bbox.y + bbox.height / 2.0;
         self.ctx.save();
+        self.active_shape_transform_depth += 1;
         // [Task #1067] 한컴 정답지 시각 표준 정합 — flip 와 회전 동시 적용 시 회전 부호 반전.
         // svg.rs::open_shape_transform 와 동일 패턴.
         let flip_negate_rotation = transform.horz_flip ^ transform.vert_flip;
@@ -1506,7 +1551,7 @@ impl WebCanvasRenderer {
     }
 
     /// RenderNode 경로에서는 기존처럼 자식 렌더 뒤 transform 을 복원한다.
-    fn close_shape_transform_for_node(&self, node_type: &RenderNodeType) {
+    fn close_shape_transform_for_node(&mut self, node_type: &RenderNodeType) {
         let transform = match node_type {
             RenderNodeType::Rectangle(r) => &r.transform,
             RenderNodeType::Line(l) => &l.transform,
@@ -1519,9 +1564,10 @@ impl WebCanvasRenderer {
     }
 
     /// PaintOp 직접 replay 경로에서는 leaf payload 렌더 직후 transform 을 복원한다.
-    fn close_shape_transform_if_needed(&self, transform: &ShapeTransform) {
+    fn close_shape_transform_if_needed(&mut self, transform: &ShapeTransform) {
         if transform.has_transform() {
             self.ctx.restore();
+            self.active_shape_transform_depth -= 1;
         }
     }
 
@@ -1897,9 +1943,22 @@ impl WebCanvasRenderer {
             self.clear_shadow(style); // stroke 전에 그림자 해제
             if let Some(stroke) = style.stroke_color {
                 self.ctx.set_stroke_style_str(&color_to_css(stroke));
-                self.ctx.set_line_width(style.stroke_width.max(0.5));
+                let stroke_width = style.stroke_width.max(0.5);
+                let aligned = if self.active_shape_transform_depth == 0
+                    && self.render_profile.shows_editor_visuals()
+                {
+                    pixel_aligned_hairline_rect(x, y, w, h, stroke_width, self.scale)
+                } else {
+                    None
+                };
+                self.ctx
+                    .set_line_width(aligned.map_or(stroke_width, |(_, _, _, _, width)| width));
                 self.set_line_dash(&style.stroke_dash);
-                self.ctx.stroke_rect(x, y, w, h);
+                if let Some((left, top, width, height, _)) = aligned {
+                    self.ctx.stroke_rect(left, top, width, height);
+                } else {
+                    self.ctx.stroke_rect(x, y, w, h);
+                }
                 let _ = self.ctx.set_line_dash(&js_sys::Array::new());
             }
         }
@@ -2671,7 +2730,7 @@ impl Renderer for WebCanvasRenderer {
 
     fn draw_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, style: &LineStyle) {
         let color = color_to_css(style.color);
-        let width = style.width.max(0.5);
+        let mut width = style.width.max(0.5);
         let dx = x2 - x1;
         let dy = y2 - y1;
         let line_len = (dx * dx + dy * dy).sqrt();
@@ -2680,6 +2739,27 @@ impl Renderer for WebCanvasRenderer {
         let mut ly1 = y1;
         let mut lx2 = x2;
         let mut ly2 = y2;
+
+        if self.active_shape_transform_depth == 0
+            && self.render_profile.shows_editor_visuals()
+            && style.line_type == super::LineRenderType::Single
+            && style.start_arrow == super::ArrowStyle::None
+            && style.end_arrow == super::ArrowStyle::None
+        {
+            if x1 == x2 {
+                if let Some((x, device_width)) = pixel_aligned_hairline(x1, width, self.scale) {
+                    lx1 = x;
+                    lx2 = x;
+                    width = device_width;
+                }
+            } else if y1 == y2 {
+                if let Some((y, device_width)) = pixel_aligned_hairline(y1, width, self.scale) {
+                    ly1 = y;
+                    ly2 = y;
+                    width = device_width;
+                }
+            }
+        }
 
         if line_len > 0.0 {
             let ux = dx / line_len;
@@ -3891,5 +3971,22 @@ mod tests {
         assert_eq!(canvas_cluster_fit_scale(7.5, 15.0, 0.0, false), Some(0.5));
         assert_eq!(canvas_cluster_fit_scale(7.5, 15.0, 0.0, true), Some(0.5));
         assert_eq!(canvas_cluster_fit_scale(15.0, 14.9, 0.0, false), None);
+    }
+
+    #[test]
+    fn thin_screen_strokes_cover_one_device_pixel_at_common_zooms() {
+        for scale in [1.0, 1.5, 2.0] {
+            let (center, width) = pixel_aligned_hairline(12.34, 0.5, scale).unwrap();
+            assert_eq!(width * scale, 1.0);
+            assert_eq!((center * scale).fract(), 0.5);
+        }
+        assert!(pixel_aligned_hairline(12.34, 1.0, 2.0).is_none());
+        let (x, y, w, h, sw) =
+            pixel_aligned_hairline_rect(5.24, 8.37, 17.73, 13.4, 0.5, 2.0).unwrap();
+        assert_eq!((x * 2.0).fract(), 0.5);
+        assert_eq(((x + w) * 2.0).fract(), 0.5);
+        assert_eq((y * 2.0).fract(), 0.5);
+        assert_eq(((y + h) * 2.0).fract(), 0.5);
+        assert_eq!(sw * 2.0, 1.0);
     }
 }

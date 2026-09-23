@@ -55,6 +55,8 @@ pub enum LayoutKind {
     Fraction {
         numer: Box<LayoutBox>,
         denom: Box<LayoutBox>,
+        /// 분수 개체의 왼쪽/오른쪽 경계에서 선까지의 거리.
+        bar_inset: f64,
     },
     /// 위아래 배치 (분수선 없음)
     Atop {
@@ -510,7 +512,23 @@ impl EqLayout {
         let pad = fs * FRAC_LINE_PAD;
         let line_thick = fs * FRAC_LINE_THICK;
         let axis = fs * if self.hft { 0.375 } else { AXIS_HEIGHT };
-        let w = n.width.max(d.width) + pad * 2.0;
+        let child_width = n.width.max(d.width);
+        let natural_width = child_width + pad * 2.0;
+        // 현대 HY 분수는 최소 1em 개체/0.8em 선을 사용한다. 좁은 분수를
+        // 글립 advance까지 줄이면 같은 분자도 분모에 따라 시작점이 달라진다.
+        // 긴 분수는 기존 0.15em 선 여백을 유지한다 (eq-01의 12pt 분수).
+        let modern_hy = !self.hft
+            && self
+                .font_family
+                .as_deref()
+                .is_some_and(super::font::is_legacy_equation_font);
+        let (w, bar_inset) = if modern_hy {
+            let width = natural_width.max(fs);
+            let bar_width = (child_width + fs * 0.3).max(fs * 0.8);
+            (width, (width - bar_width) / 2.0)
+        } else {
+            (natural_width, fs * 0.05)
+        };
 
         let numer_h = n.height + pad;
         let denom_h = d.height + pad;
@@ -572,6 +590,7 @@ impl EqLayout {
             kind: LayoutKind::Fraction {
                 numer: Box::new(n_box),
                 denom: Box::new(d_box),
+                bar_inset,
             },
         }
     }
@@ -1490,7 +1509,7 @@ mod tests {
                         leaves(child, out);
                     }
                 }
-                LayoutKind::Fraction { numer, denom } => {
+                LayoutKind::Fraction { numer, denom, .. } => {
                     leaves(numer, out);
                     leaves(denom, out);
                 }
@@ -1523,11 +1542,49 @@ mod tests {
     }
 
     #[test]
+    fn modern_hy_fraction_minimum_keeps_narrow_boxes_and_wide_rule_clearance() {
+        for fs in [11.0, 22.0] {
+            let engine = EqLayout::with_font(fs, "HYhwpEQ");
+            let narrow = engine.layout(&EqParser::new(tokenize("1 over i")).parse());
+            let LayoutKind::Fraction {
+                numer,
+                denom,
+                bar_inset,
+            } = &narrow.kind
+            else {
+                panic!("fraction")
+            };
+            assert!((narrow.width - fs).abs() < 1e-8);
+            assert!(narrow.width - bar_inset * 2.0 >= fs * 0.8 - 1e-8);
+            assert!((numer.x + numer.width / 2.0 - fs / 2.0).abs() < 1e-8);
+            assert!((denom.x + denom.width / 2.0 - fs / 2.0).abs() < 1e-8);
+
+            let wide = engine.layout(&EqParser::new(tokenize("12345 over 6")).parse());
+            let LayoutKind::Fraction {
+                numer, bar_inset, ..
+            } = &wide.kind
+            else {
+                panic!("fraction")
+            };
+            assert!(wide.width > fs);
+            assert!((numer.x - bar_inset - fs * 0.15).abs() < 1e-8);
+
+            let legacy = engine
+                .with_version("")
+                .layout(&EqParser::new(tokenize("1 over i")).parse());
+            let LayoutKind::Fraction { bar_inset, .. } = legacy.kind else {
+                panic!("fraction")
+            };
+            assert!((bar_inset - fs * 0.05).abs() < 1e-8);
+        }
+    }
+
+    #[test]
     fn legacy_fraction_preserves_native_baseline_clearance_at_different_sizes() {
         for fs in [12.0, 24.0] {
             let ast = EqParser::new(tokenize("1 over p")).parse();
             let lb = EqLayout::with_font(fs, "HYhwpEQ").layout(&ast);
-            let LayoutKind::Fraction { numer, denom } = &lb.kind else {
+            let LayoutKind::Fraction { numer, denom, .. } = &lb.kind else {
                 panic!("fraction")
             };
             let separation = (denom.y + denom.baseline - numer.y - numer.baseline) / fs;
@@ -1535,7 +1592,7 @@ mod tests {
             assert!(numer.y >= 0.0 && denom.y + denom.height <= lb.height);
             let nested = EqParser::new(tokenize("1 over {a over b}")).parse();
             let lb = EqLayout::with_font(fs, "HYhwpEQ").layout(&nested);
-            let LayoutKind::Fraction { numer, denom } = &lb.kind else {
+            let LayoutKind::Fraction { numer, denom, .. } = &lb.kind else {
                 panic!("fraction")
             };
             assert!(numer.y + numer.height < denom.y);
@@ -1553,7 +1610,7 @@ mod tests {
             let modern = EqLayout::with_font(fs, "HYhwpEQ")
                 .with_version("Equation Version 60")
                 .layout(&ast);
-            let LayoutKind::Fraction { numer, denom } = &legacy.kind else {
+            let LayoutKind::Fraction { numer, denom, .. } = &legacy.kind else {
                 panic!("fraction")
             };
             assert!((legacy.baseline - fraction_line_y(numer, fs) - fs * 0.375).abs() < 1e-8);
@@ -1564,7 +1621,7 @@ mod tests {
             let nested = EqLayout::with_font(fs, "HYhwpEQ")
                 .with_version("")
                 .layout(&nested);
-            let LayoutKind::Fraction { numer, denom } = &nested.kind else {
+            let LayoutKind::Fraction { numer, denom, .. } = &nested.kind else {
                 panic!("fraction")
             };
             assert!(denom.y > fraction_line_y(numer, fs));

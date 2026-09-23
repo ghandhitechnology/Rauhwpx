@@ -1202,6 +1202,7 @@ export interface LayerLineOp {
   x2: number;
   y2: number;
   style?: LayerLineStyle;
+  transform?: LayerPathTransform;
 }
 
 export interface LayerRectangleOp {
@@ -1210,6 +1211,7 @@ export interface LayerRectangleOp {
   cornerRadius?: number;
   style?: LayerShapeStyle;
   gradient?: LayerGradientFill;
+  transform?: LayerPathTransform;
 }
 
 export interface LayerEllipseOp {
@@ -1324,7 +1326,7 @@ export type LayerEquationLayoutKind =
   | { type: 'symbol'; text: string }
   | { type: 'mathSymbol'; text: string }
   | { type: 'function'; name: string }
-  | { type: 'fraction'; numer: LayerEquationLayoutBox; denom: LayerEquationLayoutBox }
+  | { type: 'fraction'; numer: LayerEquationLayoutBox; denom: LayerEquationLayoutBox; barInset?: number }
   | { type: 'atop'; top: LayerEquationLayoutBox; bottom: LayerEquationLayoutBox }
   | { type: 'sqrt'; body: LayerEquationLayoutBox; index?: LayerEquationLayoutBox }
   | { type: 'superscript'; base: LayerEquationLayoutBox; sup: LayerEquationLayoutBox }

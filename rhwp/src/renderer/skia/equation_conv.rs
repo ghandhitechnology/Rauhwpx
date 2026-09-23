@@ -8,8 +8,8 @@ use super::font_lookup::{
 
 use crate::renderer::equation::ast::MatrixStyle;
 use crate::renderer::equation::layout::{
-    integral_geom, is_integral_symbol, LayoutBox, LayoutKind, BIG_OP_SCALE,
-    INTEGRAL_SCALE, SCRIPT_SCALE,
+    integral_geom, is_integral_symbol, LayoutBox, LayoutKind, BIG_OP_SCALE, INTEGRAL_SCALE,
+    SCRIPT_SCALE,
 };
 use crate::renderer::equation::symbols::{DecoKind, FontStyleKind};
 
@@ -160,7 +160,11 @@ fn render_box(
                 false,
             );
         }
-        LayoutKind::Fraction { numer, denom } => {
+        LayoutKind::Fraction {
+            numer,
+            denom,
+            bar_inset,
+        } => {
             render_box(
                 canvas,
                 font_mgr,
@@ -176,8 +180,8 @@ fn render_box(
             );
             let line_y = y + crate::renderer::equation::layout::fraction_line_y(numer, fs);
             canvas.draw_line(
-                ((x + fs * 0.05) as f32, line_y as f32),
-                ((x + lb.width - fs * 0.05) as f32, line_y as f32),
+                ((x + bar_inset) as f32, line_y as f32),
+                ((x + lb.width - bar_inset) as f32, line_y as f32),
                 &stroke_paint(color, fs * 0.04),
             );
             render_box(

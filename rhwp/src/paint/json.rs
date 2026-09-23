@@ -2723,8 +2723,16 @@ fn write_equation_layout_kind(buf: &mut String, kind: &LayoutKind) {
                 json_escape(name)
             );
         }
-        LayoutKind::Fraction { numer, denom } => {
-            buf.push_str("{\"type\":\"fraction\",\"numer\":");
+        LayoutKind::Fraction {
+            numer,
+            denom,
+            bar_inset,
+        } => {
+            let _ = write!(
+                buf,
+                "{{\"type\":\"fraction\",\"barInset\":{:.6},\"numer\":",
+                bar_inset
+            );
             write_equation_layout_box(buf, numer);
             buf.push_str(",\"denom\":");
             write_equation_layout_box(buf, denom);

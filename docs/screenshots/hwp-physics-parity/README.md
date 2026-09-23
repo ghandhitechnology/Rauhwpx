@@ -6,7 +6,7 @@ Each image is ordered **official / before / after**. The baseline is commit `0d7
 
 - `native-editor-comparison.png` uses an actual Hancom Office HWP for macOS window capture at 200% zoom. The document regions are cropped without resizing.
 - `page-1-comparison.png` through `page-4-comparison.png` use Hancom's native PDF export at 96 DPI as the official panel. The detail comparisons use 192 DPI. Studio renders directly at the corresponding scale.
-- The PDF reference panels use Poppler `pdftoppm`. Native window capture, PDF rasterization, Canvas2D, and CanvasKit can produce different antialiasing. The PDF panels provide a shared physical document scale.
+- The PDF reference panels use Poppler `pdftoppm`. Native window capture, PDF rasterization, Canvas2D, and CanvasKit can produce different antialiasing. Canvas2D now uses `geometricPrecision`, avoiding Chromium's default macOS font smoothing while preserving source advances. The PDF panels provide a shared physical document scale.
 - Both source and result contain four A4 pages. The comparison covers title/body weight, objective-cell alignment, results-table centering, equations, answer lines, diagrams/captions, headers/footers, and page breaks.
 
 ## Fonts
@@ -17,15 +17,15 @@ The source faces include Gulim/GulimChe, HCR Dotum, HCR Batang, Malgun Gothic, H
 
 ## Geometry checks
 
-The final results-table row boundaries agree with the PDF to about 0.1 CSS pixel. The footer text baseline is within 0.2 pixel. PDF stroke extents and print-coordinate quantization can account for subpixel differences at borders.
+The results-table row boundaries agree with the PDF to about 0.1 CSS pixel. Native editor captures at 100% and 200% confirm the row and column coordinates and one-device-pixel screen borders. Print and high-quality output retain vector stroke coverage. The footer text baseline is within 0.2 pixel.
 
 A contour comparison matched sampled HFT equation glyphs to Hancom's PDF paths within 0.000016 point. Modern HYhwpEQ samples match the PDF's embedded outlines. These checks establish source-shape fidelity for the sampled glyphs; they do not establish pixel identity across rasterizers.
 
-## Remaining differences
+## Equation geometry and raster checks
 
-Exact pixel identity is not achieved. In the lens formula, the first fraction retains an approximately 1 CSS pixel horizontal inset difference; the other numerator origins are within about 0.2 pixel. Sampled equation baselines differ by less than 0.5 pixel. The installed HYhwpEQ outlines and advances match the PDF's embedded font, and an independent fraction fixture does not support applying a universal offset.
+The modern HY fraction box now preserves its minimum em width and independent bar inset. The three lens-formula numerator origins differ from the PDF by −0.265, +0.302, and −0.251 CSS pixel; sampled equation baselines differ by less than 0.5 pixel. All 14 equation layouts agree between Canvas2D and CanvasKit. The installed HYhwpEQ outlines and advances match the PDF's embedded font.
 
-Native window capture, PDF printing, and browser font rasterization also differ in antialiasing and thin-line coverage. Page 4 rules use black strokes of 0.5 CSS pixel in Studio and 0.48 pixel in the PDF; the PDF rasterizer snaps them darker at 96 DPI. HFT-specific hint instructions are not reproduced by the converter. CanvasKit was checked separately on all four pages at both scales; its existing `textRun:ratioTextEffect` limitation remains.
+Exact pixel identity is not achieved: text antialiasing still differs between the native editor, Canvas2D, and CanvasKit. Native captures at 100%, 150%, and 200% were compared. In the registered 200% body-text sample, excess Canvas2D ink coverage fell from 17.4% to 0.5% after selecting geometric precision. This measurement covers that sample; it is not a claim of pixel identity for all text. HFT-specific hint instructions are not reproduced by the converter; a probe preserving its stem hints changed no pixels in either current rendering mode. CanvasKit now supports ordinary text width ratios and offset shadows, including fallback glyphs. All four pages at 1× and 2× completed without unsupported operations or hidden Canvas2D overlays.
 
 ## Reproduce
 
@@ -43,6 +43,22 @@ Native window capture, PDF printing, and browser font rasterization also differ 
 | Title and objective cell | [Detail](title-and-goal-comparison.png) |
 | Equations and body text | [Modern equations](equation-and-body-comparison.png), [legacy equations](legacy-equations-comparison.png) |
 | Results table | [Detail](table-centering-comparison.png) |
-| Answer lines | [Detail](answer-lines-comparison.png) |
+| Answer lines | [PDF detail](answer-lines-comparison.png), [native editor detail](native-answer-lines-comparison.png) |
 | Diagram and caption | [Detail](diagram-caption-comparison.png) |
 | Header and footer | [Header](header-comparison.png), [footer](footer-comparison.png) |
+
+## Live computer verification, 2026-09-24
+
+Opened the original attached HWP in Hancom Office HWP and this PR worktree's Studio at `http://127.0.0.1:7701`. Imported 11 installed source font files through Studio's native file picker: Gulim, GulimChe, HCR Batang, HCR Dotum, Malgun Gothic, HYkanB, HYhwpEQ, and the four HFT banks listed above. The source document and fonts remain local.
+
+Inspected all four pages in both applications. The window captures below use 51% page zoom; the fraction captures use 101% in both applications. They are unmodified window screenshots. Window dimensions and scroll positions differ, so use the fixed-scale comparison panels above for geometry measurements.
+
+| Page | Hancom | Studio |
+| --- | --- | --- |
+| 1 | [Native window](hancom-live-page-1.png) | [Studio window](studio-live-page-1.png) |
+| 2 | [Native window](hancom-live-page-2.png) | [Studio window](studio-live-page-2.png) |
+| 3 | [Native window](hancom-live-page-3.png) | [Studio window](studio-live-page-3.png) |
+| 4 | [Native window](hancom-live-page-4.png) | [Studio window](studio-live-page-4.png) |
+| First lens fraction, 101% | [Native window](hancom-live-fraction.png) | [Studio window](studio-live-fraction.png) |
+
+The follow-up fixes preserve modern HY fraction minimum width and bar inset, align thin screen rules to device pixels, select Canvas2D geometric text precision, and replay ordinary text width ratios and offset shadows in CanvasKit. Print profiles retain vector rule coverage. Rasterizer differences described above remain; these captures do not establish pixel identity.

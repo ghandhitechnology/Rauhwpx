@@ -1451,6 +1451,10 @@ impl CanvasKitReplayPlanBuilder {
                     Some("verticalText")
                 } else if run.rotation.abs() > f64::EPSILON {
                     Some("rotatedText")
+                } else if run.style.shadow_type != 0 {
+                    Some("shadowTextEffect")
+                } else if run.style.ratio != 1.0 {
+                    Some("ratioTextEffect")
                 } else if run
                     .char_overlap
                     .as_ref()
@@ -1828,7 +1832,7 @@ fn canvaskit_equation_layout_is_supported(layout: &LayoutBox) -> bool {
             | LayoutKind::Symbol(text)
             | LayoutKind::MathSymbol(text)
             | LayoutKind::Function(text) => text_supported(text),
-            LayoutKind::Fraction { numer, denom } => {
+            LayoutKind::Fraction { numer, denom, .. } => {
                 child(numer, remaining_nodes) && child(denom, remaining_nodes)
             }
             LayoutKind::Atop { top, bottom } => {
@@ -2041,7 +2045,7 @@ fn text_run_transition_detail(run: &TextRunNode) -> Option<&'static str> {
     if run.style.outline_type != 0 {
         return Some("outlineTextEffect");
     }
-    if run.style.shadow_type != 0 {
+    if run.style.shadow_type != 0 && (run.style.shadow_type != 1 || run.char_overlap.is_some()) {
         return Some("shadowTextEffect");
     }
     if run.style.emboss {
@@ -2053,7 +2057,10 @@ fn text_run_transition_detail(run: &TextRunNode) -> Option<&'static str> {
     if run.style.shade_color & 0x00FF_FFFF != 0x00FF_FFFF {
         return Some("shadeTextEffect");
     }
-    if (run.style.ratio - 1.0).abs() > f64::EPSILON {
+    if !run.style.ratio.is_finite()
+        || run.style.ratio <= 0.0
+        || (run.char_overlap.is_some() && run.style.ratio != 1.0)
+    {
         return Some("ratioTextEffect");
     }
     if run.style.superscript || run.style.subscript {
@@ -2804,6 +2811,32 @@ mod tests {
         assert_eq!(mark_plan.items[0].op_type, "textControlMark");
         assert_eq!(mark_plan.items[0].status, CanvasKitReplayStatus::Direct);
         assert_eq!(mark_plan.summary.hidden_overlay_violations, 0);
+    }
+
+    #[test]
+    fn ordinary_text_ratio_and_offset_shadow_are_direct_but_overlap_effects_are_not() {
+        let mut run = text_run("AB");
+        run.style.ratio = 0.8;
+        run.style.shadow_type = 1;
+        let plan = analyze_canvaskit_replay_plan(
+            &tree_with_ops(vec![PaintOp::text_run(bbox(), run.clone())]),
+            CanvasKitReplayMode::Default,
+        );
+        assert_eq!(plan.items[0].status, CanvasKitReplayStatus::Direct);
+
+        run.char_overlap = Some(CharOverlapInfo {
+            border_type: 1,
+            inner_char_size: 100,
+        });
+        for (shadow, detail) in [(1, "shadowTextEffect"), (0, "ratioTextEffect")] {
+            run.style.shadow_type = shadow;
+            let plan = analyze_canvaskit_replay_plan(
+                &tree_with_ops(vec![PaintOp::char_overlap(bbox(), run.clone())]),
+                CanvasKitReplayMode::Default,
+            );
+            assert_ne!(plan.items[0].status, CanvasKitReplayStatus::Direct);
+            assert_eq!(plan.items[0].detail.as_deref(), Some(detail));
+        }
     }
 
     #[test]

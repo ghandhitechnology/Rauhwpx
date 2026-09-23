@@ -235,6 +235,8 @@ export class CanvasKitLayerRenderer {
   private currentResources: LayerResources | undefined;
   private currentShowParagraphMarks = false;
   private currentShowControlCodes = false;
+  private currentRenderScale = 1;
+  private currentRenderProfile: LayerRenderProfile = 'screen';
   private selectedTextVariantOps = new WeakSet<LayerPaintOp>();
   private documentGeneration = 0;
   private disposed = false;
@@ -578,6 +580,8 @@ export class CanvasKitLayerRenderer {
       this.currentResources = tree.resources;
       this.currentShowParagraphMarks = tree.outputOptions?.showParagraphMarks === true;
       this.currentShowControlCodes = tree.outputOptions?.showControlCodes === true;
+      this.currentRenderScale = scale;
+      this.currentRenderProfile = tree.profile ?? 'screen';
       if (this.currentShowControlCodes) {
         this.unsupportedOps.add('viewOption:showControlCodes');
       }
@@ -631,6 +635,8 @@ export class CanvasKitLayerRenderer {
       this.currentResources = undefined;
       this.currentShowParagraphMarks = false;
       this.currentShowControlCodes = false;
+      this.currentRenderScale = 1;
+      this.currentRenderProfile = 'screen';
       this.lastRenderDurationMs = performance.now() - renderStartedAt;
       this.renderCount += 1;
     }
@@ -1119,13 +1125,18 @@ export class CanvasKitLayerRenderer {
       });
     }
     if (op.borderColor && (op.borderWidth ?? 0) > 0) {
-      const paint = this.makeStrokePaint(op.borderColor, op.borderWidth ?? 1);
-      canvas.drawRect(this.rect(op.bbox), paint);
+      const aligned = this.pixelAlignedHairlineRect(op.bbox, op.borderWidth ?? 1);
+      const paint = this.makeStrokePaint(op.borderColor, aligned?.strokeWidth ?? op.borderWidth ?? 1);
+      canvas.drawRect(this.rect(aligned?.bounds ?? op.bbox), paint);
       paint.delete?.();
     }
   }
 
   private renderRectangle(canvas: SkCanvas, op: LayerRectangleOp): void {
+    const hasTransform = op.transform?.rotation || op.transform?.horzFlip || op.transform?.vertFlip;
+    const aligned = !hasTransform && (op.cornerRadius ?? 0) === 0 && op.style?.strokeColor
+      ? this.pixelAlignedHairlineRect(op.bbox, op.style.strokeWidth ?? 1)
+      : null;
     this.drawStyledShape(canvas, op.bbox, op.style, (paint) => {
       const cornerRadius = op.cornerRadius ?? 0;
       if (cornerRadius > 0) {
@@ -1133,7 +1144,10 @@ export class CanvasKitLayerRenderer {
       } else {
         canvas.drawRect(this.rect(op.bbox), paint);
       }
-    }, op.gradient);
+    }, op.gradient, aligned ? {
+      strokeWidth: aligned.strokeWidth,
+      draw: (paint) => canvas.drawRect(this.rect(aligned.bounds), paint),
+    } : undefined);
   }
 
   private renderEllipse(canvas: SkCanvas, op: LayerEllipseOp): void {
@@ -1143,8 +1157,26 @@ export class CanvasKitLayerRenderer {
   }
 
   private renderLine(canvas: SkCanvas, op: LayerLineOp): void {
-    const paint = this.makeStrokePaint(op.style?.color ?? '#000000', op.style?.width ?? 1);
-    canvas.drawLine(op.x1, op.y1, op.x2, op.y2, paint);
+    const strokeWidth = op.style?.width ?? 1;
+    let x1 = op.x1;
+    let y1 = op.y1;
+    let x2 = op.x2;
+    let y2 = op.y2;
+    let width = strokeWidth;
+    const hasTransform = op.transform?.rotation || op.transform?.horzFlip || op.transform?.vertFlip;
+    const canSnap = !hasTransform
+      && (op.style?.lineType === undefined || op.style.lineType === 'single')
+      && (op.style?.startArrow === undefined || op.style.startArrow === 'none')
+      && (op.style?.endArrow === undefined || op.style.endArrow === 'none');
+    if (canSnap && x1 === x2) {
+      const aligned = this.pixelAlignedHairline(x1, strokeWidth);
+      if (aligned) { x1 = x2 = aligned.center; width = aligned.strokeWidth; }
+    } else if (canSnap && y1 === y2) {
+      const aligned = this.pixelAlignedHairline(y1, strokeWidth);
+      if (aligned) { y1 = y2 = aligned.center; width = aligned.strokeWidth; }
+    }
+    const paint = this.makeStrokePaint(op.style?.color ?? '#000000', width);
+    canvas.drawLine(x1, y1, x2, y2, paint);
     paint.delete?.();
   }
 
@@ -1724,7 +1756,7 @@ export class CanvasKitLayerRenderer {
     if (style.outlineType && style.outlineType !== 0) {
       this.unsupportedOps.add('textRun:outlineTextEffect');
     }
-    if (style.shadowType && style.shadowType !== 0) {
+    if (style.shadowType && style.shadowType !== 0 && style.shadowType !== 1) {
       this.unsupportedOps.add('textRun:shadowTextEffect');
     }
     if (style.emboss) {
@@ -1736,7 +1768,7 @@ export class CanvasKitLayerRenderer {
     if (style.shadeColor && style.shadeColor.toLowerCase() !== '#ffffff') {
       this.unsupportedOps.add('textRun:shadeTextEffect');
     }
-    if (style.ratio !== undefined && Math.abs(style.ratio - 1) > Number.EPSILON) {
+    if (style.ratio !== undefined && (!Number.isFinite(style.ratio) || style.ratio <= 0)) {
       this.unsupportedOps.add('textRun:ratioTextEffect');
     }
   }
@@ -1769,6 +1801,28 @@ export class CanvasKitLayerRenderer {
       });
       return;
     }
+    if (op.style?.shadowType === 1) {
+      const style = { ...op.style, shadowType: 0 };
+      const dx = style.shadowOffsetX ?? 0;
+      const dy = style.shadowOffsetY ?? 0;
+      const transform = op.placement?.runToPage;
+      const angle = (op.rotation ?? 0) * Math.PI / 180;
+      const a = transform?.a ?? Math.cos(angle);
+      const b = transform?.b ?? Math.sin(angle);
+      const c = transform?.c ?? -Math.sin(angle);
+      const d = transform?.d ?? Math.cos(angle);
+      canvas.save();
+      try {
+        canvas.translate(a * dx + c * dy, b * dx + d * dy);
+        this.renderTextRun(canvas, {
+          ...op, style: { ...style, color: style.shadowColor ?? '#000000' },
+        });
+      } finally {
+        canvas.restore();
+      }
+      this.renderTextRun(canvas, { ...op, style });
+      return;
+    }
     const replayText = op.displayText ?? op.text;
     const replayPositions = op.displayText !== undefined ? op.displayPositions : op.positions;
     if (!replayText) return;
@@ -1777,6 +1831,7 @@ export class CanvasKitLayerRenderer {
     const paintText = replayText.replaceAll(DISCRETIONARY_HYPHEN, '');
     if (!paintText) return;
     const style = op.style ?? {};
+    const ratio = Number.isFinite(style.ratio) && style.ratio! > 0 ? style.ratio! : 1;
     this.recordTextRunCoverageGaps(op);
     const paint = this.makeFillPaint(style.color ?? '#000000');
     const baseFontSize = style.fontSize ?? Math.max(1, op.bbox.height || 12);
@@ -1847,11 +1902,13 @@ export class CanvasKitLayerRenderer {
           fontFamily,
           style.bold === true,
           style.italic === true,
+          ratio,
         )) {
           this.unsupportedOps.add('textRun:scriptTextRequiresShaping');
         }
       } else {
         font = createOutlineSkiaFont(this.canvasKit, typeface, fontSize);
+        font.setScaleX?.(ratio);
         const adjustableFont = font as Font & {
           setEmbolden?: (enabled: boolean) => void;
           setSkewX?: (skew: number) => void;
@@ -1874,6 +1931,7 @@ export class CanvasKitLayerRenderer {
             && this.defaultTypeface !== null
             && typeface !== this.defaultTypeface) {
             const defaultFont = createOutlineSkiaFont(this.canvasKit, this.defaultTypeface, fontSize);
+            defaultFont.setScaleX?.(ratio);
             const adjustableDefault = defaultFont as Font & {
               setEmbolden?: (enabled: boolean) => void;
               setSkewX?: (skew: number) => void;
@@ -1890,6 +1948,7 @@ export class CanvasKitLayerRenderer {
             && typeface !== this.symbolFallbackTypeface
             && this.defaultTypeface !== this.symbolFallbackTypeface) {
             const symbolFont = createOutlineSkiaFont(this.canvasKit, this.symbolFallbackTypeface, fontSize);
+            symbolFont.setScaleX?.(ratio);
             const adjustableSymbol = symbolFont as Font & {
               setEmbolden?: (enabled: boolean) => void;
               setSkewX?: (skew: number) => void;
@@ -1945,6 +2004,7 @@ export class CanvasKitLayerRenderer {
                 oldHangulTypeface?.fontFamily ?? OLD_HANGUL_FONT_FAMILY,
                 style.bold === true,
                 style.italic === true,
+                ratio,
               )) {
                 hasMissingGlyph = true;
               }
@@ -1954,6 +2014,7 @@ export class CanvasKitLayerRenderer {
               const codePoint = codePoints[runStart].codePointAt(0) ?? 0;
               const displayNumber = String(codePoint - 0xF02B0);
               const boxSize = Math.max(1, fontSize * 0.72);
+              const boxWidth = boxSize * ratio;
               const boxX = originX + replayPositions![runStart];
               const boxY = originY + baselineShift - fontSize * 0.76;
               boxedPuaStrokePaint ??= this.makeStrokePaint(
@@ -1970,6 +2031,7 @@ export class CanvasKitLayerRenderer {
                 setSkewX?: (skew: number) => void;
               };
               const boxedUsesPrimary = !this.symbolFallbackTypeface && !this.defaultTypeface;
+              boxedPuaFont.setScaleX?.(ratio);
               boxedAdjustable.setEmbolden?.(boxedUsesPrimary ? styledTypeface.syntheticBold : style.bold === true);
               boxedAdjustable.setSkewX?.((boxedUsesPrimary ? styledTypeface.syntheticItalic : style.italic === true) ? -0.2 : 0);
               const numberGlyphIds = boxedPuaFont.getGlyphIDs(
@@ -1979,12 +2041,12 @@ export class CanvasKitLayerRenderer {
               const numberWidth = (boxedPuaFont.getGlyphWidths(numberGlyphIds) ?? [])
                 .reduce((sum, width) => sum + width, 0);
               canvas.drawRect(
-                this.canvasKit.XYWHRect(boxX, boxY, boxSize, boxSize),
+                this.canvasKit.XYWHRect(boxX, boxY, boxWidth, boxSize),
                 boxedPuaStrokePaint,
               );
               canvas.drawText(
                 displayNumber,
-                boxX + (boxSize - numberWidth) / 2,
+                boxX + (boxWidth - numberWidth) / 2,
                 boxY + boxSize * 0.72,
                 paint,
                 boxedPuaFont,
@@ -2031,6 +2093,10 @@ export class CanvasKitLayerRenderer {
   }
 
   private renderCharOverlap(canvas: SkCanvas, op: LayerCharOverlapOp): void {
+    if (op.style?.shadowType) this.unsupportedOps.add('textRun:shadowTextEffect');
+    if (op.style?.ratio !== undefined && op.style.ratio !== 1) {
+      this.unsupportedOps.add('textRun:ratioTextEffect');
+    }
     if (typeof op.text !== 'string' || !op.charOverlap || !Array.isArray(op.positions)) {
       this.unsupportedOps.add('charOverlap:invalidGeometry');
       return;
@@ -2628,6 +2694,7 @@ export class CanvasKitLayerRenderer {
     fontFamily: string | null,
     bold: boolean,
     italic: boolean,
+    ratio = 1,
   ): boolean {
     if (!fontManager) return false;
     const textStyle = {
@@ -2652,7 +2719,14 @@ export class CanvasKitLayerRenderer {
       const paragraph = builder.build();
       try {
         paragraph.layout(CanvasKitLayerRenderer.MAX_SHAPED_TEXT_WIDTH);
-        canvas.drawParagraph(paragraph, originX, originY - fontSize + baselineShift);
+        canvas.save();
+        try {
+          canvas.translate(originX, originY - fontSize + baselineShift);
+          canvas.scale(ratio, 1);
+          canvas.drawParagraph(paragraph, 0, 0);
+        } finally {
+          canvas.restore();
+        }
         return true;
       } finally {
         paragraph.delete?.();
@@ -2867,10 +2941,10 @@ export class CanvasKitLayerRenderer {
         return child(layout.kind.numer)
           && this.drawEquationLine(
             canvas,
-            x + fontSize * 0.05,
+            x + (layout.kind.barInset ?? fontSize * 0.05),
             // canonical fraction_line_y: 분자 높이 + padding + 선 두께/2.
             y + layout.kind.numer.height + fontSize * (0.2 + 0.04 / 2),
-            x + layout.width - fontSize * 0.05,
+            x + layout.width - (layout.kind.barInset ?? fontSize * 0.05),
             y + layout.kind.numer.height + fontSize * (0.2 + 0.04 / 2),
             color,
             fontSize * 0.04,
@@ -3354,6 +3428,7 @@ export class CanvasKitLayerRenderer {
     style: LayerShapeStyle | undefined,
     draw: (paint: SkPaint) => void,
     gradient?: LayerGradientFill,
+    strokeOverride?: { strokeWidth: number; draw: (paint: SkPaint) => void },
   ): void {
     const gradientDrawn = gradient
       ? this.drawShapeGradient(canvas, bounds, gradient, style?.opacity ?? 1, draw)
@@ -3364,8 +3439,8 @@ export class CanvasKitLayerRenderer {
       paint.delete?.();
     }
     if (style?.strokeColor && (style.strokeWidth ?? 0) > 0) {
-      const paint = this.makeStrokePaint(style.strokeColor, style.strokeWidth ?? 1, style.opacity);
-      draw(paint);
+      const paint = this.makeStrokePaint(style.strokeColor, strokeOverride?.strokeWidth ?? style.strokeWidth ?? 1, style.opacity);
+      (strokeOverride?.draw ?? draw)(paint);
       paint.delete?.();
     }
     if (!style && !gradient) {
@@ -3373,6 +3448,31 @@ export class CanvasKitLayerRenderer {
       draw(paint);
       paint.delete?.();
     }
+  }
+
+  private pixelAlignedHairline(position: number, strokeWidth: number): { center: number; strokeWidth: number } | null {
+    const scale = this.currentRenderScale;
+    if (this.currentRenderProfile !== 'screen' && this.currentRenderProfile !== 'fastPreview') return null;
+    if (![position, strokeWidth, scale].every(Number.isFinite)
+      || strokeWidth <= 0 || scale <= 0 || strokeWidth * scale > 1 + 1e-9) return null;
+    return { center: (Math.round(position * scale) + 0.5) / scale, strokeWidth: 1 / scale };
+  }
+
+  private pixelAlignedHairlineRect(
+    bounds: LayerBounds,
+    strokeWidth: number,
+  ): { bounds: LayerBounds; strokeWidth: number } | null {
+    const scale = this.currentRenderScale;
+    if (bounds.width * scale < 2 || bounds.height * scale < 2) return null;
+    const left = this.pixelAlignedHairline(bounds.x, strokeWidth);
+    const top = this.pixelAlignedHairline(bounds.y, strokeWidth);
+    const right = this.pixelAlignedHairline(bounds.x + bounds.width, strokeWidth);
+    const bottom = this.pixelAlignedHairline(bounds.y + bounds.height, strokeWidth);
+    if (!left || !top || !right || !bottom) return null;
+    return {
+      bounds: { x: left.center, y: top.center, width: right.center - left.center, height: bottom.center - top.center },
+      strokeWidth: left.strokeWidth,
+    };
   }
 
   private drawStyledPath(

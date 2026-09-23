@@ -151,7 +151,11 @@ fn render_box(
             ctx.set_fill_style_str(color);
             draw_text(ctx, name, x, y + lb.baseline, fi, false, false, font_family);
         }
-        LayoutKind::Fraction { numer, denom } => {
+        LayoutKind::Fraction {
+            numer,
+            denom,
+            bar_inset,
+        } => {
             render_box(ctx, numer, x, y, color, fs, italic, bold, font_family);
             // 분수선 — baseline에서 axis_height 위에 배치 (SVG 경로와 동일)
             let line_y = y + super::layout::fraction_line_y(numer, fs);
@@ -159,8 +163,8 @@ fn render_box(
             ctx.set_stroke_style_str(color);
             ctx.set_line_width(line_thick);
             ctx.begin_path();
-            ctx.move_to(x + fs * 0.05, line_y);
-            ctx.line_to(x + lb.width - fs * 0.05, line_y);
+            ctx.move_to(x + bar_inset, line_y);
+            ctx.line_to(x + lb.width - bar_inset, line_y);
             ctx.stroke();
             render_box(ctx, denom, x, y, color, fs, italic, bold, font_family);
         }
