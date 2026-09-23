@@ -22,7 +22,7 @@ export const scenarios = [
 export type Scenario = (typeof scenarios)[number];
 
 /** Implements the actual UI contract: new bridge methods produce a type error here. */
-export function createMockBridge(report: (message: string) => void) {
+export function createMockBridge(report: (message: string) => void, onApproved?: () => void) {
   const data = createFixtures();
   const liveUsage = new URLSearchParams(location.search).get('usage') === 'live';
   if (liveUsage) {
@@ -66,6 +66,8 @@ export function createMockBridge(report: (message: string) => void) {
   let question: T.UserQuestionInteraction | null = null;
   let activeTemplate: T.DocumentTemplate | null = null;
   let changes: T.PendingChangeSet[] = [];
+  const changeEvents: T.PendingEditsChangeEvent['type'][] = [];
+  const fullReview = new URLSearchParams(location.search).get('review') === 'full';
   const references: T.ReferenceFile[] = [
     {
       id: 'reference-sample',
@@ -182,6 +184,8 @@ export function createMockBridge(report: (message: string) => void) {
       },
       approve: (id) => {
         changes = changes.filter((change) => change.id !== id);
+        onApproved?.();
+        changeEvents.push('approved');
         pendingListeners.forEach((listener) =>
           listener({ type: 'approved', changeSetId: id }),
         );
@@ -190,6 +194,7 @@ export function createMockBridge(report: (message: string) => void) {
       },
       reject: (id) => {
         changes = changes.filter((change) => change.id !== id);
+        changeEvents.push('rejected');
         pendingListeners.forEach((listener) =>
           listener({ type: 'rejected', changeSetId: id }),
         );
@@ -1145,36 +1150,39 @@ export function createMockBridge(report: (message: string) => void) {
     });
   }
   function addReview() {
-    if (permission === 'unrestricted') {
-      report('Sample document changes applied with full access');
-      return;
-    }
+    const range = (paragraph: number): T.DocRange => ({
+      sectionIdx: 0, startParaIdx: paragraph, startCharOffset: 0,
+      endParaIdx: paragraph, endCharOffset: 23,
+    });
+    const ops: T.PendingOp[] = fullReview ? [
+      {
+        kind: 'replace', id: crypto.randomUUID(), agent, range: range(0),
+        deletedText: '이번 사업은 업무 효율을 높이는 것을 목표로 합니다.',
+        text: '이번 사업은 지역 소상공인의 주문과 예약 업무를 줄이는 것을 목표로 합니다.',
+        charShapeId: null, paraShapeIds: [], snapshotId: null,
+      },
+      { kind: 'insert', id: crypto.randomUUID(), agent, range: range(2),
+        text: '현장 인터뷰 결과를 실행 계획에 반영합니다.' },
+      { kind: 'delete', id: crypto.randomUUID(), agent, range: range(4),
+        text: '시범 운영은 3월 첫째 주에 시작합니다.' },
+    ] : [
+      { kind: 'insert', id: crypto.randomUUID(), agent, range: range(0),
+        text: '이번 사업은 업무 효율을 높이는 것을 목표로 합니다.' },
+    ];
     changes = [
       {
         id: crypto.randomUUID(),
         agent,
         status: 'awaiting-review',
         createdAt: Date.now(),
-        ops: [
-          {
-            kind: 'insert',
-            id: crypto.randomUUID(),
-            agent,
-            range: {
-              sectionIdx: 0,
-              startParaIdx: 0,
-              startCharOffset: 0,
-              endParaIdx: 0,
-              endCharOffset: 23,
-            },
-            text: '이번 사업은 업무 효율을 높이는 것을 목표로 합니다.',
-          },
-        ],
+        ops,
       },
     ];
+    changeEvents.push('set-finalized');
     pendingListeners.forEach((listener) =>
       listener({ type: 'set-finalized', changeSetId: changes[0].id }),
     );
+    if (permission === 'unrestricted') bridge.pendingEdits.approve(changes[0].id);
   }
   function setServices(configured: boolean) {
     for (const provider of agents) {
@@ -1226,6 +1234,7 @@ export function createMockBridge(report: (message: string) => void) {
       running,
       workflow,
       pendingChanges: changes.length,
+      changeEvents: [...changeEvents],
       references: references.length,
       account: data.account.state,
       browserbase: browserbaseState,

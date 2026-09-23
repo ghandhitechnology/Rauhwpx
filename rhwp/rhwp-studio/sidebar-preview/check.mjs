@@ -12,6 +12,7 @@ import { checkSetupTerminal } from './setup-terminal.check.mjs';
 import { checkFleetPreview } from './fleet.check.mjs';
 import { checkCloudRecovery } from './cloud-recovery.check.mjs';
 import { checkCloudStream } from './cloud-stream.check.mjs';
+import { checkChangesPreview } from './changes.check.mjs';
 import { browserLaunchArgs } from '../tests/browser-support.ts';
 
 const studio = resolve(import.meta.dirname, '..');
@@ -431,6 +432,8 @@ try {
     assert.deepEqual(await visible(), []);
   });
   await step('Compact live subagent previews', () => checkFleetPreview(page, origin));
+  await step('Full-screen changes, history, commit, discard, and review',
+    () => checkChangesPreview(page, origin, artifacts));
   await step('Subagent fleet, failure, and offline recovery', async () => {
     await play('fleet');
     await page.waitForSelector('.ag-fleet-slot:not([hidden]) .ag-fleet-toggle');

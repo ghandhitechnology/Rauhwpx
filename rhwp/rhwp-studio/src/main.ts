@@ -1277,6 +1277,15 @@ async function initialize(): Promise<void> {
             committed: commitEditorSettingsRuntime,
           },
           versionController,
+          getAgentUndoEntry: () => inputHandler?.getAgentUndoEntry() ?? null,
+          undoAgentTurn: (entry) => inputHandler?.undoAgentTurn(entry) ?? false,
+          navigateToChange: (position, anchor) => {
+            if (!inputHandler) return;
+            if (anchor && position.cellIndex === undefined) {
+              position = { ...position, cursorRect: { ...anchor } };
+            }
+            inputHandler.moveCursorTo(position);
+          },
           openClassicVersionControl: () => openClassicDocumentHistory(commandServices),
           getDocumentContext: () => {
             const documentName = wasm.pageCount > 0 ? wasm.fileName : null;

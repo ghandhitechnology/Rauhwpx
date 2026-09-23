@@ -908,7 +908,7 @@ export class PendingEditManager {
     this.discardReplaceSnapshots([...kept, ...dropped]);
     this.removeSet(set);
     this.syncOverlay();
-    if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)` });
+    if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)`, changeSetId, droppedOpIds: dropped.map((op) => op.id) });
     this.emitChange({ type: 'approved', changeSetId });
     return true;
   }
@@ -931,7 +931,7 @@ export class PendingEditManager {
       this.discardReplaceSnapshots([...kept, ...dropped]);
       this.removeSet(set);
       this.syncOverlay();
-      if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)` });
+      if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)`, changeSetId, droppedOpIds: dropped.map((op) => op.id) });
       this.emitChange({ type: 'rejected', changeSetId });
     } finally {
       this.selfMutating--;
