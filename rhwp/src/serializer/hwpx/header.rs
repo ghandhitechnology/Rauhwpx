@@ -1189,9 +1189,9 @@ fn write_para_pr<W: Write>(
 /// paraPr 의 margin + lineSpacing 을 한컴 원본과 동일하게 `<hp:switch>` 구조로 쓴다.
 ///
 /// `parse_para_shape_switch` 의 정확한 역. 파서는 HwpUnitChar `case` 값을 ×2 하여
-/// IR 에 적재하므로(`stored = case × 2`), 역으로:
+/// IR 에 적재하므로(`stored = case × 2`, `unit="CHAR"` 이면 +1), 역으로:
 ///   - `default` 값 = IR 저장값 (`ps.indent` 등)
-///   - `case`(HwpUnitChar) 값 = 저장값 / 2 (margin),
+///   - `case`(HwpUnitChar) 값 = 저장값 / 2 (margin), 홀수면 `unit="CHAR"`
 ///     lineSpacing 은 PERCENT=저장값, 그 외(Fixed/SpaceOnly/Minimum)=저장값/2
 fn write_para_margin_switch<W: Write>(
     w: &mut Writer<W>,
@@ -1263,7 +1263,7 @@ fn write_para_line_spacing<W: Write>(
 /// margin 자식(`<hc:intent value="…" unit="HWPUNIT"/>`). 한컴 원본 속성 순서는
 /// value, unit 이며 네임스페이스는 `hc:` 다.
 ///
-/// [#6875]
+/// 한컴은 홀수 저장값의 case 절반을 `unit="CHAR"` 로 표시한다. [#6875]
 fn write_margin_child<W: Write>(
     w: &mut Writer<W>,
     name: &str,

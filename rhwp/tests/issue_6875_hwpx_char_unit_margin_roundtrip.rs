@@ -1,6 +1,8 @@
-//! [#6875]
+//! [#6875] HWPX 문단 여백의 홀수 자리를 `unit="CHAR"` 로 보존한다.
 //!
 //! 업스트림 [edwardkim/rhwp#7319](https://github.com/edwardkim/rhwp/pull/7319).
+//! `samples/issue5714/…vietnam_labor_report.hwp` 는 이 저장소에 없다.
+//! Fixture 는 `samples/basic/Textmail.hwp` (홀수 여백 2, 홀수 간격 2).
 
 #![cfg(not(target_arch = "wasm32"))]
 
