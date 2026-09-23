@@ -936,7 +936,7 @@ test('result resolution replaces unchanged origins and preserves conflicts', asy
     originalPath,
     originalDigest: sha256Hex(original),
     action: 'replace',
-    platform: 'linux',
+    platform: process.platform,
   });
   assert.equal(replaced.action, 'replace');
   assert.deepEqual(await readFile(originalPath), cloud);
@@ -950,7 +950,7 @@ test('result resolution replaces unchanged origins and preserves conflicts', asy
     originalPath,
     originalDigest: sha256Hex(original),
     action: 'replace',
-    platform: 'linux',
+    platform: process.platform,
   });
   assert.equal(retriedReplace.action, 'replace');
   assert.equal(retriedReplace.conflict, false, 'a crash retry recognizes the already-applied result');
@@ -965,7 +965,7 @@ test('result resolution replaces unchanged origins and preserves conflicts', asy
     originalDigest: sha256Hex(cloud),
     action: 'replace',
     resolutionId: 'handoff-conflict-crash',
-    platform: 'linux',
+    platform: process.platform,
     now: new Date('2026-08-23T10:11:12.000Z'),
   });
   assert.equal(preserved.action, 'keep-both');
@@ -980,7 +980,7 @@ test('result resolution replaces unchanged origins and preserves conflicts', asy
     originalDigest: sha256Hex(cloud),
     action: 'replace',
     resolutionId: 'handoff-conflict-crash',
-    platform: 'linux',
+    platform: process.platform,
     now: new Date('2027-01-01T00:00:00.000Z'),
   });
   assert.equal(retriedPreserved.path, preserved.path, 'a crash retry reuses the preserved copy');
@@ -995,7 +995,7 @@ test('result resolution replaces unchanged origins and preserves conflicts', asy
     originalPath,
     originalDigest: sha256Hex(original),
     action: 'discard',
-    platform: 'linux',
+    platform: process.platform,
   });
   assert.deepEqual(await readFile(discardedRecovery), cloud, 'discard cleanup follows the durable receipt too');
 

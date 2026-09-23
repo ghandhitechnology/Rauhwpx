@@ -2,7 +2,6 @@ import { checkCloudMergeRecovery } from './cloud-merge-recovery.check.mjs';
 import { checkCloudSetup } from './cloud-setup.check.mjs';
 import { checkCliTerminalDefaults } from './cli-terminal-defaults.check.mjs';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -12,19 +11,11 @@ import { checkSetupTerminal } from './setup-terminal.check.mjs';
 import { checkFleetPreview } from './fleet.check.mjs';
 import { checkCloudRecovery } from './cloud-recovery.check.mjs';
 import { checkCloudStream } from './cloud-stream.check.mjs';
-import { browserLaunchArgs } from '../tests/browser-support.ts';
+import { browserLaunchArgs, findBrowserExecutable } from '../tests/browser-support.ts';
 
 const studio = resolve(import.meta.dirname, '..');
 const artifacts = resolve(import.meta.dirname, 'artifacts');
-const executablePath = [
-  process.env.CHROME_PATH,
-  process.env.PUPPETEER_EXECUTABLE_PATH,
-  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  '/usr/bin/google-chrome',
-  '/usr/bin/google-chrome-stable',
-  '/usr/bin/chromium',
-  '/usr/bin/chromium-browser',
-].find((path) => path && existsSync(path));
+const executablePath = findBrowserExecutable();
 assert(executablePath, 'Set CHROME_PATH to a Chrome/Chromium executable.');
 await mkdir(artifacts, { recursive: true });
 const sampleFile = resolve(artifacts, 'sample.txt');

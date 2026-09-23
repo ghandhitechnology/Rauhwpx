@@ -1,6 +1,9 @@
 import spawn from 'cross-spawn';
 import { win32 } from 'node:path';
 
+/** taskkill's exit code when the targeted PID no longer exists. */
+const WINDOWS_TASKKILL_NOT_FOUND = 128;
+
 const activeTerminations = new WeakMap();
 const completedTerminations = new WeakMap();
 
@@ -298,7 +301,9 @@ export function terminateProcessTree(child, {
 
   let initialTaskkillSettled = false;
   let initialTaskkillSucceeded = false;
+  let initialTaskkillNotFound = false;
   let leaderExited = child.exitCode != null || child.signalCode != null;
+  let leaderClosed = false;
   const groupAlive = () => {
     try {
       return (processGroupAlive
@@ -314,9 +319,19 @@ export function terminateProcessTree(child, {
       finish(true);
       return;
     }
+    if (!initialTaskkillSettled) return;
+    // A CLI that finishes its turn and exits on its own races the taskkill
+    // issued while it was live; taskkill then reports "not found" (128). That
+    // alone is not proof, but once the leader's `close` event fires every
+    // stdio pipe it handed to descendants has been released, so no owned
+    // descendant that inherited them can still be running.
+    if (initialTaskkillNotFound) {
+      if (leaderClosed) finish(true);
+      return;
+    }
     // Once the leader exits, its numeric PID can be recycled. Wait only for
     // the single taskkill command started while the leader was known live.
-    if (initialTaskkillSettled) finish(null);
+    finish(null);
   };
   const noteLeaderExit = () => {
     leaderExited = true;
@@ -330,29 +345,33 @@ export function terminateProcessTree(child, {
   };
   if (pid !== null) {
     child.once?.('exit', noteLeaderExit);
-    child.once?.('close', noteLeaderExit);
+    child.once?.('close', () => {
+      leaderClosed = true;
+      noteLeaderExit();
+    });
   }
   const watchTaskkill = (proc, onResult) => {
     if (!proc?.once) {
-      onResult(false);
+      onResult(false, null);
       return;
     }
     let commandSettled = false;
-    const commandFinished = (succeeded) => {
+    const commandFinished = (code) => {
       if (commandSettled) return;
       commandSettled = true;
-      onResult(succeeded);
+      onResult(code === 0, code);
     };
-    proc.once('error', () => commandFinished(false));
-    proc.once('exit', (code) => commandFinished(code === 0));
-    proc.once('close', (code) => commandFinished(code === 0));
+    proc.once('error', () => commandFinished(null));
+    proc.once('exit', (code) => commandFinished(code));
+    proc.once('close', (code) => commandFinished(code));
   };
 
   const initialSignal = signal('SIGTERM');
   if (platform === 'win32') {
-    watchTaskkill(initialSignal, (succeeded) => {
+    watchTaskkill(initialSignal, (succeeded, code) => {
       initialTaskkillSettled = true;
       initialTaskkillSucceeded ||= succeeded;
+      initialTaskkillNotFound = code === WINDOWS_TASKKILL_NOT_FOUND;
       settleExitedWindowsLeader();
     });
   } else if (pid !== null && leaderExited && !groupAlive()) {

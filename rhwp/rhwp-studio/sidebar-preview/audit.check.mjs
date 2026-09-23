@@ -1,15 +1,14 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createServer } from 'vite';
 import puppeteer from 'puppeteer-core';
 import { auditScenarios } from '../src/sidebar-preview/audit-scenarios.ts';
+import { findBrowserExecutable } from '../tests/browser-support.ts';
 
 const studio = resolve(import.meta.dirname, '..');
 const artifacts = resolve(import.meta.dirname, 'artifacts');
-const executablePath = [process.env.CHROME_PATH, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((path) => path && existsSync(path));
+const executablePath = findBrowserExecutable();
 assert(executablePath, 'Set CHROME_PATH to Chrome/Chromium.');
 await mkdir(artifacts, { recursive: true });
 const server = await createServer({ configFile: resolve(studio, 'vite.sidebar.config.ts'),

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -214,7 +215,12 @@ test('a definite installer failure is reported without recovery or replay', asyn
   assert.equal(existingCalls, 1, 'only the normal preinstall compatibility check runs');
 });
 
-test('generated recovery commands are valid shell and cache one pairing receipt per request', () => {
+// The recovery commands run on the Linux/macOS server side; on Windows hosts
+// they are only syntax-checked when a bash is installed.
+const bashForSyntaxCheck = existsSync('/bin/bash') ? '/bin/bash' : process.platform === 'win32' ? 'bash' : null;
+const bashAvailable = bashForSyntaxCheck !== null && spawnSync(bashForSyntaxCheck, ['-c', 'true']).status === 0;
+
+test('generated recovery commands are valid shell and cache one pairing receipt per request', { skip: !bashAvailable && 'bash is unavailable' }, () => {
   const requestId = 'a'.repeat(32);
   const commands = [
     provisionerTest.existingInstallRemoteCommand({
@@ -227,7 +233,7 @@ test('generated recovery commands are valid shell and cache one pairing receipt 
   ];
 
   for (const command of commands) {
-    const checked = spawnSync('/bin/bash', ['-n', '-c', command], { encoding: 'utf8' });
+    const checked = spawnSync(bashForSyntaxCheck, ['-n', '-c', command], { encoding: 'utf8' });
     assert.equal(checked.status, 0, checked.stderr);
     assert.match(command, new RegExp(`${requestId}\\.receipt`));
     assert.ok(command.indexOf('test -s "$RECEIPT_FILE"') < command.indexOf('pairing create'));
