@@ -1301,32 +1301,42 @@ fn parse_para_shape_switch(
                         b"margin" | b"intent" | b"left" | b"right" | b"prev" | b"next" => {
                             // margin 하위 요소들: <left value="..." />, <prev value="..." /> 등
                             let tag_name = local;
+                            // [#6875] HwpUnitChar case 의 unit="CHAR" 는 저장값이 홀수여서
+                            // 절반이 정수로 안 떨어진다는 표시다. value 와 같은 패스에서 읽는다.
+                            let mut val = None;
+                            let mut char_unit = false;
                             for attr in ce.attributes().flatten() {
-                                if attr.key.as_ref() == b"value" {
-                                    let val = parse_i32(&attr);
-                                    if in_hwpunitchar_case {
-                                        // XML <1.4 already uses doubled margin units,
-                                        // even inside an HwpUnitChar case. Newer
-                                        // packages use effective HWPUNIT values.
-                                        let val2x = margin_units.case_value_to_ir(val);
-                                        match tag_name {
-                                            b"left" => ps.margin_left = val2x,
-                                            b"right" => ps.margin_right = val2x,
-                                            b"intent" => ps.indent = val2x,
-                                            b"prev" => ps.spacing_before = val2x,
-                                            b"next" => ps.spacing_after = val2x,
-                                            _ => {}
-                                        }
-                                        found_case = true;
-                                    } else if in_default {
-                                        match tag_name {
-                                            b"left" => def_margin_left = Some(val),
-                                            b"right" => def_margin_right = Some(val),
-                                            b"intent" => def_indent = Some(val),
-                                            b"prev" => def_prev = Some(val),
-                                            b"next" => def_next = Some(val),
-                                            _ => {}
-                                        }
+                                match attr.key.as_ref() {
+                                    b"value" => val = Some(parse_i32(&attr)),
+                                    b"unit" => char_unit = attr_str(&attr) == "CHAR",
+                                    _ => {}
+                                }
+                            }
+                            if let Some(val) = val {
+                                if in_hwpunitchar_case {
+                                    // XML <1.4 already uses doubled margin units,
+                                    // even inside an HwpUnitChar case. Newer
+                                    // packages use effective HWPUNIT values.
+                                    let val2x = margin_units
+                                        .case_value_to_ir(val)
+                                        .saturating_add(i32::from(char_unit));
+                                    match tag_name {
+                                        b"left" => ps.margin_left = val2x,
+                                        b"right" => ps.margin_right = val2x,
+                                        b"intent" => ps.indent = val2x,
+                                        b"prev" => ps.spacing_before = val2x,
+                                        b"next" => ps.spacing_after = val2x,
+                                        _ => {}
+                                    }
+                                    found_case = true;
+                                } else if in_default {
+                                    match tag_name {
+                                        b"left" => def_margin_left = Some(val),
+                                        b"right" => def_margin_right = Some(val),
+                                        b"intent" => def_indent = Some(val),
+                                        b"prev" => def_prev = Some(val),
+                                        b"next" => def_next = Some(val),
+                                        _ => {}
                                     }
                                 }
                             }
