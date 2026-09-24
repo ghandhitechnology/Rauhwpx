@@ -216,12 +216,13 @@ test('표 줄/칸 추가·지우기 대표 메뉴에 한컴 단축키를 표시�
   assert.match(table, /id: 'table:insert-row-col'[\s\S]*?dialog\.afterClose = \(\) => restoreEditorFocus\(ih\)/);
   assert.match(table, /id: 'table:delete-row-col'[\s\S]*?dialog\.afterClose = \(\) => restoreEditorFocus\(ih\)/);
 
-  assert.doesNotMatch(html, /data-cmd="table:insert-row-above"/);
-  assert.doesNotMatch(html, /data-cmd="table:insert-row-below"/);
-  assert.doesNotMatch(html, /data-cmd="table:insert-col-left"/);
-  assert.doesNotMatch(html, /data-cmd="table:insert-col-right"/);
-  assert.doesNotMatch(html, /data-cmd="table:delete-row"/);
-  assert.doesNotMatch(html, /data-cmd="table:delete-col"/);
+  // 메뉴 막대는 대표 항목만 둔다. 리본의 표 드롭다운은 개별 명령을 직접 연다.
+  assert.doesNotMatch(html, /class="md-item[^"]*" data-cmd="table:insert-row-above"/);
+  assert.doesNotMatch(html, /class="md-item[^"]*" data-cmd="table:insert-row-below"/);
+  assert.doesNotMatch(html, /class="md-item[^"]*" data-cmd="table:insert-col-left"/);
+  assert.doesNotMatch(html, /class="md-item[^"]*" data-cmd="table:insert-col-right"/);
+  assert.doesNotMatch(html, /class="md-item[^"]*" data-cmd="table:delete-row"/);
+  assert.doesNotMatch(html, /class="md-item[^"]*" data-cmd="table:delete-col"/);
   assert.doesNotMatch(inputHandler, /commandId: 'table:insert-row-above'/);
   assert.doesNotMatch(inputHandler, /commandId: 'table:insert-row-below'/);
   assert.doesNotMatch(inputHandler, /commandId: 'table:insert-col-left'/);
