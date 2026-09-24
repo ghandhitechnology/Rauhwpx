@@ -55,3 +55,4 @@ index 9c9dc623..de7c50ab 100644
 +        }
          let col_count = table.col_count;
          let total: u32 = table.get_column_widths().iter().sum();
+ 

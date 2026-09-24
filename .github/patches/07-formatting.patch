@@ -189,3 +189,4 @@ index f05e9588..6660c3a5 100644
 +        self.rebuild_section_deferred_in_batch(sec_idx);
          Ok("{\"ok\":true}".to_string())
      }
+ 
