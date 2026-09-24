@@ -1569,7 +1569,11 @@ impl HeightMeasurer {
                                     || matches!(c, Control::Shape(sh) if !sh.common().treat_as_char)
                             })
                     });
+                    // 같은 셀에 TopAndBottom 그림을 세로로 쌓은 RowBreak TAC는
+                    // 저장 ladder가 한 줄만 담아 `stored_extent`가 합산보다 작다.
+                    // 그 경우 trust는 중간 행 높이를 다시 훔친다 (#7333 p37/p38).
                     let trust_stored = (depth > 0 || table.common.treat_as_char)
+                        && stacked_stored_picture_h == 0.0
                         && non_inline_h > 0.0
                         && ladder_absorbed_objects
                         && stored_extent > 0.0

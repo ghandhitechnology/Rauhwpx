@@ -147,13 +147,45 @@ fn stored_empty_full_band_tac_table_top(
         .then(|| col_area.y + stored_y + hwpunit_to_px(table.outer_margin_top as i32, dpi))
 }
 
+/// 글앞 장식과 TAC 표가 같은 저장 vpos를 공유하면 장식 줄은 표를 아래로
+/// 밀면 안 된다. 빈 host 줄이 먼저 진행한 y_offset 대신 저장 줄 원점+om.top을
+/// 쓴다 (#7333 p13).
+fn stored_in_front_decoration_shared_vpos_tac_top(
+    para: &Paragraph,
+    control_index: usize,
+    table: &crate::model::table::Table,
+    col_area: &LayoutRect,
+    dpi: f64,
+) -> Option<f64> {
+    if !para.text.trim().is_empty()
+        || !table.common.treat_as_char
+        || !matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+        || !tac_has_only_in_front_decoration_shapes_before(para, control_index)
+    {
+        return None;
+    }
+    let first = para.line_segs.first()?;
+    let owned = para
+        .line_segs
+        .get(control_line_seg_index(para, control_index)?)?;
+    if owned.vertical_pos != first.vertical_pos
+        || owned.line_height < signed_hwpunit(table.common.height)
+    {
+        return None;
+    }
+    let stored_y = hwpunit_to_px(owned.vertical_pos, dpi);
+    (stored_y <= col_area.height + 60.0)
+        .then(|| col_area.y + stored_y + hwpunit_to_px(table.outer_margin_top as i32, dpi))
+}
+
 /// 빈 host의 full-band TAC 표가 표 paint frame과 다음 문단의 시작을 같은 저장
 /// `LINE_SEG`에 기록한 경우, 표 뒤 흐름의 하한을 복원한다.
 fn stored_empty_full_band_tac_table_flow_end(
     para: &Paragraph,
     control_index: usize,
     table: &crate::model::table::Table,
-    following: &Paragraph,
+    paragraphs: &[Paragraph],
+    para_index: usize,
     col_area: &LayoutRect,
     dpi: f64,
 ) -> Option<f64> {
@@ -170,7 +202,8 @@ fn stored_empty_full_band_tac_table_flow_end(
         .line_segs
         .get(control_line_seg_index(para, control_index)?)
         .filter(|line| line.tag & synth == 0)?;
-    let following = following
+    let immediate = paragraphs
+        .get(para_index + 1)?
         .line_segs
         .iter()
         .find(|line| line.tag & synth == 0)?;
@@ -184,13 +217,27 @@ fn stored_empty_full_band_tac_table_flow_end(
     let expected_next_vpos = i64::from(owner.vertical_pos)
         + i64::from(owner.text_height)
         + i64::from(owner.line_spacing);
-    if following.vertical_pos <= owner.vertical_pos
-        || (i64::from(following.vertical_pos) - expected_next_vpos).abs() > 8
+    if immediate.vertical_pos <= owner.vertical_pos
+        || (i64::from(immediate.vertical_pos) - expected_next_vpos).abs() > 8
     {
         return None;
     }
 
-    let stored_y = hwpunit_to_px(following.vertical_pos, dpi);
+    // 바로 다음 문단이 글앞/글뒤 overlay면 저장 사다리에는 줄이 있어도
+    // 본문 흐름은 소비하지 않는다. 첫 흐름 문단의 vpos가 실제 하한이다
+    // (#7333 p33: 453 overlay → 454 본문).
+    let flow_vpos = paragraphs
+        .iter()
+        .skip(para_index + 1)
+        .find(|next| !para_is_floating_overlay_anchor(next))
+        .and_then(|next| {
+            next.line_segs
+                .iter()
+                .find(|line| line.tag & synth == 0)
+                .map(|line| line.vertical_pos)
+        })
+        .unwrap_or(immediate.vertical_pos);
+    let stored_y = hwpunit_to_px(flow_vpos, dpi);
     (stored_y <= col_area.height + 60.0).then_some(col_area.y + stored_y)
 }
 
@@ -3288,13 +3335,37 @@ impl LayoutEngine {
                                 } else {
                                     *area
                                 };
+                                // HWP5 머리말은 Paper 좌표를 머리말 상자에 한정한다.
+                                // 같은 저장 grid leading이 확인된 혼합 footer도 Paper/Page
+                                // 원점을 꼬리말 상자(선행 포함)로 둔다. 페이지 용지를 원점으로
+                                // 두면 로고가 쪽 상단(y≈30)에 붙는다 (#7333).
+                                let picture_page_area = if !is_header
+                                    && stored_mixed_footer_leading > 0.0
+                                    && matches!(
+                                        pic.common.vert_rel_to,
+                                        VertRelTo::Paper | VertRelTo::Page
+                                    ) {
+                                    picture_area
+                                } else {
+                                    *body_area
+                                };
+                                let picture_paper_area = if !is_header
+                                    && stored_mixed_footer_leading > 0.0
+                                    && matches!(
+                                        pic.common.vert_rel_to,
+                                        VertRelTo::Paper | VertRelTo::Page
+                                    ) {
+                                    picture_area
+                                } else {
+                                    *paper_area
+                                };
                                 self.layout_header_footer_picture(
                                     tree,
                                     area_node,
                                     pic,
                                     &picture_area,
-                                    body_area,
-                                    paper_area,
+                                    &picture_page_area,
+                                    &picture_paper_area,
                                     y_offset,
                                     bin_data_content,
                                     outer_section_index,
@@ -6875,6 +6946,19 @@ impl LayoutEngine {
                                 composed.get(*para_index),
                                 self.dpi,
                             );
+                            // full-band TAC flow_end가 이미 overlay 다음 본문 vpos까지
+                            // 올려 둔 경우에는 같은 줄을 두 번 소비하지 않는다 (#7333 p33).
+                            let already_reserved = para.line_segs.first().is_some_and(|seg| {
+                                let stored_end = col_area.y
+                                    + hwpunit_to_px(
+                                        seg.vertical_pos + seg.line_height + seg.line_spacing,
+                                        self.dpi,
+                                    );
+                                y_offset + 0.5 >= stored_end
+                            });
+                            if already_reserved {
+                                return (y_offset, false);
+                            }
                             return (y_offset + advance, false);
                         }
                         return (y_offset, false);
@@ -7944,6 +8028,15 @@ impl LayoutEngine {
                 );
                 let table_y_start = if is_tac && inline_pos.is_none() {
                     stored_empty_full_band_tac_table_top(para, control_index, t, col_area, self.dpi)
+                        .or_else(|| {
+                            stored_in_front_decoration_shared_vpos_tac_top(
+                                para,
+                                control_index,
+                                t,
+                                col_area,
+                                self.dpi,
+                            )
+                        })
                         .unwrap_or(table_y_start)
                 } else {
                     table_y_start
@@ -8323,10 +8416,14 @@ impl LayoutEngine {
             y_offset += shift;
         }
         if let Some(existing_y) = para_start_y.get(&para_index) {
-            if tac_in_front_decoration_line_shift.is_none()
-                && is_current_tac
-                && y_offset > *existing_y + 1.0
-            {
+            // 글앞 장식과 표가 같은 저장 vpos를 공유하면 shift는 0이다. 그 경우에도
+            // 빈 host 줄이 먼저 진행한 y_offset으로 문단 원점을 덮으면 표가 장식
+            // 줄 아래로 밀린다 (#7333 p13).
+            let keep_in_front_decoration_origin = tac_in_front_decoration_line_shift.is_some()
+                || paragraphs.get(para_index).is_some_and(|para| {
+                    tac_has_only_in_front_decoration_shapes_before(para, control_index)
+                });
+            if !keep_in_front_decoration_origin && is_current_tac && y_offset > *existing_y + 1.0 {
                 para_start_y.insert(para_index, y_offset);
             }
         } else {
@@ -8685,6 +8782,11 @@ impl LayoutEngine {
                 let ps_id = comp
                     .map(|c| c.para_style_id as usize)
                     .unwrap_or(para.para_shape_id as usize);
+                let fixed_line_spacing_deduction_hu = if self.profile.get().native_hwp5_layout() {
+                    tac_in_front_decoration_fixed_line_spacing_deduction_hu(para, control_index)
+                } else {
+                    None
+                };
                 if let Some(ps) = styles.para_styles.get(ps_id) {
                     if ps.spacing_after > 0.0 {
                         y_offset += ps.spacing_after;
@@ -8711,12 +8813,10 @@ impl LayoutEngine {
                 // 음수 Fixed 줄간격도 누락된다. 표 paint와 outer margin은 위에서 이미
                 // 반영했으므로, 뒤 문단의 흐름에만 이 저장 간격을 더한다(#7333 p13,
                 // p16~21). 양수 간격 및 일반 가시 개체 조합은 기존 분기를 유지한다.
+                if let Some(deduction_hu) = fixed_line_spacing_deduction_hu {
+                    y_offset -= hwpunit_to_px(deduction_hu, self.dpi);
+                }
                 if self.profile.get().native_hwp5_layout() {
-                    if let Some(deduction_hu) =
-                        tac_in_front_decoration_fixed_line_spacing_deduction_hu(para, control_index)
-                    {
-                        y_offset -= hwpunit_to_px(deduction_hu, self.dpi);
-                    }
                     // Full-band 빈 TAC carrier는 표의 paint origin과 다음 문단 top을
                     // 같은 저장 LINE_SEG 사다리에 기록한다. 앞 InFrontOfText 장식이
                     // host_seg의 일반 후가산을 막아도, 이 정확한 등식이 성립하면
@@ -8726,18 +8826,15 @@ impl LayoutEngine {
                         para.controls
                             .get(control_index)
                             .and_then(|control| match control {
-                                Control::Table(table) => {
-                                    paragraphs.get(para_index + 1).and_then(|following| {
-                                        stored_empty_full_band_tac_table_flow_end(
-                                            para,
-                                            control_index,
-                                            table,
-                                            following,
-                                            col_area,
-                                            self.dpi,
-                                        )
-                                    })
-                                }
+                                Control::Table(table) => stored_empty_full_band_tac_table_flow_end(
+                                    para,
+                                    control_index,
+                                    table,
+                                    paragraphs,
+                                    para_index,
+                                    col_area,
+                                    self.dpi,
+                                ),
                                 _ => None,
                             })
                     {

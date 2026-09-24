@@ -243,7 +243,16 @@ impl RenderNode {
             RenderNodeType::TableCell(tc) => {
                 ("Cell", format!(",\"row\":{},\"col\":{}", tc.row, tc.col))
             }
-            RenderNodeType::Image(_) => ("Image", String::new()),
+            RenderNodeType::Image(img) => {
+                let mut extra = String::new();
+                if let Some(pi) = img.para_index {
+                    extra.push_str(&format!(",\"pi\":{pi}"));
+                }
+                if let Some(ci) = img.control_index {
+                    extra.push_str(&format!(",\"ci\":{ci}"));
+                }
+                ("Image", extra)
+            }
             RenderNodeType::TextBox => ("TextBox", String::new()),
             RenderNodeType::Equation(_) => ("Equation", String::new()),
             RenderNodeType::Line(_) => ("Line", String::new()),
