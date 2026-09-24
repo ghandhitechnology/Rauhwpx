@@ -7,6 +7,7 @@ on:
     paths:
       - .github/patches/**
       - .github/workflows/apply-issue-6639-patch.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -19,19 +20,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: chore/editing-experience-2026-09-24
-      - name: Apply product patch and remove applicator
+          fetch-depth: 0
+      - name: Apply product patch via Git Data API
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_BRANCH: chore/editing-experience-2026-09-24
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           if [ ! -f .github/patches/08-text_editing.patch ]; then
             echo "partial patch set; skip apply"
             exit 0
           fi
-          git config user.name "Andy"
-          git config user.email "heemang12bo@gmail.com"
           git apply .github/patches/0*.patch
-          python3 -c "from pathlib import Path; p=Path('rhwp/tests/issue_6639_cell_para_format_vpos.rs'); t=p.read_text(); p.write_text(t.replace('어귳난다','어긋난다'))"
-          git add rhwp
-          git rm -f .github/patches/issue-6639-vpos.patch.gz.b64 .github/patches/0*.patch .github/workflows/apply-issue-6639-patch.yml || true
-          git add -A .github/patches .github/workflows
-          git commit -m "fix: 셀 문단 줄 간격 변경 후 후속 문단 vpos를 재계산한다"
-          git push
+          python3 -c "from pathlib import Path; p=Path('rhwp/tests/issue_6639_cell_para_format_vpos.rs'); t=p.read_text(); p.write_text(t.replace('어귃난다','어긋난다'))"
+          git diff --stat
+          python3 .github/patches/commit_via_api.py
