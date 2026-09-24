@@ -563,6 +563,35 @@
   outline-offset: 2px;
 }
 
+/* 서버 선택 단계만 여백을 줄이고, 선택 행의 클릭 영역은 유지한다. */
+.ag-cloud-setup-overlay:not(.ag-cloud-setup-anchored) .ag-cloud-setup-dialog:has(.ag-cloud-setup-options) {
+  width: min(500px, 100%);
+}
+
+.ag-cloud-setup-dialog:has(.ag-cloud-setup-options) .ag-cloud-setup-header {
+  padding: 14px 20px 0;
+}
+
+.ag-cloud-setup-dialog:has(.ag-cloud-setup-options) .ag-cloud-setup-body {
+  gap: 12px;
+  padding: 8px 20px 18px;
+}
+
+.ag-cloud-setup-dialog:has(.ag-cloud-setup-options) .ag-cloud-setup-option {
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+
+.ag-cloud-setup-dialog:has(.ag-cloud-setup-options) .ag-cloud-setup-option-info {
+  width: 28px;
+  height: 28px;
+  margin-inline: 8px;
+}
+
+.ag-cloud-setup-dialog:has(.ag-cloud-setup-options) .ag-cloud-setup-footer {
+  padding: 10px 20px;
+}
+
 .ag-cloud-settings-card {
   display: grid;
   grid-template-columns: 112px minmax(0, 1fr) auto;
@@ -643,6 +672,13 @@
 
   .ag-cloud-setup-header,
   .ag-cloud-setup-body {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .ag-cloud-setup-dialog:has(.ag-cloud-setup-options) .ag-cloud-setup-header,
+  .ag-cloud-setup-dialog:has(.ag-cloud-setup-options) .ag-cloud-setup-body,
+  .ag-cloud-setup-dialog:has(.ag-cloud-setup-options) .ag-cloud-setup-footer {
     padding-right: 16px;
     padding-left: 16px;
   }
