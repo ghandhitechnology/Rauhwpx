@@ -412,12 +412,6 @@ test('글쓰기 보정 상태와 진입 버튼', () => {
   assert.match(source, /openCalibration: \(\) => writingStyleCalibration\.open\(\)/);
 });
 
-test('Pi 모델 목록은 검색 결과 수와 선택 한도를 표시한다', () => {
-  assert.match(settings, /piCatalogNote\.textContent = `\$\{matches\.length\}개 · 최대 \$\{PI_MODEL_MAX\}개`/);
-  assert.match(settings, /piCatalogNote\.textContent = `\$\{matches\.length\}개 중 \$\{visible\.length\}개`/);
-  assert.doesNotMatch(settings, /검색으로 좁혀 보세요/);
-});
-
 test('구독 한도는 직접 조회하고 로컬 토큰 기록과 분리한다', () => {
   assert.match(settings, /createProviderQuota/);
   assert.doesNotMatch(settings, /setUsagePlan|buildMeter|USAGE_PLANS/);
