@@ -656,6 +656,11 @@ function runExecutableTextReplay(op, {
     ?? Array.from({ length: Array.from(replayText).length }, (_, index) => index + 1);
 
   class FakeFont {
+    setEdging() {}
+    setHinting() {}
+    setEmbeddedBitmaps() {}
+    setLinearMetrics() {}
+    setSubpixel() {}
     constructor(typeface, size) {
       this.typeface = typeface;
       events.push({ type: 'font.create', face: typeface?.face ?? 'default', size });
@@ -755,6 +760,8 @@ function runExecutableTextReplay(op, {
   const symbolTypeface = symbolGlyphIds ? { face: 'symbol' } : null;
   const renderer = new CanvasKitLayerRendererRuntime({
     Font: FakeFont,
+    FontEdging: { AntiAlias: 1 },
+    FontHinting: { None: 0 },
     ParagraphStyle: FakeParagraphStyle,
     ParagraphBuilder: {
       Make(style, fontManager) {
@@ -810,6 +817,11 @@ function runExecutableTextSpecialReplay() {
     delete() { events.push({ type: 'paint.delete' }); }
   }
   class FakeFont {
+    setEdging() {}
+    setHinting() {}
+    setEmbeddedBitmaps() {}
+    setLinearMetrics() {}
+    setSubpixel() {}
     constructor(_typeface, size) { this.size = size; }
     getGlyphIDs(text) { return Uint16Array.from(Array.from(text), (_, index) => index + 1); }
     getGlyphWidths(ids) { return Array.from(ids, () => this.size * 0.5); }
@@ -818,6 +830,8 @@ function runExecutableTextSpecialReplay() {
   }
   const canvasKit = {
     Font: FakeFont,
+    FontEdging: { AntiAlias: 1 },
+    FontHinting: { None: 0 },
     Paint: FakePaint,
     PaintStyle: { Fill: 0, Stroke: 1 },
     StrokeCap: { Round: 0 },
@@ -1355,11 +1369,17 @@ function runExecutableFontNativeGlyphReplay() {
 function runExecutableEquationFallback() {
   const events = [];
   class FakeFont {
+    setEdging() {}
+    setHinting() {}
+    setEmbeddedBitmaps() {}
+    setLinearMetrics() {}
+    setSubpixel() {}
+    constructor(face) { events.push(`font.face:${face?.family}`); }
     getGlyphIDs(text) { return Uint16Array.from(Array.from(text), () => 1); }
     getGlyphWidths(glyphIds) { return Array.from(glyphIds, () => 8); }
     setScaleX(scale) { events.push(`font.scale:${scale}`); }
     setEmbolden() {}
-    setSkewX() {}
+    setSkewX(skew) { events.push(`font.skew:${skew}`); }
     delete() { events.push('font.delete'); }
   }
   class FakePaint {
@@ -1385,12 +1405,15 @@ function runExecutableEquationFallback() {
   }
   const renderer = new CanvasKitLayerRendererRuntime({
     Font: FakeFont,
+    FontEdging: { AntiAlias: 1 },
+    FontHinting: { None: 0 },
     Paint: FakePaint,
     PictureRecorder: FakePictureRecorder,
     PaintStyle: { Fill: 0, Stroke: 1 },
     Color: (r, g, b, a) => [r, g, b, a],
     XYWHRect: (x, y, width, height) => ({ x, y, width, height }),
   }, 'default', {}, {});
+  renderer.equationTypeface = { family: 'math' };
   const canvas = {
     drawPicture() { events.push('canvas.drawPicture'); },
   };
@@ -1417,6 +1440,10 @@ function runExecutableEquationFallback() {
   assert.equal(renderer.unsupportedOps.size, 0, 'invalid equation SVG should use the semantic layout fallback');
   assert.ok(events.includes('canvas.drawLine'));
   assert.equal(events.filter((event) => event === 'canvas.drawText').length, 2);
+  assert.equal(events.filter((event) => event === 'font.face:math').length, 2);
+  assert.ok(events.includes('font.skew:-0.2'), 'variables inherit equation italic');
+  assert.ok(events.includes('font.skew:0'), 'numbers remain upright');
+  assert.ok(!events.some(event => event.startsWith('font.scale:')), 'glyphs retain their natural width');
 
   renderer.renderEquation(canvas, {
     type: 'equation',

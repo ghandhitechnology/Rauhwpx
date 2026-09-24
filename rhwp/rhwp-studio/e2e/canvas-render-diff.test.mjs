@@ -265,8 +265,42 @@ runTest('Canvas legacy/layer visual diff', async ({ page }) => {
 
           const legacyCanvas = document.createElement('canvas');
           const layerCanvas = document.createElement('canvas');
-          doc.renderPageToCanvasLegacy(args.pageIndex, legacyCanvas, args.scale);
-          doc.renderPageToCanvas(args.pageIndex, layerCanvas, args.scale);
+          const renderWithTextModeCheck = (canvas, render) => {
+            const ctx = canvas.getContext('2d');
+            const supported = 'textRendering' in ctx;
+            let textCalls = 0;
+            const unexpectedModes = new Set();
+            if (supported) {
+              for (const method of ['fillText', 'strokeText']) {
+                const original = ctx[method];
+                ctx[method] = function (...values) {
+                  textCalls += 1;
+                  if (this.textRendering !== 'geometricPrecision') {
+                    unexpectedModes.add(this.textRendering);
+                  }
+                  return original.apply(this, values);
+                };
+              }
+            }
+            try {
+              render();
+            } finally {
+              if (supported) {
+                delete ctx.fillText;
+                delete ctx.strokeText;
+              }
+            }
+            if (supported && (unexpectedModes.size > 0 || ctx.textRendering !== 'geometricPrecision')) {
+              throw new Error(`Canvas text mode changed during replay: ${[...unexpectedModes]}, final=${ctx.textRendering}`);
+            }
+            return { supported, textCalls };
+          };
+          const textRendering = {
+            legacy: renderWithTextModeCheck(legacyCanvas, () =>
+              doc.renderPageToCanvasLegacy(args.pageIndex, legacyCanvas, args.scale)),
+            layer: renderWithTextModeCheck(layerCanvas, () =>
+              doc.renderPageToCanvas(args.pageIndex, layerCanvas, args.scale)),
+          };
 
           const width = Math.max(legacyCanvas.width, layerCanvas.width);
           const height = Math.max(legacyCanvas.height, layerCanvas.height);
@@ -337,6 +371,7 @@ runTest('Canvas legacy/layer visual diff', async ({ page }) => {
             width,
             height,
             sameSize,
+            textRendering,
             diffPixels,
             totalPixels,
             diffRatio,

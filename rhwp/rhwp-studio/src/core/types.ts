@@ -1074,6 +1074,7 @@ export interface LayerPageBackgroundOp {
   type: 'pageBackground';
   bbox: LayerBounds;
   backgroundColor?: string;
+  gradient?: LayerGradientFill;
   borderColor?: string;
   borderWidth?: number;
 }
@@ -1184,6 +1185,15 @@ export interface LayerShapeStyle {
   opacity?: number;
 }
 
+export interface LayerGradientFill {
+  gradientType: number;
+  angle: number;
+  centerX: number;
+  centerY: number;
+  colors: string[];
+  positions: number[];
+}
+
 export interface LayerLineOp {
   type: 'line';
   bbox: LayerBounds;
@@ -1192,6 +1202,7 @@ export interface LayerLineOp {
   x2: number;
   y2: number;
   style?: LayerLineStyle;
+  transform?: LayerPathTransform;
 }
 
 export interface LayerRectangleOp {
@@ -1199,12 +1210,15 @@ export interface LayerRectangleOp {
   bbox: LayerBounds;
   cornerRadius?: number;
   style?: LayerShapeStyle;
+  gradient?: LayerGradientFill;
+  transform?: LayerPathTransform;
 }
 
 export interface LayerEllipseOp {
   type: 'ellipse';
   bbox: LayerBounds;
   style?: LayerShapeStyle;
+  gradient?: LayerGradientFill;
 }
 
 export type LayerPathCommand =
@@ -1234,6 +1248,7 @@ export interface LayerPathOp {
   bbox: LayerBounds;
   commands?: LayerPathCommand[];
   style?: LayerShapeStyle;
+  gradient?: LayerGradientFill;
   lineStyle?: LayerLineStyle;
   transform?: LayerPathTransform;
 }
@@ -1264,6 +1279,7 @@ export interface LayerEquationOp {
   color?: string;
   fontSize?: number;
   fontName?: string;
+  versionInfo?: string;
   layoutBox?: LayerEquationLayoutBox;
 }
 
@@ -1310,7 +1326,7 @@ export type LayerEquationLayoutKind =
   | { type: 'symbol'; text: string }
   | { type: 'mathSymbol'; text: string }
   | { type: 'function'; name: string }
-  | { type: 'fraction'; numer: LayerEquationLayoutBox; denom: LayerEquationLayoutBox }
+  | { type: 'fraction'; numer: LayerEquationLayoutBox; denom: LayerEquationLayoutBox; barInset?: number }
   | { type: 'atop'; top: LayerEquationLayoutBox; bottom: LayerEquationLayoutBox }
   | { type: 'sqrt'; body: LayerEquationLayoutBox; index?: LayerEquationLayoutBox }
   | { type: 'superscript'; base: LayerEquationLayoutBox; sup: LayerEquationLayoutBox }

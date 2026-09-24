@@ -8,6 +8,9 @@ import {
   getLocalFontRecords,
   getLocalFontState,
   getLocalFonts,
+  importLocalFontFiles,
+  getImportedLocalFontBytes,
+  localFontImportMessage,
   LOCAL_FONT_BYTE_READ_CONCURRENCY,
   LOCAL_FONT_MAX_BYTES_PER_FACE,
   LOCAL_FONT_MAX_FACES_PER_DOCUMENT,
@@ -183,6 +186,116 @@ function createSfntWithNameRecords(entries: ReadonlyArray<{
   });
   return bytes;
 }
+
+test('세션 글꼴 파일은 웹 대체 face보다 먼저 선택되고 CanvasKit에 원본 바이트를 제공한다', async () => {
+  const g = globalThis as TestGlobals & { FontFace?: unknown };
+  const originalDocument = g.document;
+  const originalFontFace = g.FontFace;
+  const added: Array<{ family: string; source: ArrayBuffer }> = [];
+  const bytes = createSfntWithNameRecords([
+    { nameId: 1, value: 'Malgun Gothic' },
+    { nameId: 1, value: '맑은 고딕' },
+    { nameId: 2, value: 'Regular' },
+    { nameId: 4, value: 'Malgun Gothic Regular' },
+    { nameId: 6, value: 'MalgunGothic-Regular' },
+  ]);
+  class TestFontFace {
+    family: string;
+    source: ArrayBuffer;
+    constructor(family: string, source: ArrayBuffer) {
+      this.family = family;
+      this.source = source;
+    }
+    async load(): Promise<this> { return this; }
+  }
+  resetLocalFontsForTests();
+  g.FontFace = TestFontFace;
+  g.document = {
+    fonts: {
+      add(face: TestFontFace) { added.push(face); },
+      delete() { return true; },
+    },
+  };
+  try {
+    const file = new File([bytes], 'Malgun.ttf');
+    const result = await importLocalFontFiles([file, new File([new Uint8Array([0])], 'unusable.ttf')]);
+    const { imported } = result;
+    assert.equal(imported.length, 1);
+    assert.deepEqual(result.rejected, ['unusable.ttf']);
+    assert.match(localFontImportMessage(result), /unusable\.ttf/);
+    assert.equal(added.length, 1);
+    assert.equal(added[0]?.family, imported[0]?.runtimeFamily);
+    assert.equal(resolveLocalFont('맑은 고딕')?.postscriptName, 'MalgunGothic-Regular');
+    const directBytes = getImportedLocalFontBytes('맑은 고딕');
+    assert.deepEqual(new Uint8Array(directBytes!), bytes);
+    new Uint8Array(directBytes!)[0] = 0;
+    assert.deepEqual(new Uint8Array(getImportedLocalFontBytes('맑은 고딕')!), bytes);
+    assert.equal(firstQuotedFontFamily(fontFamilyChainForDisplay('맑은 고딕')), imported[0]?.runtimeFamily);
+    const loaded = await loadLocalFontBytesFor(['맑은 고딕']);
+    assert.deepEqual(new Uint8Array(loaded.get(localFontFaceKey(imported[0]!))!), bytes);
+    assert.equal(getLocalFontState().stored, false);
+  } finally {
+    resetLocalFontsForTests();
+    g.document = originalDocument;
+    g.FontFace = originalFontFace;
+  }
+});
+
+test('글꼴 파일 일부가 실패해도 정상 face와 굵기를 보존하고 실패한 파일명을 알린다', async () => {
+  const g = globalThis as TestGlobals & { FontFace?: unknown };
+  const originalDocument = g.document;
+  const originalFontFace = g.FontFace;
+  const added: Array<{ family: string; weight: string }> = [];
+  let loadCount = 0;
+  class TestFontFace {
+    family: string;
+    source: ArrayBuffer;
+    descriptors: { weight: string };
+    constructor(family: string, source: ArrayBuffer, descriptors: { weight: string }) {
+      this.family = family;
+      this.source = source;
+      this.descriptors = descriptors;
+    }
+    async load(): Promise<this> {
+      if (++loadCount === 3) throw new Error('invalid font outline');
+      return this;
+    }
+  }
+  const font = (style: string, postscriptName: string, fileName: string) => new File([
+    createSfntWithNameRecords([
+      { nameId: 1, value: 'Malgun Gothic' },
+      { nameId: 2, value: style },
+      { nameId: 4, value: `Malgun Gothic ${style}` },
+      { nameId: 6, value: postscriptName },
+    ]),
+  ], fileName);
+  resetLocalFontsForTests();
+  g.FontFace = TestFontFace;
+  g.document = {
+    fonts: {
+      add(face: TestFontFace) { added.push({ family: face.family, weight: face.descriptors.weight }); },
+      delete() { return true; },
+    },
+  };
+  try {
+    const result = await importLocalFontFiles([
+      font('Regular', 'Malgun-Regular', 'Regular.ttf'),
+      font('Bold', 'Malgun-Bold', 'Bold.ttf'),
+      font('Black', 'Malgun-Black', 'Broken.ttf'),
+    ]);
+    assert.equal(result.imported.length, 2);
+    assert.deepEqual(result.rejected, ['Broken.ttf']);
+    assert.match(localFontImportMessage(result), /Broken\.ttf/);
+    assert.equal(added.length, 2);
+    assert.equal(added[0]?.family, added[1]?.family);
+    assert.deepEqual(added.map(face => face.weight), ['400', '700']);
+    assert.equal(resolveLocalFont('Malgun Gothic')?.style, 'Regular');
+  } finally {
+    resetLocalFontsForTests();
+    g.document = originalDocument;
+    g.FontFace = originalFontFace;
+  }
+});
 
 test('저장된 localStorage snapshot 로드는 queryLocalFonts를 호출하지 않는다', async () => {
   const g = globalThis as TestGlobals;

@@ -43,12 +43,19 @@ test('fontFamilyChainForDisplay는 중복 없이 generic font를 그대로 처�
   assert.equal(fontFamilyChainForDisplay('serif', 0, 0), 'serif');
   assert.equal(
     fontFamilyChainForDisplay('없는글꼴', 0, 0),
-    '"Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", "Pretendard", sans-serif',
+    '"함초롬돋움", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", "Pretendard", sans-serif',
   );
   assert.equal(
     fontFamilyChainForDisplay('없는글꼴', 0, 0, { confirmedLocalFonts: ['없는글꼴'] }),
-    '"없는글꼴", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", "Pretendard", sans-serif',
+    '"없는글꼴", "함초롬돋움", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", "Pretendard", sans-serif',
   );
+});
+
+test('한컴 고딕 대체 글꼴은 원본 뒤에 와서 누락된 글립만 채운다', () => {
+  const chain = fontFamilyChainForDisplay('맑은 고딕', 0, 0, {
+    confirmedLocalFonts: ['맑은 고딕'],
+  });
+  assert.match(chain, /^"맑은 고딕", "함초롬돋움", "Malgun Gothic"/);
 });
 
 test('fontFamilyWithFallback 기존 helper는 동일한 fallback 계열을 사용한다', () => {
@@ -56,4 +63,20 @@ test('fontFamilyWithFallback 기존 helper는 동일한 fallback 계열을 사�
     fontFamilyWithFallback('굴림체'),
     '"굴림체", "GulimChe", "D2Coding", "Noto Sans Mono", monospace',
   );
+});
+
+test('수식 글꼴의 변수와 숫자는 본문 고딕 fallback으로 치환하지 않는다', () => {
+  for (const family of ['HYhwpEQ', 'HyhwpEQ', 'Latin Modern Math', 'STIX Two Math', 'Cambria Math']) {
+    const chain = fontFamilyChainForDisplay(family);
+    assert.match(chain, /^"(?:Times New Roman|Latin Modern Math)"/);
+    assert.match(chain, /"STIX Two Text"/);
+    assert.match(chain, /"Times New Roman"/);
+    assert.match(chain, /serif$/);
+    assert.doesNotMatch(chain, /sans-serif|Malgun|Noto Sans/);
+  }
+
+  const installed = fontFamilyChainForDisplay('HYhwpEQ', 0, 0, {
+    confirmedLocalFonts: ['HYhwpEQ'],
+  });
+  assert.match(installed, /^"HYhwpEQ", "Times New Roman"/);
 });

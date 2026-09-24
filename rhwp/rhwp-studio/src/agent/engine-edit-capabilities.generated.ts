@@ -299,6 +299,20 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "copySelectionInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, startCellPara: number, startOffset: number, endCellPara: number, endOffset: number)"
   },
   {
+    "method": "copySelectionInCellByPath",
+    "kind": "session",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "startCellPara",
+      "startOffset",
+      "endCellPara",
+      "endOffset"
+    ],
+    "signature": "copySelectionInCellByPath(sec: number, parentPara: number, pathJson: string, startCellPara: number, startOffset: number, endCellPara: number, endOffset: number)"
+  },
+  {
     "method": "copyTableCellsTransposed",
     "kind": "session",
     "parameters": [
@@ -1137,6 +1151,20 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "toCharOffset"
     ],
     "signature": "movePictureControl(sec: number, fromPara: number, fromCi: number, toPara: number, toCharOffset: number,)"
+  },
+  {
+    "method": "movePictureControlByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "fromParentPara",
+      "fromPath",
+      "fromControl",
+      "toParentPara",
+      "toPath",
+      "toCharOffset"
+    ],
+    "signature": "movePictureControlByPath(sec: number, fromParentPara: number, fromPath: CellPathLike, fromControl: number, toParentPara: number, toPath: CellPathLike, toCharOffset: number,)"
   },
   {
     "method": "moveTableOffset",

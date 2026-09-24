@@ -1,0 +1,30 @@
+{
+  "before": {
+    "copied": {
+      "text": "",
+      "hasControl": true
+    },
+    "originalParagraphs": 103,
+    "afterParagraphs": 105,
+    "pagesAfter": 5,
+    "undoRestoresText": true,
+    "undoRestoresRendering": true,
+    "redoRestoresText": true,
+    "redoRestoresRendering": false,
+    "missingRenderedParagraphCount": 7
+  },
+  "after": {
+    "copied": {
+      "text": "스크린",
+      "hasControl": false
+    },
+    "originalParagraphs": 103,
+    "afterParagraphs": 105,
+    "pagesAfter": 5,
+    "undoRestoresText": true,
+    "undoRestoresRendering": true,
+    "redoRestoresText": true,
+    "redoRestoresRendering": true,
+    "missingRenderedParagraphCount": 0
+  }
+}

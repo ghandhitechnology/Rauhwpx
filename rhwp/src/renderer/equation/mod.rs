@@ -7,6 +7,7 @@ pub mod ast;
 pub mod canonical;
 #[cfg(target_arch = "wasm32")]
 pub mod canvas_render;
+pub(crate) mod font;
 pub mod layout;
 pub(crate) mod legacy_hwpeq;
 pub mod parser;
@@ -14,11 +15,28 @@ pub mod svg_render;
 pub mod symbols;
 pub mod tokenizer;
 
+/// 개체 공통 너비는 바깥 여백을 제외한 값이다. 인라인 슬롯에 양쪽 여백을 예약한다.
+pub(crate) fn occupied_width_hwp(eq: &crate::model::control::Equation) -> i32 {
+    (i64::from(eq.common.width)
+        + i64::from(eq.common.margin.left)
+        + i64::from(eq.common.margin.right))
+    .clamp(0, i64::from(i32::MAX)) as i32
+}
+
+/// EQEDIT baseLine은 저장된 개체 높이의 백분율이다. 없는 값만 자연 기준선으로 보완한다.
+pub(crate) fn control_baseline_hwp(eq: &crate::model::control::Equation, natural: f64) -> f64 {
+    if eq.common.height > 0 && (1..=100).contains(&eq.baseline) {
+        f64::from(eq.common.height) * f64::from(eq.baseline) / 100.0
+    } else {
+        natural
+    }
+}
+
 /// Natural equation box metrics in the renderer's pixel coordinate system.
 ///
 /// Inline layout must use the same ascent/descent as the painter.  Deriving a
-/// baseline from the stored object height (for example `height * 0.85`) moves
-/// tall operators and fractions below the surrounding text baseline.
+/// baseline from an arbitrary fraction of object height moves tall operators.
+/// An authored EQEDIT baseline remains a separate placement contract.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IntrinsicMetrics {
     pub width: f64,
@@ -37,10 +55,22 @@ pub fn intrinsic_metrics_px_with_font(
     dpi: f64,
     font_name: &str,
 ) -> IntrinsicMetrics {
+    intrinsic_metrics_px_with_version(script, font_size, dpi, font_name, "Equation Version 60")
+}
+
+pub fn intrinsic_metrics_px_with_version(
+    script: &str,
+    font_size: u32,
+    dpi: f64,
+    font_name: &str,
+    version_info: &str,
+) -> IntrinsicMetrics {
     let font_size_px = super::hwpunit_to_px(font_size.max(1) as i32, dpi);
     let tokens = tokenizer::tokenize(script);
     let ast = parser::EqParser::new(tokens).parse();
-    let layout = layout::EqLayout::with_font(font_size_px, font_name).layout(&ast);
+    let layout = layout::EqLayout::with_font(font_size_px, font_name)
+        .with_version(version_info)
+        .layout(&ast);
     IntrinsicMetrics {
         width: layout.width,
         height: layout.height,
@@ -58,7 +88,22 @@ pub fn intrinsic_metrics_hwp_with_font(
     font_size: u32,
     font_name: &str,
 ) -> (u32, u32, u32) {
-    let metrics = intrinsic_metrics_px_with_font(script, font_size, super::DEFAULT_DPI, font_name);
+    intrinsic_metrics_hwp_with_version(script, font_size, font_name, "Equation Version 60")
+}
+
+pub fn intrinsic_metrics_hwp_with_version(
+    script: &str,
+    font_size: u32,
+    font_name: &str,
+    version_info: &str,
+) -> (u32, u32, u32) {
+    let metrics = intrinsic_metrics_px_with_version(
+        script,
+        font_size,
+        super::DEFAULT_DPI,
+        font_name,
+        version_info,
+    );
     let height = super::px_to_hwpunit(metrics.height, super::DEFAULT_DPI).max(1) as u32;
     let baseline =
         super::px_to_hwpunit(metrics.baseline, super::DEFAULT_DPI).clamp(0, height as i32) as u32;
@@ -83,6 +128,41 @@ pub fn intrinsic_size_hwp_with_font(script: &str, font_size: u32, font_name: &st
 #[cfg(test)]
 mod metric_tests {
     use super::*;
+
+    #[test]
+    fn source_control_metrics_keep_margins_baseline_and_natural_glyph_size_separate() {
+        use crate::model::{control::Equation, Padding};
+        let mut eq = Equation::default();
+        eq.common.width = 3000;
+        eq.common.height = 2400;
+        eq.common.margin = Padding {
+            left: 75,
+            right: 150,
+            top: 100,
+            bottom: 200,
+        };
+        eq.baseline = 65;
+        assert_eq!(occupied_width_hwp(&eq), 3225);
+        assert_eq!(control_baseline_hwp(&eq, 1700.0), 1560.0);
+        eq.baseline = 0;
+        assert_eq!(control_baseline_hwp(&eq, 1700.0), 1700.0);
+        eq.baseline = 101;
+        assert_eq!(control_baseline_hwp(&eq, 1700.0), 1700.0);
+        let ast = parser::EqParser::new(tokenizer::tokenize("x over L")).parse();
+        for version in ["", "Equation Version 60"] {
+            let engine = layout::EqLayout::with_font(16.0, "HYhwpEQ").with_version(version);
+            let natural = engine.layout(&ast);
+            let placed = engine.layout_in_control_width(&ast, natural.width + 12.0);
+            assert_eq!(placed.x, 6.0);
+            assert_eq!(placed.width, natural.width);
+            assert_eq!(placed.height, natural.height);
+            assert_eq!(placed.baseline, natural.baseline);
+            assert_eq!(
+                engine.layout_in_control_width(&ast, natural.width - 2.0).x,
+                0.0
+            );
+        }
+    }
 
     #[test]
     fn big_operator_exposes_its_real_baseline() {

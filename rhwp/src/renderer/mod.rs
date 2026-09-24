@@ -286,6 +286,39 @@ impl Default for TextStyle {
     }
 }
 
+/// 실제 Bold 메트릭이 없을 때만 한/글과 같은 가는 합성 획을 추가한다.
+/// Bold 서체에 획까지 겹치면 글자가 과하게 두꺼워진다.
+pub(crate) fn faux_bold_stroke_width(style: &TextStyle, font_size: f64) -> Option<f64> {
+    if !style.bold {
+        return None;
+    }
+    let primary = style_resolver::primary_font_name(&style.font_family);
+    font_metrics_data::find_metric(primary, true, style.italic)?
+        .bold_fallback
+        .then_some(font_size * 0.02)
+}
+
+#[cfg(test)]
+mod faux_bold_tests {
+    use super::{faux_bold_stroke_width, TextStyle};
+
+    #[test]
+    fn stroke_is_only_needed_when_bold_metrics_are_missing() {
+        let mut style = TextStyle {
+            font_family: "함초롬돋움".into(),
+            bold: true,
+            ..TextStyle::default()
+        };
+        assert_eq!(faux_bold_stroke_width(&style, 17.3), None);
+
+        style.font_family = "굴림체".into();
+        assert_eq!(faux_bold_stroke_width(&style, 16.0), Some(0.32));
+
+        style.bold = false;
+        assert_eq!(faux_bold_stroke_width(&style, 16.0), None);
+    }
+}
+
 /// 패턴 채우기 정보 (HWP pattern_type 1~6)
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct PatternFillInfo {
