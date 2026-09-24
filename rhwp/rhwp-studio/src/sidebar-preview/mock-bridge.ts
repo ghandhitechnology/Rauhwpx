@@ -12,6 +12,7 @@ import { createBrowserbaseFixture, type BrowserbaseFixtureState } from './fixtur
 
 export const scenarios = [
   'chat',
+  'tools',
   'rich',
   'plan',
   'question',
@@ -616,6 +617,10 @@ export function createMockBridge(report: (message: string) => void) {
           tool: 'read_document',
           argsJson: '{"section":0}',
         });
+        if (reply === 'tools') {
+          stream({ type: 'tool-call', agent, callId: `search-${turnGeneration}`, tool: 'search_document', argsJson: '{"query":"일정"}' });
+          stream({ type: 'tool-call', agent, callId: `edit-${turnGeneration}`, tool: 'edit_document', argsJson: '{"section":0}' });
+        }
         if (reply === 'fleet') {
           stream({
             type: 'task-start',
@@ -651,6 +656,10 @@ export function createMockBridge(report: (message: string) => void) {
             resultPreview:
               '사업 개요, 추진 일정, 기대 효과 — 3개 절을 확인했습니다.',
           });
+          if (reply === 'tools') {
+            stream({ type: 'tool-result', agent, callId: `search-${turnGeneration}`, ok: true, resultPreview: '일정 2건을 찾았습니다.' });
+            stream({ type: 'tool-result', agent, callId: `edit-${turnGeneration}`, ok: true, resultPreview: '첫 문단을 수정했습니다.' });
+          }
           if (reply === 'error') {
             stream({
               type: 'error',

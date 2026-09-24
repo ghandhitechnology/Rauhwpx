@@ -223,8 +223,8 @@ interface TurnActivityState {
   root: HTMLElement;
   label: HTMLElement;
   content: HTMLElement;
-  startedAt: number;
   toolCount: number;
+  firstToolName: string;
   failedToolCount: number;
   activeTools: Map<string, string>;
   acceptingTools: boolean;
@@ -5278,11 +5278,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const toggle = el('button', 'ag-activity-toggle');
     toggle.type = 'button';
     toggle.setAttribute('aria-expanded', 'false');
-    const failures = message.tools.filter((tool) => tool.status === 'failed').length;
     toggle.append(
-      el('span', 'ag-activity-label', failures > 0
-        ? `도구 호출 · ${failures}개 오류`
-        : `도구 호출 · ${message.tools.length}개 완료`),
+      createIcon('terminal', 'ag-activity-icon'),
+      el('span', 'ag-activity-label', message.tools.length === 1
+        ? message.tools[0].tool
+        : `${message.tools.length}개의 도구를 호출함`),
       createChevron('ag-activity-chevron'),
     );
     const collapse = el('div', 'ag-activity-collapse');
@@ -6578,30 +6578,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     return `${Math.round(ms / 60_000)}m`;
   }
 
-  function formatActivityDuration(startedAt: number): string {
-    const totalSeconds = Math.max(1, Math.round((performance.now() - startedAt) / 1000));
-    if (totalSeconds < 60) return `${totalSeconds}초`;
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return seconds > 0 ? `${minutes}분 ${seconds}초` : `${minutes}분`;
-  }
-
-  function activeToolLabel(activity: TurnActivityState) {
-    const active = [...activity.activeTools.values()];
-    if (active.length === 1) return `도구 호출 · ${active[0]} 실행 중`;
-    if (active.length > 1) return `도구 호출 · ${active[0]} 외 ${active.length - 1}개 실행 중`;
-    return `도구 호출 · ${activity.toolCount}개 완료`;
+  function activityLabel(activity: TurnActivityState): string {
+    return activity.toolCount === 1
+      ? activity.firstToolName
+      : `${activity.toolCount}개의 도구를 호출함`;
   }
 
   function settleActivity(activity: TurnActivityState) {
     if (activity.settled || activity.acceptingTools || activity.activeTools.size > 0) return;
     activity.settled = true;
-    const duration = formatActivityDuration(activity.startedAt);
     if (activity.failedToolCount > 0) {
-      setActivityLabel(activity, `도구 호출 · ${activity.failedToolCount}개 오류 · ${duration}`);
+      setActivityLabel(activity, activityLabel(activity));
       activity.root.classList.add('ag-activity-error');
     } else {
-      setActivityLabel(activity, `도구 호출 · ${activity.toolCount}개 완료 · ${duration}`);
+      setActivityLabel(activity, activityLabel(activity));
       activity.root.classList.add('ag-activity-complete');
     }
     activity.root.classList.remove('ag-activity-running');
@@ -6852,7 +6842,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const label = el('span', 'ag-activity-label', '도구 호출');
     label.setAttribute('aria-live', 'polite');
     const chevron = createChevron('ag-activity-chevron');
-    toggle.append(label, chevron);
+    toggle.append(createIcon('terminal', 'ag-activity-icon'), label, chevron);
 
     const collapse = el('div', 'ag-activity-collapse');
     const content = el('div', 'ag-activity-content');
@@ -6885,8 +6875,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       root: activity,
       label,
       content,
-      startedAt: performance.now(),
       toolCount: 0,
+      firstToolName: '',
       failedToolCount: 0,
       activeTools: new Map(),
       acceptingTools: true,
@@ -6937,9 +6927,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   ): void {
     const activity = ensureTurnActivity(evt.agent, milestone);
     activity.toolCount += 1;
+    if (activity.toolCount === 1) activity.firstToolName = evt.tool;
     activity.activeTools.set(evt.callId, evt.tool);
     turnToolCount += 1;
-    setActivityLabel(activity, activeToolLabel(activity));
+    setActivityLabel(activity, activityLabel(activity));
 
     const row = el('div', `ag-tool-row ag-${evt.agent}`);
     const head = el('button', 'ag-tool-head');
@@ -7001,7 +6992,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       entry.activity.failedToolCount += 1;
       turnFailedToolCount += 1;
     }
-    setActivityLabel(entry.activity, activeToolLabel(entry.activity));
+    setActivityLabel(entry.activity, activityLabel(entry.activity));
     settleActivity(entry.activity);
     if (followActivity) scrollActivityToLatest(entry.scroller);
   }
@@ -7026,7 +7017,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     toolRows.clear();
     for (const activity of touchedActivities) {
-      setActivityLabel(activity, activeToolLabel(activity));
+      setActivityLabel(activity, activityLabel(activity));
       settleActivity(activity);
     }
   }

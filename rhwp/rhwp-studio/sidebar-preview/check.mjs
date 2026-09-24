@@ -357,6 +357,26 @@ try {
       );
     },
   );
+  await step('Tool activity labels stay compact during and after a turn', async () => {
+    await play('chat');
+    assert.equal(await page.$eval('.ag-activity-label', node => node.textContent), 'read_document');
+    await open('scenario=tools');
+    await page.click('#play');
+    await page.waitForFunction(() => !window.sidebarPreview.bridge.isTurnRunning()
+      && document.querySelector('.ag-activity-label')?.textContent === '3개의 도구를 호출함');
+    await page.click('.ag-activity-toggle');
+    assert.equal(await page.$$eval('.ag-tool-name', nodes => nodes.map(node => node.textContent).join(',')),
+      'read_document,search_document,edit_document');
+    await page.click('.ag-header .ag-threads-btn');
+    const threadId = await page.$eval('.ag-threads-item.ag-active', node => node.dataset.threadId);
+    await page.reload({ waitUntil: 'networkidle0' });
+    await page.click('.ag-header .ag-threads-btn');
+    await page.$eval('.ag-threads-list', (list, id) =>
+      [...list.querySelectorAll('.ag-threads-item')].find(node => node.dataset.threadId === id)?.click(), threadId);
+    await page.waitForSelector('.ag-activity-label');
+    assert.equal(await page.$eval('.ag-activity-label', node => node.textContent), '3개의 도구를 호출함');
+    await screenshot('tool-activity');
+  });
   await step('Chat follows a send and yields to manual scrolling', async () => {
     await open('scenario=chat&hold=1');
     await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'no-preference' }]);
