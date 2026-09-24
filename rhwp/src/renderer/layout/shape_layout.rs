@@ -162,3 +162,28 @@ pub(super) fn shape_vertical_visual_extent_hu(shape: &ShapeObject, shape_height_
         CaptionDirection::Left | CaptionDirection::Right => shape_height_hu.max(caption_height_hu),
     }
 }
+
+fn textbox_vpos_origin_hu(common: &CommonObjAttr, matrix_positioned: bool) -> Option<i32> {
+    if matrix_positioned || common.treat_as_char {
+        return None;
+    }
+    if !matches!(common.vert_rel_to, VertRelTo::Paper | VertRelTo::Page)
+        || !matches!(common.vert_align, VertAlign::Top | VertAlign::Inside)
+    {
+        return None;
+    }
+
+    let origin = crate::renderer::float_placement::signed_hwpunit(common.vertical_offset);
+    (origin > 0).then_some(origin)
+}
+
+fn normalize_textbox_vpos_hu(vertical_pos: i32, origin_hu: Option<i32>) -> i32 {
+    match origin_hu {
+        Some(origin) if origin > 0 && vertical_pos >= origin => vertical_pos - origin,
+        _ => vertical_pos,
+    }
+}
+
+fn textbox_vpos_px(vertical_pos: i32, origin_hu: Option<i32>, dpi: f64) -> f64 {
+    hwpunit_to_px(normalize_textbox_vpos_hu(vertical_pos, origin_hu), dpi)
+}
