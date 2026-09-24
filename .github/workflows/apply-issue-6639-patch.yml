@@ -6,6 +6,7 @@ on:
       - chore/editing-experience-2026-09-24
     paths:
       - .github/patches/issue-6639-vpos.patch.gz.b64
+      - .github/workflows/apply-issue-6639-patch.yml
 
 permissions:
   contents: write
@@ -23,19 +24,9 @@ jobs:
           set -euo pipefail
           git config user.name "Andy"
           git config user.email "heemang12bo@gmail.com"
-          python3 - <<'PY'
-          import base64, gzip
-          from pathlib import Path
-          raw = Path('.github/patches/issue-6639-vpos.patch.gz.b64').read_text().strip()
-          Path('/tmp/issue-6639-vpos.patch').write_bytes(gzip.decompress(base64.b64decode(raw)))
-          PY
+          python3 -c "import base64,gzip; from pathlib import Path; raw=Path('.github/patches/issue-6639-vpos.patch.gz.b64').read_text().strip(); Path('/tmp/issue-6639-vpos.patch').write_bytes(gzip.decompress(base64.b64decode(raw)))"
           git apply /tmp/issue-6639-vpos.patch
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('rhwp/tests/issue_6639_cell_para_format_vpos.rs')
-          t = p.read_text()
-          p.write_text(t.replace('어귃난다', '어긋난다'))
-          PY
+          python3 -c "from pathlib import Path; p=Path('rhwp/tests/issue_6639_cell_para_format_vpos.rs'); t=p.read_text(); p.write_text(t.replace('어귳난다','어긋난다'))"
           git add rhwp
           git rm -f .github/patches/issue-6639-vpos.patch.gz.b64 .github/workflows/apply-issue-6639-patch.yml
           git commit -m "fix: 셀 문단 줄 간격 변경 후 후속 문단 vpos를 재계산한다"
