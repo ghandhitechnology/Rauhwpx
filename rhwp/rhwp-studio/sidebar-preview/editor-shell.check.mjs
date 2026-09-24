@@ -91,9 +91,60 @@ try {
   assert.deepEqual(await geometry(), initialGeometry);
   await page.keyboard.press('Escape');
 
-  for (const width of [1440, 768, 390]) {
+  await page.focus('#icon-toolbar .tb-btn[data-cmd="table:create"]');
+  await page.setViewport({ width: 500, height: 960 });
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'editor-toolbar-more');
+  await page.setViewport({ width: 1440, height: 960 });
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.focus('#icon-toolbar .tb-btn[data-cmd="edit:undo"]');
+  await page.setViewport({ width: 900, height: 960 });
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-cmd')), 'edit:undo');
+
+  for (const width of [1440, 900, 768, 500, 390]) {
     await page.setViewport({ width, height: 960 });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `${width}px has horizontal document overflow`);
+    assert(await page.$eval('#icon-toolbar', el => el.getBoundingClientRect().height <= 44), `${width}px toolbar wraps`);
+    assert.equal(await page.$eval('#icon-toolbar', el => getComputedStyle(el).visibility), 'visible');
+    if (width === 500) {
+      assert.equal(await page.$eval('#editor-toolbar-more', el => el.hidden), false);
+      assert(await page.$('#editor-toolbar-overflow .tb-group'));
+      await page.focus('#editor-toolbar-more');
+      await page.keyboard.press('Enter');
+      assert.equal(await page.$eval('#editor-toolbar-overflow', el => el.hidden), false);
+      assert.equal(await page.evaluate(() => Boolean(document.activeElement?.closest('#editor-toolbar-overflow .tb-btn[data-cmd]'))), true);
+      await page.setViewport({ width: 390, height: 960 });
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await page.$eval('#editor-toolbar-overflow', el => el.hidden), false);
+      const lowerPopoverHit = await page.evaluate(() => {
+        const headerBottom = document.querySelector('#studio-header').getBoundingClientRect().bottom;
+        const sidebarLeft = document.querySelector('.ag-root').getBoundingClientRect().left;
+        const candidate = [...document.querySelectorAll('#editor-toolbar-overflow .tb-btn[data-cmd]')]
+          .find(button => {
+            const rect = button.getBoundingClientRect();
+            return rect.width && rect.height && rect.left + rect.width / 2 > sidebarLeft
+              && rect.top + rect.height / 2 > headerBottom;
+          });
+        if (!candidate) return false;
+        const rect = candidate.getBoundingClientRect();
+        return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+          ?.closest('.tb-btn') === candidate;
+      });
+      assert.equal(lowerPopoverHit, true, 'More commands below the header must be clickable above the sidebar');
+      await page.keyboard.press('Escape');
+      assert.equal(await page.$eval('#editor-toolbar-overflow', el => el.hidden), true);
+      assert.equal(await page.evaluate(() => document.activeElement?.id), 'editor-toolbar-more');
+      await page.click('#editor-toolbar-more');
+      const visibleCommand = await page.evaluate(() => [...document.querySelectorAll('#editor-toolbar-overflow .tb-btn[data-cmd]')]
+        .find(element => element.getClientRects().length)?.getAttribute('data-cmd'));
+      assert(visibleCommand);
+      await page.click(`#editor-toolbar-overflow .tb-btn[data-cmd="${visibleCommand}"]`);
+      assert.match(await page.$eval('#preview-status', el => el.value), /editor fixture/);
+      await page.setViewport({ width: 500, height: 960 });
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    }
   }
   await page.click('.menu-item[data-menu="view"] .menu-title');
   await page.hover('.menu-item[data-menu="view"] .md-sub');

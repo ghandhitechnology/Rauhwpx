@@ -6,6 +6,7 @@ import type { CommandDef, CommandServices, EditorContext } from '../command/type
 import type { EventBus } from '../core/event-bus.ts';
 import { MenuBar } from '../ui/menu-bar.ts';
 import { CommandPalette } from '../ui/command-palette.ts';
+import { EditorToolbarOverflow } from '../ui/editor-toolbar-overflow.ts';
 
 /** Mount the production chrome around a plainly simulated document page. */
 export function mountEditorShell(report: (message: string) => void, eventBus: EventBus): void {
@@ -55,7 +56,14 @@ export function mountEditorShell(report: (message: string) => void, eventBus: Ev
     const shortcutLabel = element.querySelector('.md-shortcut')?.textContent?.trim();
     definitions.set(id, {
       id, label, ...(shortcutLabel ? { shortcutLabel } : {}),
-      execute: () => report(`${label} · editor fixture`),
+      execute: () => {
+        if (id === 'view:toolbox-basic') {
+          const toolbar = header.querySelector<HTMLElement>('#icon-toolbar')!;
+          const collapsed = toolbar.classList.toggle('collapsed');
+          header.querySelector('.sb-collapse-btn')?.setAttribute('aria-expanded', String(!collapsed));
+        }
+        report(`${label} · editor fixture`);
+      },
     });
   }
   registry.registerAll([...definitions.values()]);
@@ -89,6 +97,7 @@ export function mountEditorShell(report: (message: string) => void, eventBus: Ev
       dispatcher.dispatch(button.dataset.cmd!, { anchorEl: button });
     });
   });
+  new EditorToolbarOverflow(header.querySelector<HTMLElement>('#icon-toolbar')!);
   footer.addEventListener('click', (event) => {
     const button = (event.target as Element).closest<HTMLButtonElement>('button');
     if (button) report(`${button.title} · editor fixture`);

@@ -23,6 +23,7 @@ import {
 } from '@/view/canvaskit/image-header';
 import { InputHandler } from '@/engine/input-handler';
 import { Toolbar } from '@/ui/toolbar';
+import { EditorToolbarOverflow } from '@/ui/editor-toolbar-overflow';
 import { MenuBar } from '@/ui/menu-bar';
 import { loadWebFonts, resolveCanvasKitFontPlan } from '@/core/font-loader';
 import { withCanvasKitSurfaceBlockers } from '@/core/canvaskit-document-preflight';
@@ -282,6 +283,7 @@ let canvasView: CanvasView | null = null;
 let inputHandler: InputHandler | null = null;
 let commandPalette: CommandPalette | null = null;
 let toolbar: Toolbar | null = null;
+let editorToolbarOverflow: EditorToolbarOverflow | null = null;
 let ruler: Ruler | null = null;
 let rendererSession: RendererSession | null = null;
 let editMode: EditorEditMode = 'normal';
@@ -1195,6 +1197,7 @@ async function initialize(): Promise<void> {
     setupFileInput();
     setupZoomControls();
     setupEventListeners();
+    editorToolbarOverflow = new EditorToolbarOverflow(document.getElementById('icon-toolbar')!);
     setupGlobalShortcuts();
     installDesktopFileHandling((handles) => {
       const handle = handles[0];
@@ -1718,7 +1721,7 @@ function setupEventListeners(): void {
       element.style.display = mode === 'default' ? '' : 'none';
     });
     document.querySelectorAll<HTMLButtonElement>(
-      '#icon-toolbar > .tb-group:not(.tb-mode-group) .tb-btn[data-cmd]',
+      '#icon-toolbar .tb-group:not(.tb-mode-group) .tb-btn[data-cmd]',
     ).forEach((button) => {
       button.disabled = !dispatcher.isEnabled(button.dataset.cmd ?? '');
     });

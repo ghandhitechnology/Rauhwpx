@@ -5,7 +5,7 @@ process.env.VITE_URL = process.env.VITE_URL || 'http://localhost:7700';
 runTest('기본 도구 모음 명령 상태', async ({ page }) => {
   await createNewDocument(page);
   const state = async (command) => page.$eval(
-    `#icon-toolbar > .tb-group:not(.tb-mode-group) .tb-btn[data-cmd="${command}"]`,
+    `#icon-toolbar .tb-group:not(.tb-mode-group) .tb-btn[data-cmd="${command}"]`,
     button => button.disabled,
   );
 

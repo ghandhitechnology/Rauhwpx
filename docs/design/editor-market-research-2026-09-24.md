@@ -46,3 +46,7 @@ The user specified a pure black / pure white foundation, restrained solid colors
 4. Use progressive disclosure for advanced layout and engine actions. Do not hide common format, insert, or review controls behind a generic overflow menu.
 5. Design light and dark modes as deliberate black/white systems with solid fills, strong text contrast, legible borders, and an unmistakable focus indicator.
 6. Verify with representative tasks: style a heading, create and navigate a table, insert a page break, find/replace, review a comment, switch page setup, and perform each by keyboard alone.
+
+## Word ribbon follow-up
+
+The follow-up uses Word's simplified ribbon as the specific layout reference. Microsoft describes a single command row, related commands under dropdowns, and width-dependent overflow into More options. Its reference page includes classic/simplified comparison images. This editor adopts inline icon/label controls, smaller row heights, and responsive whole-group overflow while preserving existing formatting fields, menus, and contextual tools. [Microsoft's single-line ribbon reference](https://support.microsoft.com/en-us/word/using-the-simplified-ribbon-in-word-for-the-web)
