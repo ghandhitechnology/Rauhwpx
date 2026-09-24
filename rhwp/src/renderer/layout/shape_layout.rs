@@ -187,3 +187,46 @@ fn normalize_textbox_vpos_hu(vertical_pos: i32, origin_hu: Option<i32>) -> i32 {
 fn textbox_vpos_px(vertical_pos: i32, origin_hu: Option<i32>, dpi: f64) -> f64 {
     hwpunit_to_px(normalize_textbox_vpos_hu(vertical_pos, origin_hu), dpi)
 }
+
+/// 글상자 인라인 개체 줄바꿈 판정 허용 오차(px).
+/// 폭 추정 오차로 딱 맞는 개체가 불필요하게 다음 행으로 접히는 것을 막는다.
+const TEXTBOX_INLINE_WRAP_EPS_PX: f64 = 0.5;
+
+/// 평탄화된 HWPX 그룹(matrix group) 자식의 "글상자 보조선"(검정 얇은 SOLID 테두리)은
+/// 한컴 실물에서 인쇄되지 않는다(편람 장 표지 "행정업무 운영 개요" 제목/목록 글상자).
+/// 오탐 방지를 위해 매우 좁게 한정: 그룹 자식(group_level>0) + 회전/전단 없음 + 검정
+/// (color==0) 얇은(0<width<=40 HWPUNIT) SOLID(line_type==1) 테두리 + 캡션 없음 +
+/// (a) 채우기 없는 텍스트 전용 글상자 또는 (b) 흰색 단색 마스크 박스.
+fn should_suppress_group_child_construction_stroke(drawing: &DrawingObjAttr) -> bool {
+    if drawing.caption.is_some() {
+        return false;
+    }
+    let sa = &drawing.shape_attr;
+    let has_rotation_or_shear = sa.render_b.abs() > 1e-6 || sa.render_c.abs() > 1e-6;
+    if sa.group_level == 0 || has_rotation_or_shear {
+        return false;
+    }
+    let line = &drawing.border_line;
+    let line_type = line.attr & 0x3f;
+    if line_type != 1 || line.color != 0 || line.width <= 0 || line.width > 40 {
+        return false;
+    }
+    let text_only_box = drawing
+        .text_box
+        .as_ref()
+        .is_some_and(textbox_has_visible_text)
+        && drawing.fill.fill_type == FillType::None
+        && drawing.fill.gradient.is_none()
+        && drawing.fill.image.is_none();
+    if text_only_box {
+        return true;
+    }
+    drawing.text_box.is_none()
+        && drawing.fill.fill_type == FillType::Solid
+        && drawing.fill.gradient.is_none()
+        && drawing.fill.image.is_none()
+        && drawing
+            .fill
+            .solid
+            .is_some_and(|solid| solid.background_color == 0x00ff_ffff && solid.pattern_type <= 0)
+}
