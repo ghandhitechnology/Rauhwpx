@@ -19,6 +19,7 @@ function request({
   origin = 'http://127.0.0.1:5173',
   host = '127.0.0.1:5173',
   encrypted = false,
+  remoteAddress,
 } = {}) {
   return {
     url,
@@ -27,7 +28,7 @@ function request({
       ...(origin === null ? {} : { origin }),
       ...(host === null ? {} : { host }),
     },
-    socket: { encrypted },
+    socket: { encrypted, remoteAddress },
   };
 }
 
@@ -82,6 +83,27 @@ test('capability mint requests require the exact Host transport origin', () => {
   assert.equal(isExactSameOriginRequest(request({ host: null })), false);
   assert.equal(isExactSameOriginRequest(request({ origin: 'https://127.0.0.1:5173' })), false);
   assert.equal(isExactSameOriginRequest(request({ origin: 'http://127.0.0.1:5173/' })), false);
+});
+
+test('configured HTTPS preview origin is accepted only through the loopback proxy', () => {
+  const publicOrigin = 'https://mini.example.ts.net:8461';
+  const proxied = request({
+    origin: publicOrigin,
+    host: 'mini.example.ts.net:8461',
+    remoteAddress: '127.0.0.1',
+  });
+  assert.equal(isExactSameOriginRequest(proxied, publicOrigin), true);
+  assert.equal(isExactSameOriginRequest(proxied), false);
+  assert.equal(isExactSameOriginRequest(request({
+    origin: publicOrigin,
+    host: 'mini.example.ts.net:8461',
+    remoteAddress: '192.0.2.1',
+  }), publicOrigin), false);
+  assert.equal(isExactSameOriginRequest(request({
+    origin: 'https://evil.example',
+    host: 'mini.example.ts.net:8461',
+    remoteAddress: '127.0.0.1',
+  }), publicOrigin), false);
 });
 
 test('malformed request targets return 400 instead of escaping the async middleware', async () => {
