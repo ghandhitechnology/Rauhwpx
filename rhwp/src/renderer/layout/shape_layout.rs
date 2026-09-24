@@ -83,3 +83,82 @@ fn stored_lines_clear_fixed_picture(
     }
     false
 }
+
+/// 글상자에 공백이 아닌 실제 텍스트가 한 글자라도 있는지.
+fn textbox_has_visible_text(text_box: &TextBox) -> bool {
+    text_box
+        .paragraphs
+        .iter()
+        .any(|para| para.text.chars().any(|ch| !ch.is_whitespace()))
+}
+
+fn textbox_contains_non_tac_picture(text_box: &TextBox) -> bool {
+    text_box.paragraphs.iter().any(|para| {
+        para.controls
+            .iter()
+            .any(|control| matches!(control, Control::Picture(pic) if !pic.common.treat_as_char))
+    })
+}
+
+pub(super) fn shape_caption_for_layout(shape: &ShapeObject) -> Option<Caption> {
+    match shape {
+        ShapeObject::Line(s) => s.drawing.caption.clone(),
+        ShapeObject::Rectangle(s) => s.drawing.caption.clone(),
+        ShapeObject::Ellipse(s) => s.drawing.caption.clone(),
+        ShapeObject::Arc(s) => s.drawing.caption.clone(),
+        ShapeObject::Polygon(s) => s.drawing.caption.clone(),
+        ShapeObject::Curve(s) => s.drawing.caption.clone(),
+        ShapeObject::Group(s) => s.caption.clone(),
+        ShapeObject::Picture(s) => s.caption.clone(),
+        ShapeObject::Chart(s) => s.caption.clone().or_else(|| s.drawing.caption.clone()),
+        ShapeObject::Ole(s) => s.caption.clone().or_else(|| s.drawing.caption.clone()),
+    }
+}
+
+fn caption_height_hu(caption: &Caption) -> i32 {
+    if caption.paragraphs.is_empty() {
+        return 0;
+    }
+
+    let mut line_seg_height = 0i32;
+    let mut composed_height = 0i32;
+    for para in &caption.paragraphs {
+        if let (Some(first), Some(last)) = (para.line_segs.first(), para.line_segs.last()) {
+            let para_top = first.vertical_pos.min(0);
+            let para_bottom = last.vertical_pos.saturating_add(last.line_height);
+            line_seg_height = line_seg_height.max(para_bottom.saturating_sub(para_top));
+        }
+
+        let composed = compose_paragraph(para);
+        if composed.lines.is_empty() {
+            composed_height = composed_height.saturating_add(400);
+        } else {
+            for (line_index, line) in composed.lines.iter().enumerate() {
+                composed_height = composed_height.saturating_add(line.line_height);
+                if line_index + 1 < composed.lines.len() {
+                    composed_height = composed_height.saturating_add(line.line_spacing);
+                }
+            }
+        }
+    }
+
+    line_seg_height.max(composed_height).max(0)
+}
+
+pub(super) fn shape_vertical_visual_extent_hu(shape: &ShapeObject, shape_height_hu: i32) -> i32 {
+    let shape_height_hu = shape_height_hu.max(0);
+    let Some(caption) = shape_caption_for_layout(shape) else {
+        return shape_height_hu;
+    };
+    let caption_height_hu = caption_height_hu(&caption);
+    if caption_height_hu == 0 {
+        return shape_height_hu;
+    }
+
+    match caption.direction {
+        CaptionDirection::Top | CaptionDirection::Bottom => shape_height_hu
+            .saturating_add(caption_height_hu)
+            .saturating_add(caption.spacing as i32),
+        CaptionDirection::Left | CaptionDirection::Right => shape_height_hu.max(caption_height_hu),
+    }
+}
