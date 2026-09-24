@@ -3136,6 +3136,7 @@ button.ag-skill-copy {
 /* Review cards use the same neutral elevation as other contextual surfaces. */
 .ag-review-card {
   display: flex;
+  flex: 0 0 auto;
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
@@ -3243,6 +3244,34 @@ button.ag-skill-copy {
   min-width: 0;
   padding: 5px 0;
   background: var(--ag-bg);
+}
+
+.ag-object-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 56px;
+  max-height: 160px;
+  margin: 6px 0 2px;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid rgba(127, 127, 127, 0.2);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.ag-image-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 134px;
+  object-fit: contain;
+}
+
+.ag-equation-preview svg {
+  display: block;
+  max-width: 100%;
+  max-height: 134px;
+  flex-shrink: 0;
 }
 
 .ag-diff-line {

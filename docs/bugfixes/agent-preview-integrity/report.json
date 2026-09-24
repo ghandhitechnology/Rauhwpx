@@ -1,0 +1,359 @@
+{
+  "generatedAt": "2026-09-24T07:13:27.559Z",
+  "mode": "verify",
+  "requested": null,
+  "limit": 20,
+  "targeted": false,
+  "inventory": [
+    {
+      "sample": "table-complex.hwp",
+      "pages": 4,
+      "tables": 4,
+      "cells": 352,
+      "types": [
+        "shape",
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "multi-table-001.hwp",
+      "pages": 2,
+      "tables": 6,
+      "cells": 1129,
+      "types": [
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "multi-table-002.hwp",
+      "pages": 2,
+      "tables": 6,
+      "cells": 1129,
+      "types": [
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "hwp_table_test.hwp",
+      "pages": 3,
+      "tables": 10,
+      "cells": 110,
+      "types": [
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "hwp_table_test-m.hwp",
+      "pages": 3,
+      "tables": 10,
+      "cells": 109,
+      "types": [
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "table-001.hwp",
+      "pages": 1,
+      "tables": 1,
+      "cells": 131,
+      "types": [
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "table-004.hwp",
+      "pages": 1,
+      "tables": 1,
+      "cells": 86,
+      "types": [
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "inner-table-01.hwp",
+      "pages": 2,
+      "tables": 1,
+      "cells": 14,
+      "types": [
+        "shape",
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "issue-986-receipt.hwp",
+      "pages": 1,
+      "tables": 7,
+      "cells": 323,
+      "types": [
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "pic-in-table-01.hwp",
+      "pages": 22,
+      "tables": 47,
+      "cells": 269,
+      "types": [
+        "image",
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "issue2004_cell_image_stack.hwp",
+      "pages": 8,
+      "tables": 7,
+      "cells": 121,
+      "types": [
+        "image",
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "exam_math.hwp",
+      "pages": 20,
+      "tables": 16,
+      "cells": 25,
+      "types": [
+        "equation",
+        "image",
+        "line",
+        "shape",
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "task2146/21761835_jeonjik_exemption_table.hwp",
+      "pages": 6,
+      "tables": 1,
+      "cells": 296,
+      "types": [
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "task2319/20544835_jinan_apt_form.hwp",
+      "pages": 2,
+      "tables": 5,
+      "cells": 105,
+      "types": [
+        "group",
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "task2322/20862337_cheongyang_voucher_form.hwp",
+      "pages": 2,
+      "tables": 2,
+      "cells": 69,
+      "types": [
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "task2322/19439117_gokseong_voucher_form.hwp",
+      "pages": 2,
+      "tables": 2,
+      "cells": 69,
+      "types": [
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "issue2439/issue2439_repeat_table_overlap.hwp",
+      "pages": 10,
+      "tables": 24,
+      "cells": 3156,
+      "types": [
+        "line",
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "hwpx/form-002.hwpx",
+      "pages": 10,
+      "tables": 5,
+      "cells": 430,
+      "types": [
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "table-ipc.hwp",
+      "pages": 10,
+      "tables": 11,
+      "cells": 1739,
+      "types": [
+        "shape",
+        "table"
+      ],
+      "editable": true
+    },
+    {
+      "sample": "21868765_별표2_보건소_분장사무.hwp",
+      "pages": 4,
+      "tables": 1,
+      "cells": 441,
+      "types": [
+        "table"
+      ],
+      "editable": true
+    }
+  ],
+  "results": [
+    {
+      "sample": "table-complex.hwp",
+      "result": "pass",
+      "tableCount": 4,
+      "cellCount": 352
+    },
+    {
+      "sample": "multi-table-001.hwp",
+      "result": "pass",
+      "tableCount": 6,
+      "cellCount": 1129
+    },
+    {
+      "sample": "multi-table-002.hwp",
+      "result": "pass",
+      "tableCount": 6,
+      "cellCount": 1129
+    },
+    {
+      "sample": "hwp_table_test.hwp",
+      "result": "pass",
+      "tableCount": 10,
+      "cellCount": 110
+    },
+    {
+      "sample": "hwp_table_test-m.hwp",
+      "result": "pass",
+      "tableCount": 10,
+      "cellCount": 109
+    },
+    {
+      "sample": "table-001.hwp",
+      "result": "pass",
+      "tableCount": 1,
+      "cellCount": 131
+    },
+    {
+      "sample": "table-004.hwp",
+      "result": "pass",
+      "tableCount": 1,
+      "cellCount": 86
+    },
+    {
+      "sample": "inner-table-01.hwp",
+      "result": "pass",
+      "tableCount": 1,
+      "cellCount": 14
+    },
+    {
+      "sample": "issue-986-receipt.hwp",
+      "result": "pass",
+      "tableCount": 7,
+      "cellCount": 323
+    },
+    {
+      "sample": "pic-in-table-01.hwp",
+      "result": "pass",
+      "tableCount": 47,
+      "cellCount": 269
+    },
+    {
+      "sample": "issue2004_cell_image_stack.hwp",
+      "result": "pass",
+      "tableCount": 7,
+      "cellCount": 121
+    },
+    {
+      "sample": "exam_math.hwp",
+      "result": "pass",
+      "tableCount": 16,
+      "cellCount": 25
+    },
+    {
+      "sample": "task2146/21761835_jeonjik_exemption_table.hwp",
+      "result": "pass",
+      "tableCount": 1,
+      "cellCount": 296
+    },
+    {
+      "sample": "task2319/20544835_jinan_apt_form.hwp",
+      "result": "pass",
+      "tableCount": 5,
+      "cellCount": 105
+    },
+    {
+      "sample": "task2322/20862337_cheongyang_voucher_form.hwp",
+      "result": "pass",
+      "tableCount": 2,
+      "cellCount": 69
+    },
+    {
+      "sample": "task2322/19439117_gokseong_voucher_form.hwp",
+      "result": "pass",
+      "tableCount": 2,
+      "cellCount": 69
+    },
+    {
+      "sample": "issue2439/issue2439_repeat_table_overlap.hwp",
+      "result": "pass",
+      "tableCount": 24,
+      "cellCount": 3156
+    },
+    {
+      "sample": "hwpx/form-002.hwpx",
+      "result": "pass",
+      "tableCount": 5,
+      "cellCount": 430
+    },
+    {
+      "sample": "table-ipc.hwp",
+      "result": "pass",
+      "tableCount": 11,
+      "cellCount": 1739
+    },
+    {
+      "sample": "21868765_별표2_보건소_분장사무.hwp",
+      "result": "pass",
+      "tableCount": 1,
+      "cellCount": 441
+    }
+  ],
+  "failures": [],
+  "totals": {
+    "passed": 20,
+    "failed": 0,
+    "tables": 167,
+    "cells": 10103
+  },
+  "freshLoadComparison": {
+    "documents": 20,
+    "fields": [
+      "pageCount",
+      "tables",
+      "renderedControls",
+      "textLayout"
+    ],
+    "differences": []
+  }
+}

@@ -1360,18 +1360,17 @@ fn repeated_empty_tac_line_offset(
 
 /// A native cell's saved line starts can differ from the sum of its line boxes
 /// (for example when an inline equation changes only one line's height). Keep
-/// their authored relative positions until an edit or page/column reset makes
-/// that coordinate series stale.
+/// their authored relative positions while their line metrics still agree.
+/// An edit elsewhere in the document does not invalidate this coordinate series.
 fn saved_native_cell_line_vpos_base(
     para: Option<&Paragraph>,
     composed: &ComposedParagraph,
     start_line: usize,
     end_line: usize,
     native_hwp5: bool,
-    session_edited: bool,
     y: f64,
 ) -> Option<(i32, f64)> {
-    if !native_hwp5 || session_edited || end_line <= start_line + 1 {
+    if !native_hwp5 || end_line <= start_line + 1 {
         return None;
     }
     let para = para?;
@@ -3303,6 +3302,7 @@ impl LayoutEngine {
             if !tac_on_line(tac_k, tac_pos) {
                 continue;
             }
+            let tac_row = tac_row_for(tac_k).min(row_inline_x.len() - 1);
             if let Some(p) = para {
                 if let Some(Control::Equation(eq)) = p.controls.get(tac_ci) {
                     let tokens = crate::renderer::equation::tokenizer::tokenize(&eq.script);
@@ -3325,7 +3325,6 @@ impl LayoutEngine {
                         );
                     let hwp_eq_h = hwpunit_to_px(eq.common.height as i32, self.dpi);
                     let eq_h = hwp_eq_h.max(layout_box.height);
-                    let tac_row = tac_row_for(tac_k).min(row_inline_x.len() - 1);
                     let row_y = (y + tac_row as f64 * (line_height + line_spacing_px)
                         - zero_endnote_boundary_result_shift)
                         .max(col_area_y);
@@ -3378,6 +3377,7 @@ impl LayoutEngine {
                             inner_control_index: cell_ctx.as_ref().map(|_| tac_ci),
                             cell_index: eq_cell_idx,
                             cell_para_index: eq_cell_para_idx,
+                            cell_context: cell_ctx.clone(),
                             note_ref,
                         }),
                         BoundingBox::new(eq_x, eq_y, eq_w, eq_h),
@@ -3391,6 +3391,10 @@ impl LayoutEngine {
                         eq_x,
                         eq_y,
                     );
+                    row_inline_x[tac_row] += tac_w;
+                } else {
+                    // Picture, shape, and table TAC controls are painted by their own
+                    // branches, but they still occupy space before later equations.
                     row_inline_x[tac_row] += tac_w;
                 }
             }
@@ -3642,8 +3646,9 @@ impl LayoutEngine {
             // 가산하면 새 쪽에서도 쪽 하단에 그려져 문구·로고가 잘린다(셀 끝
             // Enter 재현). 단 절반을 넘는 과대 vpos만 차단해 상단 여백
             // 재현(test-image.hwp 폴백 목적)은 유지한다.
-            let session_stale_vpos =
-                self.profile.get().session_edited() && vpos0_px > col_area.height * 0.5;
+            let session_stale_vpos = self.profile.get().session_edited()
+                && cell_ctx.is_none()
+                && vpos0_px > col_area.height * 0.5;
             if vpos0_px > 0.0 && !session_stale_vpos {
                 y += vpos0_px;
             }
@@ -3870,7 +3875,6 @@ impl LayoutEngine {
                 start_line,
                 end,
                 self.profile.get().native_hwp5_layout(),
-                self.profile.get().session_edited(),
                 y,
             )
         } else {
@@ -6192,6 +6196,7 @@ impl LayoutEngine {
                                         inner_control_index: cell_ctx.as_ref().map(|_| tac_ci),
                                         cell_index: eq_cell_idx,
                                         cell_para_index: eq_cell_para_idx,
+                                        cell_context: cell_ctx.clone(),
                                         note_ref,
                                     },
                                 ),
@@ -8140,22 +8145,20 @@ mod saved_native_cell_vpos_tests {
         let continuation = line_ys(1, 2);
         assert_eq!(continuation.len(), 1);
         assert!((continuation[0] - 100.0).abs() < 0.01);
+        eng.profile.set(eng.profile.get().with_session_edited(true));
+        assert_eq!(
+            line_ys(0, 2),
+            full,
+            "editing another cell preserves saved line starts"
+        );
 
         let mut reset = para.clone();
         reset.line_segs[1].tag = LineSeg::TAG_FIRST_LINE_OF_PAGE;
-        assert!(saved_native_cell_line_vpos_base(
-            Some(&reset),
-            &composed,
-            0,
-            2,
-            true,
-            false,
-            100.0
-        )
-        .is_none());
         assert!(
-            saved_native_cell_line_vpos_base(Some(&para), &composed, 0, 2, true, true, 100.0)
-                .is_none()
+            saved_native_cell_line_vpos_base(Some(&reset), &composed, 0, 2, true, 100.0).is_none()
+        );
+        assert!(
+            saved_native_cell_line_vpos_base(Some(&para), &composed, 0, 2, true, 100.0).is_some()
         );
     }
 }

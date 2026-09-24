@@ -598,6 +598,152 @@ fn table_has_detached_para_flow_object(table: &crate::model::table::Table) -> bo
 
 type ParaFloatLanes = std::collections::HashMap<usize, FloatLaneSet>;
 
+#[derive(Clone, Copy)]
+struct AnchoredTablePlacement {
+    para_index: usize,
+    vert_rel_to: VertRelTo,
+    text_wrap: TextWrap,
+    original: BoundingBox,
+    painted: BoundingBox,
+}
+
+fn adjacent_anchored_table_shift(
+    placed: &[AnchoredTablePlacement],
+    para_index: usize,
+    vert_rel_to: VertRelTo,
+    text_wrap: TextWrap,
+    original: BoundingBox,
+) -> f64 {
+    placed
+        .iter()
+        .rev()
+        .find(|previous| {
+            previous.para_index == para_index
+                && previous.vert_rel_to == vert_rel_to
+                && previous.text_wrap == text_wrap
+                && previous.original.x < original.x + original.width
+                && original.x < previous.original.x + previous.original.width
+                && ((previous.original.y + previous.original.height) - original.y).abs() <= 0.25
+        })
+        .map(|previous| {
+            (previous.painted.y + previous.painted.height
+                - previous.original.y
+                - previous.original.height)
+                .max(0.0)
+        })
+        .unwrap_or(0.0)
+}
+
+fn paper_anchor_x(common: &CommonObjAttr, page_width: f64, dpi: f64) -> Option<(f64, f64)> {
+    if common.horz_rel_to != HorzRelTo::Paper {
+        return None;
+    }
+    let width = hwpunit_to_px(signed_hwpunit(common.width), dpi);
+    let offset = hwpunit_to_px(signed_hwpunit(common.horizontal_offset), dpi);
+    let x = match common.horz_align {
+        HorzAlign::Left | HorzAlign::Inside => offset,
+        HorzAlign::Center => (page_width - width).max(0.0) / 2.0 + offset,
+        HorzAlign::Right | HorzAlign::Outside => (page_width - width).max(0.0) - offset,
+    };
+    Some((x, width))
+}
+
+pub(crate) fn projected_paper_table_top(
+    para: &Paragraph,
+    para_index: usize,
+    control_index: usize,
+    measured_tables: &[MeasuredTable],
+    page_width: f64,
+    dpi: f64,
+) -> Option<(f64, f64, f64)> {
+    let mut placed = Vec::new();
+    for (index, control) in para.controls.iter().enumerate().take(control_index + 1) {
+        let Control::Table(table) = control else {
+            continue;
+        };
+        if table.common.treat_as_char
+            || table.common.vert_rel_to != VertRelTo::Paper
+            || table.common.horz_rel_to != HorzRelTo::Paper
+            || !matches!(table.common.vert_align, VertAlign::Top | VertAlign::Inside)
+            || !matches!(
+                table.common.text_wrap,
+                TextWrap::InFrontOfText | TextWrap::BehindText
+            )
+            || table.caption.is_some()
+        {
+            continue;
+        }
+        let (x, width) = paper_anchor_x(&table.common, page_width, dpi)?;
+        let height = hwpunit_to_px(signed_hwpunit(table.common.height), dpi);
+        let y = hwpunit_to_px(signed_hwpunit(table.common.vertical_offset), dpi)
+            + hwpunit_to_px(table.outer_margin_top as i32, dpi);
+        let original = BoundingBox::new(x, y, width, height);
+        let shift = adjacent_anchored_table_shift(
+            &placed,
+            para_index,
+            table.common.vert_rel_to,
+            table.common.text_wrap,
+            original,
+        );
+        let measured_height = measured_tables
+            .iter()
+            .find(|measured| measured.para_index == para_index && measured.control_index == index)
+            .map(|measured| measured.total_height)
+            .unwrap_or(height)
+            .max(height);
+        placed.push(AnchoredTablePlacement {
+            para_index,
+            vert_rel_to: table.common.vert_rel_to,
+            text_wrap: table.common.text_wrap,
+            original,
+            painted: BoundingBox::new(x, y + shift, width, measured_height),
+        });
+        if index == control_index {
+            return Some((y + shift, height, shift));
+        }
+    }
+    None
+}
+
+pub(crate) fn paper_overlay_table_clearance_bottom(
+    para: &Paragraph,
+    control_index: usize,
+    page_width: f64,
+    dpi: f64,
+    body_bottom: f64,
+) -> f64 {
+    let Some(Control::Table(table)) = para.controls.get(control_index) else {
+        return body_bottom;
+    };
+    let Some((table_x, table_width)) = paper_anchor_x(&table.common, page_width, dpi) else {
+        return body_bottom;
+    };
+    let saved_bottom = hwpunit_to_px(signed_hwpunit(table.common.vertical_offset), dpi)
+        + hwpunit_to_px(table.outer_margin_top as i32, dpi)
+        + hwpunit_to_px(signed_hwpunit(table.common.height), dpi);
+    para.controls
+        .iter()
+        .skip(control_index + 1)
+        .filter_map(|control| {
+            let common = match control {
+                Control::Shape(shape) => shape.common(),
+                Control::Picture(picture) => &picture.common,
+                _ => return None,
+            };
+            if common.treat_as_char
+                || common.vert_rel_to != VertRelTo::Paper
+                || !matches!(common.vert_align, VertAlign::Top | VertAlign::Inside)
+            {
+                return None;
+            }
+            let (x, width) = paper_anchor_x(common, page_width, dpi)?;
+            let y = hwpunit_to_px(signed_hwpunit(common.vertical_offset), dpi);
+            (x < table_x + table_width && table_x < x + width && y + 0.25 >= saved_bottom)
+                .then_some(y)
+        })
+        .fold(body_bottom, f64::min)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct VisibleFloatExclusion {
     /// visible host 문단의 양수 offset 자리차지 표가 후속 본문을 밀어내야 하는 y 구간.
@@ -5437,7 +5583,6 @@ impl LayoutEngine {
             col_content.endnote_flow,
         );
         hcursor.suppress_hwpx_stale_forward = self.profile.get().hwpx_stored_layout();
-        hcursor.session_edited = self.profile.get().session_edited();
         // [Task #1246] 미주 흐름 컬럼에만 between-notes 마진(HU)을 주입 → HeightCursor 가 새 미주
         // 제목 forward 흐름의 min-gap 보정에 사용. 본문 컬럼은 0 (무영향).
         if col_content.endnote_flow {
@@ -5642,6 +5787,13 @@ impl LayoutEngine {
                 }
             }
             let y_before_vpos = y_offset;
+            // Saved positions become stale when preceding table content grows,
+            // not merely because an edit happened elsewhere in the document.
+            let preceding_table_growth = self.profile.get().session_edited()
+                && measured_tables
+                    .iter()
+                    .any(|table| table.para_index <= item_para && table.has_row_growth());
+            hcursor.session_edited = preceding_table_growth;
             let prev_item_content_bottom_y = if item_ordinal > 0 {
                 let content_bottom_y = self.last_item_content_bottom.get();
                 content_bottom_y.is_finite().then_some(content_bottom_y)
@@ -5652,7 +5804,7 @@ impl LayoutEngine {
             // [편집 세션] 분할 표 조각은 typeset 이 fresh 컷으로 이 쪽 잔여에
             // 배치한 신생 아이템이다 — 저장 사다리 전방 점프로 당기면 조각이 쪽
             // 하단 밖에 그려진다(셀 Enter 재현: 조각이 쪽 하단을 수백 px 넘김).
-            // 이 쪽에 선행 아이템이 있는 조각은 흐름 y 를 신뢰한다.
+            // 전방 점프만 막고, 저장 원점으로의 후방 정렬은 유지한다.
             let session_fresh_partial_table = self.profile.get().session_edited()
                 && item_ordinal > 0
                 && matches!(item, PageItem::PartialTable { .. });
@@ -5661,7 +5813,7 @@ impl LayoutEngine {
             // 하단보다 위에 머문다. 편집으로 표가 이 쪽에 재배치되면 그 좁은
             // 상자 위치에 표를 그려 앞 문구를 문다. 한글은 재조판에서 표를
             // 글자 아래에 놓는다.
-            if self.profile.get().session_edited()
+            if preceding_table_growth
                 && item_ordinal > 0
                 && matches!(item, PageItem::Table { .. } | PageItem::PartialTable { .. })
             {
@@ -5671,14 +5823,16 @@ impl LayoutEngine {
                     }
                 }
             }
-            if !shape_jumped
-                && !session_fresh_partial_table
-                && (!prev_tac_seg_applied || current_is_endnote_question_title)
-            {
+            if !shape_jumped && (!prev_tac_seg_applied || current_is_endnote_question_title) {
                 // [Task #1027 Stage C] inter-item VPOS_CORR 보정을 HeightCursor 에 위임 (동작 동일).
                 // 이전 문단 overlay-shape/분할표 bypass, page/lazy base 산출, sb 차감,
                 // ≤8px 백워드 클램프를 모두 캡슐화 (Stage A/B 함수 결합). 렌더러·페이지네이터 공유.
-                y_offset = hcursor.vpos_adjust(y_offset, item_para, paragraphs, styles);
+                let adjusted = hcursor.vpos_adjust(y_offset, item_para, paragraphs, styles);
+                y_offset = if session_fresh_partial_table {
+                    adjusted.min(y_offset)
+                } else {
+                    adjusted
+                };
             } // !shape_jumped
             let current_title_tail_backtracked =
                 current_is_endnote_question_title && y_offset < y_before_vpos - 32.0;
@@ -6524,6 +6678,7 @@ impl LayoutEngine {
             composed,
             styles,
             bin_data_content,
+            measured_tables,
             layout,
             col_area,
             &para_start_y,
@@ -8512,6 +8667,7 @@ impl LayoutEngine {
             styles,
             bin_data_content,
             measured_tables,
+            layout,
             col_area,
             outline_numbering_id,
             multi_col_width,
@@ -8608,7 +8764,7 @@ impl LayoutEngine {
                 }
             }
         }
-        let (pt_margin_left, pt_margin_right) = if let Some(para) = paragraphs.get(para_index) {
+        let (mut pt_margin_left, pt_margin_right) = if let Some(para) = paragraphs.get(para_index) {
             let ps = styles.para_styles.get(para.para_shape_id as usize);
             let ml = ps.map(|s| s.margin_left).unwrap_or(0.0);
             let ind = ps.map(|s| s.indent).unwrap_or(0.0);
@@ -8620,6 +8776,24 @@ impl LayoutEngine {
         let pt_mt = measured_tables
             .iter()
             .find(|mt| mt.para_index == para_index && mt.control_index == control_index);
+        let grown_tac_outer_top = paragraphs
+            .get(para_index)
+            .and_then(|para| para.controls.get(control_index))
+            .and_then(|control| match control {
+                Control::Table(table)
+                    if table.common.treat_as_char
+                        && pt_mt.is_some_and(|measured| {
+                            measured.total_height
+                                > hwpunit_to_px(table.common.height as i32, self.dpi) + 10.0
+                                && measured.total_height > layout.body_area.height + 1.0
+                        }) =>
+                {
+                    pt_margin_left += hwpunit_to_px(table.outer_margin_left as i32, self.dpi);
+                    Some(hwpunit_to_px(table.outer_margin_top as i32, self.dpi))
+                }
+                _ => None,
+            })
+            .unwrap_or(0.0);
         let repeat_fragment_outer_margin = repeats_native_empty_host_rowbreak_fragment_margin(
             self.profile.get().native_hwp5_layout(),
             paragraphs,
@@ -8680,7 +8854,38 @@ impl LayoutEngine {
                 })
                 .unwrap_or(0.0)
         };
-        let pt_y_start = pt_y_start + projected_stack_continuation_top;
+        let pt_y_start = pt_y_start + projected_stack_continuation_top + grown_tac_outer_top;
+        let pt_y_start = if !is_continuation {
+            paragraphs
+                .get(para_index)
+                .and_then(|para| {
+                    let (top, declared_height, shift) = projected_paper_table_top(
+                        para,
+                        para_index,
+                        control_index,
+                        measured_tables,
+                        layout.page_width,
+                        self.dpi,
+                    )?;
+                    let measured_height = pt_mt
+                        .map(|table| table.total_height)
+                        .unwrap_or(declared_height);
+                    let body_bottom = layout.body_area.y + layout.body_area.height;
+                    let clear_bottom = paper_overlay_table_clearance_bottom(
+                        para,
+                        control_index,
+                        layout.page_width,
+                        self.dpi,
+                        body_bottom,
+                    );
+                    ((measured_height > declared_height + 0.5 || shift > 0.5)
+                        && top + measured_height > clear_bottom + 0.5)
+                        .then_some(top)
+                })
+                .map_or(pt_y_start, |top| pt_y_start.max(top))
+        } else {
+            pt_y_start
+        };
         let pt_y_before = y_offset;
         y_offset = self.layout_partial_table(
             tree,
@@ -10315,6 +10520,7 @@ impl LayoutEngine {
         composed: &[ComposedParagraph],
         styles: &ResolvedStyleSet,
         bin_data_content: &[BinDataContent],
+        measured_tables: &[MeasuredTable],
         layout: &PageLayoutInfo,
         col_area: &LayoutRect,
         para_start_y: &std::collections::HashMap<usize, f64>,
@@ -10354,7 +10560,6 @@ impl LayoutEngine {
         shape_render_items.sort_by_key(|item| item.0);
 
         let overflow_map = self.scan_textbox_overflow(paragraphs, &shape_render_items);
-
         for (_, para_index, control_index, para_y, alignment) in shape_render_items {
             let ctrl = paragraphs
                 .get(para_index)
@@ -10397,6 +10602,26 @@ impl LayoutEngine {
                     .get(para_index)
                     .and_then(|p| p.controls.get(control_index))
                 {
+                    // Use the same control-order projection as pagination. Paint order follows
+                    // z-order and must not change the positions of adjacent saved tables.
+                    let shift = projected_paper_table_top(
+                        &paragraphs[para_index],
+                        para_index,
+                        control_index,
+                        measured_tables,
+                        layout.page_width,
+                        self.dpi,
+                    )
+                    .map_or(0.0, |(_, _, shift)| shift);
+                    let mut shifted_table = None;
+                    if shift > 0.05 {
+                        let mut copy = table.clone();
+                        let shift_hu = (shift * 7200.0 / self.dpi).round() as i32;
+                        copy.common.vertical_offset = signed_hwpunit(table.common.vertical_offset)
+                            .saturating_add(shift_hu)
+                            as u32;
+                        shifted_table = Some(copy);
+                    }
                     let mut temp_parent = RenderNode::new(
                         tree.next_id(),
                         RenderNodeType::Column(0),
@@ -10405,7 +10630,7 @@ impl LayoutEngine {
                     self.layout_table(
                         tree,
                         &mut temp_parent,
-                        table,
+                        shifted_table.as_ref().unwrap_or(table),
                         page_content.section_index,
                         styles,
                         0,

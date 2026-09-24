@@ -31,6 +31,413 @@ fn a4_page_def() -> PageDef {
 }
 
 #[test]
+fn following_table_moves_after_pending_cell_equation_grows_previous_table() {
+    use crate::document_core::DocumentCore;
+
+    fn table_box(node: &RenderNode, para: usize, control: usize) -> Option<BoundingBox> {
+        if let RenderNodeType::Table(table) = &node.node_type {
+            if table.para_index == Some(para) && table.control_index == Some(control) {
+                return Some(node.bbox);
+            }
+        }
+        node.children
+            .iter()
+            .find_map(|child| table_box(child, para, control))
+    }
+    fn layered_box(node: &RenderNode, control: u32) -> Option<BoundingBox> {
+        if node
+            .layer
+            .is_some_and(|layer| layer.stable_index == control)
+        {
+            return Some(node.bbox);
+        }
+        node.children
+            .iter()
+            .find_map(|child| layered_box(child, control))
+    }
+
+    let mut core = DocumentCore::from_bytes(include_bytes!("../../../samples/table-ipc.hwp"))
+        .expect("load adjacent tables");
+    let baseline = core.build_page_tree_cached(0).expect("baseline page");
+    let first = table_box(&baseline.root, 0, 3).expect("first table");
+    let following = table_box(&baseline.root, 0, 4).expect("following table");
+    let footer = layered_box(&baseline.root, 5).expect("original page number");
+    assert!((first.y + first.height - following.y).abs() < 0.2);
+
+    core.insert_equation_in_cell_native(0, 0, 3, 0, 0, 0, "x over y", 1200, 0)
+        .expect("insert pending equation");
+    let pending = core.build_page_tree_cached(0).expect("pending page");
+    let grown = table_box(&pending.root, 0, 3).expect("grown first table");
+    let next = table_box(&pending.root, 0, 4).expect("following table after edit");
+    assert!(
+        grown.height > first.height + 10.0,
+        "the fixture must grow the first table"
+    );
+    assert!(
+        next.y + 0.2 >= grown.y + grown.height,
+        "the following table overlaps the grown table: first={grown:?}, next={next:?}"
+    );
+    let saved = core.export_hwpx_native().expect("save the edited document");
+    let reopened = DocumentCore::from_bytes(&saved).expect("reopen the edited document");
+    let reopened_page = reopened.build_page_tree_cached(0).expect("reopened page");
+    let saved_first = table_box(&reopened_page.root, 0, 3).expect("reopened first table");
+    let saved_next = table_box(&reopened_page.root, 0, 4).expect("reopened following table");
+    assert!(saved_next.y + 0.2 >= saved_first.y + saved_first.height,
+        "the reopened document loses the table displacement: first={saved_first:?}, next={saved_next:?}");
+
+    let mut text_core = DocumentCore::from_bytes(include_bytes!("../../../samples/table-ipc.hwp"))
+        .expect("load adjacent tables for text edit");
+    text_core
+        .insert_text_in_cell_native(0, 0, 3, 0, 0, 0, &"가나다라마바사아자차카타파하 ".repeat(8))
+        .expect("insert long cell text");
+    let text_page = text_core.build_page_tree_cached(0).expect("text edit page");
+    let text_first = table_box(&text_page.root, 0, 3).expect("grown text table");
+    let text_next = table_box(&text_page.root, 0, 4).expect("following table after text edit");
+    let text_footer = layered_box(&text_page.root, 5).expect("page number remains on first page");
+    assert!(text_first.height > first.height + 10.0);
+    assert!(
+        text_next.y + 0.2 >= text_first.y + text_first.height,
+        "the following table overlaps after text growth: first={text_first:?}, next={text_next:?}"
+    );
+    assert!(
+        (text_next.y - text_first.y - text_first.height).abs() < 0.2,
+        "the first fragment lost its adjacent anchor: first={text_first:?}, next={text_next:?}"
+    );
+    let text_para = &text_core.document.sections[0].paragraphs[0];
+    let clear_bottom = paper_overlay_table_clearance_bottom(
+        text_para,
+        4,
+        text_page.root.bbox.width,
+        DEFAULT_DPI,
+        text_page.root.bbox.height,
+    );
+    assert!(text_next.y + text_next.height <= clear_bottom + 0.2,
+        "the table fragment reaches the page-number shape: next={text_next:?}, clear={clear_bottom}");
+    assert!((text_footer.y - footer.y).abs() < 0.2);
+    assert!(
+        table_box(
+            &text_core
+                .build_page_tree_cached(1)
+                .expect("continuation page")
+                .root,
+            0,
+            4
+        )
+        .is_some(),
+        "the remaining rows must continue on the next page"
+    );
+    assert!(
+        layered_box(
+            &text_core
+                .build_page_tree_cached(1)
+                .expect("continuation page")
+                .root,
+            5
+        )
+        .is_none(),
+        "the authored page number must not move or duplicate"
+    );
+    let text_saved = text_core
+        .export_hwpx_native()
+        .expect("save the grown table");
+    let text_reopened = DocumentCore::from_bytes(&text_saved).expect("reopen the grown table");
+    let reopened_first_page = text_reopened
+        .build_page_tree_cached(0)
+        .expect("reopened first page");
+    let reopened_first = table_box(&reopened_first_page.root, 0, 3).expect("reopened first table");
+    let reopened_next =
+        table_box(&reopened_first_page.root, 0, 4).expect("reopened next table fragment");
+    assert!(reopened_next.y + 0.2 >= reopened_first.y + reopened_first.height);
+    assert!(table_box(
+        &text_reopened
+            .build_page_tree_cached(1)
+            .expect("reopened continuation page")
+            .root,
+        0,
+        4
+    )
+    .is_some());
+}
+
+#[test]
+fn grown_paper_overlay_table_splits_before_page_number() {
+    use crate::document_core::DocumentCore;
+
+    fn table_box(node: &RenderNode, para: usize, control: usize) -> Option<BoundingBox> {
+        if let RenderNodeType::Table(table) = &node.node_type {
+            if table.para_index == Some(para) && table.control_index == Some(control) {
+                return Some(node.bbox);
+            }
+        }
+        node.children
+            .iter()
+            .find_map(|child| table_box(child, para, control))
+    }
+    fn layered_box(node: &RenderNode, control: u32) -> Option<BoundingBox> {
+        if node
+            .layer
+            .is_some_and(|layer| layer.stable_index == control)
+        {
+            return Some(node.bbox);
+        }
+        node.children
+            .iter()
+            .find_map(|child| layered_box(child, control))
+    }
+
+    let mut core = DocumentCore::from_bytes(include_bytes!("../../../samples/table-complex.hwp"))
+        .expect("load paper overlay table");
+    let baseline = core.build_page_tree_cached(0).expect("baseline page");
+    let original = table_box(&baseline.root, 0, 5).expect("overlay table");
+    let original_footer = layered_box(&baseline.root, 6).expect("page-number shape");
+    core.insert_text_in_cell_native(
+        0,
+        0,
+        5,
+        0,
+        0,
+        0,
+        &"가나다라마바사아자차카타파하 ".repeat(10),
+    )
+    .expect("grow first cell");
+    let edited = core.build_page_tree_cached(0).expect("edited page");
+    let first_fragment = table_box(&edited.root, 0, 5).expect("first table fragment");
+    let edited_footer = layered_box(&edited.root, 6).expect("page number remains on first page");
+    let clearance = paper_overlay_table_clearance_bottom(
+        &core.document.sections[0].paragraphs[0],
+        5,
+        edited.root.bbox.width,
+        DEFAULT_DPI,
+        edited.root.bbox.height,
+    );
+    assert!(
+        first_fragment.height > original.height + 10.0,
+        "the fixture must grow the table"
+    );
+    assert!((first_fragment.y - original.y).abs() < 0.2);
+    assert!((edited_footer.y - original_footer.y).abs() < 0.2);
+    assert!(first_fragment.y + first_fragment.height <= clearance + 0.2,
+        "the first fragment reaches the page number: fragment={first_fragment:?}, clear={clearance}");
+    assert!(table_box(
+        &core
+            .build_page_tree_cached(1)
+            .expect("continuation page")
+            .root,
+        0,
+        5
+    )
+    .is_some());
+    assert!(layered_box(
+        &core
+            .build_page_tree_cached(1)
+            .expect("continuation page")
+            .root,
+        6
+    )
+    .is_none());
+}
+
+#[test]
+fn anchored_table_growth_keeps_authored_overlaps_and_unrelated_floats() {
+    let first = AnchoredTablePlacement {
+        para_index: 0,
+        vert_rel_to: VertRelTo::Paper,
+        text_wrap: TextWrap::InFrontOfText,
+        original: BoundingBox::new(10.0, 100.0, 100.0, 20.0),
+        painted: BoundingBox::new(10.0, 100.0, 100.0, 40.0),
+    };
+    let shift = |para, anchor, wrap, x, y| {
+        adjacent_anchored_table_shift(
+            &[first],
+            para,
+            anchor,
+            wrap,
+            BoundingBox::new(x, y, 100.0, 20.0),
+        )
+    };
+    assert_eq!(
+        shift(0, VertRelTo::Paper, TextWrap::InFrontOfText, 10.0, 120.0),
+        20.0
+    );
+    assert_eq!(
+        shift(0, VertRelTo::Paper, TextWrap::InFrontOfText, 10.0, 115.0),
+        0.0
+    );
+    assert_eq!(
+        shift(0, VertRelTo::Paper, TextWrap::InFrontOfText, 10.0, 125.0),
+        0.0
+    );
+    assert_eq!(
+        shift(0, VertRelTo::Paper, TextWrap::InFrontOfText, 120.0, 120.0),
+        0.0
+    );
+    assert_eq!(
+        shift(1, VertRelTo::Paper, TextWrap::InFrontOfText, 10.0, 120.0),
+        0.0
+    );
+    assert_eq!(
+        shift(0, VertRelTo::Page, TextWrap::InFrontOfText, 10.0, 120.0),
+        0.0
+    );
+    assert_eq!(
+        shift(0, VertRelTo::Paper, TextWrap::BehindText, 10.0, 120.0),
+        0.0
+    );
+}
+
+#[test]
+fn long_cell_edit_keeps_table_fragments_inside_pages() {
+    use crate::document_core::DocumentCore;
+
+    fn top_level_tables(node: &RenderNode, inside_table: bool, out: &mut Vec<BoundingBox>) {
+        let is_table = matches!(node.node_type, RenderNodeType::Table(_));
+        if is_table && !inside_table {
+            out.push(node.bbox);
+        }
+        for child in &node.children {
+            top_level_tables(child, inside_table || is_table, out);
+        }
+    }
+
+    let mut violations = Vec::new();
+    for (name, bytes, para, control, cell, cell_para) in [
+        (
+            "exemption",
+            include_bytes!("../../../samples/task2146/21761835_jeonjik_exemption_table.hwp")
+                .as_slice(),
+            4,
+            0,
+            0,
+            1,
+        ),
+        (
+            "jinan",
+            include_bytes!("../../../samples/task2319/20544835_jinan_apt_form.hwp")
+                .as_slice(),
+            0,
+            2,
+            0,
+            0,
+        ),
+    ] {
+        let mut core = DocumentCore::from_bytes(bytes).expect("load pagination fixture");
+        let baseline_tree = core.build_page_tree_cached(0).expect("baseline first page");
+        let mut baseline_tables = Vec::new();
+        top_level_tables(&baseline_tree.root, false, &mut baseline_tables);
+        let baseline_first = baseline_tables[0];
+        if name == "exemption" {
+            let baseline_page_two = core.build_page_tree_cached(2).expect("baseline third page");
+            let mut page_two_tables = Vec::new();
+            top_level_tables(&baseline_page_two.root, false, &mut page_two_tables);
+            assert!(
+                (page_two_tables[0].height - 947.7).abs() < 0.2,
+                "an unedited table changed its saved row split"
+            );
+            let mut equal_length =
+                DocumentCore::from_bytes(bytes).expect("load same-length fixture");
+            equal_length
+                .delete_text_in_cell_native(0, para, control, cell, cell_para, 0, 2)
+                .expect("remove original label");
+            equal_length
+                .insert_text_in_cell_native(0, para, control, cell, cell_para, 0, "직가")
+                .expect("insert equal-length label");
+            let equal_page_two = equal_length
+                .build_page_tree_cached(2)
+                .expect("same-length third page");
+            let mut equal_tables = Vec::new();
+            top_level_tables(&equal_page_two.root, false, &mut equal_tables);
+            assert!(
+                (equal_tables[0].height - page_two_tables[0].height).abs() < 0.2,
+                "an equal-length edit changed the saved row split"
+            );
+        }
+        let original = match &core.document.sections[0].paragraphs[para].controls[control] {
+            Control::Table(table) => table.cells[cell].paragraphs[cell_para].text.clone(),
+            _ => panic!("target is not a table"),
+        };
+        if para == 0 {
+            core.insert_text_in_cell_native(
+                0,
+                para,
+                control,
+                cell,
+                cell_para,
+                original.chars().count(),
+                &format!(" {}", "추가 내용 ".repeat(12)),
+            )
+            .expect("append longer title text");
+        } else {
+            core.delete_text_in_cell_native(
+                0,
+                para,
+                control,
+                cell,
+                cell_para,
+                0,
+                original.chars().count(),
+            )
+            .expect("delete original text");
+            core.insert_text_in_cell_native(
+                0,
+                para,
+                control,
+                cell,
+                cell_para,
+                0,
+                &format!("{original} {}", "추가 내용 ".repeat(12)),
+            )
+            .expect("insert longer text");
+        }
+        for page in 0..core.page_count() {
+            let tree = core.build_page_tree_cached(page).expect("render page");
+            let mut boxes = Vec::new();
+            top_level_tables(&tree.root, false, &mut boxes);
+            let info: serde_json::Value =
+                serde_json::from_str(&core.get_page_info_native(page).expect("page info"))
+                    .unwrap();
+            let content_bottom = info["footerArea"]["y"].as_f64().expect("body bottom");
+            if name == "jinan" && page == 0 {
+                let first = boxes[0];
+                assert!((first.x - baseline_first.x).abs() < 0.2);
+                assert!((first.y - baseline_first.y).abs() < 0.2);
+            }
+            for bbox in boxes {
+                if bbox.y + bbox.height > content_bottom + 0.5 {
+                    violations.push(format!(
+                        "{name} page={page} bottom={:.1} content_bottom={content_bottom:.1}",
+                        bbox.y + bbox.height
+                    ));
+                }
+            }
+        }
+        let saved = core.export_hwpx_native().expect("save the grown table");
+        let reopened = DocumentCore::from_bytes(&saved).expect("reopen the grown table");
+        for page in 0..reopened.page_count() {
+            let tree = reopened.build_page_tree_cached(page).expect("render reopened page");
+            let mut boxes = Vec::new();
+            top_level_tables(&tree.root, false, &mut boxes);
+            let info: serde_json::Value = serde_json::from_str(
+                &reopened.get_page_info_native(page).expect("reopened page info"),
+            )
+            .unwrap();
+            let content_bottom = info["footerArea"]["y"].as_f64().expect("body bottom");
+            for bbox in boxes {
+                if bbox.y + bbox.height > content_bottom + 0.5 {
+                    violations.push(format!(
+                        "reopened {name} page={page} bottom={:.1} content_bottom={content_bottom:.1}",
+                        bbox.y + bbox.height
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "table fragments exceed page content: {violations:?}"
+    );
+}
+
+#[test]
 fn embedded_table_inline_picture_reserves_outer_margins_around_ink() {
     use crate::model::image::Picture;
     use crate::model::Padding;

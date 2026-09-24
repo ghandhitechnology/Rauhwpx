@@ -1738,6 +1738,21 @@ export class WasmBridge {
     return JSON.parse(this.doc.getShapeBBox(sec, parentPara, controlIdx));
   }
 
+  getObjectBBox(
+    kind: 'image' | 'equation', sec: number, parentPara: number, controlIdx: number,
+    cellIdx?: number, cellParaIdx?: number, innerControlIdx?: number, cellPath?: CellPathLike,
+  ): { pageIndex: number; x: number; y: number; width: number; height: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const doc = this.doc as unknown as {
+      getObjectBBox(kind: string, sec: number, para: number, ctrl: number,
+        cell?: number, cellPara?: number, innerCtrl?: number, pathJson?: string): string;
+    };
+    return JSON.parse(doc.getObjectBBox(
+      kind, sec, parentPara, controlIdx, cellIdx, cellParaIdx, innerControlIdx,
+      cellPath ? JSON.stringify(cellPath) : undefined,
+    ));
+  }
+
   deleteTableControl(sec: number, parentPara: number, controlIdx: number): { ok: boolean } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.deleteTableControl(sec, parentPara, controlIdx));

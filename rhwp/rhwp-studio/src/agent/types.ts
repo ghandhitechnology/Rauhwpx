@@ -11,7 +11,7 @@ import type { EventBus } from '../core/event-bus.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
-import type { CellPathEntry } from '../core/types.ts';
+import type { CellPathEntry, CharShapeRun } from '../core/types.ts';
 
 export const AGENT_PROTOCOL_VERSION = 5;
 
@@ -1010,6 +1010,7 @@ export type ObjectOp =
       /** 존재하면 paraIdx 는 이 셀 내부 문단 인덱스, anchor.controlIdx 는 셀 문단 내 수식 인덱스 */
       cell?: CellAddr;
       script: string; fontSizeHu: number; colorRef: number;
+      previewSvg?: string;
       anchor?: ObjectAnchor;
     }
   | {
@@ -1230,6 +1231,8 @@ export type PendingOp =
       deletedText: string;
       /** 원본 시작 지점 글자 모양 id (삽입 서식 + 폴백 되돌림용) */
       charShapeId: number | null;
+      /** Original runs in scalar offsets relative to deletedText, including newlines. */
+      charShapeRuns?: CharShapeRun[];
       /** 원본 문단별 paraShapeId (폴백 되돌림용, -1 = 캡처 실패) */
       paraShapeIds: number[];
       /** 변이 직전 스냅샷 — 되돌림 시 원본을 정확히 복원하는 소스 */
@@ -1239,6 +1242,8 @@ export type PendingOp =
        * 다르면 스냅샷 복원이 그 사용자 편집을 지우므로 역연산 폴백을 쓴다.
        */
       userEditSeqAtSnapshot?: number;
+      /** A different set settled after this whole-document snapshot. */
+      settledSetSeqAtSnapshot?: number;
       seq?: number;
     } // applied
   | {
@@ -1256,7 +1261,9 @@ export type PendingOp =
       kind: 'field'; id: string; agent: AgentName; name: string; oldValue: string; newValue: string;
       seq?: number;
     } // applied
-  | { kind: 'object'; id: string; agent: AgentName; obj: ObjectOp; seq?: number }; // applied 여부는 isObjectOpApplied(obj)
+  | { kind: 'object'; id: string; agent: AgentName; obj: ObjectOp; seq?: number;
+      snapshotId?: number | null; userEditSeqAtSnapshot?: number;
+      settledSetSeqAtSnapshot?: number }; // applied 여부는 isObjectOpApplied(obj)
 
 export type ChangeSetStatus = 'open' | 'awaiting-review';
 

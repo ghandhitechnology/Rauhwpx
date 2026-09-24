@@ -1327,6 +1327,9 @@ pub struct EquationNode {
     pub cell_index: Option<usize>,
     /// 표 셀 내 수식인 경우: 셀 내 문단 인덱스
     pub cell_para_index: Option<usize>,
+    /// 중첩 표를 포함한 원본 셀 경로. 단일 인덱스 필드로는 서로 다른 중첩 셀을 구별할 수 없다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_context: Option<CellContext>,
     /// 각주/미주 내부 수식인 경우 원본 위치
     pub note_ref: Option<NoteControlRef>,
 }

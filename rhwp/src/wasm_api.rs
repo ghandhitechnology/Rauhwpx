@@ -4634,6 +4634,33 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// Rendered bounds of an agent-inserted image or equation. Cell coordinates
+    /// identify the equation itself, rather than its containing table cell.
+    #[wasm_bindgen(js_name = getObjectBBox)]
+    pub fn get_object_bbox(
+        &self,
+        kind: &str,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: Option<u32>,
+        cell_para_idx: Option<u32>,
+        inner_control_idx: Option<u32>,
+        cell_path_json: Option<String>,
+    ) -> Result<String, JsValue> {
+        self.get_object_bbox_native(
+            kind,
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            cell_idx.map(|n| n as usize),
+            cell_para_idx.map(|n| n as usize),
+            inner_control_idx.map(|n| n as usize),
+            cell_path_json.as_deref(),
+        )
+        .map_err(|e| e.into())
+    }
+
     #[wasm_bindgen(js_name = renderEquationPreviewWithFont)]
     pub fn render_equation_preview_with_font(
         &self,

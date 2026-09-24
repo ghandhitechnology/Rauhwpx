@@ -7,6 +7,7 @@
  * 눈금자·용지가 가려지지 않고 남은 폭 기준으로 다시 가운데 정렬되게 한다.
  */
 import './agent-sidebar.css';
+import { appendSvgMarkup } from '../dom-utils.ts';
 
 import type { EventBus } from '../../core/event-bus.ts';
 import type { SidebarBridge } from '../../agent/bridge.ts';
@@ -693,6 +694,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let replyPending = false;
   /** 편대 카드가 대신 나타내는 스폰 도구 호출 — 결과 행도 함께 접는다. */
   const suppressedSpawnCalls = new Set<string>();
+  const reviewImageUrls = new Map<string, string>();
   /**
    * 서브에이전트·워크플로 카드. 턴이 도는 동안 입력기 위 도크 팝업이 서브에이전트
    * 작업을 보는 자리이고, 턴이 끝나면 태어날 때 예약한 슬롯으로 접혀 정착한다.
@@ -7453,6 +7455,33 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       case 'field':
         diff.append(buildDiffLine('del', op.oldValue), buildDiffLine('add', op.newValue));
         break;
+      case 'object': {
+        if (op.obj.type === 'insertImage') {
+          const preview = el('div', 'ag-object-preview ag-image-preview');
+          const image = el('img', '');
+          let url = reviewImageUrls.get(op.id);
+          if (!url) {
+            const extension = op.obj.extension.toLowerCase().replace(/^\./, '');
+            const mime = extension === 'jpg' ? 'image/jpeg'
+              : extension === 'svg' ? 'image/svg+xml' : `image/${extension}`;
+            url = URL.createObjectURL(new Blob([new Uint8Array(op.obj.bytes)], { type: mime }));
+            reviewImageUrls.set(op.id, url);
+          }
+          image.src = url;
+          image.alt = op.obj.description || '삽입할 그림';
+          preview.appendChild(image);
+          diff.appendChild(preview);
+        } else if (op.obj.type === 'insertEquation' && op.obj.previewSvg) {
+          const preview = el('div', 'ag-object-preview ag-equation-preview');
+          preview.setAttribute('role', 'img');
+          preview.setAttribute('aria-label', op.obj.script);
+          appendSvgMarkup(preview, op.obj.previewSvg);
+          diff.appendChild(preview);
+        } else {
+          diff.appendChild(buildDiffLine('ctx', opPreview(op)));
+        }
+        break;
+      }
       default:
         // 서식/개체는 텍스트 diff 가 없다 — 중립 줄로 내용만 보인다.
         diff.appendChild(buildDiffLine('ctx', opPreview(op)));
@@ -8003,6 +8032,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       planColCollapsed = true;
     }
     const changeSets = bridge.pendingEdits.getChangeSets();
+    const activeOps = new Set(changeSets.flatMap(set => set.ops.map(op => op.id)));
+    for (const [id, url] of reviewImageUrls) {
+      if (!activeOps.has(id)) {
+        URL.revokeObjectURL(url);
+        reviewImageUrls.delete(id);
+      }
+    }
     const reviewSets = changeSets.filter((set) => set.status !== 'open');
     updateComposerActivity(changeSets);
     for (const set of reviewSets) {
@@ -8222,6 +8258,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     dispose(): void {
       if (root.dataset.disposed === 'true') return;
       root.dataset.disposed = 'true';
+      for (const url of reviewImageUrls.values()) URL.revokeObjectURL(url);
+      reviewImageUrls.clear();
       threadComposerDrafts.clear();
       cloudTransferCloseWaiter?.reject(new Error('클라우드 전송을 기다리는 동안 사이드바가 닫혔습니다.'));
       cloudTransferCloseWaiter = null;

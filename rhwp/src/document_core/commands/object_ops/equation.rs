@@ -1461,6 +1461,83 @@ mod tests {
     }
 
     #[test]
+    fn inline_picture_and_equation_at_same_offset_do_not_overlap() {
+        let mut core = make_test_core();
+        let image = include_bytes!(
+            "../../../../tests/fixtures/editing_parity/mac-hancom-12.30.0-xml14/grid.png"
+        );
+        let picture: serde_json::Value = serde_json::from_str(
+            &core
+                .insert_picture_with_placement_native(
+                    0,
+                    0,
+                    0,
+                    &[],
+                    image,
+                    12000,
+                    8000,
+                    240,
+                    120,
+                    "png",
+                    "inline image",
+                    None,
+                    None,
+                    true,
+                )
+                .expect("insert inline picture"),
+        )
+        .unwrap();
+        let equation: serde_json::Value = serde_json::from_str(
+            &core
+                .insert_equation_native(0, 0, 0, "x over y", 1200, 0)
+                .expect("insert equation"),
+        )
+        .unwrap();
+        let picture_bbox: serde_json::Value = serde_json::from_str(
+            &core
+                .get_object_bbox_native(
+                    "image",
+                    0,
+                    0,
+                    picture["controlIdx"].as_u64().unwrap() as usize,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("render picture"),
+        )
+        .unwrap();
+        let equation_bbox: serde_json::Value = serde_json::from_str(
+            &core
+                .get_object_bbox_native(
+                    "equation",
+                    0,
+                    0,
+                    equation["controlIdx"].as_u64().unwrap() as usize,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("render equation"),
+        )
+        .unwrap();
+        let px = picture_bbox["x"].as_f64().unwrap();
+        let py = picture_bbox["y"].as_f64().unwrap();
+        let pw = picture_bbox["width"].as_f64().unwrap();
+        let ph = picture_bbox["height"].as_f64().unwrap();
+        let ex = equation_bbox["x"].as_f64().unwrap();
+        let ey = equation_bbox["y"].as_f64().unwrap();
+        let ew = equation_bbox["width"].as_f64().unwrap();
+        let eh = equation_bbox["height"].as_f64().unwrap();
+        assert!(
+            ex >= px + pw || px >= ex + ew || ey >= py + ph || py >= ey + eh,
+            "inline controls overlap: picture={picture_bbox}, equation={equation_bbox}"
+        );
+    }
+
+    #[test]
     fn nested_cell_equations_use_exact_path_and_control_index() {
         use crate::model::table::{Cell, Table};
 
