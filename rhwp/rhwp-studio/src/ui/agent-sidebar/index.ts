@@ -726,6 +726,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const turnChanges = new TurnChanges();
   let turnOwnerThreadId: string | null = null;
   let workingDiff: DiffItem[] = [];
+  let compactChangesOpen = false;
   let changesRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   let reviewColCollapsed = true;
   let planColCollapsed = true;
@@ -2943,6 +2944,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const review = el('div', 'ag-review');
   review.tabIndex = 0;
   review.setAttribute('aria-label', '변경 사항 검토');
+  const compactChanges = el('section', 'ag-compact-changes');
+  compactChanges.hidden = true;
+  const compactChangesToggle = el('button', 'ag-compact-changes-toggle');
+  compactChangesToggle.type = 'button';
+  compactChangesToggle.setAttribute('aria-controls', 'ag-compact-changes-content');
+  compactChangesToggle.setAttribute('aria-expanded', 'false');
+  compactChangesToggle.append(createIcon('changes'), el('span', '', '커밋 전'));
+  const compactChangesCount = el('span', 'ag-compact-changes-count');
+  compactChangesToggle.append(compactChangesCount, createChevron('ag-compact-changes-chevron'));
+  compactChangesToggle.addEventListener('click', () => setCompactChangesOpen(!compactChangesOpen));
+  const compactChangesContent = el('div', 'ag-compact-changes-content');
+  compactChangesContent.id = 'ag-compact-changes-content';
+  compactChangesContent.hidden = true;
+  compactChanges.append(compactChangesToggle, compactChangesContent);
   const planSurface = el('section', 'ag-plan-surface');
   planSurface.setAttribute('aria-label', '실행 계획');
   const planCardSlot = el('div', 'ag-plan-card-slot');
@@ -3194,7 +3209,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   // 사이드바에서는 변경 검토와 계획을 분리한다. 계획은 입력기 바로 위에
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
   // 질문 카드와 입력기는 인접 형제여야 하나의 입력 면으로 이어진다.
-  chatPage.append(header, messages, review, planSurface, calibrationChip, questionController.root, composer);
+  chatPage.append(header, messages, review, compactChanges, planSurface, calibrationChip, questionController.root, composer);
 
   /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다.
    *  펼쳐진 사이드바의 현재 폭이 아니라 max-content(말줄임 바닥)로 잰다.
@@ -3440,10 +3455,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     },
     onWorkingDiff: (items) => {
       workingDiff = items;
+      updateCompactChangesVisibility();
       updateReviewControl(bridge.pendingEdits.getChangeSets());
     },
   });
   reviewColumn.append(changesDrawer.element);
+  changesDrawer.setCompactHost(compactChangesContent);
+  updateCompactChangesVisibility();
 
   function scheduleChangesRefresh(): void {
     clearTimeout(changesRefreshTimer);
@@ -3711,6 +3729,24 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function isCompactWorkspace(): boolean {
     return fullscreen && workspaceCompact;
+  }
+
+  function setCompactChangesOpen(open: boolean): void {
+    const next = open && !fullscreen && !compactChanges.hidden;
+    if (compactChangesOpen === next) return;
+    compactChangesOpen = next;
+    compactChangesContent.hidden = !next;
+    compactChangesToggle.setAttribute('aria-expanded', String(next));
+    compactChanges.classList.toggle('ag-open', next);
+    if (next) void changesDrawer.refresh();
+  }
+
+  function updateCompactChangesVisibility(): void {
+    const state = versionController?.getState();
+    const visible = !fullscreen && Boolean(state?.saved && state.enabled && state.dirty);
+    compactChanges.hidden = !visible;
+    compactChangesCount.textContent = workingDiff.length ? `${workingDiff.length}건` : '';
+    if (!visible) setCompactChangesOpen(false);
   }
 
   function clearCompactRailHoverClose(): void {
@@ -4006,7 +4042,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     threadsPage.setAttribute('aria-hidden', 'true');
     chatPage.setAttribute('aria-hidden', 'false');
     // 변경 검토·계획·질문·입력기는 다시 사이드바의 분리된 inline 흐름으로 돌아간다.
-    chatPage.append(review, planSurface, questionController.root, composer);
+    chatPage.append(review, compactChanges, planSurface, questionController.root, composer);
+    changesDrawer.setCompactHost(compactChangesContent);
+    updateCompactChangesVisibility();
     applyPlanMinimizedState();
   }
 
@@ -4077,6 +4115,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       applyRailWidth(railWidth, { persist: false });
       applyReviewWidth(reviewWidth, { persist: false });
       // 변경 사항과 계획은 각각의 환경 drawer에 둔다.
+      setCompactChangesOpen(false);
+      changesDrawer.setCompactHost(null);
+      updateCompactChangesVisibility();
       changesDrawer.reviewSlot.appendChild(review);
       planColumn.appendChild(planSurface);
       reviewColCollapsed = true;

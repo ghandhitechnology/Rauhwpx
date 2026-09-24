@@ -4,12 +4,25 @@ import { resolve } from 'node:path';
 const fullScene = 'audit=1&auditScene=chat-changes-full&scenario=review&review=full&permission=unrestricted&play=1&surface=changes';
 
 export async function checkChangesPreview(page, origin, artifacts) {
-  const open = async (query) => {
-    await page.goto(`${origin}/?theme=light&width=480&${query}`, { waitUntil: 'networkidle0' });
+  const open = async (query, width = 480) => {
+    await page.goto(`${origin}/?theme=light&width=${width}&${query}`, { waitUntil: 'networkidle0' });
     await page.waitForFunction(() => document.body.dataset.auditReady === 'true');
     await page.waitForFunction(() => document.querySelector('.ag-changes-diff-list .ag-changes-item'));
   };
   const itemCount = () => page.$$eval('.ag-changes-diff-list .ag-changes-item', (nodes) => nodes.length);
+
+  await open('audit=1&scenario=review&review=full&permission=unrestricted&play=1', 360);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.snapshot().pendingChanges), 0);
+  assert.equal(await page.$eval('.ag-compact-changes', (node) => node.hidden), false);
+  await page.click('.ag-compact-changes-toggle');
+  await page.waitForSelector('.ag-compact-changes-content:not([hidden]) .ag-changes-diff-list .ag-changes-item');
+  assert.equal(await page.$eval('.ag-compact-changes', (node) => node.scrollWidth <= node.clientWidth), true);
+  await page.screenshot({ path: resolve(artifacts, 'changes-compact-before-commit.png') });
+  await page.type('.ag-compact-changes-content .ag-changes-message', '에이전트 수정을 반영했습니다.');
+  await page.click('.ag-compact-changes-content .ag-changes-primary');
+  await page.waitForFunction(() => window.sidebarPreview.versions.getState().dirty === false);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.versions.getState().commits[0].title), '에이전트 수정을 반영했습니다.');
+  assert.equal(await page.$eval('.ag-compact-changes', (node) => node.hidden), true);
 
   await open(fullScene);
   assert.deepEqual(await page.evaluate(() => window.sidebarPreview.snapshot().changeEvents), ['set-finalized', 'approved']);
