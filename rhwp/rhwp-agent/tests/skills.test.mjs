@@ -6,6 +6,7 @@ import path from 'node:path';
 import { SkillRegistry, projectSkillMarkdown } from '../skills.mjs';
 import { buildClaudeArgv, formatClaudeExitError } from '../agents/claude.mjs';
 import { buildCodexArgv } from '../agents/codex.mjs';
+import { buildCodexAppServerArgv } from '../agents/codex-app-server.mjs';
 
 const MARKDOWN = (name, description = 'Use this skill for representative testing.', icon) => `---\nname: ${name}\ndescription: ${description}${icon ? `\nicon: ${icon}` : ''}\n---\n\nFollow the requested workflow.\n`;
 
@@ -104,6 +105,40 @@ test('promptContext keeps the writing discipline on implementing and omits it wh
   assert.match(implementing, /<korean_writing_discipline>/);
   const planning = await registry.promptContext('문장', undefined, { phase: 'planning' });
   assert.doesNotMatch(planning, /<korean_writing_discipline>/);
+});
+
+test('Codex loads bundled document image guidance by default and respects disabling it', async (t) => {
+  const markdown = readFileSync(new URL('../skills/document-image-generation/SKILL.md', import.meta.url), 'utf8');
+  assert.equal(projectSkillMarkdown(markdown, 'document-image-generation').name, 'document-image-generation');
+  const { registry } = await tempRegistry(t, {
+    bundled: { 'document-image-generation': { 'SKILL.md': markdown } },
+  });
+
+  const codex = await registry.promptContext('Add a small illustration', undefined, { agent: 'codex' });
+  assert.match(codex, /<activated_product_skill name="document-image-generation">/);
+  assert.match(codex, /insert_image/);
+  assert.match(codex, /In planning or question mode, discuss the visual without editing the document/);
+  assert.equal(codex.match(/<activated_product_skill name="document-image-generation">/g)?.length, 1);
+  const explicit = await registry.promptContext('Add a small illustration', 'document-image-generation', { agent: 'codex' });
+  assert.equal(explicit.match(/<activated_product_skill name="document-image-generation">/g)?.length, 1);
+  const claude = await registry.promptContext('Add a small illustration', undefined, { agent: 'claude' });
+  assert.doesNotMatch(claude, /<activated_product_skill name="document-image-generation">/);
+
+  const disabled = await change(registry, { action: 'enable', name: 'document-image-generation', enabled: false });
+  assert.equal(disabled.ok, true);
+  const withoutSkill = await registry.promptContext('Add a small illustration', undefined, { agent: 'codex' });
+  assert.doesNotMatch(withoutSkill, /<activated_product_skill name="document-image-generation">/);
+});
+
+test('Codex enables native image generation for document chat in both launch paths', () => {
+  const options = { ...backendOpts, permissionProfile: 'safe' };
+  for (const argv of [buildCodexArgv(options, null), buildCodexArgv(options, 'thread'), buildCodexAppServerArgv(options)]) {
+    assert.ok(argv.some((arg, index) => arg === '--enable' && argv[index + 1] === 'image_generation'));
+  }
+  const worker = { ...options, toolProfile: 'copy-layout-worker' };
+  for (const argv of [buildCodexArgv(worker, null), buildCodexAppServerArgv(worker)]) {
+    assert.ok(argv.some((arg, index) => arg === '--disable' && argv[index + 1] === 'image_generation'));
+  }
 });
 
 test('SkillRegistry creates, disables, reads, and recoverably deletes user skills', async (t) => {
