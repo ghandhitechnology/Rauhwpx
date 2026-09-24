@@ -1,0 +1,27 @@
+diff --git a/rhwp/src/model/paragraph.rs b/rhwp/src/model/paragraph.rs
+index 687dfb5b..7fc643ef 100644
+--- a/rhwp/src/model/paragraph.rs
++++ b/rhwp/src/model/paragraph.rs
+@@ -61,6 +61,13 @@ pub struct Paragraph {
+     /// None = 앞 번호 목록에 이어 (기본)
+     /// Some(NumberingRestart) = 이전 번호 이어 / 새 번호 시작
+     pub numbering_restart: Option<NumberingRestart>,
++    /// 셀 서식 변경으로 무효화된 vpos. 배치 편집 중 문단과 함께 이동하며
++    /// 파일에 실리지 않고, undo 스냅샷 저장 전에 flush 한다. [#6639]
++    pub cell_format_vpos_dirty: bool,
++    /// 저장된 셀 조각 경계. 첫 서식 vpos 갱신 전에 캡처한다.
++    /// False는 이후 성장이 리셋을 만들지 않음을 기록한다. 스냅샷은 보존하고,
++    /// 문단 분할은 이어지는 조각을 만들며, 폭 reflow는 이전 좌표계를 해제한다.
++    pub cell_vpos_reset: Option<bool>,
+ }
+ 
+ /// 문단 스코프 메타데이터 — 문단 병합의 역연산(undo)에서 복원해야 하는 값들.
+@@ -1387,6 +1394,8 @@ impl Paragraph {
+             tab_extended: new_tab_extended,
+             markpen_marks: new_markpen_marks,
+             numbering_restart: None,
++            cell_format_vpos_dirty: self.cell_format_vpos_dirty,
++            cell_vpos_reset: Some(false),
+         }
+     }
+ 
