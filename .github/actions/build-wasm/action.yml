@@ -10,13 +10,13 @@ runs:
     - name: Fingerprint committed engine inputs
       id: source
       shell: bash
-      run: echo "digest=$(python3 scripts/wasm-source-fingerprint.py)" >> "$GITHUB_OUTPUT"
+      run: echo "digest=$(node scripts/wasm-source-fingerprint.mjs)" >> "$GITHUB_OUTPUT"
     - name: Restore complete WASM package
       id: pkg
       uses: actions/cache/restore@v4
       with:
         path: rhwp/pkg
-        key: wasm-pkg-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.source.outputs.digest }}-${{ hashFiles('.cargo/**', '.github/workflows/*.yml', 'rust-toolchain*', '.github/actions/setup-rust/action.yml', '.github/actions/build-wasm/action.yml', 'scripts/wasm-source-fingerprint.py', 'package.json') }}
+        key: wasm-pkg-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.source.outputs.digest }}-${{ hashFiles('.cargo/**', 'rust-toolchain*', '.github/actions/setup-rust/action.yml', '.github/actions/build-wasm/action.yml', 'scripts/wasm-source-fingerprint.mjs', 'package.json') }}
     - uses: ./.github/actions/setup-rust
       if: inputs.setup-rust == 'true' && steps.pkg.outputs.cache-hit != 'true'
       with:

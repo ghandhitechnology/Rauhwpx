@@ -189,8 +189,18 @@ jobs:
           path: cloud/release
           merge-multiple: true
 
+      - name: Build native reference extractor
+        run: npm run build:native
+
+      - uses: ./.github/actions/build-wasm
+        with:
+          setup-rust: 'false'
+
+      - name: Build Studio application
+        run: npm run build:studio:app
+
       - name: Build AppImage and Debian package
-        run: npm run dist:linux:${{ matrix.arch }}
+        run: npm run package:linux:${{ matrix.arch }}
 
       - name: Verify Linux artifacts
         env:
@@ -259,9 +269,9 @@ jobs:
           wasm: 'true'
           cache: cloud-release
 
-      - name: Build WASM engine
-        working-directory: rhwp
-        run: wasm-pack build --target web
+      - uses: ./.github/actions/build-wasm
+        with:
+          setup-rust: 'false'
 
       - name: Build native reference extractor
         working-directory: rhwp

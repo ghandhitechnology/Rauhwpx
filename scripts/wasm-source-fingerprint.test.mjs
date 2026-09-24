@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-const script = new URL('./wasm-source-fingerprint.py', import.meta.url).pathname;
+const script = new URL('./wasm-source-fingerprint.mjs', import.meta.url).pathname;
 
 test('WASM cache fingerprint tracks engine inputs and ignores consumer apps', () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'rhwp-wasm-fingerprint-'));
@@ -19,7 +19,7 @@ test('WASM cache fingerprint tracks engine inputs and ignores consumer apps', ()
     git('add', '-A');
     git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'Update fixture');
   };
-  const fingerprint = () => execFileSync('python3', [script], { cwd: repo, encoding: 'utf8' }).trim();
+  const fingerprint = () => execFileSync(process.execPath, [script], { cwd: repo, encoding: 'utf8' }).trim();
 
   try {
     git('init', '-q');

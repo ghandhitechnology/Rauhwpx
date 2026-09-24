@@ -6,6 +6,7 @@ import { RAILWAY_DEFAULT_IMAGE } from '../desktop/cloud-railway.mjs';
 import { RAILWAY_DEFAULT_IMAGE as HOSTED_RAILWAY_DEFAULT_IMAGE } from '../rhwp/rau-credits/cloud-provisioner.mjs';
 
 const release = yaml.load(readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8'));
+const desktopPackage = yaml.load(readFileSync(new URL('../.github/actions/package-desktop/action.yml', import.meta.url), 'utf8'));
 
 test('desktop, cloud runtime metadata and default sandbox image use one release version', () => {
   const read = (path) => JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8'));
@@ -25,7 +26,7 @@ test('every desktop release bundles both cloud runtimes before packaging', () =>
     assert.ok(job.needs.includes('cloud'), `${platform} requires completed cloud artifacts`);
     const downloadIndex = job.steps.findIndex((step) => step.uses?.startsWith('actions/download-artifact@'));
     const buildIndex = job.steps.findIndex((step) => step.uses === './.github/actions/package-desktop'
-      || step.run?.includes('npm run dist:linux:'));
+      || step.run?.includes('npm run package:linux:'));
     assert.ok(downloadIndex >= 0 && buildIndex > downloadIndex, `${platform} downloads runtimes before packaging`);
     assert.deepEqual(job.steps[downloadIndex].with, {
       pattern: 'cloud-dist-*', path: 'cloud/release', 'merge-multiple': true,
@@ -36,6 +37,20 @@ test('every desktop release bundles both cloud runtimes before packaging', () =>
     assert.equal(job.steps.filter((step) => step.uses === './.github/actions/package-desktop').length, 1);
     assert.equal(job.steps.some((step) => /npm run (?:build:desktop|dist:)/.test(step.run ?? '')), false);
   }
+  const linuxSteps = release.jobs.linux.steps;
+  const native = linuxSteps.findIndex((step) => step.run === 'npm run build:native');
+  const wasm = linuxSteps.findIndex((step) => step.uses === './.github/actions/build-wasm');
+  const studio = linuxSteps.findIndex((step) => step.run === 'npm run build:studio:app');
+  const packageIndex = linuxSteps.findIndex((step) => step.run?.includes('npm run package:linux:'));
+  assert.ok(native >= 0 && native < wasm && wasm < studio && studio < packageIndex);
+
+  const desktopSteps = desktopPackage.runs.steps;
+  const desktopNative = desktopSteps.findIndex((step) => step.run === 'npm run build:native');
+  const desktopWasm = desktopSteps.findIndex((step) => step.uses === './.github/actions/build-wasm');
+  const desktopStudio = desktopSteps.findIndex((step) => step.run === 'npm run build:studio:app');
+  const desktopPackaging = desktopSteps.findIndex((step) => step.run?.includes('npm run package:mac'));
+  assert.ok(desktopNative >= 0 && desktopNative < desktopWasm
+    && desktopWasm < desktopStudio && desktopStudio < desktopPackaging);
 });
 
 test('cloud release preserves architecture artifacts, signing and sandbox smoke checks', () => {
