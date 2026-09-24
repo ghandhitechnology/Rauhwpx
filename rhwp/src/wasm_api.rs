@@ -4222,6 +4222,32 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 본문 및 중첩 표 셀 사이의 인라인 그림 이동. 빈 경로는 본문이다.
+    #[wasm_bindgen(js_name = movePictureControlByPath)]
+    pub fn move_picture_control_by_path(
+        &mut self,
+        section_idx: u32,
+        from_para_idx: u32,
+        from_cell_path_json: &str,
+        from_control_idx: u32,
+        to_para_idx: u32,
+        to_cell_path_json: &str,
+        to_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        let from_path = parse_cell_path_arg(from_cell_path_json)?;
+        let to_path = parse_cell_path_arg(to_cell_path_json)?;
+        self.move_picture_control_by_path_native(
+            section_idx as usize,
+            from_para_idx as usize,
+            &from_path,
+            from_control_idx as usize,
+            to_para_idx as usize,
+            &to_path,
+            to_char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// [Task #1171 / PR #1254] 표 셀/글상자 내부 Picture 삭제 (by_path).
     #[wasm_bindgen(js_name = deleteCellPictureControlByPath)]
     pub fn delete_cell_picture_control_by_path(

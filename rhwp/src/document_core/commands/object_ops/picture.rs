@@ -1427,6 +1427,227 @@ impl DocumentCore {
             to_para_idx, new_ctrl_idx
         )))
     }
+    /// 본문/중첩 표 셀 사이에서 인라인 그림을 이동한다. 오프셋은 논리 글자 단위다.
+    /// 반환 cellPath는 컨트롤 삭제/삽입으로 바뀐 표 인덱스를 반영한다.
+    pub fn move_picture_control_by_path_native(
+        &mut self,
+        section_idx: usize,
+        from_para_idx: usize,
+        from_path: &[(usize, usize, usize)],
+        from_control_idx: usize,
+        to_para_idx: usize,
+        to_path: &[(usize, usize, usize)],
+        to_char_offset: usize,
+    ) -> Result<String, HwpError> {
+        use crate::document_core::helpers::{
+            find_logical_control_positions, is_treat_as_char_object_control,
+            logical_paragraph_length,
+        };
+        let resolve = |parent: usize, path: &[(usize, usize, usize)]| {
+            let mut para = self
+                .document
+                .sections
+                .get(section_idx)
+                .and_then(|section| section.paragraphs.get(parent))
+                .ok_or_else(|| HwpError::RenderError("그림 이동 문단을 찾지 못했습니다".into()))?;
+            for &(ctrl, cell, paragraph) in path {
+                let Some(Control::Table(table)) = para.controls.get(ctrl) else {
+                    return Err(HwpError::RenderError(
+                        "그림 이동 경로는 표 셀이어야 합니다".into(),
+                    ));
+                };
+                para = table
+                    .cells
+                    .get(cell)
+                    .and_then(|cell| cell.paragraphs.get(paragraph))
+                    .ok_or_else(|| {
+                        HwpError::RenderError("그림 이동 셀 문단을 찾지 못했습니다".into())
+                    })?;
+            }
+            Ok(para)
+        };
+        // 변경 전 양쪽 경로와 그림을 모두 검증한다.
+        let source = resolve(from_para_idx, from_path)?;
+        let target = resolve(to_para_idx, to_path)?;
+        let picture = match source.controls.get(from_control_idx) {
+            Some(Control::Picture(pic)) if pic.common.treat_as_char => pic.clone(),
+            _ => {
+                return Err(HwpError::RenderError(
+                    "글자처럼 취급 그림만 이동할 수 있습니다".into(),
+                ))
+            }
+        };
+        let ctrl_data = source
+            .ctrl_data_records
+            .get(from_control_idx)
+            .cloned()
+            .flatten();
+        let source_offset = find_logical_control_positions(source)[from_control_idx];
+        let same_para = from_para_idx == to_para_idx && from_path == to_path;
+        let requested = to_char_offset.min(logical_paragraph_length(target));
+        let target_offset = requested - usize::from(same_para && requested > source_offset);
+        let result =
+            |moved: bool, control: usize, path: &[(usize, usize, usize)], offset: usize| {
+                serde_json::json!({
+                    "ok": true, "moved": moved, "paraIdx": to_para_idx,
+                    "controlIdx": control, "charOffset": offset,
+                    "cellPath": path.iter().map(|&(ctrl, cell, para)| serde_json::json!({
+                        "controlIndex": ctrl, "cellIndex": cell, "cellParaIndex": para,
+                    })).collect::<Vec<_>>(),
+                })
+                .to_string()
+            };
+        if same_para && target_offset == source_offset {
+            return Ok(result(false, from_control_idx, to_path, source_offset));
+        }
+
+        let section = &mut self.document.sections[section_idx];
+        let source = Self::resolve_cell_paragraph_mut(section, from_para_idx, from_path)?;
+        let gap = Self::remove_inline_control_and_shift(source, from_control_idx);
+        // 글자 모양과 영역 태그도 삭제한 8 UTF-16 유닛만큼 이동한다.
+        let remove_gap = |pos: u32| {
+            if pos > gap {
+                pos.saturating_sub(8).max(gap)
+            } else {
+                pos
+            }
+        };
+        for shape in &mut source.char_shapes {
+            shape.start_pos = remove_gap(shape.start_pos);
+        }
+        for tag in &mut source.range_tags {
+            tag.start = remove_gap(tag.start);
+            tag.end = remove_gap(tag.end);
+        }
+        for field in &mut source.field_ranges {
+            if field.control_idx > from_control_idx {
+                field.control_idx -= 1;
+            }
+        }
+        let mut target_path = to_path.to_vec();
+        if from_para_idx == to_para_idx
+            && target_path.len() > from_path.len()
+            && target_path.starts_with(from_path)
+        {
+            let ctrl = &mut target_path[from_path.len()].0;
+            if *ctrl > from_control_idx {
+                *ctrl -= 1;
+            }
+        }
+        let target = Self::resolve_cell_paragraph_mut(section, to_para_idx, &target_path)?;
+        let occupies_slot = |ctrl: &Control| {
+            is_treat_as_char_object_control(ctrl)
+                || matches!(ctrl, Control::Footnote(_) | Control::Endnote(_))
+        };
+        let positions = find_logical_control_positions(target);
+        let insert_idx = target
+            .controls
+            .iter()
+            .enumerate()
+            .find(|(i, ctrl)| {
+                positions[*i] > target_offset
+                    || (positions[*i] == target_offset && occupies_slot(ctrl))
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(target.controls.len());
+        let preceding = target.controls[..insert_idx]
+            .iter()
+            .filter(|ctrl| occupies_slot(ctrl))
+            .count();
+        let text_offset = target_offset
+            .saturating_sub(preceding)
+            .min(target.text.chars().count());
+        // 같은 텍스트 위치의 여러 컨트롤 사이도 정확한 UTF-16 갭을 선택한다.
+        let text_end = if text_offset == 0 {
+            0
+        } else {
+            let ch = target.text.chars().nth(text_offset - 1).unwrap();
+            target.char_offsets[text_offset - 1]
+                + if ch == '\t' { 8 } else { ch.len_utf16() as u32 }
+        };
+        let control_end = if insert_idx == 0 {
+            0
+        } else {
+            Self::find_inline_control_gap_start(target, insert_idx - 1) + 8
+        };
+        let insert_pos = text_end.max(control_end);
+        for offset in &mut target.char_offsets {
+            if *offset >= insert_pos {
+                *offset += 8;
+            }
+        }
+        for shape in &mut target.char_shapes {
+            if shape.start_pos >= insert_pos && shape.start_pos > 0 {
+                shape.start_pos += 8;
+            }
+        }
+        for tag in &mut target.range_tags {
+            if tag.start >= insert_pos {
+                tag.start += 8;
+            }
+            if tag.end >= insert_pos {
+                tag.end += 8;
+            }
+        }
+        for field in &mut target.field_ranges {
+            if field.control_idx >= insert_idx {
+                field.control_idx += 1;
+            }
+        }
+        target
+            .ctrl_data_records
+            .resize_with(target.controls.len(), || None);
+        target
+            .controls
+            .insert(insert_idx, Control::Picture(picture));
+        target.ctrl_data_records.insert(insert_idx, ctrl_data);
+        target.char_count += 8;
+        target.control_mask |= 1 << 11;
+        target.has_para_text = true;
+        let anchor = find_logical_control_positions(target)[insert_idx];
+        section.raw_stream = None;
+
+        let mut source_path = from_path.to_vec();
+        if from_para_idx == to_para_idx
+            && source_path.len() > target_path.len()
+            && source_path.starts_with(&target_path)
+        {
+            let ctrl = &mut source_path[target_path.len()].0;
+            if *ctrl >= insert_idx {
+                *ctrl += 1;
+            }
+        }
+        for (parent, path) in [(from_para_idx, &source_path), (to_para_idx, &target_path)] {
+            if let Some(&(_, _, para)) = path.last() {
+                self.reflow_cell_paragraph_by_path(section_idx, parent, path, para);
+                self.recalculate_cell_paragraph_vpos_by_path(section_idx, parent, path, para, None);
+                // 가장 안쪽 표부터 모든 조상 표의 높이를 다시 측정한다.
+                for depth in (0..path.len()).rev() {
+                    let ancestor = Self::resolve_cell_paragraph_mut(
+                        &mut self.document.sections[section_idx],
+                        parent,
+                        &path[..depth],
+                    )?;
+                    if let Control::Table(table) = &mut ancestor.controls[path[depth].0] {
+                        table.dirty = true;
+                    }
+                }
+            } else {
+                self.reflow_body_para_and_recalc_flow(section_idx, parent);
+            }
+        }
+        self.mark_section_dirty(section_idx);
+        self.recompose_section(section_idx);
+        self.paginate_if_needed();
+        self.invalidate_page_tree_cache();
+        self.event_log.push(DocumentEvent::PictureMoved {
+            section: section_idx,
+            para: to_para_idx,
+            ctrl: insert_idx,
+        });
+        Ok(result(true, insert_idx, &target_path, anchor))
+    }
+
     /// [Task #2230] 임베디드 BinData 등록 (콘텐츠 + 메타데이터) — 반환값은
     /// bin_data_id(위치, 1-based 순번).
     ///

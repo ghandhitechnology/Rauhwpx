@@ -2321,6 +2321,26 @@ export class WasmBridge {
     return JSON.parse(this.doc.deletePictureControl(sec, para, ci));
   }
 
+  /** 본문 및 중첩 표 셀 사이에서 인라인 그림을 이동한다. */
+  movePictureControlByPath(
+    sec: number, fromParentPara: number, fromPath: CellPathLike, fromControl: number,
+    toParentPara: number, toPath: CellPathLike, toCharOffset: number,
+  ): { ok: boolean; moved: boolean; paraIdx: number; controlIdx: number; cellPath: CellPathEntry[]; charOffset: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const serializePath = (path: CellPathLike): string => JSON.stringify(path.map(entry =>
+      'controlIndex' in entry ? entry : {
+        controlIndex: entry.controlIdx, cellIndex: entry.cellIdx, cellParaIndex: entry.cellParaIdx,
+      }));
+    const doc = this.doc as unknown as {
+      movePictureControlByPath(sec: number, fromParent: number, fromPath: string, fromControl: number,
+        toParent: number, toPath: string, offset: number): string;
+    };
+    return JSON.parse(doc.movePictureControlByPath(
+      sec, fromParentPara, serializePath(fromPath), fromControl,
+      toParentPara, serializePath(toPath), toCharOffset,
+    ));
+  }
+
   /** 글자처럼 취급(tac) 그림 컨트롤을 같은 구역 내 새 캐럿 위치로 이동한다. */
   movePictureControl(
     sec: number,

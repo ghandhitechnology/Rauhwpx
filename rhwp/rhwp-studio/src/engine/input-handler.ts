@@ -442,6 +442,9 @@ export class InputHandler {
     inlineTac?: boolean;
     /** 드래그 시작 시 소스 그림의 논리(캐럿) 위치 — undo 의 원본 자리. */
     originCharOffset?: number;
+    startClientX?: number;
+    startClientY?: number;
+    passedDragThreshold?: boolean;
     startPageX: number;
     startPageY: number;
     lastPageX: number;
@@ -449,6 +452,7 @@ export class InputHandler {
     totalDeltaH: number;
     totalDeltaV: number;
     pageIndex: number;
+    lastPageIndex?: number;
     bbox: { x: number; y: number; w: number; h: number };
     rotationAngle: number;
     /** 다중 선택 이동 시 각 개체의 원래 offset 기록 */
