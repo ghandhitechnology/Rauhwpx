@@ -93,10 +93,9 @@ test('?initial-setup=1 이면 끝난 뒤에도 다시 연다', () => {
   assert.equal(shouldSuppressInitialSetup(), typeof navigator !== 'undefined' && navigator.webdriver === true);
 });
 
-test('카드 모델 목록은 정적·동적 카탈로그를 짧게 보여 준다', () => {
+test('카드 모델 목록은 현재 선택과 Pi 기본 안내를 짧게 보여 준다', () => {
   assert.deepEqual(previewModelLabels('claude'), AGENT_MODELS.claude.map((model) => model.label));
-  assert.ok(previewModelLabels('claude').includes('Fable 5.1'));
-  assert.deepEqual(previewModelLabels('codex'), ['Astra', 'Sol 6', 'Luna 6', 'Sol 5.6', 'Terra', 'Luna 5.6']);
+  assert.deepEqual(previewModelLabels('codex'), AGENT_MODELS.codex.map((model) => model.label));
   assert.deepEqual(previewModelLabels('pi'), ['OpenRouter에서 고름', '최대 3개']);
   assert.equal(SUGGESTED_AGENT, 'claude');
   assert.equal(PROVIDER_ORDER[0], 'claude');

@@ -216,7 +216,7 @@ test('사이드바 버전 버튼은 한컴 Git 설정을 따르고 상단 메뉴
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {
   assert.match(
     settings,
-    /aiContent\.append\(defaults\.root, calibration\.root, instructionsSection\.root, templatesSection\.root, aiFooter\)/,
+    /aiContent\.append\(defaults\.root, modelCatalogSection\.root, calibration\.root, instructionsSection\.root, templatesSection\.root, aiFooter\)/,
   );
   assert.doesNotMatch(editingSettings, /documentResources/);
   assert.match(settings, /requestTemplateName\('템플릿 추가'/);
