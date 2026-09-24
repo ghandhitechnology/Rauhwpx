@@ -46,6 +46,21 @@ fn body_available_width_for_para_shape(
     (col_width - margin_left - margin_right).max(1.0)
 }
 
+fn cell_para_shape_affects_vpos(
+    before: &crate::model::style::ParaShape,
+    after: &crate::model::style::ParaShape,
+) -> bool {
+    before.line_spacing != after.line_spacing
+        || before.line_spacing_type != after.line_spacing_type
+        || before.margin_left != after.margin_left
+        || before.margin_right != after.margin_right
+        || before.indent != after.indent
+        || (before.attr1 ^ after.attr1) & (0b111 << 5) != 0
+        || before.spacing_before != after.spacing_before
+        || before.spacing_after != after.spacing_after
+        || before.break_latin_word != after.break_latin_word
+}
+
 impl DocumentCore {
     /// 임의 editable scope의 문단에 적용할 run별 파생 글자모양 ID를 만든다.
     /// 대상 문단 borrow와 doc_info mutation을 분리해 본문/HF/note/cell이 같은 규칙을 쓴다.
@@ -1743,6 +1758,7 @@ impl DocumentCore {
         }
 
         let new_id;
+        let affects_vpos;
         {
             let para = self
                 .get_cell_paragraph_ref(
@@ -1755,6 +1771,17 @@ impl DocumentCore {
                 .ok_or_else(|| HwpError::RenderError("셀 문단을 찾을 수 없음".to_string()))?;
             let base_id = para.para_shape_id;
             new_id = self.document.find_or_create_para_shape(base_id, &mods);
+            affects_vpos = self
+                .document
+                .doc_info
+                .para_shapes
+                .get(base_id as usize)
+                .is_none_or(|old| {
+                    cell_para_shape_affects_vpos(
+                        old,
+                        &self.document.doc_info.para_shapes[new_id as usize],
+                    )
+                });
 
             let cell_para = self.get_cell_paragraph_mut(
                 sec_idx,
@@ -1764,6 +1791,7 @@ impl DocumentCore {
                 cell_para_idx,
             )?;
             cell_para.para_shape_id = new_id;
+            cell_para.cell_format_vpos_dirty |= affects_vpos;
         }
 
         // 줄간격 변경 시 셀 내 문단 LineSeg 재계산.
@@ -1779,11 +1807,14 @@ impl DocumentCore {
             cell_para_idx,
         );
 
+        // [#6639] 배치 중에는 셀별로 모으고, 스타일 갱신 뒤 조각마다 한 번 재배치한다.
+        self.pending_cell_format_vpos |= affects_vpos;
+
         // 표 dirty 마킹 — measure_section_incremental이 셀 높이를 재계산하도록
         self.mark_cell_control_dirty(sec_idx, parent_para_idx, control_idx);
 
         self.document.sections[sec_idx].raw_stream = None;
-        self.rebuild_section(sec_idx);
+        self.rebuild_section_deferred_in_batch(sec_idx);
         self.event_log.push(DocumentEvent::ParaFormatChanged {
             section: sec_idx,
             para: parent_para_idx,
@@ -1809,6 +1840,27 @@ impl DocumentCore {
             )));
         }
 
+        let old_id = self
+            .get_cell_paragraph_ref(
+                sec_idx,
+                parent_para_idx,
+                control_idx,
+                cell_idx,
+                cell_para_idx,
+            )
+            .ok_or_else(|| HwpError::RenderError("셀 문단을 찾을 수 없음".to_string()))?
+            .para_shape_id;
+        let affects_vpos = self
+            .document
+            .doc_info
+            .para_shapes
+            .get(old_id as usize)
+            .is_none_or(|old| {
+                cell_para_shape_affects_vpos(
+                    old,
+                    &self.document.doc_info.para_shapes[para_shape_id as usize],
+                )
+            });
         {
             let cell_para = self.get_cell_paragraph_mut(
                 sec_idx,
@@ -1818,6 +1870,7 @@ impl DocumentCore {
                 cell_para_idx,
             )?;
             cell_para.para_shape_id = para_shape_id;
+            cell_para.cell_format_vpos_dirty |= affects_vpos;
         }
 
         self.reflow_cell_paragraph(
@@ -1827,9 +1880,10 @@ impl DocumentCore {
             cell_idx,
             cell_para_idx,
         );
+        self.pending_cell_format_vpos |= affects_vpos;
         self.mark_cell_control_dirty(sec_idx, parent_para_idx, control_idx);
         self.document.sections[sec_idx].raw_stream = None;
-        self.rebuild_section(sec_idx);
+        self.rebuild_section_deferred_in_batch(sec_idx);
         self.event_log.push(DocumentEvent::ParaFormatChanged {
             section: sec_idx,
             para: parent_para_idx,
@@ -1899,14 +1953,29 @@ impl DocumentCore {
             mods.border_spacing = Some([spacing[0], spacing[1], spacing[2], spacing[3]]);
         }
         let new_id = self.document.find_or_create_para_shape(base_id, &mods);
-        self.get_cell_paragraph_mut_by_path(sec_idx, parent_para_idx, path)?
-            .para_shape_id = new_id;
+        let affects_vpos = self
+            .document
+            .doc_info
+            .para_shapes
+            .get(base_id as usize)
+            .is_none_or(|old| {
+                cell_para_shape_affects_vpos(
+                    old,
+                    &self.document.doc_info.para_shapes[new_id as usize],
+                )
+            });
+        {
+            let cell_para = self.get_cell_paragraph_mut_by_path(sec_idx, parent_para_idx, path)?;
+            cell_para.para_shape_id = new_id;
+            cell_para.cell_format_vpos_dirty |= affects_vpos;
+        }
 
         let inner_para_idx = path.last().map(|entry| entry.2).unwrap_or(0);
         self.reflow_cell_paragraph_by_path(sec_idx, parent_para_idx, path, inner_para_idx);
+        self.pending_cell_format_vpos |= affects_vpos;
         self.mark_cell_control_dirty(sec_idx, parent_para_idx, path[0].0);
         self.document.sections[sec_idx].raw_stream = None;
-        self.rebuild_section(sec_idx);
+        self.rebuild_section_deferred_in_batch(sec_idx);
         self.event_log.push(DocumentEvent::ParaFormatChanged {
             section: sec_idx,
             para: parent_para_idx,
@@ -1928,13 +1997,31 @@ impl DocumentCore {
         if para_shape_id as usize >= self.document.doc_info.para_shapes.len() {
             return Err(HwpError::RenderError("문단 모양 ID 범위 초과".into()));
         }
-        self.get_cell_paragraph_mut_by_path(sec_idx, parent_para_idx, path)?
-            .para_shape_id = para_shape_id;
+        let old_id = self
+            .get_cell_paragraph_mut_by_path(sec_idx, parent_para_idx, path)?
+            .para_shape_id;
+        let affects_vpos = self
+            .document
+            .doc_info
+            .para_shapes
+            .get(old_id as usize)
+            .is_none_or(|old| {
+                cell_para_shape_affects_vpos(
+                    old,
+                    &self.document.doc_info.para_shapes[para_shape_id as usize],
+                )
+            });
+        {
+            let cell_para = self.get_cell_paragraph_mut_by_path(sec_idx, parent_para_idx, path)?;
+            cell_para.para_shape_id = para_shape_id;
+            cell_para.cell_format_vpos_dirty |= affects_vpos;
+        }
         let inner_para_idx = path.last().map(|entry| entry.2).unwrap_or(0);
         self.reflow_cell_paragraph_by_path(sec_idx, parent_para_idx, path, inner_para_idx);
+        self.pending_cell_format_vpos |= affects_vpos;
         self.mark_cell_control_dirty(sec_idx, parent_para_idx, path[0].0);
         self.document.sections[sec_idx].raw_stream = None;
-        self.rebuild_section(sec_idx);
+        self.rebuild_section_deferred_in_batch(sec_idx);
         Ok("{\"ok\":true}".to_string())
     }
 

@@ -546,6 +546,8 @@ fn sweep_paragraph(base: &str, a: &Paragraph, b: &Paragraph, out: &mut SweepRepo
         tab_extended,
         markpen_marks,
         numbering_restart,
+        cell_format_vpos_dirty: _,
+        cell_vpos_reset: _,
     } = a;
 
     macro_rules! f {

@@ -400,6 +400,8 @@ pub struct DocumentCore {
     pub(crate) layer_tree_json_cache: RefCell<Vec<Vec<(u8, String)>>>,
     /// Batch 모드 플래그 — true이면 paginate() 스킵
     pub(crate) batch_mode: bool,
+    /// 셀 문단 서식으로 무효화된 vpos. RowBreak 조각별 첫 변경부터 한 번만 갱신한다.
+    pub(crate) pending_cell_format_vpos: bool,
     /// 이벤트 로그 (Command 실행 시 누적)
     pub(crate) event_log: DocumentEventLog,
     /// 글상자 오버플로우 연결 캐시 (섹션별, 지연 계산)
@@ -628,6 +630,7 @@ impl DocumentCore {
             header_footer_preview_tree_cache: RefCell::new(None),
             layer_tree_json_cache: RefCell::new(Vec::new()),
             batch_mode: false,
+            pending_cell_format_vpos: false,
             event_log: DocumentEventLog::default(),
             overflow_links_cache: RefCell::new(HashMap::new()),
             snapshot_store: Vec::new(),
