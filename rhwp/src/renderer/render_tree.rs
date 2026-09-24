@@ -1322,6 +1322,8 @@ pub struct EquationNode {
     pub font_size: f64,
     /// 문서에 선언된 수식 글꼴 이름
     pub font_name: String,
+    /// 원본 수식 버전. 빈 구형 EQEDIT는 HFT 수식 서체를 사용한다.
+    pub version_info: String,
     /// 소속 구역 인덱스
     pub section_index: Option<usize>,
     /// 수식 컨트롤을 소유한 문단 인덱스
@@ -1334,6 +1336,9 @@ pub struct EquationNode {
     pub cell_index: Option<usize>,
     /// 표 셀 내 수식인 경우: 셀 내 문단 인덱스
     pub cell_para_index: Option<usize>,
+    /// 중첩 표를 포함한 원본 셀 경로. 단일 인덱스 필드로는 서로 다른 중첩 셀을 구별할 수 없다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_context: Option<CellContext>,
     /// 각주/미주 내부 수식인 경우 원본 위치
     pub note_ref: Option<NoteControlRef>,
 }

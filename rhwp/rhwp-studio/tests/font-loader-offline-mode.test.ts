@@ -88,6 +88,8 @@ test('외부 웹폰트 사용 안 함 옵션은 CDN @font-face와 FontFace.load�
     assert.equal(styles.length, 1);
     assert.equal(usesJsDelivrFontUrl(styles[0].textContent), false);
     assert.equal(fontFaceRequests.some(request => usesExternalFontUrl(request.source)), false);
+    // 일반 글꼴 목록이 비어도 수식의 첫 Canvas paint에는 수식 글꼴이 준비돼야 한다.
+    assert.ok(fontFaceRequests.some(request => request.family === 'Latin Modern Math'));
 
     fontFaceRequests.length = 0;
     await loadWebFonts([]);

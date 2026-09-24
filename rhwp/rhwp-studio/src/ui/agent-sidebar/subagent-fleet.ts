@@ -868,7 +868,9 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     const head = el('button', 'ag-tool-head');
     head.type = 'button';
     head.setAttribute('aria-expanded', 'false');
-    const status = el('span', 'ag-tool-status ag-spin');
+    const status = el('span', 'ag-tool-status ag-pending');
+    status.setAttribute('role', 'img');
+    status.setAttribute('aria-label', '실행 중');
     const name = el('span', 'ag-tool-name', evt.tool);
     const summary = el('span', 'ag-tool-summary', truncate(evt.argsJson, 56));
     const elapsed = el('span', 'ag-tool-elapsed');
@@ -903,8 +905,9 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     const entry = task.detailToolRows.get(evt.callId);
     if (!entry) return;
     task.detailToolRows.delete(evt.callId);
-    entry.status.classList.remove('ag-spin');
+    entry.status.classList.remove('ag-pending');
     entry.status.classList.add(evt.ok ? 'ag-ok' : 'ag-err');
+    entry.status.setAttribute('aria-label', evt.ok ? '완료' : '오류');
     entry.status.replaceChildren(createIcon(evt.ok ? 'check' : 'close'));
     const ms = nowMs() - entry.startedAt;
     entry.elapsed.textContent = ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
@@ -913,8 +916,9 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
 
   function sweepDetailToolRows(task: TaskEntry): void {
     for (const [, entry] of task.detailToolRows) {
-      entry.status.classList.remove('ag-spin');
+      entry.status.classList.remove('ag-pending');
       entry.status.classList.add('ag-err');
+      entry.status.setAttribute('aria-label', '중단');
       entry.status.replaceChildren(createIcon('close'));
       if (!entry.elapsed.textContent) entry.elapsed.textContent = '중단';
       if (!entry.result.textContent) entry.result.textContent = '(결과 없이 종료됨)';

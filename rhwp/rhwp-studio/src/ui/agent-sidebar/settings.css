@@ -216,7 +216,7 @@
   border: 1px solid var(--ag-border-strong);
   border-radius: 999px;
   background: var(--ag-input-bg);
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: border-color var(--ag-dur-fast) var(--ag-ease-out), background var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-settings-toggle-track::after {
@@ -228,7 +228,7 @@
   height: 12px;
   border-radius: 50%;
   background: var(--ag-text-muted);
-  transition: transform 120ms ease, background 120ms ease;
+  transition: transform var(--ag-dur-fast) var(--ag-ease-out), background var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-settings-toggle-input:checked + .ag-settings-toggle-track {
@@ -404,54 +404,6 @@
   color: var(--ag-warning, #d99532);
 }
 
-/* 새 대화 기본값은 레이블과 선택값을 한 줄에 배치합니다. */
-.ag-settings-destination-content > .ag-settings-section.ag-settings-defaults {
-  --ag-text: #f5f5f7;
-  --ag-text-muted: #a2a2a8;
-  --ag-border: #282828;
-  --ag-input-bg: #0d0d0d;
-  color-scheme: dark;
-  padding: 10px 12px;
-  gap: 10px;
-  border: 1px solid var(--ag-border);
-  border-radius: 10px;
-  background: #000;
-}
-
-.ag-settings-defaults .ag-settings-section-title {
-  color: var(--ag-text);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0;
-}
-
-.ag-settings-defaults .ag-settings-section-body {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
-  gap: 6px 20px;
-}
-
-.ag-settings-defaults .ag-settings-field {
-  min-width: 0;
-  gap: 8px;
-}
-
-.ag-settings-defaults .ag-settings-field-label {
-  flex: 0 0 50px;
-  font-size: 11px;
-  color: var(--ag-text-muted);
-}
-
-.ag-settings-defaults .ag-settings-select {
-  flex: 1 1 0;
-  width: 0;
-  max-width: none;
-  height: 28px;
-  padding: 0 6px;
-  border-color: var(--ag-border);
-  border-radius: 6px;
-}
-
 /* ── 앱 전용 AGENTS.md ──────────────────────────────── */
 
 .ag-settings-instructions-proposal {
@@ -571,7 +523,7 @@
   padding: 24px;
   background: color-mix(in srgb, #101114 54%, transparent);
   opacity: 0;
-  transition: opacity 140ms ease;
+  transition: opacity var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-template-name-overlay.ag-open {
@@ -597,7 +549,7 @@
   color: var(--ag-text);
   box-shadow: var(--n-elev-3);
   transform: translateY(8px) scale(0.985);
-  transition: transform 160ms ease;
+  transition: transform var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-template-name-overlay.ag-open .ag-template-name-dialog {
@@ -649,7 +601,7 @@
   padding: 24px;
   background: color-mix(in srgb, #101114 54%, transparent);
   opacity: 0;
-  transition: opacity 160ms ease;
+  transition: opacity var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-agent-setup-overlay.ag-open {
@@ -680,7 +632,7 @@
   color: var(--n-text);
   box-shadow: var(--n-elev-3);
   transform: translateY(10px) scale(0.985);
-  transition: transform 180ms ease;
+  transition: transform var(--ag-dur-base) var(--ag-ease-out);
 }
 
 .ag-agent-setup-overlay.ag-open .ag-agent-setup-dialog {
@@ -900,7 +852,7 @@
   height: 100%;
   border-radius: inherit;
   background: var(--accent-primary);
-  transition: width 480ms cubic-bezier(.22, .75, .2, 1);
+  transition: width var(--ag-dur-slow) var(--ag-ease-out);
 }
 
 .ag-agent-setup-progress-label {
@@ -1214,63 +1166,11 @@
   color: var(--ag-text-muted);
 }
 
-.ag-pi-catalog {
-  display: flex;
-  max-height: 260px;
-  flex-direction: column;
-  gap: 3px;
-  overflow-y: auto;
-  padding: 3px;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-field);
-  background: var(--ag-bg);
-}
-
-.ag-pi-model-row {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 8px;
-  border: 1px solid transparent;
-  border-radius: var(--ag-r-chip);
-  background: none;
-  color: var(--ag-text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.ag-pi-model-row:hover,
-.ag-pi-model-row:focus-visible {
-  background: var(--ag-hover);
-  outline: none;
-}
-
-.ag-pi-model-row.ag-active {
-  border-color: var(--ag-accent);
-  background: var(--ag-selected);
-}
-
-.ag-pi-model-main {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-}
-
-.ag-pi-model-name {
+.ag-pi-model-id {
   overflow: hidden;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ag-pi-model-id,
-.ag-pi-model-meta {
-  overflow: hidden;
+  color: var(--ag-text-muted);
   font-family: var(--ag-mono);
   font-size: var(--ag-micro);
-  color: var(--ag-text-muted);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1371,7 +1271,7 @@
 
 .ag-pi-progress .ag-settings-meter-fill {
   background: var(--ag-pi);
-  transition: width 480ms cubic-bezier(.22, .75, .2, 1);
+  transition: width var(--ag-dur-slow) var(--ag-ease-out);
 }
 
 /* 크기를 모를 때: 흐르는 줄무늬. 활동 신호가 끊기면 paused 로 멈춘다. */
@@ -1399,7 +1299,7 @@
   height: 100%;
   border-radius: 3px;
   background: var(--ag-accent);
-  transition: width 220ms var(--ag-motion-out, ease-out);
+  transition: width var(--ag-dur-base) var(--ag-motion-out, var(--ag-ease-out));
 }
 
 .ag-settings-meter-warn .ag-settings-meter-fill {
@@ -1596,12 +1496,31 @@
   display: none;
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  .ag-settings-pane:not([hidden]) {
+    animation: ag-settings-pane-arrive var(--ag-dur-base) var(--ag-ease-out) both;
+  }
+}
+
+@keyframes ag-settings-pane-arrive {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 .ag-settings-destination-content {
   box-sizing: border-box;
   width: min(100%, 820px);
   min-height: 100%;
   margin: 0 auto;
   padding: 32px 36px 96px;
+}
+
+/* Connection sections live inside the AI content and share its padding. */
+.ag-settings-page .ag-settings-destination-content > .ag-settings-connection-content {
+  width: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
 }
 
 .ag-settings-skills-content {
@@ -1712,6 +1631,10 @@
   font: inherit;
   font-size: var(--font-size-sm, 11px);
   cursor: pointer;
+  transition:
+    background-color var(--ag-dur-fast) var(--ag-ease-out),
+    color var(--ag-dur-fast) var(--ag-ease-out),
+    box-shadow var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-settings-segment.ag-active {
@@ -1797,7 +1720,7 @@
   flex: 0 0 auto;
   color: var(--ag-text-muted);
   transform: rotate(-90deg);
-  transition: transform 120ms ease;
+  transition: transform var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-settings-disclosure-toggle[aria-expanded='true'] .ag-settings-disclosure-chevron {
@@ -2127,41 +2050,55 @@
 .ag-settings-quota-refresh:disabled { opacity: .45; cursor: wait; }
 .ag-settings-quota-refresh:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
 
-/* 연결 목록: 펼친 내용은 같은 행의 표면을 이어 쓴다. */
-.ag-settings-hub-row { padding: 4px 0 10px; border: 0; border-radius: 0; background: transparent; }
-.ag-settings-hub-row > .ag-settings-btn:last-child { width:28px; height:28px; padding:6px; border:0; background:transparent; }
-.ag-settings-provider-list { gap:0; }
+/* 연결 목록: 프로바이더는 접히는 행, 펼친 내용은 같은 행의 표면을 이어 쓴다. */
+.ag-settings-provider-list { gap: 0; }
 .ag-settings-provider-row {
-  padding:0;
-  min-height:0;
-  border:1px solid transparent;
-  border-bottom-color:var(--ag-border);
-  border-radius:0;
-  background:transparent;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
 }
-.ag-settings-provider-row:first-child { border-top-color:var(--ag-border); }
-.ag-settings-provider-row:has(+ .ag-settings-provider-row[open]) { border-bottom-color:transparent; }
-
-.ag-settings-provider-summary { display:flex; align-items:center; gap:8px; min-height:38px; padding:8px 2px; cursor:pointer; list-style:none; }
-.ag-settings-provider-summary::-webkit-details-marker { display:none; }
-.ag-settings-provider-summary::after { content:'+'; width:14px; text-align:center; color:var(--ag-text-secondary); }
-.ag-settings-provider-row[open] > .ag-settings-provider-summary::after { content:'−'; }
-.ag-settings-provider-summary .ag-settings-row-text { justify-content:space-between; gap:12px; }
-.ag-settings-provider-summary .ag-settings-row-detail { text-align:right; }
-.ag-settings-provider-summary > .ag-settings-dot { width:5px; height:5px; flex-shrink:0; }
-.ag-settings-provider-row[open] { background:var(--ag-bg-2); }
-.ag-settings-provider-summary:hover { background:var(--ag-bg-2); }
-.ag-settings-provider-summary:focus-visible { outline:2px solid var(--accent-primary); outline-offset:-2px; }
-.ag-settings-provider-panel { padding:2px 12px 12px; }
-.ag-settings-provider-message { margin:4px 0 10px; color:var(--ag-text-secondary); font-size:12px; overflow-wrap:anywhere; }
-.ag-settings-provider-panel .ag-provider-setup-btn { width:auto; margin:0; }
+.ag-settings-provider-row[open] {
+  border-color: var(--ag-border);
+}
+.ag-settings-provider-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+.ag-settings-provider-summary::-webkit-details-marker { display: none; }
+.ag-settings-provider-summary::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  margin: 0 3px 3px 4px;
+  border-right: 1.5px solid var(--ag-text-muted);
+  border-bottom: 1.5px solid var(--ag-text-muted);
+  transform: rotate(45deg);
+  transition: transform var(--ag-dur-fast) var(--ag-ease-out);
+}
+.ag-settings-provider-row[open] > .ag-settings-provider-summary::after {
+  margin-bottom: -3px;
+  transform: rotate(-135deg);
+}
+.ag-settings-provider-summary .ag-settings-row-text { justify-content: space-between; gap: 12px; }
+.ag-settings-provider-summary .ag-settings-row-detail { text-align: right; }
+.ag-settings-provider-summary:focus-visible { outline: none; background-color: var(--n-fill-hover); }
+.ag-settings-provider-panel { padding: 4px 14px 16px; }
+.ag-settings-provider-message { margin: 4px 0 12px; color: var(--ag-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.ag-settings-provider-panel .ag-provider-setup-btn { width: auto; margin: 0; }
 
 /* Native details keeps keyboard and focus behavior while its content animates. */
 .ag-settings-provider-row,
 .ag-settings-provider-summary,
 .ag-settings-provider-panel .ag-provider-setup-btn,
 .ag-settings-quota-refresh {
-  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease;
+  transition: background-color var(--ag-dur-fast) var(--ag-ease-out), color var(--ag-dur-fast) var(--ag-ease-out), border-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 @supports (interpolate-size: allow-keywords) {
   .ag-settings-provider-row { interpolate-size: allow-keywords; }
@@ -2169,9 +2106,9 @@
     block-size: 0;
     overflow: clip;
     opacity: 0;
-    transition: block-size 220ms cubic-bezier(.22, 1, .36, 1),
-      opacity 160ms ease,
-      content-visibility 220ms allow-discrete;
+    transition: block-size var(--ag-dur-base) var(--ag-ease-out),
+      opacity var(--ag-dur-fast) var(--ag-ease-out),
+      content-visibility var(--ag-dur-base) allow-discrete;
   }
   .ag-settings-provider-row[open]::details-content {
     block-size: auto;
@@ -2182,51 +2119,32 @@
   .ag-settings-provider-row,
   .ag-settings-provider-row::details-content,
   .ag-settings-provider-summary,
+  .ag-settings-provider-summary::after,
   .ag-settings-provider-panel .ag-provider-setup-btn,
   .ag-settings-quota-refresh { transition: none; }
 }
 
-.ag-settings-provider-summary { padding: 10px 10px; }
-.ag-settings-provider-row[open] {
-  border-radius: 8px;
-  border-color: var(--ag-border);
+/* 계정·허브 행은 프로바이더 행과 같은 줄 모양: 이름 · 상태 · 점 · 동작. */
+:is(.ag-account-session-row, .ag-settings-hub-row) .ag-settings-row-text {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
-.ag-settings-provider-row[open] > .ag-settings-provider-summary {
-  border-radius: 8px 8px 0 0;
+:is(.ag-account-session-row, .ag-settings-hub-row) .ag-settings-row-name { flex-shrink: 0; }
+:is(.ag-account-session-row, .ag-settings-hub-row) .ag-settings-row-detail { min-width: 0; text-align: right; }
+.ag-account-session-row > .ag-settings-btn,
+.ag-settings-hub-row > .ag-settings-btn { flex: 0 0 auto; }
+.ag-account-brand-icon {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  background: currentColor;
+  -webkit-mask: url('./assets/rauhwpx-silhouette.png') center / contain no-repeat;
+  mask: url('./assets/rauhwpx-silhouette.png') center / contain no-repeat;
 }
-.ag-settings-provider-panel { padding: 4px 14px 16px; }
-.ag-settings-provider-message { margin: 4px 0 12px; }
-
-.ag-settings-destination-content > .ag-settings-section.ag-settings-quota-section { border-top: 0; }
-
-@media (prefers-reduced-motion: no-preference) {
-  .ag-settings-provider-row {
-    transition: background-color 180ms ease,
-      border-color 220ms cubic-bezier(.22, 1, .36, 1),
-      border-radius 220ms cubic-bezier(.22, 1, .36, 1);
-  }
-  .ag-settings-provider-summary {
-    transition: background-color 180ms ease,
-      border-radius 220ms cubic-bezier(.22, 1, .36, 1);
-  }
-}
-
-.ag-account-session-row {
-  min-height: 104px;
-  padding: 20px 18px;
-  gap: 16px;
-  border-radius: 12px;
-}
-.ag-account-brand-icon { width:52px; height:52px; flex:0 0 auto; object-fit:contain; }
-.ag-account-session-row .ag-settings-row-name { font-size:18px; letter-spacing:-.4px; }
-.ag-account-session-row .ag-settings-row-text { gap:6px; }
-.ag-account-session-row .ag-settings-row-detail { white-space:normal; overflow-wrap:anywhere; font-size:12px; }
-.ag-account-session-row > .ag-settings-dot[hidden] { display:none; }
-.ag-account-session-row > .ag-settings-btn { flex:0 0 auto; width:auto; }
-@container settings-hub (max-width:380px) {
-  .ag-account-session-row { gap:12px; padding:18px 12px; }
-  .ag-account-brand-icon { width:42px; height:42px; }
-}
+.ag-account-login-box { margin: 0 14px 12px; }
 
 .ag-settings-balance-amount {
   display: flex;
@@ -2247,7 +2165,7 @@
   border: 1px solid var(--ag-border-strong);
   border-radius: 12px;
   background: var(--ag-raised);
-  animation: ag-step-arrive 220ms var(--ag-motion-out) both;
+  animation: ag-step-arrive var(--ag-dur-base) var(--ag-motion-out) both;
 }
 .ag-setup-terminal[hidden] { display: none; }
 .ag-setup-terminal-header {
@@ -2281,6 +2199,1105 @@
   display: none;
 }
 
-.ag-settings-destination-content > .ag-settings-defaults + .ag-settings-section {
+/* ─── 설정 표면 체계 (마지막에 덮는 기준 블록) ─────────────
+   바탕(sunken) 위에 카드(raised) 묶음. 구역 = 머리말 한 줄 + 카드 한 장,
+   카드 안 행은 들여 그은 머리선으로만 나눈다. 글자는 세 단계:
+   본문(--n-text) · 보조(--n-text-secondary) · 흐림(--n-text-muted). */
+.ag-settings-page {
+  --ag-set-bg: var(--n-surface-sunken);
+  --ag-set-card: var(--n-surface-raised);
+  --ag-set-field: color-mix(in srgb, var(--n-surface-sunken) 45%, var(--n-surface-raised));
+  --ag-set-sep: var(--n-hairline);
+  --ag-set-edge: var(--n-hairline);
+  --ag-set-radius: 12px;
+  --ag-set-inset: 14px;
+  --ag-bg-2: var(--ag-set-field);
+  --ag-input-bg: var(--ag-set-field);
+  background: var(--ag-set-bg);
+  font-family: var(--font-family-ui, -apple-system, BlinkMacSystemFont, sans-serif);
+}
+
+:root[data-theme-effective='dark'] .ag-settings-page {
+  --ag-set-bg: var(--n-surface-sunken);
+  --ag-set-card: var(--n-surface-raised);
+  --ag-set-field: color-mix(in srgb, var(--n-surface-sunken) 60%, var(--n-surface-raised));
+  --ag-set-sep: color-mix(in srgb, var(--n-hairline) 80%, var(--n-surface-raised));
+  --ag-set-edge: color-mix(in srgb, var(--n-hairline) 70%, transparent);
+}
+
+.ag-settings-page > .ag-threads-header {
+  position: relative;
+  z-index: 2;
+  border-bottom: 1px solid var(--ag-set-sep);
+  background: var(--ag-set-bg);
+}
+
+.ag-settings-page .ag-threads-title {
+  color: var(--n-text);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.ag-settings-page .ag-settings-body,
+.ag-settings-page .ag-settings-pane {
+  background: transparent;
+}
+
+.ag-settings-page .ag-settings-nav {
+  border-right: 1px solid var(--ag-set-sep);
+  background: transparent;
+}
+
+.ag-root .ag-settings-page .ag-settings-nav-button {
+  min-height: 34px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--n-text-secondary);
+  font-weight: 600;
+  transition:
+    background-color var(--ag-dur-fast) var(--ag-ease-out),
+    color var(--ag-dur-fast) var(--ag-ease-out),
+    box-shadow var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-root .ag-settings-page .ag-settings-nav-button:hover:not(.ag-active) {
+  background: var(--n-fill-hover);
+  color: var(--n-text);
+}
+
+.ag-root .ag-settings-page .ag-settings-nav-button.ag-active {
+  border: 0;
+  background: var(--ag-set-card);
+  box-shadow: var(--n-elev-1), inset 0 0 0 1px var(--ag-set-edge);
+  color: var(--n-text);
+  font-weight: 700;
+}
+
+/* 좁은 폭: 탭 줄을 분할 컨트롤 하나로. */
+@container settings-hub (max-width: 760px) {
+  .ag-settings-page .ag-settings-nav {
+    margin: 12px 14px 0;
+    padding: 3px;
+    gap: 2px;
+    border: 0;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--n-fill-active) 70%, var(--ag-set-bg));
+  }
+
+  .ag-root .ag-settings-page .ag-settings-nav-button {
+    min-height: 28px;
+    border-radius: 7px;
+    font-size: 12px;
+  }
+
+  .ag-settings-page .ag-settings-destination-content {
+    padding: 20px 14px 88px;
+  }
+}
+
+/* 구역 = 머리말 한 줄 + 카드 한 장. */
+.ag-settings-page .ag-settings-destination-content > .ag-settings-section,
+.ag-settings-page .ag-settings-advanced > .ag-settings-section,
+.ag-settings-page .ag-cd-config > .ag-settings-section,
+.ag-settings-page .ag-settings-group {
+  gap: 8px;
+  padding: 0 0 22px;
+}
+
+.ag-settings-page .ag-settings-destination-content > .ag-settings-section + .ag-settings-section,
+.ag-settings-page .ag-settings-group + .ag-settings-group {
+  padding-top: 0;
   border-top: 0;
+}
+
+.ag-settings-page .ag-settings-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 20px;
+  padding: 0 4px;
+}
+
+.ag-settings-page .ag-settings-section-title,
+.ag-settings-page .ag-settings-group-title {
+  margin: 0;
+  color: var(--n-text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.ag-settings-page .ag-settings-group-heading {
+  margin-bottom: 8px;
+}
+
+.ag-settings-page .ag-settings-group-heading,
+.ag-settings-page .ag-settings-group-description {
+  padding: 0 4px;
+}
+
+.ag-settings-page .ag-settings-group-heading > .ag-settings-group-title {
+  padding: 0;
+}
+
+/* 머리말 오른쪽의 아이콘 동작 (새로고침 등). */
+.ag-settings-page .ag-settings-btn.ag-settings-section-action {
+  width: 24px;
+  height: 24px;
+  margin: -2px 0;
+  padding: 0;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--n-text-muted);
+}
+
+.ag-settings-page .ag-settings-section-action .ag-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ag-settings-page .ag-settings-btn.ag-settings-section-action:hover:not(:disabled) {
+  background: var(--n-fill-hover);
+  color: var(--n-text);
+}
+
+.ag-settings-page .ag-settings-section-body,
+.ag-settings-page .ag-settings-group-body {
+  gap: 0;
+  overflow: hidden;
+  border-radius: var(--ag-set-radius);
+  background: var(--ag-set-card);
+  box-shadow: var(--n-elev-1), inset 0 0 0 1px var(--ag-set-edge);
+}
+
+.ag-settings-page .ag-settings-section-body:empty,
+.ag-settings-page .ag-settings-group-body:empty {
+  display: none;
+}
+
+/* 카드 안의 행: 자기 테두리는 걷고 머리선으로만 나눈다. */
+.ag-settings-page :is(.ag-settings-section-body, .ag-settings-group-body) > :is(
+  .ag-settings-row,
+  .ag-settings-control-row,
+  .ag-settings-resource-header,
+  .ag-settings-resource-row,
+  .ag-settings-account-card,
+  .ag-settings-quota-card
+) {
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+}
+
+.ag-settings-page :is(.ag-settings-section-body, .ag-settings-group-body) > :is(
+  .ag-settings-row,
+  .ag-settings-control-row,
+  .ag-settings-resource-header,
+  .ag-settings-resource-row,
+  .ag-settings-quota-card
+) {
+  min-height: 44px;
+  padding: 10px var(--ag-set-inset);
+}
+
+/* 머리선은 왼쪽 여백만큼 들여 긋는다. background-color 와 따로 둬 호버 색과 겹친다. */
+.ag-settings-page :is(.ag-settings-section-body, .ag-settings-group-body, .ag-settings-provider-list, .ag-provider-quotas, .ag-template-list) > :not([hidden]) ~ :not([hidden]) {
+  background-image: linear-gradient(var(--ag-set-sep), var(--ag-set-sep));
+  background-position: var(--ag-set-inset) 0;
+  background-size: calc(100% - var(--ag-set-inset)) 1px;
+  background-repeat: no-repeat;
+}
+
+/* 글자 단계: 행 이름은 본문색, 상태·설명은 보조색, 도움말만 흐림. */
+.ag-settings-page .ag-settings-row-name,
+.ag-settings-page .ag-settings-control-label {
+  color: var(--n-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.ag-settings-page .ag-settings-row-detail {
+  color: var(--n-text-secondary);
+  font-size: 11.5px;
+}
+
+.ag-settings-page :is(.ag-settings-control-description, .ag-settings-note, .ag-settings-group-description) {
+  color: var(--n-text-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.ag-settings-page .ag-settings-note:empty {
+  display: none;
+}
+
+/* 버튼: 보조 버튼도 누를 수 있게 보인다 — 채운 면 + 또렷한 테두리. */
+.ag-settings-page .ag-settings-btn {
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: 7px;
+  background: var(--ag-set-card);
+  color: var(--n-text);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition:
+    background-color var(--ag-dur-fast) var(--ag-ease-out),
+    border-color var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-settings-page .ag-settings-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--n-text) 35%, var(--n-hairline-strong));
+  background: var(--n-fill-hover);
+  color: var(--n-text);
+}
+
+.ag-settings-page .ag-settings-btn:active:not(:disabled) {
+  background: var(--n-fill-active);
+}
+
+.ag-settings-page .ag-settings-primary {
+  height: 30px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.ag-settings-page :is(.ag-settings-btn, .ag-settings-primary):disabled {
+  opacity: 0.45;
+}
+
+/* 입력칸은 카드보다 한 단 낮은 면이라 칸 경계가 보인다. */
+.ag-settings-page :is(.ag-settings-input, .ag-settings-select, .ag-settings-number-input, .ag-settings-instructions-editor) {
+  border-color: var(--n-hairline-strong);
+  background: var(--ag-set-field);
+  color: var(--n-text);
+}
+
+.ag-settings-page :is(.ag-settings-input, .ag-settings-instructions-editor)::placeholder {
+  color: var(--n-text-placeholder);
+}
+
+/* 스위치 하나의 모양: 꺼짐 = 진한 머리선 트랙, 켜짐 = 강조색, 손잡이는 늘 흰색. */
+.ag-settings-page .ag-settings-toggle-track {
+  border-color: transparent;
+  background: var(--n-hairline-strong);
+}
+
+.ag-settings-page .ag-settings-toggle-track::after {
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.ag-settings-page .ag-settings-toggle-input:checked + .ag-settings-toggle-track::after {
+  background: #fff;
+}
+
+.ag-root .ag-settings-page .ag-skill-toggle {
+  background: var(--n-hairline-strong);
+}
+
+.ag-root .ag-settings-page .ag-skill-toggle[aria-pressed='true'] {
+  background: var(--accent-primary);
+}
+
+/* 행 안의 컨트롤은 설명 유무와 관계없이 세로 가운데에 선다. */
+.ag-settings-page .ag-settings-control-row {
+  align-items: center;
+}
+
+.ag-settings-page .ag-settings-disclosure-header {
+  min-height: 44px;
+  padding: 6px var(--ag-set-inset);
+  border-bottom: 0;
+}
+
+/* 연결 카드. */
+.ag-settings-page .ag-settings-provider-row {
+  border: 0;
+}
+
+.ag-settings-page .ag-settings-provider-summary {
+  min-height: 44px;
+  padding: 8px var(--ag-set-inset);
+}
+
+.ag-settings-page .ag-settings-provider-panel {
+  padding: 2px var(--ag-set-inset) 14px;
+}
+
+.ag-settings-page .ag-settings-provider-row[open],
+.ag-settings-page .ag-settings-provider-summary:hover {
+  background-color: var(--n-fill-hover);
+}
+
+.ag-settings-page .ag-settings-provider-row[open] > .ag-settings-provider-summary {
+  border-radius: 0;
+}
+
+.ag-settings-page .ag-settings-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.ag-settings-page .ag-provider-quotas {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.ag-settings-page .ag-provider-quotas > .ag-settings-quota-card {
+  margin: 0;
+  padding: 12px var(--ag-set-inset);
+  border: 0;
+  border-radius: 0;
+}
+
+.ag-settings-page .ag-settings-quota-title {
+  color: var(--n-text);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+/* 로컬 기록은 사용량 카드의 마지막 줄에서 펼친다. */
+.ag-settings-page .ag-settings-usage-disclosure {
+  border-top: 0;
+}
+
+.ag-settings-page .ag-settings-usage-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 40px;
+  padding: 0 var(--ag-set-inset);
+  color: var(--n-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  list-style: none;
+}
+
+.ag-settings-page .ag-settings-usage-disclosure > summary::-webkit-details-marker { display: none; }
+
+.ag-settings-page :is(.ag-settings-usage-disclosure, .ag-settings-advanced) > summary::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  margin: 0 3px 3px 0;
+  border-right: 1.5px solid var(--n-text-muted);
+  border-bottom: 1.5px solid var(--n-text-muted);
+  transform: rotate(45deg);
+  transition: transform var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-settings-page :is(.ag-settings-usage-disclosure, .ag-settings-advanced)[open] > summary::after {
+  margin-bottom: -3px;
+  transform: rotate(-135deg);
+}
+
+.ag-settings-page .ag-settings-usage-disclosure > summary:hover {
+  background-color: var(--n-fill-hover);
+  color: var(--n-text);
+}
+
+.ag-settings-page .ag-settings-usage-disclosure[open] > .ag-settings-usage-table {
+  margin: 0 var(--ag-set-inset) 10px;
+  width: calc(100% - 2 * var(--ag-set-inset));
+}
+
+/* 새 대화 기본값: 라벨 왼쪽, 값 오른쪽의 선택 행. */
+.ag-settings-page .ag-settings-defaults .ag-settings-section-body {
+  display: block;
+}
+
+.ag-settings-page .ag-settings-defaults .ag-settings-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 42px;
+  gap: 8px;
+  padding: 0 calc(var(--ag-set-inset) + 16px) 0 var(--ag-set-inset);
+  background-color: transparent;
+  cursor: pointer;
+  transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-settings-page .ag-settings-defaults .ag-settings-provider-mark,
+.ag-settings-page .ag-settings-defaults .ag-settings-provider-mark .ag-provider-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+
+.ag-settings-page .ag-settings-defaults .ag-settings-field:hover,
+.ag-settings-page .ag-settings-defaults .ag-settings-field:focus-within {
+  background-color: var(--n-fill-hover);
+}
+
+
+.ag-settings-page .ag-settings-defaults .ag-settings-field[hidden] {
+  display: none;
+}
+
+.ag-settings-page .ag-settings-defaults .ag-settings-field-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--n-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+/* 값은 글자 폭만큼만 차지해 제공자 표식이 값 바로 앞에 붙는다. */
+.ag-settings-page .ag-settings-defaults .ag-settings-select {
+  appearance: none;
+  flex: 0 1 auto;
+  field-sizing: content;
+  width: auto;
+  max-width: 68%;
+  min-width: 0;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--n-text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  outline: none;
+  cursor: pointer;
+}
+
+.ag-settings-page .ag-settings-defaults .ag-settings-select option {
+  background: var(--ag-set-card);
+  color: var(--n-text);
+}
+
+.ag-settings-page .ag-settings-defaults .ag-settings-field::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: calc(var(--ag-set-inset) + 2px);
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--n-text-muted);
+  border-bottom: 1.5px solid var(--n-text-muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+
+/* 고급: 드문 설정을 접어 두는 마지막 묶음. */
+.ag-settings-advanced {
+  margin: 4px 0 0;
+}
+
+.ag-settings-advanced > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  margin: 0 0 8px;
+  padding: 0 4px;
+  border-radius: 8px;
+  color: var(--n-text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+  cursor: pointer;
+}
+
+.ag-settings-advanced > summary::-webkit-details-marker { display: none; }
+
+.ag-settings-advanced > summary:hover {
+  color: var(--n-text);
+}
+
+.ag-settings-advanced > summary::before {
+  content: '';
+  flex: 1 1 auto;
+  order: 2;
+  height: 1px;
+  background: var(--ag-set-sep);
+}
+
+.ag-settings-advanced > summary::after {
+  order: 3;
+}
+
+.ag-settings-advanced > summary:focus-visible,
+.ag-settings-page .ag-settings-usage-disclosure > summary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* 적용 줄: 바꾼 내용이 있을 때만 화면 아래에 붙는다. */
+.ag-settings-page .ag-settings-apply-footer {
+  border-top: 1px solid var(--ag-set-sep);
+  background: var(--ag-set-bg);
+}
+
+.ag-settings-page .ag-settings-apply-footer:has(.ag-settings-primary:not(:disabled)) {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  margin-inline: calc(-1 * var(--ag-set-inset));
+  padding-inline: var(--ag-set-inset);
+}
+
+.ag-root .ag-settings-page .ag-settings-nav-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-settings-page .ag-settings-defaults .ag-settings-field,
+  .ag-settings-page .ag-settings-btn,
+  .ag-settings-page :is(.ag-settings-usage-disclosure, .ag-settings-advanced) > summary::after {
+    transition: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .ag-settings-page {
+    --ag-set-edge: var(--n-hairline-strong);
+    --ag-set-sep: var(--n-hairline-strong);
+  }
+}
+
+/* Model selection stays in the AI draft until Apply. */
+.ag-settings-page .ag-settings-model-catalog-section .ag-settings-section-body {
+  overflow: visible;
+  background: transparent;
+}
+
+.ag-settings-model-catalog-card {
+  overflow: hidden;
+  border: 1px solid var(--ag-set-sep);
+  border-radius: 12px;
+  background: var(--ag-set-card);
+}
+
+.ag-settings-model-catalog-top,
+.ag-settings-model-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px;
+}
+
+.ag-settings-model-catalog-top { min-height: 43px; border-bottom: 1px solid var(--ag-set-sep); }
+.ag-settings-model-tools { padding-top: 9px; padding-bottom: 9px; }
+
+.ag-settings-model-tabs {
+  display: inline-flex;
+  align-self: stretch;
+  gap: 18px;
+}
+
+.ag-settings-model-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 2px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ag-text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 150ms ease-out, color 150ms ease-out;
+}
+
+.ag-settings-model-tab .ag-provider-icon { width: 14px; height: 14px; }
+.ag-settings-model-tab.ag-active {
+  color: var(--ag-text);
+  border-bottom-color: var(--ag-accent);
+  font-weight: 600;
+}
+.ag-settings-model-tab:hover:not(.ag-active) { color: var(--ag-text); }
+
+.ag-settings-model-count,
+.ag-settings-model-status {
+  color: var(--ag-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-settings-model-search {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 31px;
+  padding: 0 9px;
+  border: 1px solid var(--ag-set-sep);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--ag-set-bg) 65%, var(--ag-set-card));
+  color: var(--ag-text-muted);
+  transition: border-color 150ms ease-out, background 150ms ease-out;
+}
+
+.ag-settings-model-search:focus-within {
+  border-color: color-mix(in srgb, var(--ag-accent) 65%, transparent);
+  background: var(--ag-set-card);
+}
+
+.ag-settings-model-search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ag-text);
+  font: inherit;
+  font-size: 12px;
+}
+.ag-settings-model-search-input::placeholder { color: var(--ag-text-muted); }
+.ag-settings-model-search-input::-webkit-search-cancel-button { cursor: pointer; }
+
+.ag-settings-model-refresh {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 31px;
+  height: 31px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ag-text-muted);
+  cursor: pointer;
+  transition: background 150ms ease-out, color 150ms ease-out;
+}
+.ag-settings-model-refresh:hover:not(:disabled) { background: var(--ag-hover); color: var(--ag-text); }
+.ag-settings-model-refresh:active:not(:disabled) { transform: scale(0.94); }
+.ag-settings-model-refresh:disabled { opacity: 0.45; cursor: default; }
+
+.ag-settings-model-list {
+  max-height: min(300px, 42vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+  border-bottom: 1px solid var(--ag-set-sep);
+}
+
+.ag-settings-model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 13px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ag-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 150ms ease-out;
+}
+.ag-settings-model-row + .ag-settings-model-row { border-top: 1px solid var(--ag-set-sep); }
+.ag-settings-model-row.ag-active { background: color-mix(in srgb, var(--ag-accent) 4%, transparent); }
+.ag-settings-model-row:hover { background: color-mix(in srgb, var(--ag-accent) 7%, transparent); }
+.ag-settings-model-row:active { background: color-mix(in srgb, var(--ag-accent) 12%, transparent); }
+.ag-settings-model-row:disabled { cursor: default; opacity: 0.55; }
+
+.ag-settings-model-row-text { display: block; flex: 1; min-width: 0; }
+.ag-settings-model-row-name {
+  display: block;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ag-settings-model-row-description {
+  display: block;
+  overflow: hidden;
+  color: var(--n-text-muted, var(--ag-text-muted));
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ag-settings-model-row-trailing { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
+.ag-settings-model-default { color: var(--ag-text-muted); font-size: 10px; }
+.ag-settings-model-check {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid color-mix(in srgb, var(--ag-text) 24%, transparent);
+  border-radius: 5px;
+  color: transparent;
+  transition: background 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out;
+}
+.ag-settings-model-check .ag-icon { width: 11px; height: 11px; }
+.ag-settings-model-row.ag-active .ag-settings-model-check {
+  border-color: var(--ag-accent);
+  background: var(--ag-accent);
+  color: #fff;
+}
+.ag-settings-model-empty { padding: 28px 15px; color: var(--ag-text-muted); font-size: 12px; text-align: center; }
+.ag-settings-model-status { min-height: 27px; padding: 6px 13px 7px; }
+
+.ag-settings-model-tab:focus-visible,
+.ag-settings-model-refresh:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -3px;
+}
+/* 줄 전체가 초점을 받는 항목은 테두리 대신 배경으로 표시한다. */
+.ag-settings-model-row:focus-visible { outline: none; background-color: var(--n-fill-hover); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-settings-model-tab,
+  .ag-settings-model-search,
+  .ag-settings-model-refresh,
+  .ag-settings-model-row,
+  .ag-settings-model-check { transition: none; }
+}
+
+@media (prefers-contrast: more) {
+  .ag-settings-model-catalog-card,
+  .ag-settings-model-search,
+  .ag-settings-model-check { border-color: currentColor; }
+  .ag-settings-model-row + .ag-settings-model-row { border-top-color: currentColor; }
+}
+
+/* 편집기·입력칸이 든 카드는 안쪽 여백으로 묶는다. */
+#ag-settings-pane-ai :is(
+  .ag-settings-instructions-section,
+  .ag-settings-browserbase-section
+) > .ag-settings-section-body {
+  box-sizing: border-box;
+  min-width: 0;
+  gap: 10px;
+  padding: var(--ag-set-inset, 14px);
+}
+
+#ag-settings-pane-ai :is(
+  .ag-settings-instructions-section,
+  .ag-settings-browserbase-section
+) > .ag-settings-section-body > * {
+  min-width: 0;
+  background-image: none;
+}
+
+.ag-settings-page .ag-settings-browserbase-section .ag-settings-status {
+  color: var(--n-text-secondary);
+  font-size: 11.5px;
+}
+
+.ag-settings-page .ag-settings-browserbase-section .ag-settings-status.ag-settings-status-warn {
+  color: var(--n-text);
+}
+
+.ag-settings-page .ag-settings-browserbase-section .ag-settings-actions {
+  justify-content: flex-end;
+}
+
+#ag-settings-pane-ai .ag-settings-browserbase-section .ag-settings-field {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(0, 1.6fr);
+  gap: 12px;
+}
+
+#ag-settings-pane-ai .ag-settings-browserbase-section .ag-settings-field-label {
+  color: var(--n-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+#ag-settings-pane-ai .ag-settings-browserbase-section .ag-settings-input {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: none;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 7px;
+}
+
+.ag-settings-page .ag-settings-instructions-section .ag-settings-actions {
+  justify-content: flex-end;
+}
+
+/* 글쓰기 보정: 상태 왼쪽, 동작 오른쪽의 한 줄. */
+.ag-settings-page .ag-settings-calibration-row .ag-settings-row-text {
+  gap: 2px;
+}
+
+.ag-settings-page .ag-settings-calibration-summary {
+  white-space: normal;
+}
+
+.ag-settings-page .ag-settings-calibration-summary[hidden] {
+  display: none;
+}
+
+/* 템플릿: 목록 행 + 도움말과 추가 버튼이 선 마지막 줄. */
+#ag-settings-pane-ai .ag-settings-templates-section :is(.ag-template-list, .ag-template-row) {
+  min-width: 0;
+}
+
+.ag-settings-page .ag-template-list {
+  gap: 0;
+}
+
+.ag-settings-page .ag-template-list:empty {
+  display: none;
+}
+
+.ag-settings-page .ag-template-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px var(--ag-set-inset);
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+}
+
+.ag-settings-page .ag-template-row-text {
+  flex: 1 1 auto;
+}
+
+.ag-settings-page .ag-template-actions {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+}
+
+.ag-settings-page .ag-template-footer {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ag-settings-page .ag-template-footer > .ag-settings-note {
+  min-width: 0;
+}
+
+.ag-settings-page .ag-settings-templates-section .ag-settings-cliproxy-error {
+  padding: 10px var(--ag-set-inset) 0;
+}
+
+@container settings-hub (max-width: 420px) {
+  .ag-settings-page .ag-template-row {
+    flex-wrap: wrap;
+  }
+}
+
+.ag-settings-model-catalog-card > .ag-pi-chips {
+  padding: 0 12px 10px;
+}
+
+.ag-settings-pi-actions {
+  padding: 0 12px 12px;
+}
+
+.ag-settings-pi-actions[hidden],
+.ag-settings-model-catalog-card > .ag-pi-chips[hidden] {
+  display: none;
+}
+
+.ag-settings-model-count {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+@container settings-hub (max-width: 360px) {
+  .ag-settings-model-catalog-top {
+    gap: 6px;
+    padding-inline: 8px;
+  }
+
+  .ag-settings-model-tabs { gap: 8px; }
+  .ag-settings-model-tab { gap: 4px; font-size: 11px; }
+  .ag-settings-model-tab .ag-provider-icon { width: 12px; height: 12px; }
+  .ag-settings-model-count { font-size: 10px; }
+}
+
+/* ─── 스킬 목적지: 검색 줄 + 카드 한 장의 목록 ─────────── */
+.ag-settings-page .ag-skills-shelf {
+  gap: 12px;
+}
+
+.ag-settings-page .ag-skills-search {
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: 8px;
+  background: var(--ag-set-card);
+  color: var(--n-text);
+}
+
+.ag-settings-page .ag-skills-search::placeholder {
+  color: var(--n-text-placeholder);
+}
+
+.ag-settings-page .ag-skills-search:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-settings-page .ag-skills-toolbar .ag-skill-text {
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: 8px;
+  background: var(--ag-set-card);
+  color: var(--n-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ag-settings-page .ag-skills-toolbar .ag-skill-text:hover,
+.ag-settings-page .ag-skills-toolbar .ag-skill-text[aria-expanded='true'] {
+  background: var(--n-fill-hover);
+}
+
+.ag-settings-page .ag-skills-import-panel {
+  border: 0;
+  border-radius: var(--ag-set-radius);
+  background: var(--ag-set-card);
+  box-shadow: var(--n-elev-1), inset 0 0 0 1px var(--ag-set-edge);
+}
+
+.ag-settings-page .ag-skills-list {
+  flex: 0 1 auto;
+  gap: 0;
+  padding: 0;
+  border-radius: var(--ag-set-radius);
+  background: var(--ag-set-card);
+  box-shadow: var(--n-elev-1), inset 0 0 0 1px var(--ag-set-edge);
+}
+
+.ag-settings-page .ag-skills-list > :not([hidden]) ~ :not([hidden]) {
+  background-image: linear-gradient(var(--ag-set-sep), var(--ag-set-sep));
+  background-position: 42px 0;
+  background-size: calc(100% - 42px) 1px;
+  background-repeat: no-repeat;
+}
+
+.ag-settings-page .ag-skill-item {
+  min-height: 52px;
+  padding: 8px 10px 8px var(--ag-set-inset);
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+}
+
+.ag-settings-page .ag-skill-item:first-child { border-radius: var(--ag-set-radius) var(--ag-set-radius) 0 0; }
+
+.ag-settings-page .ag-skill-item:hover,
+.ag-settings-page .ag-skill-item:focus-within,
+.ag-settings-page .ag-skill-item.ag-skill-expanded {
+  border: 0;
+  background-color: var(--n-fill-hover);
+}
+
+.ag-settings-page .ag-skill-item.ag-skill-imported,
+.ag-settings-page .ag-skill-item.ag-skill-drag-settled {
+  border: 0;
+  background-color: color-mix(in srgb, var(--ag-accent) 10%, var(--ag-set-card));
+  box-shadow: none;
+}
+
+.ag-settings-page .ag-skill-item.ag-skill-imported.ag-skill-import-settled {
+  background-color: transparent;
+}
+
+.ag-settings-page .ag-skill-item.ag-skill-dragging {
+  border-radius: 10px;
+  background-color: var(--ag-set-card);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22), inset 0 0 0 1px var(--ag-set-edge);
+}
+
+.ag-settings-page .ag-skill-item-name {
+  color: var(--n-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.ag-settings-page .ag-skill-item-description {
+  color: var(--n-text-muted);
+  font-size: 11.5px;
+}
+
+/* 삭제는 스위치 앞에 두어 스위치 열이 행마다 같은 자리에 선다. */
+.ag-settings-page .ag-skill-item-actions > .ag-skill-text:not(.ag-skill-edit) {
+  order: -1;
+  color: var(--ag-err);
+}
+
+.ag-settings-page .ag-skill-item-actions > .ag-skill-edit {
+  order: -2;
+}
+
+.ag-settings-page .ag-skill-drag-handle {
+  opacity: 0.7;
+}
+
+.ag-settings-page .ag-skills-list > .ag-skill-text {
+  align-self: stretch;
+  min-height: 40px;
+  padding: 0 var(--ag-set-inset);
+  border-radius: 0;
+  color: var(--n-text);
+  font-weight: 600;
+  text-align: left;
+}
+
+.ag-settings-page .ag-skill-new {
+  justify-content: flex-start;
+  min-height: 44px;
+  padding: 0 var(--ag-set-inset);
+  border: 0;
+  border-radius: 0 0 var(--ag-set-radius) var(--ag-set-radius);
+  background-color: transparent;
+  color: var(--n-text-secondary);
+  font-size: 12.5px;
+}
+
+.ag-settings-page .ag-skill-new::before {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  color: var(--accent-primary);
+  font-size: 18px;
+}
+
+.ag-settings-page .ag-skill-new:hover,
+.ag-settings-page .ag-skill-new:focus-visible {
+  border: 0;
+  background-color: var(--n-fill-hover);
+  color: var(--n-text);
+}
+
+.ag-settings-page .ag-skills-empty {
+  padding: 14px var(--ag-set-inset);
+  color: var(--n-text-muted);
+  text-align: left;
+}
+
+
+.ag-settings-page .ag-skill-new:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
 }

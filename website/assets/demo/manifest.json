@@ -1,0 +1,166 @@
+{
+  "clips": [
+    {
+      "name": "gianmun",
+      "title": "독서축제 참가 협조 요청.hwpx",
+      "caption": "기안문 양식에 수신, 제목, 본문을 채워요.",
+      "video": {
+        "file": "gianmun.mp4",
+        "width": 1600,
+        "height": 1000,
+        "duration": 11.57,
+        "bytes": 305605
+      },
+      "page": {
+        "file": "gianmun-page.mp4",
+        "width": 720,
+        "height": 1018,
+        "duration": 10.03,
+        "bytes": 145523
+      },
+      "poster": {
+        "file": "gianmun.jpg",
+        "bytes": 119437
+      },
+      "pagePoster": {
+        "file": "gianmun-page.jpg",
+        "bytes": 52641
+      }
+    },
+    {
+      "name": "report",
+      "title": "2026 상반기 운영 보고서.hwpx",
+      "caption": "계획을 먼저 보여 주고, 승인하면 보고서를 써요.",
+      "video": {
+        "file": "report.mp4",
+        "width": 1600,
+        "height": 1000,
+        "duration": 12,
+        "bytes": 328750
+      },
+      "page": {
+        "file": "report-page.mp4",
+        "width": 720,
+        "height": 1018,
+        "duration": 7,
+        "bytes": 57527
+      },
+      "poster": {
+        "file": "report.jpg",
+        "bytes": 112516
+      },
+      "pagePoster": {
+        "file": "report-page.jpg",
+        "bytes": 46869
+      }
+    },
+    {
+      "name": "table",
+      "title": "2026 추진일정.hwpx",
+      "caption": "추진일정을 표로 만들고 칸을 채워요.",
+      "video": {
+        "file": "table.mp4",
+        "width": 1600,
+        "height": 1000,
+        "duration": 9.33,
+        "bytes": 288653
+      },
+      "page": {
+        "file": "table-page.mp4",
+        "width": 720,
+        "height": 1018,
+        "duration": 8.2,
+        "bytes": 101868
+      },
+      "poster": {
+        "file": "table.jpg",
+        "bytes": 112136
+      },
+      "pagePoster": {
+        "file": "table-page.jpg",
+        "bytes": 61568
+      }
+    },
+    {
+      "name": "equation",
+      "title": "수학 복습 학습지.hwpx",
+      "caption": "문항마다 알맞은 수식을 넣어요.",
+      "video": {
+        "file": "equation.mp4",
+        "width": 1600,
+        "height": 1000,
+        "duration": 9.77,
+        "bytes": 243763
+      },
+      "page": {
+        "file": "equation-page.mp4",
+        "width": 720,
+        "height": 1018,
+        "duration": 8.77,
+        "bytes": 80904
+      },
+      "poster": {
+        "file": "equation.jpg",
+        "bytes": 99855
+      },
+      "pagePoster": {
+        "file": "equation-page.jpg",
+        "bytes": 32608
+      }
+    },
+    {
+      "name": "review",
+      "title": "보도자료_가을 독서축제.hwpx",
+      "caption": "고친 곳을 표시하고, 승인하면 반영해요.",
+      "video": {
+        "file": "review.mp4",
+        "width": 1600,
+        "height": 1000,
+        "duration": 10.37,
+        "bytes": 298659
+      },
+      "page": {
+        "file": "review-page.mp4",
+        "width": 720,
+        "height": 1018,
+        "duration": 9.23,
+        "bytes": 131980
+      },
+      "poster": {
+        "file": "review.jpg",
+        "bytes": 117447
+      },
+      "pagePoster": {
+        "file": "review-page.jpg",
+        "bytes": 58981
+      }
+    },
+    {
+      "name": "typing",
+      "title": "가정통신문.hwpx",
+      "caption": "한글 입력이 끊김 없이 바로 보여요.",
+      "video": {
+        "file": "typing.mp4",
+        "width": 1600,
+        "height": 1000,
+        "duration": 11.53,
+        "bytes": 156316
+      },
+      "page": {
+        "file": "typing-page.mp4",
+        "width": 720,
+        "height": 1018,
+        "duration": 11.07,
+        "bytes": 86658
+      },
+      "poster": {
+        "file": "typing.jpg",
+        "bytes": 83125
+      },
+      "pagePoster": {
+        "file": "typing-page.jpg",
+        "bytes": 32752
+      }
+    }
+  ]
+}

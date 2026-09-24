@@ -1,0 +1,404 @@
+/* 리본 도구 모음: 큰 세로 명령 + 작은 명령 세로 목록 + 그룹 이름 */
+:is(#studio-header, #editor-area, #status-bar, .modal-overlay, .cp-overlay, .font-picker-menu, .context-menu) {
+  --ribbon-accent: #2f69b0;
+  --ribbon-accent-soft: #2f69b033;
+  --ribbon-selected-edge: #b6bec9;
+}
+:root[data-theme-effective='dark'] :is(#studio-header, #editor-area, #status-bar, .modal-overlay, .cp-overlay, .font-picker-menu, .context-menu) {
+  --ribbon-accent: #7fa6dc;
+  --ribbon-accent-soft: #7fa6dc33;
+  --ribbon-selected-edge: #5c5c5c;
+}
+
+.tb-icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+#icon-toolbar {
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 0;
+  height: 78px;
+  min-height: 78px;
+  padding: 5px 8px;
+  background: var(--ui-surface);
+  border-bottom: 1px solid var(--ui-border);
+}
+
+#icon-toolbar :is(.tb-group:not(.tb-mode-group), .tb-section) {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  justify-items: center;
+  padding: 0 2px;
+}
+#icon-toolbar .tb-mode-group { display: flex; align-items: stretch; gap: 0; }
+#icon-toolbar .tb-group-body { display: flex; align-items: stretch; gap: 2px; height: 68px; }
+#icon-toolbar .tb-stack { display: flex; flex-direction: column; gap: 1px; }
+#icon-toolbar .tb-caption {
+  padding: 1px 4px 4px;
+  color: var(--ui-text-muted);
+  font: 11px/15px var(--font-family-ui);
+  white-space: nowrap;
+}
+#icon-toolbar .tb-caption:is(.tb-mode-label, .tb-note-label) { display: block; color: var(--ui-text-secondary); font-weight: 600; }
+/* 그룹 이름은 더 보기 창에서만 보인다. 리본은 구분선만으로 묶음을 나눈다. */
+#icon-toolbar > :is(.tb-group, .tb-section) .tb-caption,
+#icon-toolbar > .tb-group .tb-section .tb-caption { display: none; }
+#icon-toolbar .tb-sep { align-self: stretch; width: 1px; height: auto; margin: 12px 7px; background: var(--ui-border); }
+
+#icon-toolbar .tb-btn {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--ui-text);
+}
+#icon-toolbar .tb-btn:hover:not(:disabled) { background: var(--ui-hover); }
+#icon-toolbar .tb-btn:active:not(:disabled) { background: var(--ui-active); box-shadow: none; }
+#icon-toolbar .tb-btn:is(.active, [aria-pressed='true']) { background: var(--ui-selected); border-color: var(--ribbon-selected-edge); }
+#icon-toolbar .tb-btn:disabled { opacity: .38; }
+#icon-toolbar .tb-label { user-select: none; color: inherit; font: 12px/14px var(--font-family-ui); white-space: nowrap; }
+
+#icon-toolbar .tb-lg {
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 4px;
+  height: 100%;
+  min-width: 46px;
+  padding: 5px 6px 3px;
+}
+#icon-toolbar .tb-lg .tb-ico { width: 32px; height: 32px; }
+#icon-toolbar .tb-lg .tb-label { text-align: center; }
+#icon-toolbar .tb-lg .tb-label br { display: inline; }
+
+#icon-toolbar .tb-sm {
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 6px;
+  height: 22px;
+  padding: 0 7px 0 4px;
+}
+#icon-toolbar .tb-sm .tb-ico { width: 16px; height: 16px; }
+#icon-toolbar .tb-sm:not(:hover) .tb-label { color: var(--ui-text-secondary); }
+
+/* 선은 1px 격자에 맞춰 그렸으므로 원래 크기에서 선명하다. */
+.tb-ico, .tb-chev {
+  flex-shrink: 0;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+#icon-toolbar .tb-btn:disabled .tb-ico { --ribbon-accent: currentColor; --ribbon-accent-soft: transparent; }
+.tb-chev { width: 8px; height: 8px; margin-left: 2px; vertical-align: 1px; }
+
+/* 스플릿: 위는 명령, 아래 띠는 메뉴 */
+#icon-toolbar .tb-split { flex-direction: column; }
+#icon-toolbar .tb-split-main { flex: 1; height: auto; border-radius: 4px 4px 0 0; }
+#icon-toolbar .tb-split-arrow {
+  justify-content: center;
+  height: 14px;
+  min-width: 0;
+  padding: 0;
+  border-radius: 0 0 4px 4px;
+}
+#icon-toolbar .tb-split:hover .tb-btn:not(:hover, :disabled) { background: var(--ui-hover); }
+#icon-toolbar .tb-split:hover .tb-btn:hover:not(:disabled) { background: var(--ui-active); }
+#icon-toolbar .tb-split-menu { top: calc(100% + 2px); border-radius: 6px; padding: 4px; }
+#icon-toolbar .tb-split-item { border-radius: 4px; }
+
+#icon-toolbar .tb-hf-label { align-self: center; margin: 0 6px; }
+
+/* Table commands use the full ribbon height without stretching short labels. */
+#icon-toolbar .tb-table-context-group {
+  flex: 0 0 auto;
+  min-width: 96px;
+  margin-right: 4px;
+  padding-right: 4px;
+  border-right: 1px solid var(--ui-border);
+}
+#icon-toolbar .tb-table-tile-table { min-width: 68px; }
+#icon-toolbar .tb-table-tile-insert,
+#icon-toolbar .tb-table-tile-delete { min-width: 112px; }
+#icon-toolbar .tb-table-tile-equal { min-width: 130px; }
+#icon-toolbar .tb-table-tile-cell { min-width: 82px; }
+#icon-toolbar .tb-table-context-group .tb-group-body,
+#icon-toolbar .tb-table-context-group [data-table-ribbon-menu] { width: 100%; }
+#icon-toolbar .tb-table-context-group .tb-btn {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  gap: 6px;
+  padding: 5px 8px 4px;
+}
+#icon-toolbar .tb-table-context-group .tb-btn > .tb-ico { width: 32px; height: 32px; }
+#icon-toolbar .tb-table-context-group .tb-btn > .tb-label { line-height: 17px; }
+#icon-toolbar .tb-table-tile-equal .tb-group-body { align-items: center; }
+#icon-toolbar .tb-table-tile-equal .tb-stack { justify-content: center; width: 100%; gap: 2px; }
+#icon-toolbar .tb-table-tile-equal .tb-btn {
+  flex-direction: row;
+  justify-content: flex-start;
+  height: 30px;
+  gap: 8px;
+  padding: 0 7px;
+}
+#icon-toolbar .tb-table-tile-equal .tb-btn > .tb-ico { width: 16px; height: 16px; }
+#icon-toolbar .tb-table-menu-trigger > .tb-chev {
+  position: absolute;
+  top: 21px;
+  left: calc(50% + 22px);
+  width: 9px;
+  height: 9px;
+  margin: 0;
+}
+#icon-toolbar .tb-table-menu-trigger[aria-expanded='true'] { background: var(--ui-selected); }
+
+.tb-table-menu-panel {
+  position: fixed;
+  z-index: 1300;
+  min-width: 224px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow: auto;
+  padding: 5px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 8px;
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  box-shadow: var(--shadow-dropdown);
+}
+.tb-table-menu-panel[hidden] { display: none; }
+.tb-table-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: 13px/18px var(--font-family-ui);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tb-table-menu-item:hover:not(:disabled),
+.tb-table-menu-item:focus-visible { background: var(--ui-hover); }
+.tb-table-menu-item:focus-visible { outline: 2px solid var(--ribbon-accent); outline-offset: -2px; }
+.tb-table-menu-item:disabled { opacity: .38; cursor: default; }
+.tb-table-menu-item > .tb-ico { width: 19px; height: 19px; }
+.tb-table-menu-shortcut { margin-left: auto; padding-left: 18px; color: var(--ui-text-muted); }
+
+#icon-toolbar #editor-toolbar-overflow .tb-table-context-group {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border-right: 0;
+}
+#icon-toolbar #editor-toolbar-overflow .tb-table-context-group .tb-group-body { height: auto; }
+#icon-toolbar #editor-toolbar-overflow .tb-table-context-group .tb-btn {
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 10px;
+  height: 40px;
+  padding: 0 10px;
+}
+#icon-toolbar #editor-toolbar-overflow .tb-table-context-group .tb-btn > .tb-ico { width: 20px; height: 20px; }
+#icon-toolbar #editor-toolbar-overflow .tb-table-context-group .tb-label { display: block; }
+#icon-toolbar #editor-toolbar-overflow .tb-table-menu-trigger > .tb-chev {
+  top: 16px;
+  right: 9px;
+  left: auto;
+}
+
+/* 넘치는 그룹은 같은 모양으로 더 보기 창에 세로로 쌓는다. */
+#editor-toolbar-more { align-self: flex-start; height: 68px; }
+#editor-toolbar-more[hidden], #editor-toolbar-overflow[hidden] { display: none; }
+#icon-toolbar #editor-toolbar-more[aria-expanded='true'] { background: var(--ui-selected); }
+#editor-toolbar-overflow {
+  position: fixed;
+  z-index: 1200;
+  max-width: calc(100vw - 16px);
+  max-height: min(560px, calc(100dvh - 80px));
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 8px;
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  box-shadow: var(--shadow-dropdown);
+}
+#editor-toolbar-overflow .tb-overflow-content { display: flex; flex-direction: column; }
+#icon-toolbar #editor-toolbar-overflow :is(.tb-group:not(.tb-mode-group), .tb-section) {
+  justify-items: start;
+  padding: 4px 2px 6px;
+  border-bottom: 1px solid var(--ui-border);
+}
+#icon-toolbar #editor-toolbar-overflow .tb-mode-group { flex-direction: column; }
+#icon-toolbar #editor-toolbar-overflow :is(.tb-group, .tb-section):last-child { border-bottom: 0; }
+#icon-toolbar #editor-toolbar-overflow .tb-caption { order: -1; grid-row: 1; padding: 0 4px 4px; }
+#icon-toolbar #editor-toolbar-overflow .tb-group-body { grid-row: 2; }
+#editor-toolbar-overflow .tb-sep { display: none; }
+#editor-toolbar-overflow .tb-split.open .tb-split-menu { position: absolute; }
+
+/* 구분선이 숨는 폭에서는 그룹 사이 여백으로 묶음을 나눈다. */
+@media (min-width: 1024px) and (max-width: 1279px) {
+  #icon-toolbar > .tb-group:not(.tb-mode-group) { padding-inline: 6px; }
+}
+
+/* 좁은 화면: 한 줄 아이콘 막대로 접는다. */
+@media (max-width: 1023px) {
+  #icon-toolbar { height: 40px; min-height: 40px; padding: 3px 8px; }
+  #icon-toolbar :is(.tb-group:not(.tb-mode-group), .tb-section) { display: flex; padding: 0; }
+  #icon-toolbar .tb-caption, #icon-toolbar .tb-label { display: none; }
+  #icon-toolbar .tb-group-body { height: 32px; gap: 1px; }
+  #icon-toolbar .tb-stack { display: contents; }
+  #icon-toolbar :is(.tb-lg, .tb-sm) { flex-direction: row; justify-content: center; height: 32px; min-width: 32px; padding: 0 6px; }
+  #icon-toolbar .tb-lg .tb-ico { width: 20px; height: 20px; stroke-width: 1.5; }
+  #icon-toolbar .tb-sep { margin: 6px 4px; }
+  #icon-toolbar .tb-split { flex-direction: row; }
+  #icon-toolbar .tb-split-main { border-radius: 4px 0 0 4px; }
+  #icon-toolbar .tb-split-arrow { width: 14px; height: 32px; border-radius: 0 4px 4px 0; }
+  #editor-toolbar-more { align-self: center; height: 32px; }
+  #editor-toolbar-overflow .tb-label { display: block; }
+  #icon-toolbar #editor-toolbar-overflow :is(.tb-group:not(.tb-mode-group), .tb-section) { display: block; }
+  #icon-toolbar #editor-toolbar-overflow .tb-group-body { flex-wrap: wrap; height: auto; }
+  #icon-toolbar #editor-toolbar-overflow :is(.tb-lg, .tb-sm) { justify-content: flex-start; gap: 8px; height: 34px; padding: 0 8px; }
+  #icon-toolbar > .tb-table-context-group {
+    min-width: 0;
+    margin-right: 3px;
+    padding-right: 3px;
+  }
+  #icon-toolbar > :is(.tb-table-tile-table, .tb-table-tile-insert, .tb-table-tile-delete, .tb-table-tile-equal, .tb-table-tile-cell) { min-width: 0; }
+  #icon-toolbar > .tb-table-context-group .tb-group-body { height: 32px; }
+  #icon-toolbar > .tb-table-context-group .tb-btn {
+    flex-direction: row;
+    gap: 5px;
+    height: 32px;
+    padding: 0 5px;
+  }
+  #icon-toolbar > .tb-table-context-group .tb-btn > .tb-ico { width: 18px; height: 18px; }
+  #icon-toolbar > .tb-table-context-group .tb-label { display: block; }
+  #icon-toolbar > .tb-table-context-group .tb-table-menu-trigger > .tb-chev {
+    position: static;
+    order: 1;
+    width: 8px;
+    height: 8px;
+  }
+  #icon-toolbar > .tb-table-tile-equal .tb-stack { display: contents; }
+  #icon-toolbar > .tb-table-tile-equal .tb-btn { width: auto; height: 32px; gap: 5px; padding: 0 5px; }
+  #icon-toolbar > .tb-table-tile-equal .tb-btn > .tb-ico { width: 18px; height: 18px; }
+}
+@media (max-width: 639px) {
+  #icon-toolbar > .tb-table-context-group .tb-label { display: none; }
+  #icon-toolbar > .tb-table-context-group .tb-table-menu-trigger > .tb-chev { display: none; }
+}
+@media (max-width: 1023px) and (pointer: coarse) {
+  #icon-toolbar { height: 48px; min-height: 48px; }
+  #icon-toolbar :is(.tb-lg, .tb-sm), #editor-toolbar-more { min-width: 44px; height: 44px; }
+  #icon-toolbar .tb-group-body { height: 44px; }
+  #icon-toolbar > .tb-table-context-group .tb-group-body,
+  #icon-toolbar > .tb-table-context-group .tb-btn { height: 44px; }
+}
+
+/* The agent toggle belongs to the ribbon's command row. Its existing click
+   handler and expanded state remain owned by the sidebar. */
+#icon-toolbar > .ag-collapse-tab {
+  position: sticky;
+  right: 0;
+  flex: 0 0 66px;
+  align-self: flex-start;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 4px;
+  width: 66px;
+  height: 68px;
+  min-height: 68px;
+  margin-left: auto;
+  padding: 5px 6px 3px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  font: 12px/14px var(--font-family-ui);
+  transform: none;
+  transition: none;
+}
+#icon-toolbar > .ag-collapse-tab::after {
+  content: '에이전트';
+  color: inherit;
+  line-height: 14px;
+  white-space: nowrap;
+}
+#icon-toolbar > .ag-collapse-tab .ag-rau-icon {
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+}
+#icon-toolbar > .ag-collapse-tab:hover {
+  background: var(--ui-hover);
+  color: var(--ui-text);
+  transform: none;
+}
+#icon-toolbar > .ag-collapse-tab:active {
+  background: var(--ui-active);
+  transform: none;
+}
+
+@media (max-width: 1023px) {
+  #icon-toolbar > .ag-collapse-tab {
+    flex-basis: 32px;
+    justify-content: center;
+    gap: 0;
+    width: 32px;
+    height: 32px;
+    min-height: 32px;
+    padding: 0 6px;
+  }
+  #icon-toolbar > .ag-collapse-tab::after { display: none; }
+  #icon-toolbar > .ag-collapse-tab .ag-rau-icon {
+    flex-basis: 20px;
+    width: 20px;
+    height: 20px;
+  }
+}
+@media (max-width: 1023px) and (pointer: coarse) {
+  #icon-toolbar > .ag-collapse-tab {
+    flex-basis: 44px;
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+}
+
+/* 리본 반응: 짧은 전환, 큰 아이콘 들림, 켜진 명령은 강조색으로 표시한다. */
+#icon-toolbar .tb-btn {
+  transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
+}
+#icon-toolbar .tb-btn .tb-ico,
+#icon-toolbar .tb-btn .tb-chev {
+  transition: transform 160ms cubic-bezier(.2, .8, .3, 1);
+}
+#icon-toolbar .tb-lg:hover:not(:disabled) > .tb-ico { transform: translateY(-1px); }
+#icon-toolbar .tb-btn:active:not(:disabled) > .tb-ico { transform: scale(.94); transition-duration: 60ms; }
+#icon-toolbar .tb-btn:focus-visible {
+  outline: 2px solid var(--ribbon-accent);
+  outline-offset: -2px;
+}
+#icon-toolbar .tb-btn:is(.active, [aria-pressed='true']) {
+  background: color-mix(in srgb, var(--ribbon-accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--ribbon-accent) 38%, transparent);
+}
+#icon-toolbar .tb-btn:is(.active, [aria-pressed='true']) :is(.tb-ico, .tb-label) { color: var(--ribbon-accent); }
+#icon-toolbar .tb-sm:is(.active, [aria-pressed='true']) .tb-label { color: var(--ribbon-accent); }
+#icon-toolbar .tb-btn[aria-expanded='true'] .tb-chev,
+#icon-toolbar .tb-split.open .tb-split-arrow .tb-chev { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) {
+  #icon-toolbar .tb-btn,
+  #icon-toolbar .tb-btn :is(.tb-ico, .tb-chev) { transition: none; }
+  #icon-toolbar .tb-lg:hover:not(:disabled) > .tb-ico,
+  #icon-toolbar .tb-btn:active:not(:disabled) > .tb-ico { transform: none; }
+}

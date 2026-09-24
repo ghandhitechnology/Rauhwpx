@@ -61,6 +61,8 @@ test('plan transition: planning -> awaiting -> switching -> implementing', () =>
   assert.equal(workflow.phase, 'implementing');
   assert.deepEqual(approval.approvedPlan.plan, {
     ...plan(),
+    steps: [{ ...plan().steps[0], id: 'step-1' }],
+    revision: 1,
     planId: 'plan-authoritative',
     createdAt: '2026-08-07T00:00:00.000Z',
     epoch: 11,
@@ -119,6 +121,62 @@ test('approval requires idle and the latest authoritative plan id', () => {
   );
 });
 
+test('revisions preserve prior plans and approval rejects changed or unobserved documents', () => {
+  let id = 0;
+  const workflow = new PlanningState({ workflow: 'plan', createPlanId: () => `plan-${++id}` });
+  const first = workflow.present(plan(), 8);
+  const second = workflow.present({ ...plan(), summary: 'Use the shorter wording.', changeSummary: 'Shortened wording.' }, 9);
+  assert.equal(first.plan.summary, 'Implement safely.');
+  assert.equal(second.plan.revision, 2);
+  assert.equal(second.plan.previousPlanId, first.planId);
+  assert.equal(second.plan.documentRevision, 9);
+  assert.throws(() => workflow.beginApproval({ planId: first.planId, sessionStatus: 'idle', documentRevision: 9 }), { code: 'STALE_PLAN_ID' });
+  assert.throws(() => workflow.beginApproval({ planId: second.planId, sessionStatus: 'idle', documentRevision: 10 }), { code: 'STALE_PLAN_DOCUMENT' });
+  assert.equal(workflow.phase, 'awaiting-approval');
+  workflow.beginApproval({ planId: second.planId, sessionStatus: 'idle', documentRevision: 9 });
+  const unobserved = state();
+  unobserved.present(plan());
+  assert.throws(() => unobserved.beginApproval({ planId: 'plan-authoritative', sessionStatus: 'idle', documentRevision: 9 }), { code: 'STALE_PLAN_DOCUMENT' });
+});
+
+test('execution requires agent progress, successful settlement and document review', () => {
+  const workflow = state();
+  const ready = workflow.present(plan());
+  const approved = workflow.beginApproval({ planId: ready.planId, sessionStatus: 'idle' }).approvedPlan;
+  workflow.completeSwitch(ready.planId);
+  assert.equal(workflow.snapshot().latestPlan.execution.steps[0].status, 'pending');
+  workflow.settleExecution('awaiting-review');
+  assert.equal(workflow.execution.status, 'blocked', 'a successful provider turn alone does not complete work');
+  assert.throws(() => workflow.updateProgress({ planId: ready.planId, stepId: 'made-up', status: 'completed' }), { code: 'INVALID_PLAN_STEP' });
+  workflow.updateProgress({ planId: ready.planId, stepId: 'step-1', status: 'in-progress' });
+  workflow.updateProgress({ planId: ready.planId, stepId: 'step-1', status: 'completed', note: 'Verified the replacement text.' });
+  assert.equal(workflow.execution.status, 'running', 'checklist completion is not document acceptance');
+  workflow.settleExecution('awaiting-review');
+  workflow.acknowledgeExecution('blocked');
+  assert.equal(workflow.execution.steps[0].status, 'pending', 'rejected or rolled-back edits require rechecking');
+  assert.throws(() => workflow.acknowledgeExecution('completed'), { code: 'PLAN_EXECUTION_FAILED' });
+  workflow.updateProgress({ planId: ready.planId, stepId: 'step-1', status: 'in-progress' });
+  workflow.updateProgress({ planId: ready.planId, stepId: 'step-1', status: 'completed' });
+  workflow.settleExecution('awaiting-review');
+  workflow.acknowledgeExecution('completed');
+  workflow.acknowledgeExecution('completed');
+  assert.equal(workflow.snapshot().latestPlan.execution.status, 'completed');
+  assert.equal(approved.plan.execution, undefined, 'approval stays immutable');
+  assert.match(workflow.execution.steps[0].note, /Verified the replacement text/);
+  assert.match(workflow.execution.steps[0].note, /Recheck this step/);
+});
+
+test('plan progress is restricted to approved plan workflows', () => {
+  for (const phase of ['planning', 'awaiting-approval']) {
+    assert.throws(() => authorizeToolCall({ category: 'plan-progress', tool: 'update_plan_progress', workflow: 'plan', phase,
+      expectedEpoch: 7, receivedEpoch: 7 }), { code: 'INVALID_PLAN_PHASE' });
+  }
+  assert.equal(authorizeToolCall({ category: 'plan-progress', tool: 'update_plan_progress', workflow: 'plan', phase: 'implementing',
+    expectedEpoch: 7, receivedEpoch: 7 }), true);
+  assert.throws(() => authorizeToolCall({ category: 'plan-progress', tool: 'update_plan_progress', workflow: 'direct', phase: null,
+    expectedEpoch: 7 }), { code: 'PLAN_WORKFLOW_REQUIRED' });
+});
+
 test('request changes returns to planning and invalidates the old capability epoch', () => {
   const workflow = state();
   workflow.present(plan());
@@ -163,14 +221,14 @@ test('explicit implementation approval accepts only standalone unambiguous comma
   }
 });
 
-test('awaiting-approval messages serialize approval/revision and attachments cannot approve', () => {
+test('awaiting-approval messages preserve discussion and attachments cannot approve', () => {
   assert.match(
     serverSource,
     /const hasAttachments = messageAttachments\.length > 0[\s\S]*Array\.isArray\(msg\.stagedReferenceIds\)[\s\S]*!hasAttachments && isExplicitImplementationApproval\(msg\.text\)[\s\S]*enqueueWorkflowTransition\(record, activeSession, \(\) => approveImplementationPlan/,
   );
   assert.match(
     serverSource,
-    /enqueueWorkflowTransition\([\s\S]*requestImplementationPlanChanges\(record, sock, \{ planId, feedback: msg\.text \}\)/,
+    /setExecutionMode\(providerModeRequest\(activeSession, 'awaiting-approval'\)\)[\s\S]*dispatchUserMessage\(record, sock, msg, activeSession, messageAttachments, true\)/,
   );
 });
 
@@ -241,13 +299,13 @@ test('plan document writes are blocked until implementing', () => {
 });
 
 test('user interaction is authorized while planning, implementing, questioning, or in Direct', () => {
-  for (const phase of ['planning', 'implementing']) {
+  for (const phase of ['planning', 'awaiting-approval', 'implementing']) {
     assert.equal(authorizeToolCall({
       category: 'user-interaction', tool: 'ask_user_question', workflow: 'plan', phase,
       expectedEpoch: 7, receivedEpoch: 7,
     }), true);
   }
-  for (const phase of ['awaiting-approval', 'switching']) {
+  for (const phase of ['switching']) {
     assert.throws(() => authorizeToolCall({
       category: 'user-interaction', tool: 'ask_user_question', workflow: 'plan', phase,
       expectedEpoch: 7, receivedEpoch: 7,

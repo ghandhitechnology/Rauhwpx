@@ -39,9 +39,9 @@ const PROGRESS_STAGES: ReadonlyArray<{
   { state: 'reading', label: '문서 읽기', detail: '원고를 안전하게 불러오고 있습니다.' },
   { state: 'extracting', label: '텍스트 추출', detail: '문서 형식에서 분석할 문장을 꺼내고 있습니다.' },
   { state: 'preparing', label: '분석 자료 정돈', detail: '문장 단위를 정리하고 언어를 확인하고 있습니다.' },
-  { state: 'analyzing', label: '목소리 읽기', detail: '습관의 목록이 아니라, 글에서 어떤 사람인지를 듣고 있습니다.' },
-  { state: 'synthesizing', label: '목소리 담기', detail: '규칙 대신, 이 글을 쓴 사람의 결을 남기고 있습니다.' },
-  { state: 'saving', label: '문체 프로필 저장', detail: '다음 글쓰기부터 그 목소리로 쓸 style.md를 준비하고 있습니다.' },
+  { state: 'analyzing', label: '목소리 읽기', detail: '글쓴이의 목소리를 읽고 있습니다.' },
+  { state: 'synthesizing', label: '목소리 담기', detail: '목소리를 프로필로 옮기고 있습니다.' },
+  { state: 'saving', label: '문체 프로필 저장', detail: 'style.md를 저장하고 있습니다.' },
 ];
 
 type CorpusMode = 'append' | 'replace';
@@ -282,15 +282,15 @@ function toBase64(bytes: Uint8Array): string {
 
 function errorCopy(code: string, fallback: string): string {
   switch (code) {
-    case 'INSUFFICIENT_SAMPLE': return '읽을 수 있는 글이 10쪽보다 적습니다. 원고를 더 추가해 다시 분석해 주세요.';
+    case 'INSUFFICIENT_SAMPLE': return '읽을 수 있는 글이 10쪽 미만입니다 · 원고 추가';
     case 'CODEX_UNAVAILABLE':
     case 'CLAUDE_UNAVAILABLE':
     case 'PI_UNAVAILABLE':
-    case 'PROVIDER_UNAVAILABLE': return '선택한 프로바이더를 시작하지 못했습니다. 연결 상태를 확인하거나 다른 프로바이더를 선택해 주세요.';
-    case 'MODEL_UNAVAILABLE': return '선택한 모델을 사용할 수 없습니다. 모델 목록에서 다른 모델을 선택해 주세요.';
-    case 'CALIBRATION_BUSY': return '다른 문체 분석이 진행 중입니다. 현재 작업이 끝난 뒤 다시 시도해 주세요.';
-    case 'TIMEOUT': return '에이전트 쪽 분석이 중단되었습니다. 연결을 확인한 뒤 다시 시도해 주세요.';
-    default: return fallback || '문체 분석을 완료하지 못했습니다. 파일과 모델을 확인한 뒤 다시 시도해 주세요.';
+    case 'PROVIDER_UNAVAILABLE': return '프로바이더 시작 실패 · 연결 확인 또는 다른 프로바이더 선택';
+    case 'MODEL_UNAVAILABLE': return '선택한 모델 사용 불가 · 다른 모델 선택';
+    case 'CALIBRATION_BUSY': return '다른 분석 진행 중 · 끝난 뒤 다시 시도';
+    case 'TIMEOUT': return '분석 중단됨 · 연결 확인 후 다시 시도';
+    default: return fallback || '분석 실패 · 파일과 모델 확인 후 다시 시도';
   }
 }
 
@@ -363,10 +363,10 @@ export function createWritingStyleCalibration(
     return panel;
   });
 
-  const introTitle = el('h2', 'ag-calibration-title', '말투를 맞출까요?');
+  const introTitle = el('h2', 'ag-calibration-title', '말투 맞추기');
   introTitle.id = 'ag-calibration-title';
-  const introStatement = el('p', 'ag-calibration-statement', '당신이 글에서 말투를 학습해서, 따라합니다');
-  const introDetail = el('p', 'ag-calibration-detail', '먼저 분석할 글의 주 언어를 선택하세요.');
+  const introStatement = el('p', 'ag-calibration-statement', '직접 쓴 글로 말투를 배웁니다.');
+  const introDetail = el('p', 'ag-calibration-detail', '글의 주 언어');
   const languageGroup = el('div', 'ag-calibration-language-group');
   languageGroup.setAttribute('role', 'radiogroup');
   languageGroup.setAttribute('aria-label', '캘리브레이션 언어');
@@ -394,7 +394,7 @@ export function createWritingStyleCalibration(
   introActions.append(introLater, introNext);
   panels[0]!.append(introTitle, introStatement, introDetail, languageGroup, introActions);
 
-  const uploadTitle = el('h2', 'ag-calibration-title', '보정할 글과 모델을 선택하세요');
+  const uploadTitle = el('h2', 'ag-calibration-title', '글과 모델 선택');
   const uploadStatement = el('p', 'ag-calibration-upload-statement');
 
   const corpusSection = el('section', 'ag-calibration-corpus');
@@ -527,7 +527,7 @@ export function createWritingStyleCalibration(
   const instruction = el('textarea', 'ag-calibration-instruction') as HTMLTextAreaElement;
   instruction.rows = 3;
   instruction.maxLength = 4_000;
-  instruction.placeholder = '예: 결론은 단정적으로 쓰되, 독자에게 지시하는 표현은 부드럽게 써 주세요.';
+  instruction.placeholder = '예: 결론은 단정적으로, 지시 표현은 부드럽게';
   instructionLabel.appendChild(instruction);
   const instructionHint = el('p', 'ag-calibration-instruction-hint', '기억한 목소리 위에 별도로 적용됩니다.');
   const resultError = el('div', 'ag-calibration-error');
@@ -628,8 +628,8 @@ export function createWritingStyleCalibration(
     }
     if (!active) corpusMode = 'replace';
     uploadStatement.textContent = active && corpusMode === 'append'
-      ? '현재 보정 자료 위에 새 문서를 더합니다. 직접 쓴 글을 선택해 주세요.'
-      : '직접 쓴 글을 총합 10쪽 이상 선택해 주세요.';
+      ? '현재 보정 자료에 직접 쓴 글을 더합니다.'
+      : '직접 쓴 글 10쪽 이상';
     setCorpusModeButtons();
     updateAnalyzeButton();
   }
@@ -639,8 +639,8 @@ export function createWritingStyleCalibration(
     const catalogProvider = calibrationCatalog?.providers.find((provider) => provider.id === agent);
     if (catalogProvider) {
       if (!catalogProvider.available) {
-        const piReason = agent === 'pi' ? '설정의 Pi 연결에서 OpenRouter 키와 모델을 먼저 선택해 주세요.' : '';
-        const rauReason = agent === 'rau' ? '설정의 Rau 카드에서 체험 크레딧을 먼저 연결해 주세요.' : '';
+        const piReason = agent === 'pi' ? '설정 > Pi에서 OpenRouter 키와 모델 선택 필요' : '';
+        const rauReason = agent === 'rau' ? '설정 > Rau에서 체험 크레딧 연결 필요' : '';
         return { available: false, pending: false, label: (agent === 'pi' || agent === 'rau') ? '설정 필요' : '사용 불가', reason: piReason || rauReason || catalogProvider.error || `${catalogProvider.name} 실행 환경을 찾지 못했습니다.` };
       }
       if (catalogProvider.models.length === 0) return { available: false, pending: false, label: '모델 없음', reason: `${catalogProvider.name}에서 사용할 수 있는 모델이 없습니다.` };
@@ -651,12 +651,12 @@ export function createWritingStyleCalibration(
     const health = providerStatus?.[agent];
     if (!health) return { available: false, pending: true, label: '확인 중', reason: `${AGENT_LABEL[agent]} 연결을 확인하고 있습니다.` };
     if (!health.available) {
-      return { available: false, pending: false, label: '사용 불가', reason: health.error || `${AGENT_LABEL[agent]} 실행 환경을 찾지 못했습니다. 설정에서 연결 상태를 확인해 주세요.` };
+      return { available: false, pending: false, label: '사용 불가', reason: health.error || `${AGENT_LABEL[agent]} 실행 환경 없음 · 설정에서 확인` };
     }
     if (agent === 'pi') {
       if (!piStatus) return { available: false, pending: true, label: '확인 중', reason: 'Pi 설정과 선택 모델을 확인하고 있습니다.' };
-      if (!piStatus.setupComplete) return { available: false, pending: false, label: '설정 필요', reason: '설정의 Pi 연결에서 OpenRouter 키와 모델을 먼저 선택해 주세요.' };
-      if (modelsForAgent('pi').length === 0) return { available: false, pending: false, label: '모델 없음', reason: '설정의 Pi 연결에서 분석에 쓸 모델을 선택해 주세요.' };
+      if (!piStatus.setupComplete) return { available: false, pending: false, label: '설정 필요', reason: '설정 > Pi에서 OpenRouter 키와 모델 선택 필요' };
+      if (modelsForAgent('pi').length === 0) return { available: false, pending: false, label: '모델 없음', reason: '설정 > Pi에서 분석 모델 선택 필요' };
     }
     return { available: true, pending: false, label: health.version ? `연결됨 · ${health.version}` : '연결됨', reason: '' };
   }
@@ -738,9 +738,9 @@ export function createWritingStyleCalibration(
     analyze.textContent = selectedModel
       ? `${labelForModel(selectedAgent, selectedModel)}로 ${corpusMode === 'append' ? '추가 분석' : '분석 시작'}`
       : '분석 시작';
-    if (selectedFiles.length === 0) analyze.title = '새로 분석할 파일을 선택해 주세요.';
+    if (selectedFiles.length === 0) analyze.title = '분석할 파일 선택';
     else if (!availability.available) analyze.title = availability.reason;
-    else if (!selectedModel) analyze.title = '분석할 모델을 선택해 주세요.';
+    else if (!selectedModel) analyze.title = '분석 모델 선택';
     else analyze.removeAttribute('title');
   }
 
@@ -880,8 +880,8 @@ export function createWritingStyleCalibration(
   function updateProgressConnection(): void {
     progressConnection.hidden = connectionState === 'connected';
     progressConnection.textContent = connectionState === 'replaced'
-      ? '다른 탭이 연결을 사용 중입니다. 이 탭을 다시 연결하면 진행 상황을 이어받습니다.'
-      : '로컬 에이전트에 다시 연결하고 있습니다. 분석 작업은 허브에서 계속됩니다.';
+      ? '다른 탭에서 연결 사용 중'
+      : '다시 연결 중 · 분석은 계속됩니다';
   }
 
   function renderResultCorpus(status: WritingStyleStatus): void {
@@ -982,7 +982,7 @@ export function createWritingStyleCalibration(
       calibrationBaselineUpdatedAt = activeStatus?.updatedAt ?? null;
       awaitingReconnectCompletion = false;
       submitting = false;
-      ackTimer = window.setTimeout(() => failRequest('에이전트가 요청을 확인하지 못했습니다. 연결을 복구한 뒤 다시 시도해 주세요.'), ACK_TIMEOUT_MS);
+      ackTimer = window.setTimeout(() => failRequest('요청 확인 실패 · 연결 후 다시 시도'), ACK_TIMEOUT_MS);
     } catch (error) {
       failRequest(error instanceof Error ? error.message : String(error));
     }
@@ -1004,7 +1004,7 @@ export function createWritingStyleCalibration(
       return;
     }
     if (connectionState !== 'connected') {
-      resultError.textContent = '연결을 복구한 뒤 추가 지침을 저장해 주세요.';
+      resultError.textContent = '연결 후 추가 지침을 저장합니다.';
       return;
     }
     resultError.textContent = '';

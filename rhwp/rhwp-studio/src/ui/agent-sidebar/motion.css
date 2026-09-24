@@ -1,0 +1,51 @@
+/* ─── 사이드바·설정·첫 실행 공용 모션 토큰 ─────────────────
+   시간 세 개, 곡선 두 개만 쓴다. 새 전환은 여기서 고른다.
+   - fast: 색·불투명도·호버 같은 작은 상태 변화
+   - base: 펼침·접힘, 목록 항목 등장
+   - slow: 사이드바·시트처럼 화면 단위로 움직이는 면
+   면 전환은 넘침 없이 멈추고, 작은 피드백은 즉시 반응한다. */
+:root {
+  --ag-dur-fast: 120ms;
+  --ag-dur-base: 180ms;
+  --ag-dur-slow: 300ms;
+  --ag-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  /* 사이드바와 시트에 같은 임계 감쇠 곡선을 쓴다. 화면 가장자리에서
+     넘치지 않고, 연속 입력은 현재 위치에서 바로 새 목표로 향한다. */
+  --ag-spring-edge: linear(
+    0, 0.023 1.1%, 0.096 2.4%, 0.391 6.6%, 0.612 10.4%, 0.765 14.3%,
+    0.868 18.5%, 0.932 23%, 0.97 28.2%, 0.99 35%, 0.998 45%, 1
+  );
+  --ag-spring: var(--ag-spring-edge);
+
+  /* 예전 이름 — 같은 토큰으로 모은다. */
+  --ag-sidebar-ease: var(--ag-ease-out);
+  --ag-sidebar-duration: var(--ag-dur-slow);
+  --ag-motion-out: var(--ag-ease-out);
+  --ag-motion-smooth: var(--ag-ease-out);
+  --ag-spring-soft: var(--ag-spring);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --ag-dur-fast: 1ms;
+    --ag-dur-base: 1ms;
+    --ag-dur-slow: 1ms;
+  }
+
+  .ag-root,
+  .ag-root *,
+  .ag-root *::before,
+  .ag-root *::after,
+  .ag-sheet-layer,
+  .ag-sheet-layer *,
+  .rhwp-setup-overlay,
+  .rhwp-setup-overlay *,
+  .ag-cloud-setup-overlay,
+  .ag-cloud-setup-overlay * {
+    /* transition-duration 은 건드리지 않는다 — 기본 transition-property 가
+       all 이라 전환이 없던 속성까지 1ms 전환이 생긴다. 전환 시간은 위 토큰이 줄인다. */
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

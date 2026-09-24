@@ -44,8 +44,12 @@ try {
     await open(params);
     assert.equal(await page.$eval('.audit-scene-current a', (node) => node.firstChild.textContent), scene.title);
     if (scene.id === 'chat-review') assert.ok(await page.evaluate(() => window.sidebarPreview.snapshot().pendingChanges > 0));
+    if (scene.id === 'chat-changes-full') {
+      assert.deepEqual(await page.evaluate(() => window.sidebarPreview.snapshot().changeEvents), ['set-finalized', 'approved']);
+      assert.equal(await page.$eval('.ag-root', (node) => node.classList.contains('ag-review-drawer-open')), true);
+    }
     if (scene.params['cloud-phase']) assert.notEqual(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind), 'idle');
-    if (['chat-empty', 'chat-review', 'cloud-options', 'cloud-disconnected'].includes(scene.id))
+    if (['chat-empty', 'chat-review', 'chat-changes-full', 'cloud-options', 'cloud-disconnected'].includes(scene.id))
       await page.screenshot({ path: resolve(artifacts, `audit-${scene.id}.png`) });
     console.log(`PASS ${scene.id}`);
   }

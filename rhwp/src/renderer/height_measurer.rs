@@ -203,14 +203,20 @@ pub struct MeasuredTable {
     pub para_index: usize,
     /// 컨트롤 인덱스
     pub control_index: usize,
+    /// 컨트롤 인덱스가 바뀌어도 다른 표의 기준 행 높이를 재사용하지 않도록 하는 개체 ID.
+    pub source_instance_id: u32,
     /// 총 높이 (px, 캡션 포함)
     pub total_height: f64,
     /// 행별 높이 목록 (px)
     pub row_heights: Vec<f64>,
+    /// 저장된 TAC 표 높이에 맞춰 축소하기 전의 행별 측정 높이.
+    pub raw_row_heights: Vec<f64>,
     /// [편집 세션] 로드 시점(비편집) 측정의 행 배분 — 편집 재측정의 행별 하한 기준.
     /// 직전 측정이 아니라 이 값을 하한으로 써야 undo/삭제로 내용이 줄었을 때
     /// 행이 로드 배분까지 되돌아온다. 비편집 측정은 None(자기 자신이 기준).
     pub baseline_row_heights: Option<Vec<f64>>,
+    /// 여러 번 편집해도 유지하는 로드 시점의 축소 전 행 높이.
+    pub baseline_raw_row_heights: Option<Vec<f64>>,
     /// 캡션 높이 (px)
     pub caption_height: f64,
     /// 셀 간격 (px)
@@ -1120,9 +1126,12 @@ impl HeightMeasurer {
             return MeasuredTable {
                 para_index,
                 control_index,
+                source_instance_id: table.common.instance_id,
                 total_height: 0.0,
                 row_heights: vec![0.0; rc],
+                raw_row_heights: vec![0.0; rc],
                 baseline_row_heights: None,
+                baseline_raw_row_heights: None,
                 caption_height: 0.0,
                 cell_spacing: 0.0,
                 cumulative_heights: vec![0.0; rc + 1],
@@ -2106,6 +2115,7 @@ impl HeightMeasurer {
         let cell_spacing = hwpunit_to_px(table.cell_spacing as i32, self.dpi);
         let raw_table_height: f64 =
             row_heights.iter().sum::<f64>() + cell_spacing * (row_count.saturating_sub(1) as f64);
+        let raw_row_heights = row_heights.clone();
         // TAC 표: common.height(표 속성 높이)를 상한으로 사용
         // 한컴은 TAC 표의 높이를 속성값으로 유지 (셀 콘텐츠 넘침은 클리핑)
         // 비-TAC 표: 셀 콘텐츠 기반 확장 유지 (행 분할 필요)
@@ -2425,9 +2435,12 @@ impl HeightMeasurer {
         MeasuredTable {
             para_index,
             control_index,
+            source_instance_id: table.common.instance_id,
             total_height,
             row_heights,
+            raw_row_heights,
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height,
             cell_spacing,
             cumulative_heights,
@@ -2449,7 +2462,18 @@ impl HeightMeasurer {
     /// 편집기의 행 배분은 선언 높이 비례 팽창이라, 한 셀이 자라면 다른 행의
     /// 몫을 잠식해 행 경계가 위로 밀린다. 한글은 편집한 행만 키우고 나머지
     /// 행의 저장 배분을 보존한다.
-    fn floor_rows_to_prev(mt: &mut MeasuredTable, prev: &MeasuredTable, cell_spacing: f64) {
+    fn floor_rows_to_prev(
+        mt: &mut MeasuredTable,
+        prev: &MeasuredTable,
+        cell_spacing: f64,
+        treat_as_char: bool,
+        instance_id: u32,
+    ) {
+        if (instance_id != 0 || prev.source_instance_id != 0)
+            && instance_id != prev.source_instance_id
+        {
+            return;
+        }
         // 하한 기준은 직전 측정이 아니라 **로드 시점 배분**이다 — 직전 측정을
         // 기준으로 삼으면 편집으로 커진 행이 undo/삭제 뒤에도 하한에 걸려
         // 되돌아오지 못한다(셀 끝 Enter 4회 → 역병합 4회: 표가 커진 채 잔존,
@@ -2463,11 +2487,31 @@ impl HeightMeasurer {
             return;
         }
         mt.baseline_row_heights = Some(baseline.clone());
+        let baseline_raw = prev
+            .baseline_raw_row_heights
+            .as_ref()
+            .unwrap_or(&prev.raw_row_heights);
+        if baseline_raw.len() == mt.raw_row_heights.len() {
+            mt.baseline_raw_row_heights = Some(baseline_raw.clone());
+        }
+        // 로드 때 저장 TAC 높이에 맞춰 각 행을 축소했으면, 내용이 그대로인 행은
+        // 그 배분을 유지하고 실제로 자란 행에만 로드 이후 성장분을 더한다.
+        let was_fitted_down = treat_as_char
+            && baseline_raw.len() == baseline.len()
+            && baseline_raw.iter().sum::<f64>() > baseline.iter().sum::<f64>() + 0.5;
         let mut changed = false;
-        for (h, b) in mt.row_heights.iter_mut().zip(baseline.iter()) {
-            if *h + 0.05 < *b {
-                *h = *b;
-                changed = true;
+        for (row, (h, b)) in mt.row_heights.iter_mut().zip(baseline.iter()).enumerate() {
+            let minimum = if was_fitted_down {
+                let growth = (mt.raw_row_heights[row] - baseline_raw[row]).max(0.0);
+                *b + growth
+            } else {
+                *b
+            };
+            if was_fitted_down || *h + 0.05 < minimum {
+                if (*h - minimum).abs() > 0.05 {
+                    changed = true;
+                }
+                *h = minimum;
             }
         }
         if !changed {
@@ -2542,7 +2586,13 @@ impl HeightMeasurer {
                     if self.session_edited {
                         if let Some(prev) = prev_measured.get_measured_table(para_idx, ctrl_idx) {
                             let cs = hwpunit_to_px(table.cell_spacing as i32, self.dpi);
-                            Self::floor_rows_to_prev(&mut measured_table, prev, cs);
+                            Self::floor_rows_to_prev(
+                                &mut measured_table,
+                                prev,
+                                cs,
+                                table.common.treat_as_char,
+                                table.common.instance_id,
+                            );
                         }
                     }
                     measured_tables.push(measured_table);
@@ -2610,7 +2660,13 @@ impl HeightMeasurer {
                                     prev_measured.get_measured_table(para_idx, ctrl_idx)
                                 {
                                     let cs = hwpunit_to_px(table.cell_spacing as i32, self.dpi);
-                                    Self::floor_rows_to_prev(&mut mt, prev, cs);
+                                    Self::floor_rows_to_prev(
+                                        &mut mt,
+                                        prev,
+                                        cs,
+                                        table.common.treat_as_char,
+                                        table.common.instance_id,
+                                    );
                                 }
                             }
                             measured_tables.push(mt);
@@ -2659,7 +2715,13 @@ impl HeightMeasurer {
                     if self.session_edited {
                         if let Some(prev) = prev_measured.get_measured_table(para_idx, ctrl_idx) {
                             let cs = hwpunit_to_px(table.cell_spacing as i32, self.dpi);
-                            Self::floor_rows_to_prev(&mut mt, prev, cs);
+                            Self::floor_rows_to_prev(
+                                &mut mt,
+                                prev,
+                                cs,
+                                table.common.treat_as_char,
+                                table.common.instance_id,
+                            );
                         }
                     }
                     measured_tables.push(mt);
@@ -2707,6 +2769,17 @@ impl HeightMeasurer {
 }
 
 impl MeasuredTable {
+    pub(crate) fn has_row_growth(&self) -> bool {
+        self.baseline_row_heights.as_ref().is_some_and(|baseline| {
+            self.row_heights.len() == baseline.len()
+                && self
+                    .row_heights
+                    .iter()
+                    .zip(baseline)
+                    .any(|(height, loaded)| *height > *loaded + 0.05)
+        })
+    }
+
     /// 지정 행의 셀별 남은 콘텐츠 높이 최대값을 반환한다.
     /// 셀의 콘텐츠 높이가 행 높이(패딩 제외)를 초과하면 행 높이로 캡핑한다.
     /// (HWP가 지정한 행 높이 = 보이는 콘텐츠 높이; 중첩 표의 클리핑된 높이만 반영)
@@ -3544,9 +3617,12 @@ mod tests {
         let mt = MeasuredTable {
             para_index: 0,
             control_index: 0,
+            source_instance_id: 0,
             total_height: 100.0,
             row_heights: vec![20.0, 30.0, 25.0],
+            raw_row_heights: vec![20.0, 30.0, 25.0],
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height: 0.0,
             cell_spacing: 5.0,
             cumulative_heights: vec![0.0, 20.0, 55.0, 85.0], // 0, 20, 20+30+5, 55+25+5
@@ -3567,9 +3643,12 @@ mod tests {
         let mt = MeasuredTable {
             para_index: 0,
             control_index: 0,
+            source_instance_id: 0,
             total_height: 100.0,
             row_heights: vec![20.0, 30.0, 25.0, 40.0],
+            raw_row_heights: vec![20.0, 30.0, 25.0, 40.0],
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height: 0.0,
             cell_spacing: 5.0,
             cumulative_heights: vec![0.0, 20.0, 55.0, 85.0, 130.0],
@@ -3597,9 +3676,12 @@ mod tests {
         let mt = MeasuredTable {
             para_index: 0,
             control_index: 0,
+            source_instance_id: 0,
             total_height: 100.0,
             row_heights: vec![50.0, 30.0],
+            raw_row_heights: vec![50.0, 30.0],
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height: 0.0,
             cell_spacing: 5.0,
             cumulative_heights: vec![0.0, 50.0, 85.0],
@@ -3619,9 +3701,12 @@ mod tests {
         let mt = MeasuredTable {
             para_index: 0,
             control_index: 0,
+            source_instance_id: 0,
             total_height: 100.0,
             row_heights: vec![20.0, 30.0, 25.0],
+            raw_row_heights: vec![20.0, 30.0, 25.0],
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height: 0.0,
             cell_spacing: 5.0,
             cumulative_heights: vec![0.0, 20.0, 55.0, 85.0],
@@ -3652,9 +3737,12 @@ mod tests {
         let mt = MeasuredTable {
             para_index: 0,
             control_index: 0,
+            source_instance_id: 0,
             total_height: 100.0,
             row_heights: vec![50.0, 30.0, 25.0],
+            raw_row_heights: vec![50.0, 30.0, 25.0],
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height: 0.0,
             cell_spacing: 5.0,
             cumulative_heights: vec![0.0, 50.0, 85.0, 115.0],
@@ -3680,9 +3768,12 @@ mod tests {
         let mt = MeasuredTable {
             para_index: 0,
             control_index: 0,
+            source_instance_id: 0,
             total_height: 0.0,
             row_heights: vec![],
+            raw_row_heights: vec![],
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height: 0.0,
             cell_spacing: 0.0,
             cumulative_heights: vec![0.0],
@@ -3702,9 +3793,12 @@ mod tests {
         let mt = MeasuredTable {
             para_index: 0,
             control_index: 0,
+            source_instance_id: 0,
             total_height: 50.0,
             row_heights: vec![50.0],
+            raw_row_heights: vec![50.0],
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height: 0.0,
             cell_spacing: 0.0,
             cumulative_heights: vec![0.0, 50.0],
@@ -3826,9 +3920,12 @@ mod tests {
         let mt = MeasuredTable {
             para_index: 0,
             control_index: 0,
+            source_instance_id: 0,
             total_height: 100.0,
             row_heights: vec![20.0, 30.0, 25.0],
+            raw_row_heights: vec![20.0, 30.0, 25.0],
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height: 0.0,
             cell_spacing: 5.0,
             cumulative_heights: vec![0.0, 20.0, 55.0, 85.0],
@@ -3859,9 +3956,12 @@ mod tests {
         let mt = MeasuredTable {
             para_index: 0,
             control_index: 0,
+            source_instance_id: 0,
             total_height: 50.0,
             row_heights: vec![20.0, 30.0],
+            raw_row_heights: vec![20.0, 30.0],
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height: 0.0,
             cell_spacing: 5.0,
             cumulative_heights: vec![0.0, 20.0, 55.0],
@@ -3886,9 +3986,12 @@ mod tests {
         let mt = MeasuredTable {
             para_index: 0,
             control_index: 0,
+            source_instance_id: 0,
             total_height: 100.0,
             row_heights: vec![10.0, 10.0, 10.0, 10.0, 10.0],
+            raw_row_heights: vec![10.0, 10.0, 10.0, 10.0, 10.0],
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height: 0.0,
             cell_spacing: 0.0,
             cumulative_heights: vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0],
@@ -3919,9 +4022,12 @@ mod tests {
         let mt = MeasuredTable {
             para_index: 0,
             control_index: 0,
+            source_instance_id: 0,
             total_height: 100.0,
             row_heights: vec![10.0, 10.0, 10.0, 10.0, 10.0],
+            raw_row_heights: vec![10.0, 10.0, 10.0, 10.0, 10.0],
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height: 0.0,
             cell_spacing: 0.0,
             cumulative_heights: vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0],
@@ -3944,9 +4050,12 @@ mod tests {
         let mut mt = MeasuredTable {
             para_index: 0,
             control_index: 0,
+            source_instance_id: 0,
             total_height: 0.0,
             row_heights: vec![],
+            raw_row_heights: vec![],
             baseline_row_heights: None,
+            baseline_raw_row_heights: None,
             caption_height: 0.0,
             cell_spacing: 0.0,
             cumulative_heights: vec![0.0],

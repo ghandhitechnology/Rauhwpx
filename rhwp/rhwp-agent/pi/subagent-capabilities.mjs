@@ -11,6 +11,7 @@ const ROOT_ONLY_TOOLS = new Set([
   'ask_user_question',
   'delegate_copy_layout',
   'present_implementation_plan',
+  'update_plan_progress',
   'register_copy_layout_template',
   'update_agent_instructions',
   'commit_product_skill',

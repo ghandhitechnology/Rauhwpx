@@ -26,6 +26,27 @@ const FONT_MENU_CATEGORIES: ReadonlyArray<{ id: FontMenuCategory; label: string 
 
 /** 서식 도구 모음 (style-bar) 컨트롤러 */
 export class Toolbar {
+  private onKeyboardActivate(button: HTMLElement, action: () => void): void {
+    button.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (this.enabled) action();
+    });
+  }
+
+  private adjustLineSpacing(delta: number): void {
+    const next = Math.max(5, Math.min(500, (Number(this.lsSelect.value) || 160) + delta));
+    this.ensureLsOption(next);
+    this.lsSelect.value = String(next);
+    this.dispatcher.dispatch('format:line-spacing', { value: next });
+  }
+
+  private adjustFontSize(delta: number): void {
+    const next = Math.max(1, Math.min(4096, (parseFloat(this.fontSize.value) || 10) + delta));
+    this.fontSize.value = String(next);
+    this.eventBus.emit('format-char', { fontSize: Math.round(next * 100) } as CharProperties);
+  }
   private styleName: HTMLSelectElement;
   private fontName: HTMLSelectElement;
   private fontSize: HTMLInputElement;
@@ -132,20 +153,31 @@ export class Toolbar {
       [this.btnStrike, 'format:strikethrough'],
     ];
     for (const [btn, cmdId] of buttons) {
+      const apply = () => { this.dispatcher.dispatch(cmdId); };
       btn.addEventListener('mousedown', (e) => {
         e.preventDefault();
-        this.dispatcher.dispatch(cmdId);
+        apply();
       });
+      this.onKeyboardActivate(btn, apply);
     }
   }
 
   /** 글자 효과 드롭다운 설정 */
   private setupCharfxDropdown(): void {
     // 버튼 클릭 → 드롭다운 열기/닫기
+    const toggleCharfx = () => { this.charfxDropdown.classList.toggle('open'); };
     this.charfxBtn.addEventListener('mousedown', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      this.charfxDropdown.classList.toggle('open');
+      toggleCharfx();
+    });
+    this.onKeyboardActivate(this.charfxBtn, toggleCharfx);
+    this.charfxDropdown.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || !this.charfxDropdown.classList.contains('open')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.charfxDropdown.classList.remove('open');
+      this.charfxBtn.focus();
     });
 
     // 메뉴 항목 클릭 → 커맨드 디스패치 + 닫기
@@ -159,6 +191,14 @@ export class Toolbar {
         this.dispatcher.dispatch(`format:${fmt}`);
       }
       this.charfxDropdown.classList.remove('open');
+    });
+    this.charfxMenu.querySelectorAll<HTMLElement>('.sb-dropdown-item').forEach(item => {
+      this.onKeyboardActivate(item, () => {
+        const fmt = item.dataset.format;
+        if (fmt) this.dispatcher.dispatch(`format:${fmt}`);
+        this.charfxDropdown.classList.remove('open');
+        this.charfxBtn.focus();
+      });
     });
 
     // 외부 클릭 시 닫기
@@ -214,22 +254,16 @@ export class Toolbar {
     // ▲ 버튼: +5%
     this.btnLsUp.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      const cur = Number(this.lsSelect.value) || 160;
-      const next = Math.min(500, cur + 5);
-      this.ensureLsOption(next);
-      this.lsSelect.value = String(next);
-      this.dispatcher.dispatch('format:line-spacing', { value: next });
+      this.adjustLineSpacing(5);
     });
+    this.onKeyboardActivate(this.btnLsUp, () => this.adjustLineSpacing(5));
 
     // ▼ 버튼: -5%
     this.btnLsDown.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      const cur = Number(this.lsSelect.value) || 160;
-      const next = Math.max(5, cur - 5);
-      this.ensureLsOption(next);
-      this.lsSelect.value = String(next);
-      this.dispatcher.dispatch('format:line-spacing', { value: next });
+      this.adjustLineSpacing(-5);
     });
+    this.onKeyboardActivate(this.btnLsDown, () => this.adjustLineSpacing(-5));
   }
 
   /** 프리셋에 없는 줄간격 값이면 option을 동적 추가한다 */
@@ -332,19 +366,15 @@ export class Toolbar {
     // 크기 증감 버튼 (char-shape-dialog.ts의 fontSize 범위 100~409600과 동일한 1~4096pt로 clamp)
     this.btnSizeUp.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      const pt = parseFloat(this.fontSize.value) || 10;
-      const newPt = Math.min(4096, pt + 1);
-      this.fontSize.value = String(newPt);
-      this.eventBus.emit('format-char', { fontSize: Math.round(newPt * 100) } as CharProperties);
+      this.adjustFontSize(1);
     });
+    this.onKeyboardActivate(this.btnSizeUp, () => this.adjustFontSize(1));
 
     this.btnSizeDown.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      const pt = parseFloat(this.fontSize.value) || 10;
-      const newPt = Math.max(1, pt - 1);
-      this.fontSize.value = String(newPt);
-      this.eventBus.emit('format-char', { fontSize: Math.round(newPt * 100) } as CharProperties);
+      this.adjustFontSize(-1);
     });
+    this.onKeyboardActivate(this.btnSizeDown, () => this.adjustFontSize(-1));
   }
 
   /** 글자색 피커 이벤트 */
@@ -485,6 +515,7 @@ export class Toolbar {
           e.preventDefault();
           this.dispatcher.dispatch(cmdId);
         });
+        this.onKeyboardActivate(btn, () => { this.dispatcher.dispatch(cmdId); });
       }
     }
   }
@@ -511,31 +542,43 @@ export class Toolbar {
       popup = null;
       document.removeEventListener('mousedown', close);
     };
-    const showPopup = () => {
+    const showPopup = (focusFirst = false) => {
       if (popup) { closePopup(); return; }
       popup = document.createElement('div');
       popup.className = 'bullet-popup';
-      popup.style.cssText = 'position:absolute;z-index:1000;background:var(--color-surface);border:1px solid var(--color-border);border-radius:3px;box-shadow:var(--shadow-dropdown);padding:4px;display:grid;grid-template-columns:repeat(6,1fr);gap:2px;color:var(--color-text);';
+      popup.setAttribute('role', 'dialog');
+      popup.setAttribute('aria-label', '글머리표 선택');
       const rect = btn.getBoundingClientRect();
-      popup.style.left = `${rect.left}px`;
-      popup.style.top = `${rect.bottom + 2}px`;
       for (const ch of BULLETS) {
         const cell = document.createElement('button');
         cell.type = 'button';
-        cell.style.cssText = 'width:28px;height:28px;border:1px solid var(--color-border);border-radius:2px;background:var(--color-surface);color:var(--color-text);cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;color-scheme:inherit;';
         cell.textContent = ch;
         cell.title = ch;
+        cell.setAttribute('aria-label', `글머리표 ${ch}`);
         cell.addEventListener('mousedown', (e) => {
           e.preventDefault();
           e.stopPropagation();
           closePopup();
           this.dispatcher.dispatch('format:apply-bullet', { bulletChar: ch });
         });
-        cell.addEventListener('mouseenter', () => { cell.style.background = 'var(--color-accent-bg)'; });
-        cell.addEventListener('mouseleave', () => { cell.style.background = 'var(--color-surface)'; });
+        this.onKeyboardActivate(cell, () => {
+          closePopup();
+          this.dispatcher.dispatch('format:apply-bullet', { bulletChar: ch });
+          btn.focus();
+        });
         popup.appendChild(cell);
       }
       document.body.appendChild(popup);
+      popup.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - popup.offsetWidth - 8))}px`;
+      popup.style.top = `${rect.bottom + popup.offsetHeight + 8 <= window.innerHeight ? rect.bottom + 6 : Math.max(8, rect.top - popup.offsetHeight - 6)}px`;
+      popup.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        event.stopPropagation();
+        closePopup();
+        btn.focus();
+      });
+      if (focusFirst) popup.querySelector<HTMLButtonElement>('button')?.focus();
       setTimeout(() => document.addEventListener('mousedown', close), 0);
     };
 
@@ -543,6 +586,7 @@ export class Toolbar {
       e.preventDefault();
       showPopup();
     });
+    this.onKeyboardActivate(btn, () => showPopup(true));
   }
 
   /** 스타일 드롭다운 change 이벤트 → 커맨드 디스패치 */
@@ -713,6 +757,7 @@ export class Toolbar {
 
   private setActive(btn: HTMLElement, active: boolean): void {
     btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
   }
 
   /** 대표 글꼴 optgroup을 #font-name 드롭다운에 추가 */

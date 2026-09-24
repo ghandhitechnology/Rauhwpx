@@ -4374,40 +4374,7 @@ impl TypesetEngine {
                                 .and_then(|idx| paragraphs.get(idx))
                                 .is_some_and(|p| p.controls.is_empty() && p.text.trim().is_empty())
                         });
-                    // [편집 세션] 저장 vpos 리셋은 저장 시점의 쪽 경계 신호라
-                    // 편집으로 앞 내용이 늘거나 줄면 낡은 좌표다. 다만 무조건
-                    // 무시하면 이 쪽 잔여가 몇십 px 뿐일 때 다음 쪽에서 시작하던
-                    // 표의 머리 행 조각이 잔여에 낑겨 앞 문단과 겹친다(한글
-                    // 오라클: 잔여가 작으면 표는 통째로 다음 쪽 유지). 그래서
-                    // 표 host 문단은 잔여에 표 머리(첫 두 행)가 실제로 들어갈
-                    // 때만 낡은 경계를 무시하고 fresh fit 에 맡긴다.
-                    let session_stale_reset_override =
-                        self.profile.get().session_edited() && !st.current_items.is_empty() && {
-                            let first_table_head_px =
-                                para.controls
-                                    .iter()
-                                    .enumerate()
-                                    .find_map(|(ci, c)| match c {
-                                        Control::Table(_) => measured_tables
-                                            .iter()
-                                            .find(|m| {
-                                                m.para_index == para_idx && m.control_index == ci
-                                            })
-                                            .map(|m| m.row_heights.iter().take(2).sum::<f64>()),
-                                        _ => None,
-                                    });
-                            // 표 없는 문단의 저장 리셋은 단/쪽 경계 인코딩일 수
-                            // 있어 존중한다 — 무시 대상은 편집으로 성장하는 표
-                            // host 문단의 낡은 경계뿐이다.
-                            match first_table_head_px {
-                                Some(head) => {
-                                    st.current_height + head <= st.available_height() + 0.5
-                                }
-                                None => false,
-                            }
-                        };
-                    let trigger =
-                        trigger && !omit_pushed_empty_page && !session_stale_reset_override;
+                    let trigger = trigger && !omit_pushed_empty_page;
                     if trigger {
                         // [Task #724] wrap_around active 시 강제 종료 — anchor cs=0
                         // (HWP5 변환본 caption-style) 한정. 일반 wrap_around (anchor cs>0)
@@ -14240,6 +14207,7 @@ impl TypesetEngine {
             .find(|&i| matches!(para.controls[i], Control::Table(_)));
 
         let mut break_after_current_table = false;
+        let mut split_paper_overlay_origin: Option<(usize, usize)> = None;
         for (order_pos, ctrl_idx) in ctrl_order.iter().copied().enumerate() {
             let ctrl = &para.controls[ctrl_idx];
             match ctrl {
@@ -14312,6 +14280,93 @@ impl TypesetEngine {
                         .find(|mt| mt.para_index == para_idx && mt.control_index == ctrl_idx)
                         .map(|mt| mt.total_height)
                         .unwrap_or(0.0);
+                    let paper_stack_position = crate::renderer::layout::projected_paper_table_top(
+                        para,
+                        para_idx,
+                        ctrl_idx,
+                        measured_tables,
+                        st.layout.page_width,
+                        self.dpi,
+                    );
+                    let overlay_overflows_body =
+                        paper_stack_position.is_some_and(|(top, declared_height, shift)| {
+                            let body_bottom = st.layout.body_area.y + st.base_available_height();
+                            let clear_bottom =
+                                crate::renderer::layout::paper_overlay_table_clearance_bottom(
+                                    para,
+                                    ctrl_idx,
+                                    st.layout.page_width,
+                                    self.dpi,
+                                    body_bottom,
+                                );
+                            (table_measured_h > declared_height + 0.5 || shift > 0.5)
+                                && top + table_measured_h > clear_bottom + 0.5
+                        });
+                    if overlay_overflows_body {
+                        let (top, _, _) = paper_stack_position.unwrap();
+                        let origin_page_count = st.pages.len();
+                        let origin = (
+                            origin_page_count.saturating_sub(1),
+                            st.current_column as usize,
+                        );
+                        st.current_height = st
+                            .current_height
+                            .max((top - st.layout.body_area.y).max(0.0));
+                        let body_bottom = st.layout.body_area.y + st.base_available_height();
+                        let clear_bottom =
+                            crate::renderer::layout::paper_overlay_table_clearance_bottom(
+                                para,
+                                ctrl_idx,
+                                st.layout.page_width,
+                                self.dpi,
+                                body_bottom,
+                            );
+                        let previous_zone_offset = st.current_zone_y_offset;
+                        st.current_zone_y_offset =
+                            st.current_zone_y_offset.max(body_bottom - clear_bottom);
+                        let mut flowing_table = table.clone();
+                        flowing_table.common.text_wrap = crate::model::shape::TextWrap::Square;
+                        flowing_table.common.vert_rel_to = crate::model::shape::VertRelTo::Para;
+                        flowing_table.common.vertical_offset = 0;
+                        let ft = self.format_table(
+                            para,
+                            para_idx,
+                            ctrl_idx,
+                            &flowing_table,
+                            measured_tables,
+                            styles,
+                            composed,
+                            next_para,
+                            st.current_height < 1.0,
+                        );
+                        let mt = measured_tables
+                            .iter()
+                            .find(|mt| mt.para_index == para_idx && mt.control_index == ctrl_idx);
+                        self.typeset_block_table(
+                            st,
+                            para_idx,
+                            ctrl_idx,
+                            para,
+                            &flowing_table,
+                            &ft,
+                            &fmt,
+                            mt,
+                            styles,
+                            para_start_height,
+                            para_start_height,
+                            first_placed_table == Some(ctrl_idx),
+                            last_placed_table == Some(ctrl_idx),
+                            paragraphs_all,
+                            composed_all,
+                        );
+                        if st.pages.len() == origin_page_count {
+                            st.current_zone_y_offset = previous_zone_offset;
+                        }
+                        if st.pages.len() > origin_page_count {
+                            split_paper_overlay_origin = Some(origin);
+                        }
+                        continue;
+                    }
                     let oversized_multirow = table.row_count > 1
                         && table_measured_h > st.base_available_height()
                         && !paper_anchored_overlay_table;
@@ -14380,7 +14435,27 @@ impl TypesetEngine {
                         .find(|mt| mt.para_index == para_idx && mt.control_index == ctrl_idx);
                     let is_first_placed = first_placed_table == Some(ctrl_idx);
                     let is_last_placed = last_placed_table == Some(ctrl_idx);
-                    if self.is_effective_tac_table(para, table, &fmt) {
+                    let grown_tac_needs_split = self.is_effective_tac_table(para, table, &fmt)
+                        && table.row_count > 1
+                        && matches!(table.page_break, crate::model::table::TablePageBreak::RowBreak | crate::model::table::TablePageBreak::CellBreak)
+                        && ft.effective_height
+                            > hwpunit_to_px(table.common.height as i32, self.dpi) + 0.5
+                        && st.current_height + ft.effective_height > st.available_height() + 0.5;
+                    if grown_tac_needs_split {
+                        // A formerly page-sized inline table can exceed the body after a cell
+                        // edit. Use the existing row splitter for this render pass; the source
+                        // table keeps its inline flags for save and undo.
+                        let mut flowing_table = table.clone();
+                        flowing_table.common.treat_as_char = false;
+                        flowing_table.common.text_wrap = crate::model::shape::TextWrap::Square;
+                        flowing_table.common.vert_rel_to = crate::model::shape::VertRelTo::Para;
+                        flowing_table.common.vertical_offset = 0;
+                        self.typeset_block_table(
+                            st, para_idx, ctrl_idx, para, &flowing_table, &ft, &fmt, mt,
+                            styles, issue2439_para_start_height, issue2439_para_start_height,
+                            is_first_placed, is_last_placed, paragraphs_all, composed_all,
+                        );
+                    } else if self.is_effective_tac_table(para, table, &fmt) {
                         self.typeset_tac_table(
                             st,
                             para_idx,
@@ -14578,10 +14653,33 @@ impl TypesetEngine {
                             st.advance_column_or_new_page();
                         }
                     }
-                    st.current_items.push(PageItem::Shape {
+                    let item = PageItem::Shape {
                         para_index: para_idx,
                         control_index: ctrl_idx,
+                    };
+                    let paper_anchor = match ctrl {
+                        Control::Shape(shape) => Some(shape.common()),
+                        Control::Picture(picture) => Some(&picture.common),
+                        _ => None,
+                    }
+                    .is_some_and(|common| {
+                        !common.treat_as_char && matches!(common.vert_rel_to, VertRelTo::Paper)
                     });
+                    if let Some((page_index, column_index)) =
+                        split_paper_overlay_origin.filter(|_| paper_anchor)
+                    {
+                        if let Some(column) = st
+                            .pages
+                            .get_mut(page_index)
+                            .and_then(|page| page.column_contents.get_mut(column_index))
+                        {
+                            column.items.push(item);
+                        } else {
+                            st.current_items.push(item);
+                        }
+                    } else {
+                        st.current_items.push(item);
+                    }
                     if let Some(line_h) = tac_separate_line_h {
                         st.current_height += line_h;
                     } else if let Some(extra) = non_tac_pushdown_h {
@@ -15783,6 +15881,18 @@ impl TypesetEngine {
             mut split_end_cut,
             mut split_end_limit,
         } = scan;
+        let grown_dirty_cell = table.cells.iter().any(|cell| {
+            cell.dirty_flag
+                && cell.height < 0x8000_0000
+                && mt.cells.iter().any(|measured| {
+                    measured.row == cell.row as usize
+                        && measured.col == cell.col as usize
+                        && measured.total_content_height
+                            + measured.padding_top
+                            + measured.padding_bottom
+                            > hwpunit_to_px(cell.height as i32, self.dpi) + 0.5
+                })
+        });
         let mut r = cursor_row;
         while r < row_count {
             let cs_before = if r > cursor_row { cs } else { 0.0 };
@@ -16386,6 +16496,18 @@ impl TypesetEngine {
                 break;
             }
             let res = layout_engine.advance_row_cut(table, r, row_start_cut, budget, styles);
+            // A cut walker can return its first text unit to guarantee progress even when that
+            // unit is taller than the remaining budget. Honor loaded page boundaries until
+            // a cell has actually grown; a saved edit retains that signal in `dirty_flag`.
+            if (mt.has_row_growth() || grown_dirty_cell)
+                && r > cursor_row
+                && rowbreak_split_row_overflow_tolerance
+                    >= HWPX_ROWBREAK_SPLIT_ROW_OVERFLOW_TOLERANCE_PX
+                && res.consumed_height > budget + 0.5
+            {
+                end_row = r;
+                break;
+            }
             // [#2236 진단] 인트라 컷 시도 결과 — 동작 불변.
             if std::env::var("RHWP_DIAG_SCAN").is_ok() {
                 eprintln!(

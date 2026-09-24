@@ -91,9 +91,10 @@ test('the sidebar lights threads while turns run and settles them on completion'
   assert.match(source, /else markChatFinished\(runStatusThreadId\)/);
   // 승인 대기로 끝난 계획 턴은 빨간 점을 남기고, 승인·수정 요청·무효화가 걷는다.
   assert.match(source, /planningPhase === 'awaiting-approval' && planApprovable\) \{\s*\n\s*markChatNeedsInput\(runStatusThreadId\)/);
-  assert.match(source, /case 'plan-approved':[\s\S]{0,220}settlePlanAttention\(\)/);
-  assert.match(source, /case 'implementation-started':[\s\S]{0,120}settlePlanAttention\(\)/);
-  assert.match(source, /case 'plan-invalidated':[\s\S]{0,120}settlePlanAttention\(\)/);
+  for (const event of ['plan-approved', 'implementation-started', 'plan-invalidated']) {
+    const caseBody = source.split(`case '${event}':`)[1]?.split(/\n\s*case '/)[0] ?? '';
+    assert.match(caseBody, /settlePlanAttention\(\)/);
+  }
   // 열람은 완료 점만 걷고, 다른 탭의 노란 불은 건드리지 않는다.
   assert.match(source, /getChatStatus\(id\) === 'finished'\) clearChatStatus\(id\)/);
   // 목록 행과 접힌 그룹 줄 양쪽에 점이 붙고, 상태 변화가 목록을 다시 그린다.

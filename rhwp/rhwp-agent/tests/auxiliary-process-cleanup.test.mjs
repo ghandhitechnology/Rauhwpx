@@ -39,7 +39,11 @@ test('chat-title output cap waits for tree cleanup before returning a fallback',
   const child = new FakeProcess();
   const gate = gatedTermination(child);
   const title = generateChatTitle('긴 대화', {
-    spawnProcess: () => child,
+    model: 'gpt-6.1-luna',
+    spawnProcess: (_command, args) => {
+      assert.ok(args.includes('gpt-6.1-luna'));
+      return child;
+    },
     terminateProcess: gate.terminateProcess,
   });
   let settled = false;

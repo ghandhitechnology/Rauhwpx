@@ -78,14 +78,14 @@ export function createSkillEditor(options: {
       if (closed) return;
       if (!outcome.ok) {
         status.textContent = outcome.code === 'STALE'
-          ? '다른 변경 사항이 있습니다. 내용을 복사한 뒤 다시 열어 주세요.'
+          ? '다른 곳에서 바뀌었습니다 · 내용 복사 후 다시 열기'
           : outcome.message;
         return;
       }
       closed = true;
       options.saved(outcome.digest);
     } catch {
-      status.textContent = '저장하지 못했습니다. 다시 시도해 주세요.';
+      status.textContent = '저장 실패 · 다시 시도';
     } finally {
       busy = false;
       save.textContent = '저장';
@@ -115,7 +115,7 @@ export function createSkillEditor(options: {
   }).catch(() => {
     if (closed) return;
     root.setAttribute('aria-busy', 'false');
-    status.textContent = '불러오지 못했습니다. 다시 열어 주세요.';
+    status.textContent = '불러오기 실패 · 다시 열기';
   });
   return { root };
 }
@@ -142,7 +142,7 @@ export function createNewSkillEditor(options: {
   const description = document.createElement('input');
   description.className = 'ag-skill-editor-description';
   description.type = 'text';
-  description.placeholder = '이 스킬이 언제 쓰이는지 한 줄로 설명하세요';
+  description.placeholder = '언제 쓰는 스킬인지 한 줄로';
   description.setAttribute('aria-label', '스킬 설명');
   fields.append(name, description);
 
@@ -152,7 +152,7 @@ export function createNewSkillEditor(options: {
   const textarea = document.createElement('textarea');
   textarea.className = 'ag-skill-editor-input';
   textarea.setAttribute('aria-label', '스킬 지시');
-  textarea.placeholder = '스킬이 따라야 할 지시를 Markdown으로 작성하세요.';
+  textarea.placeholder = '스킬 지시 (Markdown)';
   textarea.spellcheck = false;
   bodyLabel.appendChild(textarea);
 
@@ -187,8 +187,8 @@ export function createNewSkillEditor(options: {
     root.setAttribute('aria-busy', String(busy));
     if (!busy && commitError) status.textContent = commitError;
     else if (!busy && name.value.trim() && !validName) status.textContent = '이름은 영문 소문자, 숫자, 하이픈만 사용할 수 있습니다.';
-    else if (!busy && validName && !validDescription) status.textContent = '스킬 설명을 입력하세요.';
-    else if (!busy && validName && validDescription && !validBody) status.textContent = '스킬 지시문을 입력하세요.';
+    else if (!busy && validName && !validDescription) status.textContent = '스킬 설명 입력 필요';
+    else if (!busy && validName && validDescription && !validBody) status.textContent = '스킬 지시문 입력 필요';
     else if (!busy) status.textContent = '';
   };
   const close = () => { if (!busy) { closed = true; options.close(); } };
@@ -209,7 +209,7 @@ export function createNewSkillEditor(options: {
       closed = true;
       options.saved(outcome);
     } catch {
-      commitError = '저장하지 못했습니다. 다시 시도해 주세요.';
+      commitError = '저장 실패 · 다시 시도';
       status.textContent = commitError;
     } finally {
       busy = false;

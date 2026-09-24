@@ -1,4 +1,5 @@
 mod bookmark_query;
+mod character_count;
 mod cursor_nav;
 // wasm_api 의 선택 rect 래퍼가 셀 주소(평면/경로)를 구성할 때 쓴다.
 pub(crate) use cursor_nav::SelCellAddr;

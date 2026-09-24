@@ -20,8 +20,8 @@ use super::render_tree::{
     REAL_PICTURE_WATERMARK_FILL_OPACITY, REAL_PICTURE_WATERMARK_PAGE_OPACITY,
 };
 use super::{
-    clamp_tab_leader_end_x, GradientFillInfo, LineStyle, PathCommand, PatternFillInfo, Renderer,
-    ShapeStyle, StrokeDash, TextStyle,
+    clamp_tab_leader_end_x, faux_bold_stroke_width, GradientFillInfo, LineStyle, PathCommand,
+    PatternFillInfo, Renderer, ShapeStyle, StrokeDash, TextStyle,
 };
 
 /// Hanyang-PUA 옛한글 코드포인트를 KS X 1026-1:2007 자모 시퀀스로 확장.
@@ -476,28 +476,11 @@ impl SvgRenderer {
                 self.draw_path_arrow_markers(path);
             }
             RenderNodeType::Equation(eq) => {
-                // 수식 SVG 조각을 bbox 위치에 배치
-                // HWP 저장 영역(bbox)과 레이아웃 산출 크기(layout_box)가 다를 수 있으므로
-                // bbox 너비에 맞춰 스케일링한다. 높이는 줄 높이/여백을 포함한 영역이라
-                // 식 자체를 세로로 늘리면 한컴보다 글자가 찌그러진다.
-                let scale_x = if eq.layout_box.width > 0.0 && node.bbox.width > 0.0 {
-                    node.bbox.width / eq.layout_box.width
-                } else {
-                    1.0
-                };
-                let scale_y = 1.0_f64;
-                let needs_scale = (scale_x - 1.0).abs() > 0.01 || (scale_y - 1.0).abs() > 0.01;
-                if needs_scale {
-                    self.output.push_str(&format!(
-                        "<g transform=\"translate({},{}) scale({:.4},{:.4})\">\n",
-                        node.bbox.x, node.bbox.y, scale_x, scale_y,
-                    ));
-                } else {
-                    self.output.push_str(&format!(
-                        "<g transform=\"translate({},{})\">\n",
-                        node.bbox.x, node.bbox.y,
-                    ));
-                }
+                // control 폭은 flow advance이며 서체의 가로 배율이 아니다.
+                self.output.push_str(&format!(
+                    "<g transform=\"translate({},{})\">\n",
+                    node.bbox.x, node.bbox.y,
+                ));
                 self.output.push_str(&eq.svg_content);
                 self.output.push_str("</g>\n");
                 // 폰트 임베딩: 수식에서 사용된 글자 수집
@@ -3284,19 +3267,6 @@ impl Renderer for SvgRenderer {
     fn draw_path(&mut self, commands: &[PathCommand], style: &ShapeStyle) {
         self.draw_path_with_gradient(commands, style, None);
     }
-}
-
-fn faux_bold_stroke_width(style: &TextStyle, font_size: f64) -> Option<f64> {
-    /// 한/글 2022 PDF 실측 — `w / Tf`.
-    const HANCOM_FAUX_BOLD_STROKE_EM: f64 = 0.02;
-
-    if !style.bold {
-        return None;
-    }
-    let primary = super::style_resolver::primary_font_name(&style.font_family);
-    super::font_metrics_data::find_metric(primary, true, style.italic)?
-        .bold_fallback
-        .then_some(font_size * HANCOM_FAUX_BOLD_STROKE_EM)
 }
 
 fn faux_bold_stroke_attr(width: f64, fill: &str) -> String {

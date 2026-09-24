@@ -12,7 +12,7 @@ import {
   saveAgentPrefs,
   trySaveAgentPrefs,
 } from '../src/agent/agent-prefs.ts';
-import { setPiModels } from '../src/agent/models.ts';
+import { modelsForAgent, setModelCatalog, setPiModels } from '../src/agent/models.ts';
 import type { PiModelConfig } from '../src/agent/types.ts';
 
 /** localStorage 대역 — 테스트는 브라우저 없이 돌아간다. */
@@ -39,6 +39,10 @@ test('빈 저장소는 Claude/Sonnet/High/안전 기본값을 준다', () => {
     defaultModel: 'sonnet',
     defaultEffort: 'high',
     defaultPermissionProfile: 'safe',
+    selectedModels: {
+      claude: ['fable', 'opus', 'sonnet', 'haiku'],
+      codex: ['astra', 'sol', 'luna', 'terra'],
+    },
   });
   assert.deepEqual(prefs, defaultAgentPrefs());
   assert.equal(DEFAULT_CHAT_AGENT, 'claude');
@@ -52,7 +56,7 @@ test('모르는 모델은 프로바이더 기본 모델로 접힌다', () => {
 test('프로바이더가 다르면 모델도 그 프로바이더 기준으로 다시 해석된다', () => {
   const prefs = loadAgentPrefs(makeStorage({ defaultAgent: 'codex', defaultModel: 'opus' }));
   assert.equal(prefs.defaultAgent, 'codex');
-  assert.equal(prefs.defaultModel, 'gpt-5.6-sol');
+  assert.equal(prefs.defaultModel, 'sol');
 });
 
 test('모델이 지원하지 않는 추론 강도는 그 모델의 기본값으로 내려간다', () => {
@@ -98,15 +102,41 @@ test('저장은 부분 갱신이고, 저장된 값은 다시 읽힌다', () => {
   // 프로바이더를 바꾸면 남아 있던 모델은 새 프로바이더 기준으로 접히고,
   // 강도는 codex 도 max 를 받으니 그대로 살아남는다.
   const switched = saveAgentPrefs({ defaultAgent: 'codex' }, storage);
-  assert.equal(switched.defaultModel, 'gpt-5.6-sol');
+  assert.equal(switched.defaultModel, 'sol');
   assert.equal(switched.defaultEffort, 'max');
   assert.equal(JSON.parse(storage.map.get(AGENT_PREFS_STORAGE_KEY)!).defaultAgent, 'codex');
+});
+
+test('a staged concrete selection remains valid without changing the saved sidebar picker', () => {
+  const storage = makeStorage();
+  loadAgentPrefs(storage);
+  setModelCatalog('codex', [
+    { id: 'gpt-6-sol', label: 'GPT-6 Sol' },
+    { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
+  ]);
+  try {
+    const draft = normalizeAgentPrefs({
+      defaultAgent: 'codex',
+      defaultModel: 'gpt-5.3-codex',
+      selectedModels: { claude: ['sonnet'], codex: ['gpt-5.3-codex'] },
+    });
+    assert.equal(draft.defaultModel, 'gpt-5.3-codex');
+    assert.deepEqual(draft.selectedModels.codex, ['gpt-5.3-codex']);
+    assert.notDeepEqual(modelsForAgent('codex').map((model) => model.id), ['gpt-5.3-codex']);
+
+    const saved = saveAgentPrefs(draft, storage);
+    assert.deepEqual(modelsForAgent('codex').map((model) => model.id), ['gpt-5.3-codex']);
+    assert.deepEqual(loadAgentPrefs(storage), saved);
+  } finally {
+    setModelCatalog('codex', []);
+    loadAgentPrefs(makeStorage());
+  }
 });
 
 test('저장소가 없으면 정규화된 값만 돌려주고 던지지 않는다', () => {
   const prefs = saveAgentPrefs({ defaultAgent: 'codex' }, null);
   assert.equal(prefs.defaultAgent, 'codex');
-  assert.equal(prefs.defaultModel, 'gpt-5.6-sol');
+  assert.equal(prefs.defaultModel, 'sol');
 });
 
 const PI_MODEL: PiModelConfig = {
@@ -236,5 +266,5 @@ test('첫 실행에서 BYOK 만 연결하면 그 프로바이더가 기본값이
   assert.equal(firstRunDefaultAgent(['codex', 'claude']), 'codex');
   const seeded = applyFirstRunDefaultAgent(['codex'], storage);
   assert.equal(seeded.defaultAgent, 'codex');
-  assert.equal(seeded.defaultModel, 'gpt-5.6-sol');
+  assert.equal(seeded.defaultModel, 'sol');
 });

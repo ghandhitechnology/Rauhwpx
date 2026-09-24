@@ -143,6 +143,12 @@ impl ParagraphMarginUnits {
             Self::LegacyDoubled => value,
         }
     }
+
+    /// HwpUnitChar case 여백. `unit="CHAR"` 는 홀수 저장값의 최하위 비트다.
+    fn case_margin_child_to_ir(self, value: i32, unit: &str) -> i32 {
+        self.case_value_to_ir(value)
+            .saturating_add(i32::from(unit == "CHAR"))
+    }
 }
 
 pub(super) fn parse_hwpx_header_with_margin_units(
@@ -1301,32 +1307,39 @@ fn parse_para_shape_switch(
                         b"margin" | b"intent" | b"left" | b"right" | b"prev" | b"next" => {
                             // margin 하위 요소들: <left value="..." />, <prev value="..." /> 등
                             let tag_name = local;
+                            // 한컴은 홀수 저장값의 case 절반을 unit="CHAR" 로 표시한다. [#6875]
+                            let mut val = None;
+                            let mut unit = String::new();
                             for attr in ce.attributes().flatten() {
-                                if attr.key.as_ref() == b"value" {
-                                    let val = parse_i32(&attr);
-                                    if in_hwpunitchar_case {
-                                        // XML <1.4 already uses doubled margin units,
-                                        // even inside an HwpUnitChar case. Newer
-                                        // packages use effective HWPUNIT values.
-                                        let val2x = margin_units.case_value_to_ir(val);
-                                        match tag_name {
-                                            b"left" => ps.margin_left = val2x,
-                                            b"right" => ps.margin_right = val2x,
-                                            b"intent" => ps.indent = val2x,
-                                            b"prev" => ps.spacing_before = val2x,
-                                            b"next" => ps.spacing_after = val2x,
-                                            _ => {}
-                                        }
-                                        found_case = true;
-                                    } else if in_default {
-                                        match tag_name {
-                                            b"left" => def_margin_left = Some(val),
-                                            b"right" => def_margin_right = Some(val),
-                                            b"intent" => def_indent = Some(val),
-                                            b"prev" => def_prev = Some(val),
-                                            b"next" => def_next = Some(val),
-                                            _ => {}
-                                        }
+                                match attr.key.as_ref() {
+                                    b"value" => val = Some(parse_i32(&attr)),
+                                    b"unit" => unit = attr_str(&attr),
+                                    _ => {}
+                                }
+                            }
+                            if let Some(val) = val {
+                                if in_hwpunitchar_case {
+                                    // XML <1.4 already uses doubled margin units,
+                                    // even inside an HwpUnitChar case. Newer
+                                    // packages use effective HWPUNIT values.
+                                    let val2x = margin_units.case_margin_child_to_ir(val, &unit);
+                                    match tag_name {
+                                        b"left" => ps.margin_left = val2x,
+                                        b"right" => ps.margin_right = val2x,
+                                        b"intent" => ps.indent = val2x,
+                                        b"prev" => ps.spacing_before = val2x,
+                                        b"next" => ps.spacing_after = val2x,
+                                        _ => {}
+                                    }
+                                    found_case = true;
+                                } else if in_default {
+                                    match tag_name {
+                                        b"left" => def_margin_left = Some(val),
+                                        b"right" => def_margin_right = Some(val),
+                                        b"intent" => def_indent = Some(val),
+                                        b"prev" => def_prev = Some(val),
+                                        b"next" => def_next = Some(val),
+                                        _ => {}
                                     }
                                 }
                             }
@@ -2429,6 +2442,22 @@ mod tests {
         assert_eq!(shape.margin_right, 1600);
         assert_eq!(shape.spacing_before, 600);
         assert_eq!(shape.spacing_after, 300);
+    }
+
+    #[test]
+    fn hwpunitchar_char_unit_restores_the_odd_stored_bit() {
+        let xml = r#"<hh:head><hh:paraPr id="0"><hp:switch>
+          <hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">
+            <hh:margin><hc:intent value="-1310" unit="HWPUNIT"/><hc:left value="0" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/><hc:prev value="0" unit="HWPUNIT"/><hc:next value="80" unit="CHAR"/></hh:margin>
+          </hp:case><hp:default><hh:margin><hc:intent value="-2620" unit="HWPUNIT"/><hc:left value="0" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/><hc:prev value="0" unit="HWPUNIT"/><hc:next value="161" unit="HWPUNIT"/></hh:margin></hp:default>
+        </hp:switch></hh:paraPr></hh:head>"#;
+        let (parsed, _) = parse_hwpx_header(xml).unwrap();
+        let shape = &parsed.para_shapes[0];
+        assert_eq!(shape.indent, -2620);
+        assert_eq!(shape.margin_left, 0);
+        assert_eq!(shape.margin_right, 0);
+        assert_eq!(shape.spacing_before, 0);
+        assert_eq!(shape.spacing_after, 161);
     }
 
     #[test]

@@ -1243,8 +1243,8 @@ test('provider configuration rejects busy, unconnected, invalid and overlapping 
   for (const [selection, code] of [
     [{ provider: 'unknown' }, 'INVALID_PROVIDER'],
     [{ provider: 'claude', model: 'sonnet' }, 'PROVIDER_UNAVAILABLE'],
-    [{ model: 'sonnet' }, 'INVALID_MODEL'],
-    [{ effort: 'ultra' }, 'INVALID_EFFORT'],
+    [{ model: 'sol/../model' }, 'INVALID_MODEL'],
+    [{ effort: 'hyper' }, 'INVALID_EFFORT'],
     [{ model: '--unsafe-option' }, 'INVALID_REQUEST'],
     [{ provider: 'claude', model: 'haiku', effort: 'max' }, 'INVALID_EFFORT'],
   ]) {

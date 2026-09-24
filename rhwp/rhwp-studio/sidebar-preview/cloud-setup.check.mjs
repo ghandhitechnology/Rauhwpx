@@ -18,11 +18,11 @@ export async function checkCloudSetup(page, origin, artifacts) {
     await page.goto(`${origin}/?cloud=1&page=settings&destination=cloud&controls=0&width=${width}&reset=1`, { waitUntil: 'networkidle0' });
     await page.waitForFunction(() => window.sidebarPreview?.cloud);
     await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('unconfigured'));
-    await page.click('.ag-cd-setup');
+    await page.click('.ag-cloud-settings-action');
     await title('Cloud 서버 선택');
     await click('취소');
     assert.equal(await page.$eval('.ag-cloud-setup-overlay', (node) => node.hidden), true);
-    await page.click('.ag-cd-setup');
+    await page.click('.ag-cloud-settings-action');
     await click('계속');
     await title('Raucloud 사용');
     await click('뒤로');

@@ -5,6 +5,20 @@
 
 use super::ast::*;
 
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(catch, js_namespace = globalThis, js_name = measureEquationText)]
+    fn measure_equation_text(
+        source: &str,
+        text: &str,
+        size: f64,
+        italic: bool,
+        hft: bool,
+        literal: bool,
+    ) -> Result<Option<f64>, wasm_bindgen::JsValue>;
+}
+
 /// 수식 레이아웃 박스
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LayoutBox {
@@ -41,6 +55,8 @@ pub enum LayoutKind {
     Fraction {
         numer: Box<LayoutBox>,
         denom: Box<LayoutBox>,
+        /// 분수 개체의 왼쪽/오른쪽 경계에서 선까지의 거리.
+        bar_inset: f64,
     },
     /// 위아래 배치 (분수선 없음)
     Atop {
@@ -119,10 +135,14 @@ pub enum LayoutKind {
 }
 
 /// 수식 레이아웃 계산기
+#[derive(Clone)]
 pub struct EqLayout {
     /// 기본 글꼴 크기 (px)
     pub font_size: f64,
     font_family: Option<String>,
+    hft: bool,
+    italic: bool,
+    operator_padding_scale: f64,
 }
 
 /// 비율 상수
@@ -194,11 +214,19 @@ pub(crate) const AXIS_HEIGHT: f64 = 0.25;
 /// 텍스트 기본 baseline 비율 (상단에서 baseline까지)
 const TEXT_BASELINE: f64 = 0.8;
 
+/// 분수선은 분자의 em box와 padding 뒤에 둔다. 버전별 baseline/axis와 분리한다.
+pub(crate) fn fraction_line_y(numerator: &LayoutBox, font_size: f64) -> f64 {
+    numerator.height + font_size * (FRAC_LINE_PAD + FRAC_LINE_THICK / 2.0)
+}
+
 impl EqLayout {
     pub fn new(font_size: f64) -> Self {
         Self {
             font_size,
             font_family: None,
+            hft: false,
+            italic: true,
+            operator_padding_scale: 1.0,
         }
     }
 
@@ -206,10 +234,37 @@ impl EqLayout {
         Self {
             font_size,
             font_family: (!font_family.trim().is_empty()).then(|| font_family.to_string()),
+            hft: false,
+            italic: true,
+            operator_padding_scale: 1.0,
         }
     }
 
-    fn text_width(&self, text: &str, font_size: f64, italic: bool) -> f64 {
+    pub fn with_version(mut self, version: &str) -> Self {
+        self.hft = version.is_empty()
+            && self
+                .font_family
+                .as_deref()
+                .is_some_and(super::font::is_legacy_equation_font);
+        self
+    }
+
+    fn text_width(&self, text: &str, font_size: f64, italic: bool, literal: bool) -> f64 {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(width) = self
+            .font_family
+            .as_deref()
+            .and_then(|family| {
+                measure_equation_text(family, text, font_size, italic, self.hft, literal)
+                    .ok()
+                    .flatten()
+            })
+            .filter(|width| width.is_finite() && *width >= 0.0)
+        {
+            return width;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = literal;
         self.font_family
             .as_deref()
             .and_then(|family| {
@@ -223,6 +278,43 @@ impl EqLayout {
     /// AST를 레이아웃 박스로 변환
     pub fn layout(&self, node: &EqNode) -> LayoutBox {
         self.layout_node(node, self.font_size)
+    }
+
+    /// 원본 개체의 여유 폭 안에 자연 크기의 수식을 중앙 배치한다. 글립은 늘이지 않는다.
+    pub fn layout_in_control_width(&self, node: &EqNode, width: f64) -> LayoutBox {
+        let mut result = self.layout(node);
+        if !width.is_finite() || width <= 0.0 {
+            return result;
+        }
+        if result.width > width {
+            // 저장 폭은 font stretch가 아닌 개체 크기다. 추정 연산자 여백만 줄인다.
+            // 최소 여백으로도 못 맞추는 폰트 대체/수동 크기 변경은 자연 배치를 유지한다.
+            let mut compact = self.clone();
+            compact.operator_padding_scale = 0.0;
+            let minimum = compact.layout(node);
+            if minimum.width <= width && minimum.width < result.width {
+                let mut low = 0.0;
+                let mut high = 1.0;
+                let mut scale = (width - minimum.width) / (result.width - minimum.width);
+                for _ in 0..16 {
+                    compact.operator_padding_scale = scale;
+                    result = compact.layout(node);
+                    if (result.width - width).abs() < 0.0001 {
+                        break;
+                    }
+                    if result.width > width {
+                        high = scale;
+                    } else {
+                        low = scale;
+                    }
+                    scale = (low + high) / 2.0;
+                }
+            }
+        }
+        if width > result.width {
+            result.x = (width - result.width) / 2.0;
+        }
+        result
     }
 
     fn layout_node(&self, node: &EqNode, fs: f64) -> LayoutBox {
@@ -285,7 +377,11 @@ impl EqLayout {
 
         let mut boxes: Vec<LayoutBox> = children
             .iter()
-            .map(|c| self.layout_node(c, fs))
+            .enumerate()
+            .map(|(i, c)| match c {
+                EqNode::Symbol(s) if is_sign(children, i) => self.padded_symbol(s, fs, SIGN_PAD_EM),
+                _ => self.layout_node(c, fs),
+            })
             .filter(|b| b.width > 0.0 || matches!(b.kind, LayoutKind::Newline))
             .collect();
 
@@ -332,7 +428,7 @@ impl EqLayout {
                 '\u{3000}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{AC00}'..='\u{D7AF}'
             )
         });
-        let w = self.text_width(text, fs, !has_cjk);
+        let w = self.text_width(text, fs, self.italic && !has_cjk, true);
         LayoutBox {
             x: 0.0,
             y: 0.0,
@@ -344,7 +440,7 @@ impl EqLayout {
     }
 
     fn layout_number(&self, text: &str, fs: f64) -> LayoutBox {
-        let w = self.text_width(text, fs, false);
+        let w = self.text_width(text, fs, false, false);
         LayoutBox {
             x: 0.0,
             y: 0.0,
@@ -356,17 +452,17 @@ impl EqLayout {
     }
 
     fn layout_symbol(&self, text: &str, fs: f64) -> LayoutBox {
-        let w = estimate_text_width(text, fs, false);
-        // 연산자 좌우 여백
-        let pad = if matches!(text, "+" | "-" | "=" | "<" | ">" | "×" | "÷") {
-            fs * 0.15
-        } else {
-            fs * 0.05
-        };
+        // 연산자 좌우 여백: 관계 > 이항 > 그 밖의 기호
+        self.padded_symbol(text, fs, operator_pad_em(text).unwrap_or(0.05))
+    }
+
+    fn padded_symbol(&self, text: &str, fs: f64, pad_em: f64) -> LayoutBox {
+        let w = self.text_width(text, fs, false, false);
+        let pad = fs * pad_em;
         LayoutBox {
             x: 0.0,
             y: 0.0,
-            width: w + pad * 2.0,
+            width: w + pad * 2.0 * self.operator_padding_scale,
             height: fs,
             baseline: fs * 0.8,
             kind: LayoutKind::Symbol(text.to_string()),
@@ -389,7 +485,12 @@ impl EqLayout {
                 kind: LayoutKind::MathSymbol(text.to_string()),
             };
         }
-        let w = estimate_text_width(text, fs, false);
+        // 관계·이항 연산 기호는 Symbol 로 두어 좌우 여백 가운데에 그린다.
+        if let Some(pad_em) = operator_pad_em(text) {
+            return self.padded_symbol(text, fs, pad_em);
+        }
+        let italic = self.italic && super::font::is_greek_variable(text);
+        let w = self.text_width(text, fs, italic, false);
         LayoutBox {
             x: 0.0,
             y: 0.0,
@@ -401,7 +502,7 @@ impl EqLayout {
     }
 
     fn layout_function(&self, name: &str, fs: f64) -> LayoutBox {
-        let w = self.text_width(name, fs, false);
+        let w = self.text_width(name, fs, false, false);
         LayoutBox {
             x: 0.0,
             y: 0.0,
@@ -418,8 +519,24 @@ impl EqLayout {
 
         let pad = fs * FRAC_LINE_PAD;
         let line_thick = fs * FRAC_LINE_THICK;
-        let axis = fs * AXIS_HEIGHT;
-        let w = n.width.max(d.width) + pad * 2.0;
+        let axis = fs * if self.hft { 0.375 } else { AXIS_HEIGHT };
+        let child_width = n.width.max(d.width);
+        let natural_width = child_width + pad * 2.0;
+        // 현대 HY 분수는 최소 1em 개체/0.8em 선을 사용한다. 좁은 분수를
+        // 글립 advance까지 줄이면 같은 분자도 분모에 따라 시작점이 달라진다.
+        // 긴 분수는 기존 0.15em 선 여백을 유지한다 (eq-01의 12pt 분수).
+        let modern_hy = !self.hft
+            && self
+                .font_family
+                .as_deref()
+                .is_some_and(super::font::is_legacy_equation_font);
+        let (w, bar_inset) = if modern_hy {
+            let width = natural_width.max(fs);
+            let bar_width = (child_width + fs * 0.3).max(fs * 0.8);
+            (width, (width - bar_width) / 2.0)
+        } else {
+            (natural_width, fs * 0.05)
+        };
 
         let numer_h = n.height + pad;
         let denom_h = d.height + pad;
@@ -429,7 +546,7 @@ impl EqLayout {
         // 즉, 분수선 y = baseline - axis_height (상단 기준)
         let frac_line_from_top = numer_h + line_thick / 2.0;
         let baseline = frac_line_from_top + axis;
-        let total_h = numer_h + line_thick + denom_h;
+        let mut total_h = numer_h + line_thick + denom_h;
 
         let mut n_box = n;
         n_box.x = (w - n_box.width) / 2.0;
@@ -438,6 +555,39 @@ impl EqLayout {
         let mut d_box = d;
         d_box.x = (w - d_box.width) / 2.0;
         d_box.y = numer_h + line_thick;
+
+        // HYhwpEQ는 분자/분모의 baseline을 수식 baseline 위/아래에 놓는다.
+        // em box의 시작점에 같은 padding을 더하면 실제 간격이 1.04em으로 줄어든다.
+        // 한컴 원본 PDF(eq-01-2022의 12/13pt, 11pt 광학 실험지)에서는 약 1.3em이다.
+        if self
+            .font_family
+            .as_deref()
+            .is_some_and(super::font::is_legacy_equation_font)
+        {
+            n_box.y = (baseline - fs * 0.625 - n_box.baseline).max(0.0);
+            // HFT serif cap은 약 0.70em이다. 분모 cap과 bar 사이의 기존
+            // FRAC_LINE_PAD clearance를 유지하고 HFT axis(0.375em)를 뺀다.
+            let denom_shift = if self.hft {
+                0.70 + FRAC_LINE_PAD - 0.375
+            } else {
+                0.70
+            };
+            let clear_top = if self.hft {
+                let cap_ascent = if matches!(
+                    d_box.kind,
+                    LayoutKind::Text(_) | LayoutKind::Number(_) | LayoutKind::MathSymbol(_)
+                ) {
+                    fs * 0.70
+                } else {
+                    d_box.baseline
+                };
+                frac_line_from_top + fs * FRAC_LINE_PAD - (d_box.baseline - cap_ascent)
+            } else {
+                frac_line_from_top + line_thick / 2.0 + fs * 0.14
+            };
+            d_box.y = (baseline + fs * denom_shift - d_box.baseline).max(clear_top);
+            total_h = total_h.max(d_box.y + d_box.height);
+        }
 
         LayoutBox {
             x: 0.0,
@@ -448,6 +598,7 @@ impl EqLayout {
             kind: LayoutKind::Fraction {
                 numer: Box::new(n_box),
                 denom: Box::new(d_box),
+                bar_inset,
             },
         }
     }
@@ -1200,7 +1351,14 @@ impl EqLayout {
         body: &EqNode,
         fs: f64,
     ) -> LayoutBox {
-        let b = self.layout_node(body, fs);
+        use super::symbols::FontStyleKind;
+        let mut styled = self.clone();
+        styled.italic = match style {
+            FontStyleKind::Italic => true,
+            FontStyleKind::Bold => self.italic,
+            _ => false,
+        };
+        let b = styled.layout_node(body, fs);
         LayoutBox {
             x: 0.0,
             y: 0.0,
@@ -1325,10 +1483,158 @@ mod tests {
     }
 
     #[test]
+    fn roman_and_nested_italic_measure_the_face_they_paint() {
+        use super::super::symbols::FontStyleKind;
+        let text = EqNode::Text("abc".into());
+        let roman = EqNode::FontStyle {
+            style: FontStyleKind::Roman,
+            body: Box::new(text.clone()),
+        };
+        let nested = EqNode::FontStyle {
+            style: FontStyleKind::Roman,
+            body: Box::new(EqNode::FontStyle {
+                style: FontStyleKind::Italic,
+                body: Box::new(text.clone()),
+            }),
+        };
+        let layout = EqLayout::new(20.0);
+        assert_eq!(
+            layout.layout(&roman).width,
+            layout.text_width("abc", 20.0, false, true)
+        );
+        assert_eq!(layout.layout(&nested).width, layout.layout(&text).width);
+    }
+
+    #[test]
+    fn saved_control_width_fits_operator_padding_without_rescaling_glyphs() {
+        fn leaves(node: &LayoutBox, out: &mut Vec<(String, f64, f64)>) {
+            match &node.kind {
+                LayoutKind::Text(s) | LayoutKind::Number(s) => {
+                    out.push((s.clone(), node.width, node.height))
+                }
+                LayoutKind::Row(children) => {
+                    for child in children {
+                        leaves(child, out);
+                    }
+                }
+                LayoutKind::Fraction { numer, denom, .. } => {
+                    leaves(numer, out);
+                    leaves(denom, out);
+                }
+                _ => {}
+            }
+        }
+        for script in ["a+b=c", "{a+b} over c = d over {e+f}"] {
+            let ast = EqParser::new(tokenize(script)).parse();
+            let engine = EqLayout::new(20.0);
+            let natural = engine.layout(&ast);
+            let target = natural.width - 2.0;
+            let fitted = engine.layout_in_control_width(&ast, target);
+            assert!((fitted.width - target).abs() < 0.001);
+            assert_eq!(fitted.height, natural.height);
+            assert_eq!(fitted.baseline, natural.baseline);
+            let (mut before, mut after) = (Vec::new(), Vec::new());
+            leaves(&natural, &mut before);
+            leaves(&fitted, &mut after);
+            assert_eq!(before, after);
+            assert_eq!(engine.layout_in_control_width(&ast, 0.01).width, natural.width,
+                "a source box narrower than its glyphs must never stretch glyphs or erase all spacing");
+        }
+    }
+
+    #[test]
     fn test_fraction_layout() {
         let lb = parse_and_layout("a over b", 20.0);
         assert!(lb.width > 0.0);
         assert!(lb.height > 20.0); // 분수는 기본 높이보다 높아야 함
+    }
+
+    #[test]
+    fn modern_hy_fraction_minimum_keeps_narrow_boxes_and_wide_rule_clearance() {
+        for fs in [11.0, 22.0] {
+            let engine = EqLayout::with_font(fs, "HYhwpEQ");
+            let narrow = engine.layout(&EqParser::new(tokenize("1 over i")).parse());
+            let LayoutKind::Fraction {
+                numer,
+                denom,
+                bar_inset,
+            } = &narrow.kind
+            else {
+                panic!("fraction")
+            };
+            assert!((narrow.width - fs).abs() < 1e-8);
+            assert!(narrow.width - bar_inset * 2.0 >= fs * 0.8 - 1e-8);
+            assert!((numer.x + numer.width / 2.0 - fs / 2.0).abs() < 1e-8);
+            assert!((denom.x + denom.width / 2.0 - fs / 2.0).abs() < 1e-8);
+
+            let wide = engine.layout(&EqParser::new(tokenize("12345 over 6")).parse());
+            let LayoutKind::Fraction {
+                numer, bar_inset, ..
+            } = &wide.kind
+            else {
+                panic!("fraction")
+            };
+            assert!(wide.width > fs);
+            assert!((numer.x - bar_inset - fs * 0.15).abs() < 1e-8);
+
+            let legacy = engine
+                .with_version("")
+                .layout(&EqParser::new(tokenize("1 over i")).parse());
+            let LayoutKind::Fraction { bar_inset, .. } = legacy.kind else {
+                panic!("fraction")
+            };
+            assert!((bar_inset - fs * 0.05).abs() < 1e-8);
+        }
+    }
+
+    #[test]
+    fn legacy_fraction_preserves_native_baseline_clearance_at_different_sizes() {
+        for fs in [12.0, 24.0] {
+            let ast = EqParser::new(tokenize("1 over p")).parse();
+            let lb = EqLayout::with_font(fs, "HYhwpEQ").layout(&ast);
+            let LayoutKind::Fraction { numer, denom, .. } = &lb.kind else {
+                panic!("fraction")
+            };
+            let separation = (denom.y + denom.baseline - numer.y - numer.baseline) / fs;
+            assert!((1.28..1.34).contains(&separation));
+            assert!(numer.y >= 0.0 && denom.y + denom.height <= lb.height);
+            let nested = EqParser::new(tokenize("1 over {a over b}")).parse();
+            let lb = EqLayout::with_font(fs, "HYhwpEQ").layout(&nested);
+            let LayoutKind::Fraction { numer, denom, .. } = &lb.kind else {
+                panic!("fraction")
+            };
+            assert!(numer.y + numer.height < denom.y);
+            assert!(denom.y + denom.height <= lb.height);
+        }
+    }
+
+    #[test]
+    fn hft_fraction_uses_its_axis_and_keeps_nested_denominators_clear() {
+        for fs in [12.0, 24.0] {
+            let ast = EqParser::new(tokenize("x over L")).parse();
+            let legacy = EqLayout::with_font(fs, "HYhwpEQ")
+                .with_version("")
+                .layout(&ast);
+            let modern = EqLayout::with_font(fs, "HYhwpEQ")
+                .with_version("Equation Version 60")
+                .layout(&ast);
+            let LayoutKind::Fraction { numer, denom, .. } = &legacy.kind else {
+                panic!("fraction")
+            };
+            assert!((legacy.baseline - fraction_line_y(numer, fs) - fs * 0.375).abs() < 1e-8);
+            let separation = denom.y + denom.baseline - numer.y - numer.baseline;
+            assert!((1.14 * fs..1.17 * fs).contains(&separation));
+            assert!(legacy.baseline > modern.baseline);
+            let nested = EqParser::new(tokenize("x over {a over b}")).parse();
+            let nested = EqLayout::with_font(fs, "HYhwpEQ")
+                .with_version("")
+                .layout(&nested);
+            let LayoutKind::Fraction { numer, denom, .. } = &nested.kind else {
+                panic!("fraction")
+            };
+            assert!(denom.y > fraction_line_y(numer, fs));
+            assert!(denom.y + denom.height <= nested.height);
+        }
     }
 
     /// Task #1233: 큰 연산자(Σ)는 box width 에 trailing 간격(fs×BIG_OP_TRAIL_PAD)을 포함해야
@@ -1551,5 +1857,32 @@ mod tests {
             narrow.width,
             wide.width,
         );
+    }
+}
+
+/// 부호로 쓰인 +/- 의 좌우 여백 (em)
+const SIGN_PAD_EM: f64 = 0.03;
+
+/// 행 첫머리나 다른 연산자 뒤의 +/- 는 부호이므로 붙여 쓴다.
+fn is_sign(children: &[EqNode], i: usize) -> bool {
+    if !matches!(&children[i], EqNode::Symbol(s) if s == "+" || s == "-") {
+        return false;
+    }
+    match i.checked_sub(1).map(|p| &children[p]) {
+        None | Some(EqNode::Symbol(_)) => true,
+        Some(EqNode::MathSymbol(p)) => operator_pad_em(p).is_some(),
+        _ => false,
+    }
+}
+
+/// 연산자 좌우 여백 (em). TeX 의 관계(5mu)·이항(4mu) 간격을 따른다.
+pub(crate) fn operator_pad_em(text: &str) -> Option<f64> {
+    match text {
+        "=" | "<" | ">" | "<=" | ">=" | "!=" | "==" | "->" | "<<" | ">>" | "<<<" | ">>>" | "≤"
+        | "≥" | "≠" | "≈" | "≡" | "∼" | "≃" | "≅" | "∝" | "≪" | "≫" | "→" | "←" | "↔" | "⇒"
+        | "⇐" | "⇔" | "∈" | "∉" | "∋" | "⊂" | "⊃" | "⊆" | "⊇" => Some(0.28),
+        "+" | "-" | "−" | "×" | "÷" | "±" | "∓" | "·" | "∙" | "∘" | "⊕" | "⊖" | "⊗" | "∪" | "∩"
+        | "∧" | "∨" => Some(0.22),
+        _ => None,
     }
 }

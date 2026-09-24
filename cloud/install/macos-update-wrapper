@@ -12,7 +12,7 @@ NODE=$(command -v node)
 CHANNEL=${RAUHWpx_CHANNEL:-stable}
 CURRENT_VERSION=$(${NODE} -p "require('${INSTALL_ROOT}/current/package.json').version")
 RELEASES_JSON=$(curl --fail --location --silent --show-error \
-  'https://api.github.com/repos/ghandhitechnology/Rauhwpx/releases?per_page=30')
+  'https://api.github.com/repos/heemangstudio/Rauhwpx/releases?per_page=30')
 UPDATE=$(${NODE} -e '
   const releases=JSON.parse(process.argv[1]);
   const current=process.argv[2], channel=process.argv[3], name="rauhwpx-cloud-linux-arm64.tar.gz";

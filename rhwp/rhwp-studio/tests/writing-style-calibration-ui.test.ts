@@ -30,7 +30,7 @@ test('calibration uses the live provider catalog with the shared model registry 
   assert.match(calibration, /calibrationCatalog\?\.providers\.find/);
   assert.match(calibration, /modelsForAgent\(agent\)\.map/);
   assert.match(calibration, /button\.disabled = !health\.available/);
-  assert.match(calibration, /설정의 Pi 연결/);
+  assert.match(calibration, /설정 > Pi에서/);
   assert.match(calibration, /if \(!selectionTouched && event\.catalog\.defaultSelection\)/);
   assert.match(calibration, /entry\.id === selection\.agent && entry\.available/);
   assert.match(calibration, /provider\?\.models\.some\(\(model\) => model\.id === selection\.model\)/);
@@ -69,7 +69,7 @@ test('long analysis has server-authored activity without a browser deadline', ()
 });
 
 test('wizard intro and progress copy use the signed first-run voice', () => {
-  assert.match(calibration, /const introTitle = el\('h2', 'ag-calibration-title', '말투를 맞출까요\?'\)/);
+  assert.match(calibration, /const introTitle = el\('h2', 'ag-calibration-title', '말투 맞추기'\)/);
   assert.match(
     calibration,
     /'Noticing temperament and unevenness': '기질과 고르지 않은 결을 짚고 있습니다\.'/,

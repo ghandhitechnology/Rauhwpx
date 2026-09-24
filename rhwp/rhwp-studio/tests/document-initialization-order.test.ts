@@ -21,7 +21,7 @@ function initializeDocumentSource(): string {
 test('문서 초기화는 로컬 글꼴 확인 후에만 입력 핸들러를 활성화한다', () => {
   const initializeDocument = initializeDocumentSource();
   const hideEmptyStateIndex = initializeDocument.indexOf("emptyState.setAttribute('aria-hidden', 'true');");
-  const promptIndex = initializeDocument.indexOf('await promptLocalFontsIfNeeded(docInfo, displayName);');
+  const promptIndex = initializeDocument.indexOf('await promptLocalFontsIfNeeded(docInfo);');
   const activateIndex = initializeDocument.indexOf('inputHandler?.activateWithCaretPosition();');
   const contextIndex = initializeDocument.indexOf("eventBus.emit('document-context-changed');");
   const completeIndex = initializeDocument.indexOf("documentState.markClean('document-initialized');");

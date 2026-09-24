@@ -472,7 +472,7 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(planning, /live-document notification/);
   assert.match(planning, /not a request to implement or draft a plan/);
   assert.match(planning, /native question interaction or ask_user_question/);
-  assert.match(planning, /only when the user explicitly asks you to write, draft, or present a plan/);
+  assert.match(planning, /when the user explicitly asks you to write, draft, or present a plan/);
   assert.match(planning, /Do not tell the user the plan is ready until that tool returns success/);
   assert.match(planning, /read-only workspace, web, subagent, and rhwp MCP capabilities available/);
   assert.doesNotMatch(planning, /sandboxed Bash/);
@@ -592,12 +592,11 @@ test('all workflow system prompts default document design to black and white', (
   }
 });
 
-test('plan revision prompt reopens discovery instead of forcing replacement', () => {
+test('plan revision prompt applies concrete feedback without another drafting request', () => {
   const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
-  assert.match(server, /Return to discovery: inspect the affected current state/);
-  assert.match(server, /ambiguous or changes an assumption/);
-  assert.match(server, /ask one focused question in normal chat instead of immediately presenting a replacement/);
-  assert.doesNotMatch(server, /Revise the plan in response and present the complete replacement/);
+  assert.match(server, /Re-read the affected document state and revise the plan directly/);
+  assert.match(server, /Ask a focused question only if a missing answer blocks/);
+  assert.match(server, /does not need to ask you to draft it again/);
 });
 
 test('resume argv retains the selected capability profile', () => {

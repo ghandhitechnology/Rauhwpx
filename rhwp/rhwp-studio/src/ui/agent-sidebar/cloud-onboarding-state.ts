@@ -180,29 +180,29 @@ export function validateCloudProfileDraft(
   const errors: CloudFieldErrors = {};
   const host = draft.host.trim();
   if (!host) errors.host = draft.transport.kind === 'tailscale'
-    ? 'VPS의 Tailscale IP 또는 기기 이름을 입력하세요.'
-    : '원격 Mac 또는 VPS의 SSH 주소를 입력하세요.';
-  else if (!validHost(host)) errors.host = '프로토콜이나 경로 없이 올바른 VPS 주소를 입력하세요.';
-  else if (draft.transport.kind === 'tailscale' && !isTailscaleHost(host)) errors.host = 'Tailscale IP 또는 MagicDNS 기기 이름을 입력하세요.';
-  if (!draft.sshUser.trim()) errors.sshUser = 'SSH 사용자 이름을 입력하세요.';
-  else if (!/^[A-Za-z_][A-Za-z0-9_-]{0,31}$/.test(draft.sshUser.trim())) errors.sshUser = '올바른 SSH 사용자 이름을 입력하세요.';
-  if (!draft.name.trim()) errors.name = '이 VPS를 구분할 이름을 입력하세요.';
-  else if (draft.name.trim().length > 80) errors.name = '환경 이름은 80자 이하로 입력하세요.';
-  if (!Number.isSafeInteger(draft.sshPort) || draft.sshPort < 1 || draft.sshPort > 65535) errors.sshPort = '1부터 65535 사이의 포트를 입력하세요.';
+    ? 'VPS의 Tailscale IP 또는 기기 이름 필요'
+    : '원격 Mac 또는 VPS의 SSH 주소 필요';
+  else if (!validHost(host)) errors.host = '프로토콜·경로 없는 VPS 주소 필요';
+  else if (draft.transport.kind === 'tailscale' && !isTailscaleHost(host)) errors.host = 'Tailscale IP 또는 MagicDNS 이름 필요';
+  if (!draft.sshUser.trim()) errors.sshUser = 'SSH 사용자 이름 필요';
+  else if (!/^[A-Za-z_][A-Za-z0-9_-]{0,31}$/.test(draft.sshUser.trim())) errors.sshUser = 'SSH 사용자 이름 형식 오류';
+  if (!draft.name.trim()) errors.name = '환경 이름 필요';
+  else if (draft.name.trim().length > 80) errors.name = '환경 이름은 80자 이하';
+  if (!Number.isSafeInteger(draft.sshPort) || draft.sshPort < 1 || draft.sshPort > 65535) errors.sshPort = '포트는 1–65535';
   const httpsPort = draft.tailscaleHttpsPort ?? 443;
-  if (!Number.isSafeInteger(httpsPort) || httpsPort < 1 || httpsPort > 65535) errors.tailscaleHttpsPort = '1부터 65535 사이의 포트를 입력하세요.';
-  if (draft.auth.kind === 'key-file' && !draft.auth.keyPath.trim()) errors.keyPath = '개인 키 파일 경로를 입력하세요.';
+  if (!Number.isSafeInteger(httpsPort) || httpsPort < 1 || httpsPort > 65535) errors.tailscaleHttpsPort = '포트는 1–65535';
+  if (draft.auth.kind === 'key-file' && !draft.auth.keyPath.trim()) errors.keyPath = '개인 키 파일 경로 필요';
   else if (draft.auth.kind === 'key-file' && (draft.auth.keyPath.includes('\0') || draft.auth.keyPath.trim().length > 4096)) {
-    errors.keyPath = '올바른 개인 키 파일 경로를 입력하세요.';
+    errors.keyPath = '개인 키 파일 경로 형식 오류';
   }
   if (draft.transport.kind === 'https' && !validHttpsEndpoint(draft.transport.endpoint.trim())) {
-    errors.endpoint = '자격 증명, 쿼리, 조각이 없는 HTTPS 주소를 입력하세요.';
+    errors.endpoint = '자격 증명·쿼리·조각 없는 HTTPS 주소 필요';
   }
   if (options.existing) {
-    if (!draft.serverPublicKey?.trim()) errors.serverPublicKey = '서버에서 표시한 ID 키를 입력하세요.';
-    else if (!/^ed25519:[A-Za-z0-9_-]{59}$/.test(draft.serverPublicKey.trim())) errors.serverPublicKey = 'ed25519:로 시작하는 서버 ID 키를 확인하세요.';
+    if (!draft.serverPublicKey?.trim()) errors.serverPublicKey = '서버 ID 키 필요';
+    else if (!/^ed25519:[A-Za-z0-9_-]{59}$/.test(draft.serverPublicKey.trim())) errors.serverPublicKey = '서버 ID 키는 ed25519:로 시작합니다.';
     const code = options.pairingCode?.trim().toUpperCase() ?? '';
-    if (!/^[A-Z2-9]{4}(?:-[A-Z2-9]{4}){2}$/.test(code)) errors.pairingCode = 'XXXX-XXXX-XXXX 형식의 페어링 코드를 입력하세요.';
+    if (!/^[A-Z2-9]{4}(?:-[A-Z2-9]{4}){2}$/.test(code)) errors.pairingCode = '페어링 코드 형식: XXXX-XXXX-XXXX';
   }
   return errors;
 }
@@ -213,76 +213,76 @@ export function mapSandboxIssue(error: unknown): CloudSetupIssue {
   if (/not configured|railway_token|railway_project_id|railway_environment_id/.test(normalized)) {
     return {
       title: 'Raucloud가 아직 준비되지 않았습니다',
-      guidance: '이 빌드에는 앱 서버 설정이 없습니다. 내 서버를 사용하거나 앱을 업데이트하세요.',
+      guidance: '내 서버를 쓰거나 앱을 업데이트합니다.',
       detail,
     };
   }
   if (/cannot manage the/.test(normalized)) {
     return {
       title: '이 앱이 관리할 수 없는 샌드박스입니다',
-      guidance: '서버 종료로 연결을 놓은 뒤, 공급자 콘솔에서 남은 서버를 직접 삭제하세요.',
+      guidance: '연결을 놓은 뒤 공급자 콘솔에서 서버를 직접 삭제합니다.',
       detail,
     };
   }
   if (/does not include app-provided|provider_unavailable|unknown app server provider/.test(normalized)) {
     return {
       title: '이 빌드에는 Raucloud가 없습니다',
-      guidance: '내 서버를 연결해 사용하세요.',
+      guidance: '내 서버 사용',
       detail,
     };
   }
   if (/rejected the configured api token|unauthorized/.test(normalized)) {
     return {
       title: '앱 서버 자격 증명이 거부되었습니다',
-      guidance: 'Raucloud를 사용할 수 없습니다. 잠시 후 다시 시도하거나 내 서버를 사용하세요.',
+      guidance: '잠시 후 다시 시도 · 또는 내 서버 사용',
       detail,
     };
   }
   if (/unreachable|timed out|timeout|fetch failed|failed to fetch/.test(normalized)) {
     return {
       title: '앱 서버에 연결할 수 없습니다',
-      guidance: '네트워크 연결을 확인한 뒤 다시 시도하세요.',
+      guidance: '네트워크 확인 후 다시 시도',
       detail,
     };
   }
   if (/deployment|deploy|reports crashed|reports failed/.test(normalized)) {
     return {
       title: '샌드박스를 시작하지 못했습니다',
-      guidance: '잠시 후 다시 시도하세요. 계속 실패하면 내 서버를 사용하세요.',
+      guidance: '잠시 후 다시 시도 · 또는 내 서버 사용',
       detail,
     };
   }
   if (/health|did not answer/.test(normalized)) {
     return {
       title: '샌드박스가 응답하지 않습니다',
-      guidance: '샌드박스를 다시 만들어 보세요.',
+      guidance: '샌드박스 다시 만들기',
       detail,
     };
   }
   if (/before shutting it down|has_work/.test(normalized)) {
     return {
       title: '진행 중인 클라우드 작업이 있습니다',
-      guidance: '작업을 마치거나 취소한 뒤 샌드박스를 종료하세요.',
+      guidance: '작업을 마치거나 취소한 뒤 종료합니다.',
       detail,
     };
   }
   if (/shut down the app-provided sandbox|sandbox_still_active/.test(normalized)) {
     return {
-      title: '앱 샌드박스를 먼저 종료하세요',
-      guidance: 'Raucloud를 종료한 뒤 내 서버를 연결하세요.',
+      title: '앱 샌드박스 종료 필요',
+      guidance: 'Raucloud 종료 후 내 서버 연결',
       detail,
     };
   }
   if (/identity|signature|pinned/.test(normalized)) {
     return {
       title: '샌드박스 ID를 확인하지 못했습니다',
-      guidance: '샌드박스를 종료하고 다시 만드세요.',
+      guidance: '샌드박스 종료 후 다시 만들기',
       detail,
     };
   }
   return {
     title: 'Raucloud를 준비하지 못했습니다',
-    guidance: '다시 시도하거나 내 서버를 사용하세요.',
+    guidance: '다시 시도 · 또는 내 서버 사용',
     detail,
   };
 }
@@ -294,14 +294,14 @@ export function mapCloudSetupIssue(error: unknown, transport: CloudProfileDraft[
   if (/spawn .*enoent|enoent.*spawn|ssh .*not (?:found|installed)/.test(normalized)) {
     return {
       title: '이 기기에 OpenSSH 클라이언트가 없습니다',
-      guidance: 'Windows 설정의 선택 기능에서 OpenSSH 클라이언트를 설치하거나 macOS·Linux에서 ssh를 사용할 수 있는지 확인한 뒤 다시 시도하세요.',
+      guidance: 'OpenSSH 클라이언트 설치 후 다시 시도 (Windows: 설정 > 선택 기능)',
       detail,
     };
   }
   if (/permission denied|authentication failed|publickey/.test(normalized)) {
     return {
       title: 'SSH 인증에 실패했습니다',
-      guidance: 'SSH agent에 키를 추가하거나 올바른 개인 키 파일을 선택하세요. Windows에서는 OpenSSH 인증 에이전트 서비스를 실행한 뒤 ssh-add로 키를 등록하세요.',
+      guidance: 'SSH agent에 키를 추가하거나 개인 키 파일 선택 (Windows: ssh-add)',
       detail,
     };
   }
@@ -309,46 +309,46 @@ export function mapCloudSetupIssue(error: unknown, transport: CloudProfileDraft[
     return {
       title: '원격 호스트에 연결할 수 없습니다',
       guidance: transport === 'tailscale'
-        ? '두 기기의 Tailscale 연결과 VPS 주소, SSH 포트를 확인하세요.'
+        ? 'Tailscale 연결, VPS 주소, SSH 포트 확인'
         : transport === 'ssh-tunnel'
-          ? '원격 호스트의 SSH 주소와 포트, 키 인증, 방화벽을 확인하세요.'
-          : 'VPS 주소, SSH 포트, 방화벽과 HTTPS 주소를 확인하세요.',
+          ? 'SSH 주소·포트, 키 인증, 방화벽 확인'
+          : 'VPS 주소, SSH 포트, 방화벽, HTTPS 주소 확인',
       detail,
     };
   }
   if (/passwordless sudo|sudo.*password|requires a password/.test(normalized)) {
-    return { title: '비밀번호 없는 sudo가 필요합니다', guidance: 'SSH 사용자에게 비밀번호 없이 sudo를 실행할 권한을 설정한 뒤 다시 시도하세요.', detail };
+    return { title: '비밀번호 없는 sudo가 필요합니다', guidance: 'SSH 사용자에게 비밀번호 없는 sudo 권한 설정', detail };
   }
   if (/macos 14|apple silicon|ubuntu|debian|unsupported.*distribution|operating system/.test(normalized)) {
-    return { title: '지원하는 원격 운영체제가 필요합니다', guidance: 'Apple silicon의 macOS 14 이상 또는 Ubuntu/Debian을 사용하세요.', detail };
+    return { title: '지원하는 원격 운영체제가 필요합니다', guidance: 'Apple silicon macOS 14 이상 또는 Ubuntu/Debian', detail };
   }
   if (/no compatible (?:stable |prerelease )?cloud asset|cloud release asset|curl.*(?:requested url.*404|error:\s*404)/.test(normalized)) {
     return {
       title: 'Cloud 설치 파일을 찾을 수 없습니다',
-      guidance: '현재 앱 버전과 맞는 Cloud 설치 파일이 아직 배포되지 않았습니다. 앱을 업데이트하거나 잠시 후 다시 시도하세요.',
+      guidance: '이 버전용 설치 파일이 아직 없습니다 · 앱 업데이트',
       detail,
     };
   }
   if (transport === 'tailscale' && /enotfound|name_not_resolved|could not resolve|dns|fetch failed|failed to fetch/.test(normalized)) {
     return {
-      title: 'Tailscale DNS를 켜 주세요',
-      guidance: '이 기기의 Tailscale 설정에서 DNS 사용(Accept DNS)을 켠 뒤 다시 연결하세요.',
+      title: 'Tailscale DNS 꺼짐',
+      guidance: 'Tailscale 설정에서 Accept DNS를 켠 뒤 다시 연결',
       detail,
     };
   }
   if (/tailscale/.test(normalized)) {
-    return { title: 'VPS의 Tailscale을 확인하세요', guidance: 'VPS에 Tailscale을 설치하고 이 기기와 같은 네트워크에 연결하세요.', detail };
+    return { title: 'VPS Tailscale 확인 필요', guidance: 'VPS에 Tailscale을 설치하고 같은 네트워크에 연결', detail };
   }
   if (/architecture|amd64|arm64|x86_64|aarch64/.test(normalized)) {
-    return { title: '지원하지 않는 서버 구조입니다', guidance: 'Mac은 Apple silicon, Linux는 amd64 또는 arm64를 사용하세요.', detail };
+    return { title: '지원하지 않는 서버 구조입니다', guidance: 'Mac은 Apple silicon, Linux는 amd64·arm64', detail };
   }
   if (/identity|server.*key|signature|pinned/.test(normalized)) {
-    return { title: '서버 ID를 확인하지 못했습니다', guidance: '서버 ID 키가 바뀌지 않았는지 확인하세요. 예상하지 못한 변경이면 연결을 중단하세요.', detail };
+    return { title: '서버 ID를 확인하지 못했습니다', guidance: '서버 ID 키가 바뀌었을 수 있습니다 · 예상 못 한 변경이면 중단', detail };
   }
   if (/pairing|code.*expired|invalid code/.test(normalized)) {
-    return { title: '페어링 코드를 사용할 수 없습니다', guidance: 'VPS에서 새 페어링 코드를 만든 뒤 다시 입력하세요.', detail };
+    return { title: '페어링 코드를 사용할 수 없습니다', guidance: 'VPS에서 새 코드를 만들어 다시 입력', detail };
   }
-  return { title: 'Cloud 설정을 마치지 못했습니다', guidance: '연결 정보를 확인하고 다시 시도하세요.', detail };
+  return { title: 'Cloud 설정을 마치지 못했습니다', guidance: '연결 정보 확인 후 다시 시도', detail };
 }
 
 export function snapshotProfile(snapshot: CloudSnapshot): CloudProfileDraft | undefined {

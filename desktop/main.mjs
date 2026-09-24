@@ -100,8 +100,8 @@ import {
 
 const { autoUpdater } = electronUpdater;
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
-const RELEASES_URL = 'https://github.com/ghandhitechnology/Rauhwpx/releases/latest';
-const RELEASES_API_URL = 'https://api.github.com/repos/ghandhitechnology/Rauhwpx/releases/latest';
+const RELEASES_URL = 'https://github.com/heemangstudio/Rauhwpx/releases/latest';
+const RELEASES_API_URL = 'https://api.github.com/repos/heemangstudio/Rauhwpx/releases/latest';
 const PRELOAD_PATH = join(__dirname, 'preload.cjs');
 const devUrl = resolveDevelopmentUrl({
   packaged: app.isPackaged,
@@ -886,6 +886,12 @@ function installMenu() {
       );
     },
   };
+  // The stock window menu binds CmdOrCtrl+M to Minimize, which swallows the
+  // editor's Cmd+M chord (equations, footnotes, text colors).
+  const minimizeWindow = {
+    label: 'Minimize',
+    click: (_menuItem, browserWindow) => browserWindow?.minimize(),
+  };
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(isMac ? [{
       label: 'Rauhwpx',
@@ -926,7 +932,13 @@ function installMenu() {
       ],
     },
     { role: 'viewMenu' },
-    { role: 'windowMenu' },
+    {
+      label: 'Window',
+      role: 'window',
+      submenu: isMac
+        ? [minimizeWindow, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
+        : [minimizeWindow, { role: 'close' }],
+    },
     ...(isMac ? [] : [{ role: 'help', submenu: [{ role: 'about' }] }]),
   ]));
 }

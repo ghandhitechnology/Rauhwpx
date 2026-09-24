@@ -52,7 +52,7 @@ fn shaped_char_positions(text: &str, style: &TextStyle) -> Option<Vec<f64>> {
         || text.contains('\t')
         || text
             .chars()
-            .any(|ch| matches!(ch, '\u{FFFC}' | '\u{F081C}'))
+            .any(|ch| matches!(ch, '\u{FFFC}' | '\u{F081C}' | '\u{00AD}'))
     {
         return None;
     }
@@ -457,7 +457,7 @@ fn compute_char_positions_walk(
                 + style.extra_char_spacing;
         }
         // 인라인 객체 placeholder 는 실제 control node 가 따로 그리므로 텍스트 폭은 0.
-        if c == '\u{FFFC}' {
+        if matches!(c, '\u{FFFC}' | '\u{00AD}') {
             return 0.0;
         }
         // [Issue #677] HWP PUA 채움 문자 (U+F081C) — 시각 폭 0 (한컴 PDF 정합).
@@ -603,7 +603,7 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                     + style.extra_char_spacing;
             }
             // 인라인 객체 placeholder 는 실제 control node 가 따로 그리므로 텍스트 폭은 0.
-            if c == '\u{FFFC}' {
+            if matches!(c, '\u{FFFC}' | '\u{00AD}') {
                 return 0.0;
             }
             // [Issue #677] HWP PUA 채움 문자 (U+F081C) — 시각 폭 0
@@ -1207,7 +1207,7 @@ impl TextMeasurer for WasmTextMeasurer {
                     + style.extra_char_spacing;
             }
             // 인라인 객체 placeholder 는 실제 control node 가 따로 그리므로 텍스트 폭은 0.
-            if c == '\u{FFFC}' {
+            if matches!(c, '\u{FFFC}' | '\u{00AD}') {
                 return 0.0;
             }
             // [Issue #677] HWP PUA 채움 문자 (U+F081C) — 시각 폭 0
@@ -1592,6 +1592,56 @@ pub(crate) fn resolved_to_text_style(
     }
 }
 
+/// Use Hancom's sans fallback only when the selected face cannot draw any
+/// visible glyph in this run and the fallback covers all of them. Keeping the
+/// decision at run granularity lets layout and painting use the same face.
+pub(crate) fn apply_covered_hancom_fallback(style: &mut TextStyle, text: &str) {
+    if style.font_metrics_policy != FontMetricsPolicy::HancomWindows {
+        return;
+    }
+    let requested_name = style.font_family.split(',').next().unwrap_or("").trim();
+    const FALLBACK: &str = "함초롬돋움";
+    if requested_name.is_empty() || requested_name == FALLBACK {
+        return;
+    }
+    if !crate::renderer::generic_fallback(requested_name).ends_with("sans-serif") {
+        return;
+    }
+    let (Some(requested), Some(fallback)) = (
+        font_metrics_data::find_metric(requested_name, style.bold, style.italic),
+        font_metrics_data::find_metric(FALLBACK, style.bold, style.italic),
+    ) else {
+        return;
+    };
+    let mut visible = false;
+    for ch in text
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !ch.is_control())
+    {
+        visible = true;
+        if !metric_has_source_range(requested.metric, ch)
+            || requested.metric.get_width(ch).is_some()
+            || fallback.metric.get_width(ch).is_none()
+        {
+            return;
+        }
+    }
+    if visible {
+        style.font_family = FALLBACK.to_string();
+    }
+}
+
+fn metric_has_source_range(metric: &font_metrics_data::FontMetric, ch: char) -> bool {
+    let code = ch as u32;
+    if (0xAC00..=0xD7A3).contains(&code) {
+        return metric.hangul.is_some();
+    }
+    metric
+        .latin_ranges
+        .iter()
+        .any(|range| (range.start..=range.end).contains(&code))
+}
+
 // ── 내장 폰트 메트릭 측정 ───────────────────────────────────────────
 
 /// 폰트가 고정폭(monospace)인지 판정한다.
@@ -1788,6 +1838,9 @@ fn measure_char_width_with_policy(
     font_size: f64,
     policy: FontMetricsPolicy,
 ) -> Option<f64> {
+    if c == '\u{00AD}' {
+        return Some(0.0);
+    }
     // CSS font-family 체인에서 첫 번째 폰트명으로 메트릭 조회
     let primary_name = font_family.split(',').next().unwrap_or(font_family).trim();
     // [#2156] 함초롬바탕 비한글 문자 — Haansoft Batang 메트릭 대체 (한글 동작).
@@ -1799,9 +1852,24 @@ fn measure_char_width_with_policy(
     if let Some(w) = kopub_char_width(primary_name, c, font_size) {
         return Some(w);
     }
-    let mm = match font_metrics_data::find_metric(primary_name, bold, italic) {
-        Some(metric) if c == ' ' || metric.metric.get_width(c).is_some() => metric,
-        _ => {
+    let requested = font_metrics_data::find_metric(primary_name, bold, italic);
+    let requested_covers = requested
+        .as_ref()
+        .is_some_and(|metric| c == ' ' || metric.metric.get_width(c).is_some());
+    let mm = if requested_covers {
+        requested.expect("checked above")
+    } else if policy == FontMetricsPolicy::HancomWindows
+        && requested
+            .as_ref()
+            .is_some_and(|metric| metric_has_source_range(metric.metric, c))
+        && primary_name != "함초롬돋움"
+        && crate::renderer::generic_fallback(primary_name).ends_with("sans-serif")
+    {
+        if let Some(fallback) = font_metrics_data::find_metric("함초롬돋움", bold, italic)
+            .filter(|metric| metric.metric.get_width(c).is_some())
+        {
+            fallback
+        } else {
             let (_, fallback_chain) = font_family.split_once(',')?;
             return measure_char_width_with_policy(
                 fallback_chain,
@@ -1812,6 +1880,9 @@ fn measure_char_width_with_policy(
                 policy,
             );
         }
+    } else {
+        let (_, fallback_chain) = font_family.split_once(',')?;
+        return measure_char_width_with_policy(fallback_chain, bold, italic, c, font_size, policy);
     };
     // HWP 반각 처리: space 및 한컴이 반각으로 처리하는 구두점/기호
     let w = if c == ' ' {
@@ -1832,7 +1903,10 @@ fn measure_char_width_with_policy(
         // 강제 시 한컴 대비 약 4px (font-size 20px 기준, 0.5→0.3 em 차) 과대.
         // glyph_w 가 비정상 fullwidth (>= em_size) 일 때만 0.3 em 강제 — 함초롬
         // 바탕 (0.32) / Pretendard (0.22) 등 정상 DB 값은 조건 미충족으로 영향 없음.
-        let is_narrow_unicode_punct = matches!(c, '\u{2018}' | '\u{2019}' | '\u{2027}');
+        let quote_width_is_authentic =
+            matches!(c, '\u{2018}' | '\u{2019}') && is_monospace_metric(mm.metric);
+        let is_narrow_unicode_punct =
+            matches!(c, '\u{2018}' | '\u{2019}' | '\u{2027}') && !quote_width_is_authentic;
         // [U+00B7 .notdef 위장값 정정] 비례폰트(휴먼명조 등)가 `·` (가운뎃점)
         // 글리프를 갖지 않으면 cmap 이 .notdef(glyph 0) 로 매핑돼 advance 가
         // em_size(전각) 로 기록된다. 한컴은 이 경우 점 글리프를 가진 대체
@@ -1845,7 +1919,9 @@ fn measure_char_width_with_policy(
             c == '\u{00B7}' && glyph_w >= mm.metric.em_size && !is_monospace_metric(mm.metric);
         if (is_narrow_unicode_punct && glyph_w >= mm.metric.em_size) || is_b7_notdef_artifact {
             (mm.metric.em_size as f64 * 0.3) as u16
-        } else if (is_halfwidth_punct || is_halfwidth_cjk_quote(c)) && glyph_w >= mm.metric.em_size
+        } else if (is_halfwidth_punct || is_halfwidth_cjk_quote(c))
+            && !quote_width_is_authentic
+            && glyph_w >= mm.metric.em_size
         {
             mm.metric.em_size / 2
         } else {
@@ -1880,6 +1956,76 @@ fn measure_char_width_with_policy(
     // 한컴과 동일한 HWPUNIT 정수 변환: w * base_size / em (내림)
     // round가 아닌 truncate (as i32)로 처리하여 한컴 정수 나눗셈과 일치
     Some(quantize_hwp_px(actual_px))
+}
+
+#[cfg(test)]
+#[test]
+fn covering_hancom_fallback_changes_only_fully_missing_sans_runs() {
+    let mut style = TextStyle {
+        font_metrics_policy: FontMetricsPolicy::HancomWindows,
+        font_family: "문체부 돋음체".to_string(),
+        font_size: 20.0,
+        bold: true,
+        ..Default::default()
+    };
+    apply_covered_hancom_fallback(&mut style, "Performance Assessment");
+    assert_eq!(style.font_family, "함초롬돋움");
+    assert!(
+        font_metrics_data::find_metric(&style.font_family, true, false)
+            .is_some_and(|metric| !metric.bold_fallback)
+    );
+    assert_eq!(
+        measure_char_width_with_policy(
+            "문체부 돋음체",
+            true,
+            false,
+            'P',
+            20.0,
+            FontMetricsPolicy::HancomWindows,
+        ),
+        measure_char_width_with_policy(
+            "함초롬돋움",
+            true,
+            false,
+            'P',
+            20.0,
+            FontMetricsPolicy::HancomWindows,
+        ),
+    );
+
+    style.font_family = "문체부 돋음체".to_string();
+    apply_covered_hancom_fallback(&mut style, "한글");
+    assert_eq!(style.font_family, "문체부 돋음체");
+    apply_covered_hancom_fallback(&mut style, "한글 Performance");
+    assert_eq!(style.font_family, "문체부 돋음체");
+
+    style.font_family = "맑은 고딕".to_string();
+    style.bold = false;
+    apply_covered_hancom_fallback(&mut style, " ◦ ");
+    assert_eq!(style.font_family, "함초롬돋움");
+    assert_eq!(
+        measure_char_width_with_policy(
+            "맑은 고딕",
+            false,
+            false,
+            '◦',
+            13.333,
+            FontMetricsPolicy::HancomWindows,
+        ),
+        measure_char_width_with_policy(
+            "함초롬돋움",
+            false,
+            false,
+            '◦',
+            13.333,
+            FontMetricsPolicy::HancomWindows,
+        ),
+    );
+    style.font_family = "맑은 고딕".to_string();
+    apply_covered_hancom_fallback(&mut style, "●");
+    assert_eq!(style.font_family, "맑은 고딕");
+    apply_covered_hancom_fallback(&mut style, "😀");
+    assert_eq!(style.font_family, "맑은 고딕");
 }
 
 // ── 호환 래퍼 (기존 호출부 변경 없음) ──────────────────────────────
@@ -1918,7 +2064,7 @@ pub(crate) fn estimate_text_width_unrounded(text: &str, style: &TextStyle) -> f6
                 + style.extra_char_spacing;
         }
         // 인라인 객체 placeholder 는 실제 control node 가 따로 그리므로 텍스트 폭은 0.
-        if c == '\u{FFFC}' {
+        if matches!(c, '\u{FFFC}' | '\u{00AD}') {
             return 0.0;
         }
         // [Issue #677] HWP PUA 채움 문자 (U+F081C) — 시각 폭 0
@@ -2801,6 +2947,25 @@ mod tests {
         assert!(positions[2] > positions[1]);
     }
 
+    #[test]
+    fn discretionary_hyphen_has_no_advance_between_visible_characters() {
+        let style = TextStyle {
+            font_family: "맑은 고딕".to_string(),
+            font_size: 13.3,
+            ..Default::default()
+        };
+        let positions = compute_char_positions("A\u{00AD}- B", &style);
+        assert_eq!(positions[1], positions[2]);
+        assert!(
+            positions[3] > positions[2],
+            "literal hyphen remains visible"
+        );
+        assert_eq!(
+            estimate_text_width("A\u{00AD}B", &style),
+            estimate_text_width("AB", &style)
+        );
+    }
+
     // ── 오버플로우 압축 회귀 테스트 (Task #229) ──
 
     /// 음수 extra_char_spacing (오버플로우 압축)에서 narrow glyph(콤마)가
@@ -3353,6 +3518,49 @@ mod tests {
              (≤ font_size * 0.4 = {:.2}) 로 측정되어야 함, got {:.2}",
             style.font_size * 0.4,
             dot_advance
+        );
+    }
+
+    fn quote_advances_em(font_family: &str, font_size: f64) -> (f64, f64) {
+        let m = EmbeddedTextMeasurer;
+        let style = TextStyle {
+            font_family: font_family.to_string(),
+            font_size,
+            ratio: 1.0,
+            ..Default::default()
+        };
+        let positions = m.compute_char_positions("\u{2018}가\u{2019}", &style);
+        assert_eq!(
+            positions.len(),
+            4,
+            "{font_family} 따옴표 클러스터 경계가 4개여야 함, got {:?}",
+            positions
+        );
+        (
+            (positions[1] - positions[0]) / font_size,
+            (positions[3] - positions[2]) / font_size,
+        )
+    }
+
+    #[test]
+    fn test_7092_monospace_quotes_advance_full_width() {
+        for family in ["굴림체", "돋움체", "바탕체"] {
+            let (left, right) = quote_advances_em(family, 20.0);
+            assert!(
+                left >= 0.9 && right >= 0.9,
+                "{family} 따옴표는 정본대로 전각이어야 한다(수정 전 0.300). \
+                 ‘={left:.4}em ’={right:.4}em"
+            );
+        }
+    }
+
+    #[test]
+    fn test_7092_proportional_quotes_keep_narrow_width() {
+        let (left, right) = quote_advances_em("휴먼명조", 20.0);
+        assert!(
+            left <= 0.4 && right <= 0.4,
+            "휴먼명조 따옴표는 이 변경의 범위 밖이라 종전 0.300 em 이어야 한다. \
+             ‘={left:.4}em ’={right:.4}em"
         );
     }
 

@@ -178,3 +178,68 @@ test('idle interruption refuses a tool request that has not yet emitted its UI t
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(bridge.interruptIfIdle(), true);
 });
+
+test('plan completion follows the actual edit outcome and exact provider turn', () => {
+  function fixture({ pending = false, complete = true, failure = false } = {}) {
+    const bridge = Object.create(AgentBridgeImpl.prototype) as any;
+    const frames: any[] = [];
+    let sets: any[] = [];
+    Object.assign(bridge, {
+      phase: 'implementing', workflow: 'plan', activeProviderTurnId: null,
+      latestPlan: { planId: 'plan-1', execution: { status: 'running', steps: [{ stepId: 'step-1', status: complete ? 'completed' : 'in-progress' }] } },
+      planReview: null, planExecutionTurn: null, pendingTurnOpen: false,
+      activeToolRequestControllers: new Map(), permissionProfile: pending ? 'safe' : 'unrestricted',
+      pendingEdits: { getChangeSets: () => sets }, syncEditingLease: () => {}, emit: () => {},
+      beginPendingTurn: () => { bridge.pendingTurnOpen = true; },
+      endPendingTurn: () => {
+        bridge.pendingTurnOpen = false;
+        if (failure) throw new Error('commit failed');
+        sets = pending ? [{ id: 'edits-1', ops: [{}] }] : [];
+      },
+      sendJson: (frame: unknown) => { frames.push(frame); return true; },
+    });
+    bridge.handleAgentEvent({ type: 'turn-start', agent: 'claude', turnId: 'turn-1' });
+    return { bridge, frames };
+  }
+  const safe = fixture({ pending: true });
+  const initialTracking = safe.bridge.planExecutionTurn;
+  safe.bridge.beginPlanExecutionTurn();
+  assert.equal(safe.bridge.planExecutionTurn, initialTracking, 'reconnect preserves an observed turn baseline');
+  safe.bridge.handleAgentEvent({ type: 'turn-end', agent: 'claude', turnId: 'old-turn', stopReason: 'success' });
+  assert.equal(safe.frames.length, 0);
+  safe.bridge.handleAgentEvent({ type: 'turn-end', agent: 'claude', turnId: 'turn-1', stopReason: 'success' });
+  assert.equal(safe.frames.at(-1).status, 'awaiting-review');
+  safe.bridge.handlePlanEditChange({ type: 'approved', changeSetId: 'unrelated' });
+  assert.equal(safe.frames.length, 1);
+  safe.bridge.handlePlanEditChange({ type: 'approved', changeSetId: 'edits-1' });
+  assert.equal(safe.frames.at(-1).status, 'completed');
+
+  const rejected = fixture({ pending: true });
+  rejected.bridge.handleAgentEvent({ type: 'turn-end', agent: 'claude', turnId: 'turn-1', stopReason: 'end_turn' });
+  rejected.bridge.handlePlanEditChange({ type: 'invalidated', changeSetId: 'edits-1', reason: 'text drift' });
+  rejected.bridge.handlePlanEditChange({ type: 'approved', changeSetId: 'edits-1' });
+  assert.equal(rejected.frames.at(-1).status, 'blocked');
+
+  const partial = fixture({ pending: true, complete: false });
+  partial.bridge.handleAgentEvent({ type: 'turn-end', agent: 'claude', turnId: 'turn-1', stopReason: 'success' });
+  partial.bridge.handlePlanEditChange({ type: 'approved', changeSetId: 'edits-1' });
+  assert.equal(partial.frames.at(-1).status, 'blocked', 'accepting partial edits cannot complete the plan');
+
+  const reconnect = fixture({ pending: true });
+  reconnect.bridge.planExecutionTurn = null;
+  reconnect.bridge.beginPlanExecutionTurn();
+  reconnect.bridge.handleAgentEvent({ type: 'turn-end', agent: 'claude', turnId: 'turn-1', stopReason: 'success' });
+  assert.equal(reconnect.frames.at(-1).status, 'awaiting-review', 'a running reconnect restores checklist settlement');
+  reconnect.bridge.handlePlanEditChange({ type: 'approved', changeSetId: 'edits-1' });
+  assert.equal(reconnect.frames.at(-1).status, 'completed');
+
+  for (const [options, stopReason, status] of [
+    [{}, 'completed', 'completed'],
+    [{ complete: false }, 'completed', 'blocked'],
+    [{}, 'interrupted', 'interrupted'],
+  ] as const) {
+    const { bridge, frames } = fixture(options);
+    bridge.handleAgentEvent({ type: 'turn-end', agent: 'codex', turnId: 'turn-1', stopReason });
+    assert.equal(frames.at(-1).status, status);
+  }
+});
