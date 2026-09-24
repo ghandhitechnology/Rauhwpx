@@ -1348,8 +1348,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const agentUndoBtn = el('button', 'ag-header-icon-btn ag-agent-undo-btn');
   agentUndoBtn.type = 'button';
   agentUndoBtn.hidden = true;
-  agentUndoBtn.setAttribute('aria-label', '에이전트 변경 되돌리기');
-  agentUndoBtn.title = '에이전트 변경 되돌리기';
+  agentUndoBtn.setAttribute('aria-label', '승인한 변경 되돌리기');
+  agentUndoBtn.title = '승인한 변경 되돌리기';
   agentUndoBtn.appendChild(createIcon('undo'));
   agentUndoBtn.addEventListener('click', undoLatestAgentTurn);
 
@@ -3437,8 +3437,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const reviewColumnUndo = el('button', 'ag-header-icon-btn ag-review-column-undo');
   reviewColumnUndo.type = 'button';
   reviewColumnUndo.hidden = true;
-  reviewColumnUndo.setAttribute('aria-label', '에이전트 변경 되돌리기');
-  reviewColumnUndo.title = '에이전트 변경 되돌리기';
+  reviewColumnUndo.setAttribute('aria-label', '승인한 변경 되돌리기');
+  reviewColumnUndo.title = '승인한 변경 되돌리기';
   reviewColumnUndo.appendChild(createIcon('undo'));
   reviewColumnUndo.addEventListener('click', undoLatestAgentTurn);
   const reviewColumnActions = el('div', 'ag-review-column-actions');
@@ -8348,6 +8348,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const available = currentAgentUndoEntry() !== null;
     const disabled = bridge.getEditingLease().active || mergeResolverLocked;
     for (const button of [agentUndoBtn, reviewColumnUndo]) {
+      if (available && button.hidden) {
+        button.classList.remove('ag-undo-arrive');
+        void button.offsetWidth;
+        button.classList.add('ag-undo-arrive');
+      }
       button.hidden = !available;
       button.disabled = !available || disabled;
     }

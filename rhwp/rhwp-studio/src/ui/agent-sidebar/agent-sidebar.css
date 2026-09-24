@@ -6407,6 +6407,10 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   padding: 34px 38px 40px;
 }
 
+/* 가운데 놓인 대화 열은 스크롤 막대 없이 스크롤한다. */
+.ag-fullscreen .ag-messages { scrollbar-width: none; }
+.ag-fullscreen .ag-messages::-webkit-scrollbar { display: none; }
+
 .ag-fullscreen .ag-composer {
   max-width: 860px;
   width: min(860px, calc(100% - 48px));
@@ -8234,4 +8238,24 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   font-size: 10px;
   font-weight: 400;
   color: var(--ag-text-muted);
+}
+
+/* 승인 직후 나타나는 되돌리기 버튼은 한 번만 살짝 떠오르며 자리를 알린다. */
+.ag-header-icon-btn.ag-undo-arrive {
+  animation: ag-undo-arrive var(--ag-dur-slow) var(--ag-ease-out) both;
+}
+.ag-header-icon-btn.ag-undo-arrive .ag-icon {
+  animation: ag-undo-arrive-icon 520ms var(--ag-ease-out) both;
+}
+@keyframes ag-undo-arrive {
+  from { opacity: 0; transform: scale(.72); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ag-undo-arrive-icon {
+  0% { transform: rotate(40deg); }
+  100% { transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ag-header-icon-btn.ag-undo-arrive,
+  .ag-header-icon-btn.ag-undo-arrive .ag-icon { animation: none; }
 }
