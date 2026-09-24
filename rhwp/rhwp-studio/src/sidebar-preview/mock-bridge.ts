@@ -107,6 +107,12 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
     setRunning(false);
     stream({ type: 'turn-end', agent, stopReason });
   };
+  const updatePlanExecution = (execution: NonNullable<T.StructuredPlan['execution']>) => {
+    if (!workflow.latestPlan) return;
+    const latestPlan = { ...workflow.latestPlan, execution };
+    workflow = { ...workflow, latestPlan };
+    emit({ type: 'plan-progress', planId: latestPlan.planId, ...workflow });
+  };
   const setupChanged = () =>
     emit({ type: 'agent-setup-status', statuses: data.setups });
   const skillTrash = new Map();
@@ -185,6 +191,9 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
       },
       approve: (id) => {
         changes = changes.filter((change) => change.id !== id);
+        if (workflow.latestPlan?.execution?.status === 'awaiting-review') {
+          updatePlanExecution({ ...workflow.latestPlan.execution, status: 'completed' });
+        }
         onApproved?.();
         changeEvents.push('approved');
         pendingListeners.forEach((listener) =>
@@ -675,6 +684,11 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
             return;
           }
           if (reply === 'plan') {
+            if (workflow.latestPlan) {
+              stream({ type: 'text-delta', agent, text: '현재 계획은 개요와 일정을 확인한 뒤 문서를 수정합니다. 바꾸고 싶은 점을 알려주시면 새 계획을 만들겠습니다.' });
+              finish();
+              return;
+            }
             const plan = samplePlan();
             workflow = {
               workflow: 'plan',
@@ -874,9 +888,27 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
         later(() => {
           if (generation !== planGeneration) return;
           workflow.phase = 'implementing';
+          updatePlanExecution({
+            status: 'running',
+            steps: workflow.latestPlan!.steps.map((step) => ({ stepId: step.id!, status: 'pending' })),
+          });
           emit({ type: 'implementation-started', planId, ...workflow });
           setRunning(true);
           stream({ type: 'turn-start', agent });
+          later(() => {
+            if (generation !== planGeneration) return;
+            updatePlanExecution({ status: 'running', steps: [
+              { stepId: workflow.latestPlan!.steps[0].id!, status: 'in-progress' },
+              ...workflow.latestPlan!.steps.slice(1).map((step) => ({ stepId: step.id!, status: 'pending' as const })),
+            ] });
+            later(() => {
+              if (generation !== planGeneration) return;
+              updatePlanExecution({ status: 'running', steps: [
+                { stepId: workflow.latestPlan!.steps[0].id!, status: 'completed' },
+                ...workflow.latestPlan!.steps.slice(1).map((step) => ({ stepId: step.id!, status: 'in-progress' as const })),
+              ] });
+            }, 350);
+          }, 350);
           later(() => {
             if (generation !== planGeneration) return;
             stream({
@@ -884,19 +916,33 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
               agent,
               text: '계획에 따라 개요와 추진 일정을 정리했습니다.',
             });
+            updatePlanExecution({ status: 'awaiting-review', steps: workflow.latestPlan!.steps.map((step) => ({ stepId: step.id!, status: 'completed' })) });
             addReview();
             finish();
-          }, 500);
+          }, 1700);
         }, 200);
       });
       return true;
     },
-    requestPlanChanges: (planId) => {
+    requestPlanChanges: (planId, feedback) => {
       if (connection !== 'connected' || workflow.latestPlan?.planId !== planId)
         return false;
+      const previous = workflow.latestPlan;
+      const planGeneration = ++generation;
       later(() => {
+        if (generation !== planGeneration) return;
         workflow.phase = 'planning';
         emit({ type: 'workflow-changed', ...workflow });
+        setRunning(true);
+        stream({ type: 'turn-start', agent, turnId: `revision-${planGeneration}` });
+        stream({ type: 'text-delta', agent, text: `피드백을 확인했습니다: ${feedback?.trim() || '계획을 다시 검토합니다.'}` });
+        later(() => {
+          if (generation !== planGeneration) return;
+          const plan = samplePlan((previous.revision ?? 1) + 1, previous.planId);
+          workflow = { ...workflow, phase: 'awaiting-approval', latestPlan: plan, capabilityEpoch: workflow.capabilityEpoch! + 1 };
+          emit({ type: 'plan-ready', plan, ...workflow });
+          finish();
+        }, 300);
       });
       return true;
     },

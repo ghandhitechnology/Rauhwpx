@@ -8,6 +8,7 @@
  */
 import './motion.css';
 import './agent-sidebar.css';
+import './plan-presentation.css';
 import { confirmSheet } from './sheet.ts';
 import { createChangesDrawer, createJumpButton, renderPendingOpDiff, renderPendingOpsDiff, summarizeDiffItems } from './changes-drawer.ts';
 import { TurnChanges } from './turn-changes.ts';
@@ -51,7 +52,7 @@ import {
 import { loadAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
 import { userSettings } from '../../core/user-settings.ts';
 import { renderChatMarkdown } from './chat-markdown.ts';
-import { appendMarkdown, planToMarkdown } from './plan-markdown.ts';
+import { safeMarkdownHref } from './plan-markdown.ts';
 import {
   createEmptyThread,
   createPendingUserQuestionDraftSnapshot,
@@ -747,12 +748,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const initialWorkflowState: AgentWorkflowState = bridge.getWorkflowState();
   let chatWorkflow: AgentWorkflow = initialWorkflowState.workflow;
   let planningPhase: AgentPhase = initialWorkflowState.phase;
-  let activePlan: StructuredPlan | null = planningPhase === 'implementing'
-    ? null
-    : initialWorkflowState.latestPlan;
+  let activePlan: StructuredPlan | null = initialWorkflowState.latestPlan;
   /** 서버가 현재 살아 있다고 말한 계획만 승인할 수 있다(기록 복원본은 읽기 전용). */
   let planApprovable = activePlan !== null && planningPhase === 'awaiting-approval';
   let planActionPending = false;
+  let revisionPlanId: string | null = null;
   /** 이 채팅에서 원격 브라우저 전체 제어 경고를 이미 받았는가. */
   let browserbaseAcknowledged = chatWorkflow === 'plan' || chatWorkflow === 'question';
   /** 계획 모드 전환이 서버에서 확인된 뒤에만 활성화 안내를 표시한다. */
@@ -4831,6 +4831,43 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         : '첨부 파일 확인 필요';
     }
     if (!activeComposerSkill && text.startsWith('//')) text = text.slice(1);
+    if (revisionPlanId && !referenceLibrary.hasDrafts() && !activeComposerSkill && text) {
+      const planId = revisionPlanId;
+      if (!planApprovable || activePlan?.planId !== planId) {
+        revisionPlanId = null;
+        rebuildReview();
+        return;
+      }
+      planActionPending = true;
+      let sent = false;
+      try {
+        sent = bridge.requestPlanChanges(planId, text);
+      } catch {
+        sent = false;
+      }
+      if (!sent) {
+        planActionPending = false;
+        updateComposer();
+        rebuildReview();
+        systemMessage('수정 요청을 보내지 못했습니다. 다시 시도해 주세요.');
+        return;
+      }
+      const userMessage = recordUserMessage(text, []);
+      const userBubble = renderUserMessage(userMessage);
+      userBubble.classList.add('ag-msg-enter');
+      followConversation = true;
+      replyPending = true;
+      appendConversation(userBubble);
+      updateTurnPending(selectedAgent);
+      scrollConversationToMessage(userBubble, { smooth: true });
+      revisionPlanId = null;
+      input.value = '';
+      input.style.height = 'auto';
+      persistComposerDraft();
+      updateComposer();
+      rebuildReview();
+      return;
+    }
     const templateInvocation = activeComposerSkill ? null : text.match(/^\/templates(?:\s+([\s\S]*))?$/i);
     if (templateInvocation) {
       const tail = (templateInvocation[1] ?? '').trim();
@@ -4913,7 +4950,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     // 대화 기록은 skill block만 보이도록 빈 본문을 유지한다. 다만 wire
     // protocol은 비어 있지 않은 text를 요구하므로 명시적 slash 호출 자체를
     // 요청 본문으로 보낸다. 자연어 fallback을 UI나 기록에 숨겨 넣지 않는다.
-    const requestText = requestTextForSkillInvocation(text, skillNameForMessage);
+    const skillRequestText = requestTextForSkillInvocation(text, skillNameForMessage);
+    const requestText = revisionPlanId && referenceLibrary.hasDrafts() && !skillNameForMessage
+      ? `현재 계획(${revisionPlanId})을 다음 피드백에 맞게 수정해 주세요.\n\n${skillRequestText}`
+      : skillRequestText;
     const staged = referenceLibrary.takeReadyDrafts();
     const messageAttachments: ThreadAttachment[] = staged.map((file) => ({
       stageId: file.id,
@@ -4952,6 +4992,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       void messageSent;
     }
     input.value = '';
+    revisionPlanId = null;
     setComposerSkill(null);
     setSlashMenuOpen(false);
     input.style.height = 'auto';
@@ -6350,7 +6391,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         : activeComposerSkill
           ? '추가 요청 (선택)'
         : chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'
-          ? '계획에서 바꿀 부분'
+          ? revisionPlanId ? '계획에서 바꿀 부분' : '계획에 대해 질문하거나 의견 남기기'
           : chatWorkflow === 'question'
             ? '질문 입력'
           : chatWorkflow === 'plan' && planningPhase === 'planning'
@@ -7635,6 +7676,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function applyWorkflow(workflow: AgentWorkflow): void {
     chatWorkflow = workflow;
+    if (workflow !== 'plan') revisionPlanId = null;
     currentThread.workflow = workflow;
     threadWorkflows.set(currentThread.id, workflow);
     if (workflow === 'direct') {
@@ -7765,15 +7807,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (kicker) kicker.textContent = '실행 됨';
   }
 
-  function closePlanForExecution(planId: string): void {
-    markPlanExecuted(planId);
-    if (activePlan?.planId === planId) {
-      activePlan = null;
-      activePlanHistorical = false;
-      planMinimized = false;
-      planColCollapsed = true;
-    }
-    persistCurrentThread();
+  function showPlanExecution(planId: string): void {
+    if (activePlan?.planId !== planId) return;
+    activePlanHistorical = false;
+    if (activePlan.execution?.status === 'completed') markPlanExecuted(planId);
+    rebuildReview();
   }
 
   function openPresentedPlan(planId: string): void {
@@ -7785,8 +7823,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     activePlan = plan;
     planApprovable = workflowState.latestPlan?.planId === planId
       && workflowState.phase === 'awaiting-approval';
-    activePlanHistorical = !planApprovable
-      && (workflowState.latestPlan?.planId !== planId || workflowState.phase === 'implementing');
+    activePlanHistorical = workflowState.latestPlan?.planId !== planId
+      || workflowState.latestPlan?.execution?.status === 'completed';
     rebuildReview();
     if (fullscreen) {
       setPlanColCollapsed(false);
@@ -7815,11 +7853,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
     const head = el('header', 'ag-plan-head');
     const kickerRow = el('div', 'ag-plan-kicker-row');
-    kickerRow.append(el('span', 'ag-plan-kicker', '실행 계획'));
+    kickerRow.append(el('span', 'ag-plan-kicker', plan.execution ? '문서 작업' : '계획 초안'));
     kickerRow.append(el(
       'span',
       'ag-plan-phase',
-      activePlanHistorical ? '계획 기록' : PLANNING_PHASE_LABEL[planningPhase],
+      activePlanHistorical ? '계획 기록' : plan.execution
+        ? ({ running: '실행 중', 'awaiting-review': '검토 대기', completed: '완료', blocked: '확인 필요', interrupted: '중단됨' })[plan.execution.status]
+        : PLANNING_PHASE_LABEL[planningPhase],
     ));
     const planIdReadout = el('span', 'ag-plan-id', plan.planId);
     planIdReadout.title = plan.planId;
@@ -7839,12 +7879,114 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
     const goalText = (plan.goal || plan.summary || '').trim();
     if (goalText) head.appendChild(el('p', 'ag-plan-goal', goalText));
+    if (plan.revision && plan.revision > 1) {
+      head.appendChild(el('p', 'ag-plan-revision', `${plan.revision}차 초안${plan.changeSummary ? ` · ${plan.changeSummary}` : ''}`));
+    }
     card.appendChild(head);
 
-    // 본문은 전부 펼친다 — 접기 없이 패널이 스크롤한다.
     const body = el('div', 'ag-plan-body');
     body.id = `ag-plan-body-${plan.planId}`;
-    appendMarkdown(body, planToMarkdown(plan));
+    if (plan.summary?.trim() && plan.summary.trim() !== goalText) {
+      body.appendChild(el('p', 'ag-plan-summary', plan.summary.trim()));
+    }
+    if (plan.steps.length > 0) {
+      const section = el('section', 'ag-plan-steps');
+      const completed = plan.execution?.steps.filter((step) => step.status === 'completed').length ?? 0;
+      const heading = el('div', 'ag-plan-section-heading');
+      heading.appendChild(el('h4', '', plan.execution ? '진행 상황' : '작업 순서'));
+      if (plan.execution) {
+        const count = el('span', 'ag-plan-step-count', `${completed} / ${plan.steps.length}`);
+        count.setAttribute('role', 'status');
+        count.setAttribute('aria-live', 'polite');
+        heading.appendChild(count);
+      }
+      section.appendChild(heading);
+      const list = el('ol', 'ag-plan-step-list');
+      plan.steps.forEach((step, index) => {
+        const stepId = step.id ?? `step-${index + 1}`;
+        const progress = plan.execution?.steps.find((entry) => entry.stepId === stepId);
+        const status = progress?.status ?? 'pending';
+        const item = el('li', 'ag-plan-step');
+        item.dataset.stepId = stepId;
+        item.dataset.status = status;
+        const content = el('div', 'ag-plan-step-content');
+        if (step.details?.trim()) content.appendChild(el('p', '', step.details.trim()));
+        if (step.files?.length) content.appendChild(el('p', 'ag-plan-step-meta', `파일 · ${step.files.join(', ')}`));
+        const hasDetails = content.childElementCount > 0;
+        const details = el(hasDetails ? 'details' : 'div', 'ag-plan-step-details');
+        const summary = el(hasDetails ? 'summary' : 'div', 'ag-plan-step-summary');
+        const number = el('span', 'ag-plan-step-number', String(index + 1).padStart(2, '0'));
+        if (progress?.status === 'completed') {
+          number.replaceChildren(createIcon('check'));
+          number.setAttribute('aria-label', `${index + 1}단계 완료`);
+        } else if (progress?.status === 'in-progress') {
+          const spinner = el('span', 'ag-plan-step-spinner');
+          spinner.setAttribute('aria-hidden', 'true');
+          number.replaceChildren(spinner);
+          number.setAttribute('aria-label', `${index + 1}단계 진행 중`);
+        }
+        const main = el('span', 'ag-plan-step-main');
+        main.appendChild(el('span', 'ag-plan-step-title', step.title || '단계'));
+        if (step.target?.trim()) main.appendChild(el('span', 'ag-plan-step-preview', `대상 · ${step.target.trim()}`));
+        if (step.preview?.trim()) main.appendChild(el('span', 'ag-plan-step-preview', `예상 결과 · ${step.preview.trim()}`));
+        if (progress?.note?.trim()) main.appendChild(el('span', 'ag-plan-step-note', progress.note.trim()));
+        const statusLabel = ({ pending: '대기', 'in-progress': '진행 중', completed: '완료', blocked: '확인 필요' })[status];
+        const state = el('span', 'ag-plan-step-status', plan.execution ? statusLabel : '');
+        summary.append(number, main, state);
+        details.appendChild(summary);
+        if (hasDetails) details.appendChild(content);
+        else details.classList.add('ag-plan-step-plain');
+        item.appendChild(details);
+        list.appendChild(item);
+      });
+      section.appendChild(list);
+      body.appendChild(section);
+    }
+    if (plan.validation.length) {
+      const section = el('section', 'ag-plan-validation');
+      section.appendChild(el('h4', '', '검증'));
+      const list = el('ul', 'ag-plan-validation-list');
+      for (const entry of plan.validation) list.appendChild(el('li', '', entry));
+      section.appendChild(list);
+      body.appendChild(section);
+    }
+    for (const [label, entries] of [
+      ['예상 파일', plan.files], ['위험', plan.risks], ['가정', plan.assumptions],
+      ['결정', plan.decisions], ['제외', plan.exclusions],
+    ] as const) {
+      if (!entries.length) continue;
+      const details = el('details', 'ag-plan-secondary');
+      details.dataset.label = label;
+      details.appendChild(el('summary', '', `${label} · ${entries.length}`));
+      const list = el('ul', '');
+      for (const entry of entries) list.appendChild(el('li', '', entry));
+      details.appendChild(list);
+      body.appendChild(details);
+    }
+    if (plan.sources?.length) {
+      const sources = el('section', 'ag-plan-sources');
+      sources.appendChild(el('h4', '', '참고 자료'));
+      const list = el('ul', 'ag-plan-source-list');
+      for (const source of plan.sources) {
+        const item = el('li', 'ag-plan-source');
+        const href = source.url ? safeMarkdownHref(source.url) : null;
+        if (href) {
+          const link = el('a', '', source.title || href);
+          link.href = href;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          item.appendChild(link);
+        } else {
+          item.appendChild(el('span', '', source.title || '자료'));
+        }
+        if (source.note?.trim()) item.appendChild(el('span', 'ag-plan-source-note', source.note.trim()));
+        const locator = [source.fileId, source.chunkId].filter(Boolean).join(' · ');
+        if (locator) item.appendChild(el('span', 'ag-plan-source-locator', locator));
+        list.appendChild(item);
+      }
+      sources.appendChild(list);
+      body.appendChild(sources);
+    }
     card.appendChild(body);
 
     if (!activePlanHistorical) {
@@ -7854,28 +7996,46 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         && !turnRunning;
       const footer = el('footer', 'ag-plan-footer');
       const actions = el('div', 'ag-review-actions ag-plan-actions');
-      const approve = el('button', 'ag-approve ag-plan-approve', '편집 모드로 전환');
+      const approve = el('button', 'ag-approve ag-plan-approve', '문서에 적용');
       approve.type = 'button';
       approve.disabled = !approvableNow;
       approve.addEventListener('click', () => approveActivePlan(plan.planId));
-      const revise = el('button', 'ag-reject ag-plan-revise', '수정 요청');
+      const revise = el('button', 'ag-reject ag-plan-revise', revisionPlanId === plan.planId ? '수정 내용 입력 중' : '수정 요청');
       revise.type = 'button';
       revise.disabled = !planApprovable || planActionPending || planningPhase === 'switching' || turnRunning;
-      revise.addEventListener('click', () => requestPlanRevision(plan.planId));
+      revise.addEventListener('click', () => preparePlanRevision(plan.planId));
       actions.append(approve, revise);
-      footer.appendChild(actions);
+      if (planningPhase === 'awaiting-approval') footer.appendChild(actions);
 
       let noteText = '';
       if (planningPhase === 'switching') {
         noteText = '승인했습니다. 실행 단계로 전환 중입니다…';
       } else if (planningPhase === 'implementing') {
-        noteText = '실행 중 · 편집은 검토 후 반영';
-      } else if (!planApprovable) {
-        noteText = '이전 계획입니다. 표시만 되고 승인할 수 없습니다.';
+        noteText = plan.execution?.status === 'completed' ? '작업을 마쳤습니다.'
+          : plan.execution?.status === 'awaiting-review' ? '변경 사항을 검토해 주세요.'
+            : plan.execution?.status === 'blocked' ? '진행을 위해 확인이 필요합니다.'
+              : plan.execution?.status === 'interrupted' ? '작업이 중단됐습니다.'
+                : '';
       }
       if (noteText) footer.appendChild(el('p', 'ag-plan-note', noteText));
-      card.appendChild(footer);
+      if (footer.childElementCount > 0) card.appendChild(footer);
     }
+    return card;
+  }
+
+  function buildPlanDraftCard(): HTMLElement {
+    const card = el('section', 'ag-plan-draft-card');
+    const button = el('button', 'ag-plan-draft-action', '계획 초안 작성');
+    button.type = 'button';
+    button.disabled = turnRunning || planActionPending || planningPhase !== 'planning';
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+      const text = input.value.trim();
+      input.value = text ? `${text}\n\n현재 대화를 바탕으로 계획 초안을 작성해 주세요.`
+        : '현재 대화를 바탕으로 계획 초안을 작성해 주세요.';
+      composer.requestSubmit();
+    });
+    card.appendChild(button);
     return card;
   }
 
@@ -7895,21 +8055,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
   }
 
-  function requestPlanRevision(planId: string): void {
-    if (!planApprovable || planActionPending) return;
-    planActionPending = true;
+  function preparePlanRevision(planId: string): void {
+    if (!planApprovable || planActionPending || planningPhase !== 'awaiting-approval') return;
+    revisionPlanId = revisionPlanId === planId ? null : planId;
     rebuildReview();
-    try {
-      if (!bridge.requestPlanChanges(planId)) {
-        throw new Error('허브 연결이 끊겨 수정 요청을 보내지 못했습니다.');
-      }
-    } catch (err) {
-      planActionPending = false;
-      rebuildReview();
-      systemMessage(`수정 요청 실패: ${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
-    systemMessage('수정 요청 · 바꿀 부분 입력');
     updateComposer();
     input.focus();
   }
@@ -7920,6 +8069,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       case 'workflow-changed':
         workflowTransitionPending = false;
         planActionPending = false;
+        if (e.phase !== 'awaiting-approval') revisionPlanId = null;
         applyWorkflow(e.workflow);
         setPlanningPhase(e.phase);
         if (e.phase === 'awaiting-approval' && e.latestPlan) {
@@ -7938,6 +8088,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         return true;
       case 'plan-ready':
         planActionPending = false;
+        revisionPlanId = null;
         turnPresentedPlan = true;
         planCardPending = false;
         activePlan = e.plan;
@@ -7956,6 +8107,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         // 서버가 승인했다고 말한 계획이 지금 카드와 다르면 표시를 건드리지 않는다.
         if (activePlan && e.planId && e.planId !== activePlan.planId) return true;
         planActionPending = false;
+        revisionPlanId = null;
         planApprovable = false;
         settlePlanAttention();
         setPlanningPhase(e.phase);
@@ -7963,27 +8115,38 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         return true;
       case 'implementation-started':
         planActionPending = false;
+        revisionPlanId = null;
         planApprovable = false;
+        planMinimized = false;
         settlePlanAttention();
-        closePlanForExecution(e.planId || activePlan?.planId || '');
+        if (e.latestPlan) {
+          activePlan = e.latestPlan;
+          recordPlan(e.latestPlan);
+        }
         setPlanningPhase(e.phase);
-        rebuildReview();
+        showPlanExecution(e.planId || activePlan?.planId || '');
+        return true;
+      case 'plan-progress':
+        if (e.latestPlan?.planId !== e.planId) return true;
+        planApprovable = false;
+        revisionPlanId = null;
+        activePlan = e.latestPlan;
+        recordPlan(e.latestPlan);
+        setPlanningPhase(e.phase);
+        showPlanExecution(e.planId);
         return true;
       case 'planning-document-saved':
         systemMessage('문서를 저장했습니다');
         return true;
       case 'plan-invalidated':
         planActionPending = false;
+        revisionPlanId = null;
         planApprovable = false;
         settlePlanAttention();
         activePlanHistorical = activePlan !== null;
         setPlanningPhase(e.phase);
-        if (e.reason !== 'document-saved') {
-          systemMessage(
-            e.reason
-              ? `계획 만료 (${e.reason})`
-              : '계획 만료',
-          );
+        if (e.reason !== 'document-saved' && e.reason !== 'workflow-changed') {
+          systemMessage('계획을 수정하고 있습니다.');
         }
         rebuildReview();
         return true;
@@ -7997,7 +8160,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const hadPendingAction = planActionPending;
     planActionPending = false;
     const state = bridge.getWorkflowState();
-    const samePlanId = (activePlan?.planId ?? null) === (state.latestPlan?.planId ?? null);
+    const samePlanId = (activePlan?.planId ?? null) === (state.latestPlan?.planId ?? null)
+      && activePlan?.revision === state.latestPlan?.revision
+      && JSON.stringify(activePlan?.execution) === JSON.stringify(state.latestPlan?.execution);
     const sameApproval = planApprovable === (state.latestPlan !== null && state.phase === 'awaiting-approval');
     if (chatWorkflow === state.workflow && planningPhase === state.phase && samePlanId && sameApproval) {
       if (hadPendingAction) {
@@ -8008,16 +8173,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     chatWorkflow = state.workflow;
     planningPhase = state.phase;
+    if (state.phase !== 'awaiting-approval') revisionPlanId = null;
     planApprovable = false;
     activePlanHistorical = false;
     if (state.latestPlan) {
       recordPlan(state.latestPlan);
-      if (state.phase === 'implementing') {
-        closePlanForExecution(state.latestPlan.planId);
-      } else {
-        activePlan = state.latestPlan;
-        planApprovable = state.phase === 'awaiting-approval';
-      }
+      activePlan = state.latestPlan;
+      planApprovable = state.phase === 'awaiting-approval';
+      if (state.latestPlan.execution?.status === 'completed') markPlanExecuted(state.latestPlan.planId);
     }
     if (chatWorkflow === 'plan' || chatWorkflow === 'question') browserbaseAcknowledged = true;
     threadWorkflows.set(currentThread.id, chatWorkflow);
@@ -8028,16 +8191,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   /** 채팅 전환 — 모드·계획 기록은 표시용으로만 복원한다. */
   function restorePlanningForThread(threadId: string, thread?: ChatThread): void {
+    revisionPlanId = null;
     planArchives.set(currentThread.id, planHistory);
     planHistory = planArchives.get(threadId) ?? [];
     const latestPlan = planHistory[planHistory.length - 1] ?? null;
-    const latestPlanExecuted = latestPlan !== null
-      && thread?.messages.some((message) => (
-        message.kind === 'plan'
-        && message.planId === latestPlan.planId
-        && message.planState === 'executed'
-      ));
-    activePlan = latestPlanExecuted ? null : latestPlan;
+    activePlan = latestPlan;
     activePlanHistorical = false;
     planMinimized = false;
     planApprovable = false;
@@ -8139,14 +8297,44 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const leavingCandidates = [...review.querySelectorAll<HTMLElement>(
       ':scope > .ag-review-card[data-set-id]:not(.ag-review-card-leaving)',
     )].map((card) => ({ card, height: card.offsetHeight }));
+    const previousPlanId = planCardSlot.querySelector<HTMLElement>('.ag-plan-card')?.dataset.planId;
+    const previousScrollTop = planCardSlot.scrollTop;
+    const openStepIds = new Set([...planCardSlot.querySelectorAll<HTMLElement>('.ag-plan-step-details[open]')]
+      .map((details) => details.closest<HTMLElement>('.ag-plan-step')?.dataset.stepId).filter(Boolean));
+    const openSecondaryLabels = new Set([...planCardSlot.querySelectorAll<HTMLElement>('.ag-plan-secondary[open]')]
+      .map((details) => details.dataset.label).filter(Boolean));
+    const focused = planCardSlot.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
+    const focusedStepId = focused?.closest<HTMLElement>('.ag-plan-step')?.dataset.stepId;
+    const focusedSecondaryLabel = focused?.closest<HTMLElement>('.ag-plan-secondary')?.dataset.label;
     review.replaceChildren();
     planCardSlot.replaceChildren();
     // 계획과 문서 변경은 서로 다른 surface다. 긴 계획이 변경 목록을 밀어내지
     // 않고, 집중 모드의 환경 패널에서도 각각 독립적으로 열린다.
-    const planShown = chatWorkflow === 'plan' && activePlan !== null;
-    if (planShown && activePlan) {
-      planCardSlot.appendChild(buildPlanCard(activePlan));
+    const planShown = chatWorkflow === 'plan' && (activePlan !== null || planningPhase === 'planning');
+    if (activePlan && chatWorkflow === 'plan') {
+      const card = buildPlanCard(activePlan);
+      if (previousPlanId === activePlan.planId) card.classList.add('ag-plan-update');
+      planCardSlot.appendChild(card);
+      if (activePlanHistorical && planningPhase === 'planning') planCardSlot.appendChild(buildPlanDraftCard());
+      if (previousPlanId === activePlan.planId) {
+        for (const details of planCardSlot.querySelectorAll<HTMLDetailsElement>('.ag-plan-step-details')) {
+          if (openStepIds.has(details.closest<HTMLElement>('.ag-plan-step')?.dataset.stepId)) details.open = true;
+        }
+        for (const details of planCardSlot.querySelectorAll<HTMLDetailsElement>('.ag-plan-secondary')) {
+          if (openSecondaryLabels.has(details.dataset.label)) details.open = true;
+        }
+        planCardSlot.scrollTop = previousScrollTop;
+        if (focusedStepId || focusedSecondaryLabel) {
+          const target = focusedStepId
+            ? [...planCardSlot.querySelectorAll<HTMLElement>('.ag-plan-step-summary')]
+              .find((summary) => summary.closest<HTMLElement>('.ag-plan-step')?.dataset.stepId === focusedStepId)
+            : [...planCardSlot.querySelectorAll<HTMLElement>('.ag-plan-secondary summary')]
+              .find((summary) => summary.closest<HTMLElement>('.ag-plan-secondary')?.dataset.label === focusedSecondaryLabel);
+          target?.focus({ preventScroll: true });
+        }
+      }
     }
+    else if (planShown) planCardSlot.appendChild(buildPlanDraftCard());
     planSurface.hidden = !planShown;
     if (!planShown) {
       planMinimized = false;

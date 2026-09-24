@@ -26,6 +26,29 @@ test('planning and user-input protocol uses v5 and validates the complete struct
   assert.equal(isStructuredPlan(plan), true);
   assert.equal(isStructuredPlan({ ...plan, risks: undefined }), false);
   assert.equal(isStructuredPlan({ ...plan, steps: [{ title: '검토' }] }), false);
+  const executing = {
+    ...plan,
+    revision: 2,
+    previousPlanId: 'plan-0',
+    changeSummary: '도입부를 간결하게 수정합니다.',
+    documentRevision: 12,
+    sources: [{ title: '참고자료', url: 'https://example.com/report', note: '문서 구성의 근거' }],
+    steps: [{ id: 'step-1', title: '검토', details: '문서 구조를 읽는다.', target: '도입부', preview: '제안 문구' }],
+    execution: { status: 'running', steps: [{ stepId: 'step-1', status: 'in-progress' }] },
+  };
+  assert.equal(isStructuredPlan(executing), true);
+  for (const execution of [
+    { status: 'running', steps: [] },
+    { status: 'completed', steps: [{ stepId: 'missing', status: 'completed' }] },
+    { status: 'running', steps: [{ stepId: 'step-1', status: 'unknown' }] },
+    { status: ['running'], steps: [{ stepId: 'step-1', status: 'pending' }] },
+  ]) assert.equal(isStructuredPlan({ ...executing, execution }), false);
+  assert.equal(isStructuredPlan({ ...executing, revision: -1 }), false);
+  assert.equal(isStructuredPlan({ ...executing, sources: [{ title: '자료', url: {} }] }), false);
+  assert.equal(isStructuredPlan({ ...executing,
+    steps: [...executing.steps, { ...executing.steps[0], id: 'step-2' }],
+    execution: { status: 'running', steps: [executing.execution.steps[0], executing.execution.steps[0]] },
+  }), false);
 });
 
 test('bridge exposes plan commands and emits every server lifecycle event', () => {
@@ -34,6 +57,7 @@ test('bridge exposes plan commands and emits every server lifecycle event', () =
     'chat-plan-approve',
     'chat-plan-request-changes',
     'chat-document-saved',
+    'chat-plan-execution-result',
   ]) {
     assert.match(bridgeSource, new RegExp(`type: '${message}'`));
   }
@@ -43,6 +67,7 @@ test('bridge exposes plan commands and emits every server lifecycle event', () =
     'plan-approved',
     'plan-invalidated',
     'implementation-started',
+    'plan-progress',
   ]) {
     assert.match(bridgeSource, new RegExp(`case '${event}'`));
     assert.match(bridgeSource, new RegExp(`type: '${event}'`));

@@ -1,0 +1,140 @@
+/* 계획서 표현만 덮어쓴다. 접기·스크롤·실행 상태는 기존 컴포넌트가 담당한다. */
+.ag-plan-card {
+  --plan-line: color-mix(in srgb, var(--ag-text) 10%, transparent);
+  --plan-wash: color-mix(in srgb, var(--ag-accent) 7%, var(--ag-bg));
+  padding: 20px;
+  border: 1px solid var(--plan-line);
+  border-radius: 14px;
+  background: var(--ag-bg);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--ag-text) 3%, transparent);
+}
+
+.ag-plan-head {
+  padding: 0 0 20px;
+  border-color: var(--plan-line);
+}
+
+.ag-plan-kicker-row { gap: 8px; }
+.ag-plan-kicker { font-size: 10px; letter-spacing: 0.04em; }
+.ag-plan-phase {
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: var(--plan-wash);
+  color: var(--ag-text-secondary);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.ag-plan-title {
+  margin-top: 14px;
+  font-size: 21px;
+  font-weight: 800;
+  line-height: 1.35;
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+}
+
+.ag-plan-goal { margin-top: 10px; font-size: 13px; line-height: 1.75; }
+.ag-plan-revision {
+  margin-top: 14px;
+  padding-left: 10px;
+  border-left: 2px solid var(--ag-accent);
+  color: var(--ag-text-secondary);
+  line-height: 1.65;
+}
+
+.ag-plan-body { padding: 20px 0 24px; }
+.ag-plan-summary { margin-bottom: 24px; line-height: 1.75; }
+.ag-plan-section-heading { margin-bottom: 10px; }
+.ag-plan-section-heading h4,
+.ag-plan-sources h4,
+.ag-plan-validation h4 { font-size: 12px; font-weight: 700; }
+.ag-plan-step-count { font-family: var(--ag-mono); font-size: 10px; }
+
+.ag-plan-step { border: 0; border-radius: 8px; }
+.ag-plan-step + .ag-plan-step { margin-top: 4px; }
+.ag-plan-step:last-child { border-bottom: 0; }
+.ag-plan-step-summary { gap: 10px; padding: 12px 0; border-radius: 8px; }
+.ag-plan-step-number {
+  flex-basis: 26px;
+  height: 26px;
+  min-height: 26px;
+  border: 1px solid var(--plan-line);
+  border-radius: 8px;
+  background: var(--ag-bg);
+  color: var(--ag-text-secondary);
+  font-family: var(--ag-mono);
+  font-size: 10px;
+}
+
+.ag-plan-step-main { gap: 6px; padding-top: 3px; }
+.ag-plan-step-title { font-size: 13px; font-weight: 700; line-height: 1.5; }
+.ag-plan-step-preview,
+.ag-plan-step-note { font-size: 12px; line-height: 1.65; }
+.ag-plan-step-status { padding-top: 5px; font-size: 10px; }
+.ag-plan-step-content {
+  margin-left: 13px;
+  padding: 0 0 14px 22px;
+  border-left: 1px solid var(--plan-line);
+  font-size: 12px;
+  line-height: 1.75;
+}
+
+.ag-plan-step[data-status='in-progress'] {
+  background: var(--plan-wash);
+  box-shadow: 0 0 0 6px var(--plan-wash);
+}
+.ag-plan-step[data-status='in-progress'] .ag-plan-step-number {
+  border-color: color-mix(in srgb, var(--ag-accent) 45%, var(--plan-line));
+}
+.ag-plan-step[data-status='completed'] .ag-plan-step-number {
+  background: var(--plan-wash);
+  border-color: transparent;
+  color: var(--ag-text);
+}
+.ag-plan-step[data-status='blocked'] .ag-plan-step-number { border-style: dashed; }
+
+.ag-plan-validation {
+  margin-top: 24px;
+  padding: 14px;
+  border-radius: 8px;
+  background: var(--ag-bg-2);
+}
+.ag-plan-validation-list { margin-top: 8px; font-size: 12px; line-height: 1.7; }
+.ag-plan-validation-list li:last-child { margin-bottom: 0; }
+.ag-plan-secondary { margin-top: 12px; border-color: var(--plan-line); }
+.ag-plan-secondary summary { padding: 12px 0; font-size: 12px; }
+.ag-plan-secondary ul { font-size: 12px; line-height: 1.7; }
+.ag-plan-sources { margin-top: 24px; }
+.ag-plan-source { padding: 10px 0; gap: 5px; border-color: var(--plan-line); }
+.ag-plan-source a { color: var(--ag-text); text-decoration-color: var(--ag-accent); text-underline-offset: 4px; }
+.ag-plan-source-note { line-height: 1.65; }
+.ag-plan-footer { padding: 16px 0 0; border-color: var(--plan-line); }
+.ag-plan-actions { flex-wrap: wrap; }
+.ag-plan-actions button {
+  min-height: 40px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  transition: background-color 160ms var(--ag-motion-out), transform 160ms var(--ag-motion-out);
+}
+.ag-plan-actions button:active:not(:disabled) { transform: scale(0.98); }
+.ag-plan-minimize { width: 28px; height: 28px; flex-basis: 28px; }
+.ag-plan-minimize,
+.ag-plan-step-summary,
+.ag-plan-secondary summary { transition: background-color 160ms var(--ag-motion-out); }
+@media (hover: hover) {
+  .ag-plan-step-details:not(.ag-plan-step-plain) > .ag-plan-step-summary:hover,
+  .ag-plan-secondary summary:hover { background: var(--ag-hover); }
+  .ag-plan-source a:hover { text-decoration-thickness: 2px; }
+}
+@media (pointer: coarse) {
+  .ag-plan-actions button,
+  .ag-plan-minimize,
+  .ag-plan-secondary summary { min-height: 44px; }
+  .ag-plan-minimize { min-width: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ag-plan-card *, .ag-plan-card *::before, .ag-plan-card *::after { transition: none; }
+  .ag-plan-actions button:active:not(:disabled) { transform: none; }
+}

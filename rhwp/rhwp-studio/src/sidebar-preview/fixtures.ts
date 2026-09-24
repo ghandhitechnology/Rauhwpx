@@ -255,26 +255,59 @@ export function createFixtures() {
   };
 }
 
-export function samplePlan(): T.StructuredPlan {
+export function samplePlan(revision = 1, previousPlanId?: string): T.StructuredPlan {
   return {
     planId: crypto.randomUUID(),
     title: '사업 제안서 개선 계획',
     goal: '제안의 핵심과 실행 일정을 명확히 전달합니다.',
-    summary: '문서 구조를 정리하고 문장을 다듬습니다.',
+    summary: revision > 1
+      ? '피드백을 반영해 일정 검토를 먼저 하고 문서 구조를 정리합니다.'
+      : '문서 구조를 정리하고 문장을 다듬습니다.',
+    revision,
+    ...(previousPlanId ? {
+      previousPlanId,
+      changeSummary: '일정 검토를 첫 단계로 옮기고 검증 기준을 구체화했습니다.',
+    } : {}),
+    documentRevision: 0,
     assumptions: ['기존 목차를 유지합니다.'],
     decisions: ['핵심 내용을 첫 문단에 배치합니다.'],
-    steps: [
+    steps: (revision > 1 ? [
       {
+        id: 'step-1',
+        title: '일정 검토',
+        details: '단계별 산출물과 담당자, 날짜를 표로 확인합니다.',
+        target: '추진 일정 절',
+        preview: '날짜와 담당자를 확인한 뒤 일정표를 정리합니다.',
+      },
+      {
+        id: 'step-2',
+        title: '개요 정리',
+        details: '일정표에 맞춰 목적과 기대 효과를 간결하게 작성합니다.',
+        target: '사업 개요 절',
+        preview: '제안의 목적을 첫 문단에서 읽을 수 있게 합니다.',
+      },
+    ] : [
+      {
+        id: 'step-1',
         title: '개요 정리',
         details: '목적과 기대 효과를 간결하게 작성합니다.',
+        target: '사업 개요 절',
+        preview: '제안의 목적을 첫 문단에서 읽을 수 있게 합니다.',
       },
       {
+        id: 'step-2',
         title: '일정 검토',
         details: '단계별 산출물과 일정을 표로 정리합니다.',
+        target: '추진 일정 절',
+        preview: '날짜와 담당자를 확인한 뒤 일정표를 정리합니다.',
       },
-    ],
+    ]),
     files: ['사업 제안서.hwpx'],
-    validation: ['용어와 날짜를 확인합니다.'],
+    validation: ['용어와 날짜, 담당자를 확인합니다.'],
+    sources: [
+      { title: '사업 제안서.hwpx', fileId: 'preview-proposal', note: '사업 개요와 추진 일정' },
+      { title: '브랜드 가이드.pdf', fileId: 'reference-sample', note: '용어와 문체' },
+    ],
     risks: [],
     exclusions: [],
     createdAt: timestamp,
