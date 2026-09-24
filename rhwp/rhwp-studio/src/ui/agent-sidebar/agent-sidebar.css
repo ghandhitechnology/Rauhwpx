@@ -8,8 +8,8 @@
    포커스 모드는 같은 정보 구조를 공유한다: 위에는 문서 맥락, 가운데는
    읽기 편한 대화, 아래에는 입력과 실행 설정이 한 면에 모인다. 기술
    좌표와 원시 도구 출력은 필요할 때 펼쳐 보고, 검토는 변경이 있을 때만
-   여는 문맥 패널이다. 색은 기존 중성 램프를 유지하고 모서리, 여백,
-   활자 위계만 제품 전반의 SaaS 셸과 맞춘다. */
+   여는 문맥 패널이다. 중성 면은 편집기와 같은 램프를 쓰고 모서리, 여백,
+   활자 위계도 제품 전반의 셸과 맞춘다. */
 
 /* 모션 토큰은 motion.css 에 있다. */
 
@@ -62,6 +62,21 @@ body.ag-sidebar-animating .ag-root {
 /* --ag-* 는 이 파일 전체가 쓰는 간접층이다. 여기서 새 중성
    램프로 갈아끼우면 아래 규칙들이 함께 따라온다. */
 .ag-root {
+  --n-surface: #f2f3f5;
+  --n-surface-raised: #fff;
+  --n-surface-sunken: #e8eaee;
+  --n-canvas: #f2f3f5;
+  --n-text: #171b22;
+  --n-text-secondary: #424a55;
+  --n-text-muted: #626b77;
+  --n-text-placeholder: #6b7480;
+  --n-text-disabled: #9299a3;
+  --n-hairline: #d9dde3;
+  --n-hairline-strong: #b6bec9;
+  --n-fill-hover: #e5e8ed;
+  --n-fill-active: #dce1e8;
+  --n-fill-selected: #dfe5ec;
+  --n-fill-selected-soft: #e9edf2;
   --ag-bg: var(--n-surface);
   --ag-bg-2: var(--n-surface-sunken);
   --ag-raised: var(--n-surface-raised);
@@ -72,10 +87,19 @@ body.ag-sidebar-animating .ag-root {
   --ag-text-muted: var(--n-text-muted);
   --ag-border: var(--n-hairline);
   --ag-border-strong: var(--n-hairline-strong);
-  --ag-input-bg: var(--n-surface);
+  --ag-input-bg: var(--n-surface-raised);
   --ag-hover: var(--n-fill-hover);
   --ag-active: var(--n-fill-active);
   --ag-selected: var(--n-fill-selected);
+  --ui-surface: var(--n-surface);
+  --ui-surface-raised: var(--n-surface-raised);
+  --ui-text: var(--n-text);
+  --ui-text-hint: var(--n-text-muted);
+  --ui-border: var(--n-hairline);
+  --ui-border-strong: var(--n-hairline-strong);
+  --ui-hover-strong: var(--n-fill-active);
+  --ui-active: var(--n-fill-active);
+  --color-text: var(--n-text);
   --ag-rau: #8d8680;
   --ag-claude: #c4785a;
   --ag-codex: #5b8fd4;
@@ -241,16 +265,21 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 :root[data-theme-effective='dark'] .ag-root {
-  /* Keep the agent workspace visually heavier than the editor chrome while
-     lifting the composer one clear step above the conversation surface. */
-  --ag-bg: #111214;
-  --ag-bg-2: #0d0e10;
-  --ag-raised: #191a1d;
-  --ag-input-bg: #202124;
-  --ag-border: rgba(255, 255, 255, 0.075);
-  --ag-border-strong: rgba(255, 255, 255, 0.14);
-  --ag-hover: rgba(255, 255, 255, 0.075);
-  --ag-active: rgba(255, 255, 255, 0.12);
+  --n-surface: #262626;
+  --n-surface-raised: #2f2f2f;
+  --n-surface-sunken: #1c1c1c;
+  --n-canvas: #262626;
+  --n-text: #ededed;
+  --n-text-secondary: #c8c8c8;
+  --n-text-muted: #a1a1a1;
+  --n-text-placeholder: #8d8d8d;
+  --n-text-disabled: #6b6b6b;
+  --n-hairline: #393939;
+  --n-hairline-strong: #555555;
+  --n-fill-hover: #343434;
+  --n-fill-active: #3e3e3e;
+  --n-fill-selected: #444444;
+  --n-fill-selected-soft: #303030;
   --ag-rau: #d4cdc4;
   --ag-claude: #d49174;
   --ag-codex: #7aa8e0;
