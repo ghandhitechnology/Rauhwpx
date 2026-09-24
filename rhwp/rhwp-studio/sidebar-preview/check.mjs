@@ -398,6 +398,7 @@ try {
     await page.mouse.wheel({ deltaY: -350 });
     await page.waitForFunction((top) => document.querySelector('.ag-messages').scrollTop < top - 80, {}, followedTop);
     const pausedTop = await messages.evaluate((node) => node.scrollTop);
+    await page.waitForSelector('.ag-composer.ag-resting');
     await page.waitForFunction(() => document.querySelector('.ag-messages').textContent.includes('필요한 부분을 선택'));
     assert(Math.abs((await messages.evaluate((node) => node.scrollTop)) - pausedTop) < 4);
     await page.mouse.wheel({ deltaY: 1800 });
@@ -405,6 +406,7 @@ try {
       const node = document.querySelector('.ag-messages');
       return node.scrollHeight - node.scrollTop - node.clientHeight < 4;
     });
+    await page.waitForSelector('.ag-composer:not(.ag-resting)');
     const resumedTop = await messages.evaluate((node) => node.scrollTop);
     await page.evaluate(() => {
       const messages = document.querySelector('.ag-messages');
@@ -413,6 +415,11 @@ try {
       messages.insertBefore(more, messages.querySelector('.ag-messages-end'));
     });
     await page.waitForFunction((top) => document.querySelector('.ag-messages').scrollTop > top + 100, {}, resumedTop);
+    // 접힌 입력기는 누르는 순간 설정 줄과 함께 다시 펼쳐진다.
+    await page.mouse.wheel({ deltaY: -120 });
+    await page.waitForSelector('.ag-composer.ag-resting');
+    await page.click('.ag-input');
+    await page.waitForSelector('.ag-composer:not(.ag-resting) .ag-composer-meta', { visible: true });
     await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
   });
   await step('Provider, model and effort changes after the first reply', async () => {

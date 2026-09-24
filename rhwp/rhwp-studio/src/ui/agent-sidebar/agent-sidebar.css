@@ -4421,6 +4421,60 @@ button.ag-skill-copy {
   box-shadow: var(--n-elev-2), 0 0 0 3px var(--ag-opencode-wash);
 }
 
+/* ─── 쉬는 입력기 ─────────────────────────────────────────
+   대화를 위로 읽는 동안 입력기는 한 줄짜리 알약으로 접힌다. 높이와 안쪽 위치는
+   composer-resting.ts 가 아래 가장자리를 고정한 채 옮기고, 여기서는 도착 모양과
+   모서리·설정 줄의 전환만 정한다. */
+.ag-root .ag-chat-page .ag-composer {
+  box-sizing: border-box;
+  transition:
+    border-color var(--ag-dur-fast) var(--ag-ease-out),
+    box-shadow var(--ag-dur-fast) var(--ag-ease-out),
+    border-radius var(--ag-dur-slow) var(--ag-spring);
+}
+
+.ag-root .ag-composer.ag-resting {
+  padding: 3px 5px 3px 8px;
+  border-radius: 21px;
+}
+
+.ag-root .ag-composer.ag-resting .ag-composer-field {
+  min-height: 34px;
+  padding: 2px 0 2px 2px;
+}
+
+.ag-root .ag-composer.ag-resting .ag-input {
+  height: 30px !important;
+  min-height: 30px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ag-root .ag-composer.ag-resting .ag-send {
+  border-radius: 15px;
+}
+
+/* 설정 줄은 흐름에서 빠져 아래 가장자리에 붙은 채 사라지고, 펼칠 때는
+   높이가 거의 자리 잡은 뒤에 떠오른다. */
+.ag-composer-meta {
+  transition:
+    opacity var(--ag-dur-base) var(--ag-ease-out) calc(var(--ag-dur-slow) / 3),
+    visibility 0s linear 0s;
+}
+
+.ag-root .ag-composer.ag-resting .ag-composer-meta {
+  position: absolute;
+  right: 8px;
+  bottom: 5px;
+  left: 8px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
+    visibility 0s linear var(--ag-dur-fast);
+}
+
 .ag-composer-meta {
   display: flex;
   flex-wrap: nowrap;
@@ -4784,7 +4838,10 @@ button.ag-skill-copy {
   background: var(--accent-primary);
   color: var(--n-on-accent);
   cursor: pointer;
-  transition: background var(--ag-dur-fast) var(--ag-ease-out), opacity var(--ag-dur-fast) var(--ag-ease-out);
+  transition:
+    background var(--ag-dur-fast) var(--ag-ease-out),
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
+    border-radius var(--ag-dur-slow) var(--ag-spring);
 }
 
 .ag-send .ag-icon {
