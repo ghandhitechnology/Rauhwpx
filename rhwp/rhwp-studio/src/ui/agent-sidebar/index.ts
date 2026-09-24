@@ -8,6 +8,7 @@
  */
 import './motion.css';
 import './agent-sidebar.css';
+import './plan-presentation.css';
 import { confirmSheet } from './sheet.ts';
 import { createChangesDrawer, createJumpButton, renderPendingOpDiff, renderPendingOpsDiff, summarizeDiffItems } from './changes-drawer.ts';
 import { TurnChanges } from './turn-changes.ts';
