@@ -176,9 +176,29 @@ export interface AgentInstructionsDraft {
 }
 
 export interface StructuredPlanStep {
+  id?: string;
   title: string;
   details: string;
+  target?: string;
+  preview?: string;
   files?: string[];
+}
+
+export interface PlanSource {
+  title: string;
+  url?: string;
+  fileId?: string;
+  chunkId?: string;
+  note?: string;
+}
+
+export interface PlanExecution {
+  status: 'running' | 'awaiting-review' | 'completed' | 'blocked' | 'interrupted';
+  steps: Array<{
+    stepId: string;
+    status: 'pending' | 'in-progress' | 'completed' | 'blocked';
+    note?: string;
+  }>;
 }
 
 /** Server-authored plan. Its epoch is descriptive; capabilityEpoch is the write authority. */
@@ -196,6 +216,12 @@ export interface StructuredPlan {
   exclusions: string[];
   createdAt: string;
   epoch: number;
+  revision?: number;
+  previousPlanId?: string;
+  changeSummary?: string;
+  documentRevision?: number;
+  sources?: PlanSource[];
+  execution?: PlanExecution;
 }
 
 export interface AgentWorkflowState {
@@ -238,6 +264,7 @@ export function isStructuredPlan(value: unknown): value is StructuredPlan {
       const item = step as Record<string, unknown>;
       return typeof item['title'] === 'string'
         && typeof item['details'] === 'string'
+        && ['id', 'target', 'preview'].every((key) => item[key] === undefined || typeof item[key] === 'string')
         && (item['files'] === undefined || isStringArray(item['files']));
     })
     && isStringArray(plan['files'])
@@ -247,7 +274,34 @@ export function isStructuredPlan(value: unknown): value is StructuredPlan {
     && typeof plan['createdAt'] === 'string'
     && typeof plan['epoch'] === 'number'
     && Number.isSafeInteger(plan['epoch'])
-    && plan['epoch'] >= 0;
+    && plan['epoch'] >= 0
+    && ['previousPlanId', 'changeSummary'].every((key) => plan[key] === undefined || typeof plan[key] === 'string')
+    && (plan['revision'] === undefined || (Number.isSafeInteger(plan['revision']) && Number(plan['revision']) > 0))
+    && (plan['documentRevision'] === undefined || (Number.isSafeInteger(plan['documentRevision']) && Number(plan['documentRevision']) >= 0))
+    && (plan['sources'] === undefined || (Array.isArray(plan['sources']) && plan['sources'].every((source: unknown) => {
+      if (!source || typeof source !== 'object' || Array.isArray(source)) return false;
+      const item = source as Record<string, unknown>;
+      return typeof item['title'] === 'string'
+        && ['url', 'fileId', 'chunkId', 'note'].every((key) => item[key] === undefined || typeof item[key] === 'string');
+    })))
+    && (plan['execution'] === undefined || isPlanExecution(plan['execution'], plan['steps'] as StructuredPlanStep[]));
+}
+
+function isPlanExecution(value: unknown, steps: StructuredPlanStep[]): value is PlanExecution {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const execution = value as Record<string, unknown>;
+  const ids = new Set(steps.map((step, index) => step.id ?? `step-${index + 1}`));
+  if (typeof execution['status'] !== 'string'
+    || !['running', 'awaiting-review', 'completed', 'blocked', 'interrupted'].includes(execution['status'])
+    || !Array.isArray(execution['steps']) || execution['steps'].length !== steps.length) return false;
+  return execution['steps'].every((step: unknown) => {
+    if (!step || typeof step !== 'object' || Array.isArray(step)) return false;
+    const item = step as Record<string, unknown>;
+    if (typeof item['stepId'] !== 'string' || !ids.delete(item['stepId'])) return false;
+    return typeof item['status'] === 'string'
+      && ['pending', 'in-progress', 'completed', 'blocked'].includes(item['status'])
+      && (item['note'] === undefined || typeof item['note'] === 'string');
+  });
 }
 
 export interface WritingStyleStatus {
@@ -809,6 +863,7 @@ export type SidebarEvent =
   | ({ type: 'plan-approved'; planId: string } & AgentWorkflowState)
   | ({ type: 'plan-invalidated'; planId: string | null; reason?: string } & AgentWorkflowState)
   | ({ type: 'implementation-started'; planId: string } & AgentWorkflowState)
+  | ({ type: 'plan-progress'; planId: string } & AgentWorkflowState)
   | { type: 'planning-document-saved'; revision: number }
   | { type: 'skills-catalog'; catalog: SkillCatalog }
   | { type: 'harness-list-result'; requestId: string; rows: HarnessSkillRow[] }

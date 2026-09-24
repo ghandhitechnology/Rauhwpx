@@ -3571,7 +3571,7 @@ button.ag-skill-copy {
   flex: 0 1 auto;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
-  max-height: 46%;
+  max-height: 58%;
   min-height: 0;
   overflow: hidden;
   padding: 12px;
@@ -3709,6 +3709,8 @@ button.ag-skill-copy {
   animation: ag-plan-enter var(--ag-dur-fast) var(--ag-motion-out) both;
 }
 
+.ag-plan-card.ag-plan-update { animation: none; }
+
 @keyframes ag-plan-enter {
   from { opacity: 0; transform: translateY(3px); }
   to { opacity: 1; transform: none; }
@@ -3781,16 +3783,24 @@ button.ag-skill-copy {
 
 .ag-plan-title {
   margin: 7px 0 0;
-  font-size: var(--font-size-md, 13px);
+  font-size: 16px;
   font-weight: 700;
-  line-height: 1.35;
+  line-height: 1.38;
+  letter-spacing: -0.02em;
 }
 
 .ag-plan-goal {
-  margin: 4px 0 0;
+  margin: 7px 0 0;
   color: var(--ag-text-secondary);
-  font-size: var(--font-size-sm, 11px);
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.58;
+}
+
+.ag-plan-revision {
+  margin: 8px 0 0;
+  color: var(--ag-text-muted);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 /* 본문과 동작은 정상 문서 흐름을 따른다. 스크롤은 바깥 .ag-review 하나가 맡아
@@ -3800,11 +3810,153 @@ button.ag-skill-copy {
   min-height: auto;
   padding: 14px 2px 16px;
   color: var(--ag-text);
-  font-size: var(--font-size-base, 12px);
-  line-height: 1.68;
+  font-size: 12px;
+  line-height: 1.6;
   overflow: visible;
   overflow-wrap: anywhere;
 }
+
+.ag-plan-summary {
+  margin: 0 0 18px;
+  color: var(--ag-text-secondary);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.ag-plan-section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.ag-plan-section-heading h4,
+.ag-plan-sources h4,
+.ag-plan-validation h4 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: var(--ag-track);
+}
+
+.ag-plan-step-count {
+  color: var(--ag-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-plan-step-list,
+.ag-plan-source-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ag-plan-step {
+  border-top: 1px solid var(--ag-border);
+}
+
+.ag-plan-step:last-child { border-bottom: 1px solid var(--ag-border); }
+
+.ag-plan-step-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 2px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.ag-plan-step-summary::-webkit-details-marker { display: none; }
+.ag-plan-step-summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+
+.ag-plan-step-number {
+  display: inline-flex;
+  flex: 0 0 18px;
+  min-height: 18px;
+  align-items: center;
+  justify-content: center;
+  color: var(--ag-text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-plan-step-number svg { width: 14px; height: 14px; }
+.ag-plan-step-spinner { width: 11px; height: 11px; border: 1.5px solid var(--ag-border); border-top-color: var(--accent-primary); border-radius: 50%; animation: ag-plan-orbit 0.9s linear infinite; }
+
+.ag-plan-step-main {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ag-plan-step-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ag-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ag-plan-step-preview,
+.ag-plan-step-note {
+  color: var(--ag-text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ag-plan-step-note { color: var(--ag-text); }
+
+.ag-plan-step-status {
+  flex: 0 0 auto;
+  color: var(--ag-text-muted);
+  font-size: 10px;
+}
+
+.ag-plan-step[data-status='in-progress'] .ag-plan-step-status,
+.ag-plan-step[data-status='blocked'] .ag-plan-step-status { color: var(--accent-primary); }
+.ag-plan-step[data-status='completed'] .ag-plan-step-number,
+.ag-plan-step[data-status='completed'] .ag-plan-step-status { color: var(--accent-primary); }
+
+.ag-plan-step-content {
+  padding: 0 2px 10px 30px;
+  color: var(--ag-text-secondary);
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.ag-plan-step-content p { margin: 0 0 5px; }
+.ag-plan-step-content p:last-child { margin-bottom: 0; }
+.ag-plan-step-plain .ag-plan-step-summary { cursor: default; }
+
+.ag-plan-validation { margin-top: 18px; }
+.ag-plan-validation-list { margin: 8px 0 0; padding-left: 18px; color: var(--ag-text-secondary); }
+.ag-plan-validation-list li { margin: 5px 0; }
+
+.ag-plan-secondary { margin-top: 10px; border-top: 1px solid var(--ag-border); }
+.ag-plan-secondary summary { padding: 9px 2px; color: var(--ag-text-secondary); font-size: 11px; cursor: pointer; }
+.ag-plan-secondary summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.ag-plan-secondary ul { margin: 0 0 10px; padding-left: 20px; color: var(--ag-text-secondary); font-size: 11px; }
+.ag-plan-secondary li { margin: 5px 0; overflow-wrap: anywhere; }
+
+.ag-plan-sources { margin-top: 18px; }
+.ag-plan-source-list { margin-top: 8px; }
+.ag-plan-source { display: flex; flex-direction: column; gap: 2px; padding: 7px 0; border-top: 1px solid var(--ag-border); }
+.ag-plan-source a { color: var(--accent-primary); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.ag-plan-source-note { color: var(--ag-text-muted); font-size: 11px; }
+.ag-plan-source-locator { color: var(--ag-text-muted); font-family: var(--ag-mono); font-size: 10px; overflow-wrap: anywhere; }
+
+.ag-plan-draft-card { padding: 12px 2px; }
+.ag-plan-draft-action { padding: 8px 12px; border: 1px solid var(--ag-border); border-radius: 7px; background: var(--ag-bg); color: var(--ag-text); font: inherit; cursor: pointer; }
+.ag-plan-draft-action:hover { background: var(--ag-hover); }
+.ag-plan-draft-action:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.ag-plan-draft-action:disabled { opacity: 0.5; cursor: default; }
 
 .ag-plan-footer {
   position: static;
@@ -4198,7 +4350,8 @@ button.ag-skill-copy {
   }
 
   .ag-plan-orbit,
-  .ag-plan-orbit::before {
+  .ag-plan-orbit::before,
+  .ag-plan-step-spinner {
     animation: none;
   }
 }

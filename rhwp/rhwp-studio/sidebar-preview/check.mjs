@@ -13,6 +13,7 @@ import { checkFleetPreview } from './fleet.check.mjs';
 import { checkCloudRecovery } from './cloud-recovery.check.mjs';
 import { checkCloudStream } from './cloud-stream.check.mjs';
 import { checkChangesPreview } from './changes.check.mjs';
+import { checkPlanPreview } from './plan.check.mjs';
 import { browserLaunchArgs } from '../tests/browser-support.ts';
 
 const studio = resolve(import.meta.dirname, '..');
@@ -467,6 +468,8 @@ try {
       );
     },
   );
+  await step('Plan research, revision, execution progress, and review',
+    () => checkPlanPreview(page, origin, artifacts));
   await step('Question submission and resolution', async () => {
     await play('question');
     await screenshot('question');

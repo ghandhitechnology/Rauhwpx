@@ -27,7 +27,7 @@ const KOREAN_IMPLEMENTATION_APPROVALS = new Set([
 
 /**
  * Recognizes only standalone, unambiguous requests to execute the latest plan.
- * Everything else remains plan-revision feedback at the hub boundary.
+ * Everything else stays in discussion; concrete feedback may revise the plan.
  * @param {unknown} text
  */
 export function isExplicitImplementationApproval(text) {
@@ -94,6 +94,7 @@ export class PlanningState {
     this.now = options.now ?? (() => new Date().toISOString());
     /** @type {Readonly<{planId: string, plan: any}> | null} */
     this.latestPlan = null;
+    this.execution = null;
   }
 
   bumpEpoch() {
@@ -111,7 +112,7 @@ export class PlanningState {
       phase: this.workflow === 'direct' ? 'direct' : this.phase,
       capabilityEpoch: this.capabilityEpoch,
       planId: this.latestPlan?.planId ?? null,
-      latestPlan: this.latestPlan ? clone(this.latestPlan.plan) : null,
+      latestPlan: this.latestPlan ? { ...clone(this.latestPlan.plan), ...(this.execution ? { execution: clone(this.execution) } : {}) } : null,
     };
   }
 
@@ -124,20 +125,26 @@ export class PlanningState {
     };
   }
 
-  present(plan) {
+  present(plan, documentRevision) {
     if (this.workflow !== 'plan') throw workflowError('PLAN_WORKFLOW_REQUIRED', 'Plans can only be presented from the plan workflow');
-    if (this.phase !== 'planning') throw workflowError('INVALID_PLAN_PHASE', `A plan can only be presented while planning (current phase: ${this.phase})`);
+    if (this.phase !== 'planning' && this.phase !== 'awaiting-approval') throw workflowError('INVALID_PLAN_PHASE', `A plan can only be presented before approval (current phase: ${this.phase})`);
     const planId = this.createPlanId();
+    const previous = this.latestPlan;
     this.phase = 'awaiting-approval';
     this.bumpEpoch();
     const canonical = deepFreeze({
       ...clone(plan),
+      steps: plan.steps.map((step, index) => ({ ...clone(step), id: `step-${index + 1}` })),
+      revision: (previous?.plan.revision ?? 0) + 1,
+      ...(previous ? { previousPlanId: previous.planId } : {}),
+      ...(Number.isSafeInteger(documentRevision) ? { documentRevision } : {}),
       planId,
       createdAt: this.now(),
       epoch: this.capabilityEpoch,
     });
     const record = deepFreeze({ planId, plan: canonical });
     this.latestPlan = record;
+    this.execution = null;
     return clone(record);
   }
 
@@ -166,12 +173,16 @@ export class PlanningState {
     return this.snapshot();
   }
 
-  beginApproval({ planId, sessionStatus }) {
+  beginApproval({ planId, sessionStatus, documentRevision }) {
     if (this.workflow !== 'plan' || this.phase !== 'awaiting-approval') {
       throw workflowError('INVALID_PLAN_PHASE', `A plan can only be approved while awaiting approval (current phase: ${this.phase ?? 'direct'})`);
     }
     if (sessionStatus !== 'idle') throw workflowError('AGENT_BUSY', 'A plan can only be approved while the agent is idle');
     this.assertLatest(planId);
+    if ((Number.isSafeInteger(this.latestPlan.plan.documentRevision) || Number.isSafeInteger(documentRevision))
+      && this.latestPlan.plan.documentRevision !== documentRevision) {
+      throw workflowError('STALE_PLAN_DOCUMENT', 'The document has changed since this plan was researched. Refresh the plan before applying it.');
+    }
     this.phase = 'switching';
     this.bumpEpoch();
     return { ...this.snapshot(), approvedPlan: clone(this.latestPlan) };
@@ -181,7 +192,53 @@ export class PlanningState {
     if (this.phase !== 'switching') throw workflowError('INVALID_PLAN_PHASE', `Cannot finish a mode switch from phase ${this.phase ?? 'direct'}`);
     this.assertLatest(planId);
     this.phase = 'implementing';
+    this.execution = {
+      status: 'running',
+      steps: this.latestPlan.plan.steps.map((step) => ({ stepId: step.id, status: 'pending' })),
+    };
     return this.snapshot();
+  }
+
+  updateProgress({ planId, stepId, status, note }) {
+    this.assertLatest(planId);
+    if (this.phase !== 'implementing' || !this.execution || this.execution.status === 'completed') {
+      throw workflowError('INVALID_PLAN_PHASE', 'Checklist updates require an active approved plan');
+    }
+    const step = this.execution.steps.find((item) => item.stepId === stepId);
+    if (!step) throw workflowError('INVALID_PLAN_STEP', 'The step does not belong to the approved plan');
+    if (!['pending', 'in-progress', 'completed', 'blocked'].includes(status)) {
+      throw workflowError('INVALID_PLAN_PROGRESS', 'Unknown checklist status');
+    }
+    step.status = status;
+    if (note !== undefined) step.note = note;
+    this.execution.status = status === 'blocked' ? 'blocked' : 'running';
+    return this.snapshot();
+  }
+
+  settleExecution(status) {
+    if (!this.execution || this.execution.status === 'completed') return this.snapshot();
+    if (!['awaiting-review', 'completed', 'blocked', 'interrupted'].includes(status)) {
+      throw workflowError('INVALID_PLAN_PROGRESS', 'Unknown execution result');
+    }
+    if (status === 'blocked' || status === 'interrupted') {
+      for (const step of this.execution.steps) {
+        if (step.status !== 'completed' && step.status !== 'in-progress') continue;
+        step.status = 'pending';
+        const reason = 'Execution was interrupted or changes were not accepted. Recheck this step before marking it complete.';
+        if (!step.note?.includes(reason)) step.note = step.note ? `${step.note}\n${reason}` : reason;
+      }
+    }
+    this.execution.status = ['completed', 'awaiting-review'].includes(status)
+      && !this.execution.steps.every((step) => step.status === 'completed') ? 'blocked' : status;
+    return this.snapshot();
+  }
+
+  acknowledgeExecution(status) {
+    if (['blocked', 'interrupted'].includes(this.execution?.status)
+      && ['completed', 'awaiting-review'].includes(status)) {
+      throw workflowError('PLAN_EXECUTION_FAILED', 'The plan needs a successful implementation turn before it can complete');
+    }
+    return this.settleExecution(status);
   }
 
   failSwitch(planId) {
@@ -208,7 +265,7 @@ export function authorizeToolCall(input) {
   if (received !== null && (!Number.isSafeInteger(received) || received !== input.expectedEpoch)) {
     throw workflowError('STALE_CAPABILITY_EPOCH', `Stale MCP capability epoch for ${input.tool}; restart the provider with epoch ${input.expectedEpoch}`);
   }
-  if (input.category === 'planning-control' && input.workflow !== 'plan') {
+  if ((input.category === 'planning-control' || input.category === 'plan-progress') && input.workflow !== 'plan') {
     throw workflowError('PLAN_WORKFLOW_REQUIRED', `${input.tool} is available only to chats that originated in the plan workflow`);
   }
   if ((input.category === 'browser' || input.category === 'download-write') && !restricted) {
@@ -233,10 +290,13 @@ export function authorizeToolCall(input) {
   if ((input.category === 'document-write' || input.category === 'instruction-write') && input.phase !== 'implementing') {
     throw workflowError('PLAN_WRITE_BLOCKED', `Writes are blocked during the ${input.phase} phase`);
   }
-  if (input.category === 'user-interaction' && input.phase !== 'planning' && input.phase !== 'implementing') {
+  if (input.category === 'plan-progress' && input.phase !== 'implementing') {
+    throw workflowError('INVALID_PLAN_PHASE', 'Checklist updates require an approved plan');
+  }
+  if (input.category === 'user-interaction' && !['planning', 'awaiting-approval', 'implementing'].includes(input.phase)) {
     throw workflowError('INVALID_PLAN_PHASE', `${input.tool} is unavailable during the ${input.phase} phase`);
   }
-  if (input.category === 'planning-control' && input.phase !== 'planning') {
+  if (input.category === 'planning-control' && !['planning', 'awaiting-approval'].includes(input.phase)) {
     throw workflowError('INVALID_PLAN_PHASE', `${input.tool} is only available during the planning phase`);
   }
   return true;
@@ -248,6 +308,7 @@ export function buildApprovedPlanPrompt(approved) {
     'The user approved the following hub-authoritative implementation plan.',
     `Plan ID: ${approved.planId}`,
     'Implement this canonical plan now. Do not re-plan, omit steps, or substitute a different plan. First re-read the relevant current state, then execute every canonical step thoroughly and run every listed validation. Respect the current permission profile. In the final report, distinguish completed, blocked, and deferred items and validation results; never claim partial work is complete.',
+    'For each canonical step, call update_plan_progress with its step ID and in-progress before working, then completed only after its work and relevant validation succeed. Report blocked steps with a concrete note. Do not mark pending or unverified work completed. Call verify_changes after document edits. The app separately tracks pending user review and the final application of edits.',
     // 승인 메시지는 promptContext 를 거치지 않는다 — 구현 단계 첫 턴이 규율 없이 시작하지 않도록 여기서 얹는다.
     humanizerPromptBlock('implementing'),
     JSON.stringify(approved.plan, null, 2),

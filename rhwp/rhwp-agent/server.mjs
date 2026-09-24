@@ -1163,6 +1163,10 @@ function beginAgentTurn(record, activeSession) {
   // must remain unable to borrow that window.
   activeSession.providerTurnStarted = false;
   activeSession.status = 'running';
+  if (activeSession.planning.phase === 'implementing' && activeSession.planning.execution?.status !== 'completed') {
+    activeSession.planExecutionTurnId = activeSession.turnId;
+    activeSession.planExecutionTurnSucceeded = false;
+  }
 }
 
 function providerTurnIsCurrent(record, binding) {
@@ -1284,6 +1288,12 @@ function currentPiSubagentForSocket(record, sock) {
 
 function settleAgentTurn(record, activeSession, event) {
   const settledTurnId = activeSession.turnId;
+  if (activeSession.planning.phase === 'implementing' && activeSession.planExecutionTurnId === settledTurnId) {
+    activeSession.planExecutionTurnSucceeded = ['completed', 'end_turn', 'success'].includes(event.stopReason) && !event.errorMessage;
+    activeSession.planning.settleExecution(event.stopReason === 'interrupted' ? 'interrupted'
+      : activeSession.planExecutionTurnSucceeded ? 'awaiting-review' : 'blocked');
+    sendJson(record.studioSocket, { v: 1, type: 'plan-progress', ...activeSession.planning.snapshot() });
+  }
   settleUserQuestion(record, userQuestionOutcomeForTurnEnd(event));
   failPendingProviderCallsForTurn(record, activeSession, settledTurnId);
   retireProviderSockets(record, activeSession, { turnId: settledTurnId });
@@ -2488,8 +2498,8 @@ function addTemplateContext(record, activeSession, prompt) {
   }
 }
 
-function dispatchUserMessage(record, sock, msg, activeSession, messageAttachments = []) {
-  if (activeSession.planning.phase === 'awaiting-approval') {
+function dispatchUserMessage(record, sock, msg, activeSession, messageAttachments = [], discussionReady = false) {
+  if (activeSession.planning.phase === 'awaiting-approval' && !discussionReady) {
     const planId = activeSession.planning.latestPlan?.planId;
     if (!planId) {
       sendJson(sock, { v: 1, type: 'chat-error', code: 'PLAN_NOT_FOUND', message: 'The latest plan is unavailable; return to planning and present it again.' });
@@ -2498,14 +2508,18 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
     const hasAttachments = messageAttachments.length > 0
       || (Array.isArray(msg.stagedReferenceIds) && msg.stagedReferenceIds.length > 0);
     if (!hasAttachments && isExplicitImplementationApproval(msg.text)) {
-      void enqueueWorkflowTransition(record, activeSession, () => approveImplementationPlan(record, sock, { planId }))
+      void enqueueWorkflowTransition(record, activeSession, () => approveImplementationPlan(record, sock, { planId, documentRevision: msg.documentRevision }))
         .catch((error) => sendChatError(sock, error));
       return;
     }
     void enqueueWorkflowTransition(
       record,
       activeSession,
-      () => requestImplementationPlanChanges(record, sock, { planId, feedback: msg.text }),
+      async () => {
+        requireWorkflowSwitchBackend(activeSession);
+        await activeSession.backend.setExecutionMode(providerModeRequest(activeSession, 'awaiting-approval'));
+        if (record.agentSession === activeSession) dispatchUserMessage(record, sock, msg, activeSession, messageAttachments, true);
+      },
     )
       .catch((error) => sendChatError(sock, error));
     return;
@@ -2529,6 +2543,9 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
       // turn and a later message can start another turn on the same session
       // before the read completes, so session identity alone is insufficient.
       if (!providerTurnIsCurrent(record, providerTurn)) return;
+      if (activeSession.planning.phase === 'awaiting-approval') {
+        prompt = `The current plan remains open for review. Answer questions and research normally. If this message requests concrete changes to the plan, revise it directly with present_implementation_plan; do not ask the user to request a draft again. Never treat discussion as approval to edit the document.\n\nCurrent plan:\n${JSON.stringify(activeSession.planning.latestPlan.plan)}\n\n${prompt}`;
+      }
       activeSession.backend.sendUserMessage(addAgentInstructionsContext(addReopenedChatHistory(
         activeSession,
         addActiveDocumentContext(
@@ -2661,6 +2678,7 @@ async function startSession(
   if (continuing && currentSession.planning.workflow === workflow) {
     planning.phase = currentSession.planning.phase;
     planning.latestPlan = currentSession.planning.latestPlan;
+    planning.execution = currentSession.planning.execution ? structuredClone(currentSession.planning.execution) : null;
   }
   const generation = ++record.sessionGeneration;
   const providerRole = 'chat';
@@ -2735,6 +2753,10 @@ async function startSession(
     chatId: threadId,
     activeTemplateId: continuing ? currentSession.activeTemplateId : null,
     lastDocumentInfo: continuing ? currentSession.lastDocumentInfo : null,
+    lastObservedDocumentRevision: continuing ? currentSession.lastObservedDocumentRevision : undefined,
+    planExecutionTurnId: continuing ? currentSession.planExecutionTurnId : null,
+    planExecutionTurnSucceeded: continuing ? currentSession.planExecutionTurnSucceeded : false,
+    planReviewTurnId: continuing && currentSession.planning.workflow === workflow ? currentSession.planReviewTurnId : null,
     bootstrapHistory: normalizeChatHistory(requestedHistory),
     planning,
     workflowTransition: Promise.resolve(),
@@ -2865,6 +2887,7 @@ async function approveImplementationPlan(record, sock, msg) {
   const transition = activeSession.planning.beginApproval({
     planId: String(msg.planId ?? ''),
     sessionStatus: activeSession.status,
+    documentRevision: msg.documentRevision,
   });
   sendJson(sock, { v: 1, type: 'plan-approved', ...activeSession.planning.snapshot() });
   try {
@@ -2892,6 +2915,8 @@ async function approveImplementationPlan(record, sock, msg) {
     if (record.agentSession === activeSession) {
       if (activeSession.planning.phase === 'switching') {
         activeSession.planning.failSwitch(transition.approvedPlan.planId);
+      } else if (activeSession.planning.phase === 'implementing') {
+        activeSession.planning.settleExecution('blocked');
       }
       failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
       activeSession.status = 'idle';
@@ -2933,7 +2958,6 @@ async function requestImplementationPlanChanges(record, sock, msg, {
       planId,
       reason: bounded.reason || feedback || 'changes-requested',
       ...activeSession.planning.snapshot(),
-      latestPlan: null,
     });
     if (promptOverride) {
       beginAgentTurn(record, activeSession);
@@ -2948,7 +2972,8 @@ async function requestImplementationPlanChanges(record, sock, msg, {
       beginAgentTurn(record, activeSession);
       const revisionPrompt = [
         'The user requested changes, so the previous implementation plan is no longer authoritative.',
-        'Return to discovery: inspect the affected current state and evaluate the feedback. If it is ambiguous or changes an assumption, discuss it with the user and ask one focused question in normal chat instead of immediately presenting a replacement. If it is already concrete, do not invent a question; follow the planning checkpoint and presentation rules before presenting a complete replacement.',
+        'Re-read the affected document state and revise the plan directly from this feedback. Ask a focused question only if a missing answer blocks the revision. Present a complete replacement with present_implementation_plan and a concise changeSummary. The user does not need to ask you to draft it again.',
+        `Previous plan: ${JSON.stringify(activeSession.planning.latestPlan.plan)}`,
         `Feedback: ${feedback}`,
       ].join('\n\n');
       activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
@@ -3021,6 +3046,7 @@ async function setChatWorkflow(record, sock, msg) {
     throw error;
   }
   if (record.agentSession !== activeSession) return;
+  activeSession.planReviewTurnId = null;
   if (msg.workflow === 'direct') {
     const browserbaseCleaned = await record.browserbaseSession.cleanup('workflow changed to direct')
       .catch(() => false);
@@ -3444,6 +3470,29 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'chat-document-saved': {
       queuePlanningDocumentSaved(record, msg);
+      return;
+    }
+    case 'chat-plan-execution-result': {
+      const activeSession = record.agentSession;
+      try {
+        const rejectsPendingReview = msg.status === 'blocked'
+          && typeof msg.turnId === 'string' && msg.turnId === activeSession?.planReviewTurnId;
+        if (!activeSession || activeSession.planning.phase !== 'implementing'
+          || typeof msg.turnId !== 'string'
+          || (!rejectsPendingReview && (msg.turnId !== activeSession.planExecutionTurnId
+            || (activeSession.status !== 'idle' && activeSession.planning.execution?.status !== 'completed')))) {
+          throw workflowError('STALE_PLAN_EXECUTION', 'The execution result does not match the settled plan turn');
+        }
+        activeSession.planning.assertLatest(msg.planId);
+        if (['completed', 'awaiting-review'].includes(msg.status) && !activeSession.planExecutionTurnSucceeded) {
+          throw workflowError('PLAN_EXECUTION_FAILED', 'An unsuccessful provider turn cannot complete the plan');
+        }
+        activeSession.planning.acknowledgeExecution(msg.status);
+        activeSession.planReviewTurnId = msg.status === 'awaiting-review' ? msg.turnId : null;
+        sendJson(sock, { v: 1, type: 'plan-progress', ...activeSession.planning.snapshot() });
+      } catch (error) {
+        sendChatError(sock, error);
+      }
       return;
     }
     case 'skills-list': {
@@ -4108,6 +4157,11 @@ async function handleStudioMessage(record, sock, msg) {
         interruptedSession.status = 'idle';
         interruptedSession.turnId = null;
         interruptedSession.providerTurnStarted = false;
+        if (interruptedSession.planning.phase === 'implementing' && interruptedSession.planning.execution?.status !== 'completed') {
+          interruptedSession.planExecutionTurnSucceeded = false;
+          interruptedSession.planning.settleExecution('interrupted');
+          sendJson(sock, { v: 1, type: 'plan-progress', ...interruptedSession.planning.snapshot() });
+        }
         record.userQuestionResponseReceipts.clear();
       }
       return;
@@ -4183,6 +4237,11 @@ async function handleStudioMessage(record, sock, msg) {
               result = msg.result;
             }
             assertProviderTurn();
+            if (!entry.copyLayoutJobId && record.agentSession?.generation === entry.sessionGeneration
+              && toolDefinitionsByName.get(entry.tool)?.category === 'document-read'
+              && Number.isSafeInteger(result?.revision)) {
+              record.agentSession.lastObservedDocumentRevision = result.revision;
+            }
             if (entry.tool === 'get_document_info' && !entry.copyLayoutJobId
               && record.agentSession?.generation === entry.sessionGeneration) {
               record.agentSession.lastDocumentInfo = Object.freeze({
@@ -4360,6 +4419,10 @@ function handleMcpMessage(record, sock, msg) {
       try {
         args = toolArgSchema(tool, definition).parse(msg.args ?? {});
         definition.validate?.(args);
+        if ((tool === 'present_implementation_plan' || tool === 'update_plan_progress')
+          && (workerJob || sock.piSubagentId || sock.agentRole !== 'chat' || msg.parentTaskId)) {
+          throw workflowError('ROOT_INTERACTION_REQUIRED', 'Only the root conversation may manage the plan');
+        }
         if (!record.agentSession && !workerJob && tool !== 'read_product_skill') {
           throw workflowError('AGENT_NOT_STARTED', 'No active chat session');
         }
@@ -4808,7 +4871,8 @@ function handleMcpMessage(record, sock, msg) {
           return;
         }
         try {
-          const planRecord = record.agentSession.planning.present(args);
+          const planRecord = record.agentSession.planning.present(args, record.agentSession.lastObservedDocumentRevision);
+          record.agentSession.planReviewTurnId = null;
           sendJson(record.studioSocket, {
             v: 1,
             type: 'plan-ready',
@@ -4819,6 +4883,16 @@ function handleMcpMessage(record, sock, msg) {
           emitWorkflowState(record, { reason: 'plan-presented' });
           const { workflow, phase, capabilityEpoch } = record.agentSession.planning.snapshot();
           sendResult({ planId: planRecord.planId, workflow, phase, capabilityEpoch });
+        } catch (error) {
+          sendError(error);
+        }
+        return;
+      }
+      if (tool === 'update_plan_progress') {
+        try {
+          const snapshot = record.agentSession.planning.updateProgress(args);
+          sendJson(record.studioSocket, { v: 1, type: 'plan-progress', ...snapshot });
+          sendResult(snapshot);
         } catch (error) {
           sendError(error);
         }
@@ -5790,6 +5864,11 @@ httpServer.on('upgrade', (req, socket, head) => {
       });
       // welcome이 유휴 세션 fallback을 만들기 전에 권위 있는 최종 결과를 먼저 보낸다.
       // 전송 실패 시 다음 재연결에서 다시 시도할 수 있도록 결과를 보존한다.
+      if (record.agentSession?.planning.execution) {
+        // Checklist updates may have happened while Studio was disconnected.
+        // Its terminal handler must see that state before settling document edits.
+        sendJson(ws, { v: 1, type: 'plan-progress', ...record.agentSession.planning.snapshot() });
+      }
       replayMissedTurnEnd(record, ws, sendJson);
       sendJson(ws, {
         v: 1,
