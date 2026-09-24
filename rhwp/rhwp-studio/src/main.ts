@@ -30,6 +30,7 @@ import { loadExtensionViewerSettings, type ExtensionViewerSettings } from '@/cor
 import { CommandRegistry } from '@/command/registry';
 import { CommandDispatcher } from '@/command/dispatcher';
 import { defaultShortcuts, matchShortcut } from '@/command/shortcut-map';
+import { detectPlatformKind } from '@/engine/navigation-keymap';
 import { allowsDocumentShortcut, isEditorInput, ownsTextInput } from '@/command/shortcut-target';
 import type { EditorContext, CommandServices, EditorEditMode } from '@/command/types';
 import {
@@ -279,6 +280,7 @@ if (import.meta.env.DEV) {
 }
 let canvasView: CanvasView | null = null;
 let inputHandler: InputHandler | null = null;
+let commandPalette: CommandPalette | null = null;
 let toolbar: Toolbar | null = null;
 let ruler: Ruler | null = null;
 let rendererSession: RendererSession | null = null;
@@ -1106,7 +1108,16 @@ async function initialize(): Promise<void> {
     // InputHandler에 커맨드 디스패처 및 컨텍스트 메뉴 주입
     inputHandler.setDispatcher(dispatcher);
     inputHandler.setContextMenu(new ContextMenu(dispatcher, registry));
-    inputHandler.setCommandPalette(new CommandPalette(registry, dispatcher));
+    commandPalette = new CommandPalette(registry, dispatcher);
+    inputHandler.setCommandPalette(commandPalette);
+    const commandSearch = document.getElementById('editor-command-search');
+    if (commandSearch) {
+      const shortcutLabel = detectPlatformKind() === 'mac' ? '⌘/' : 'Ctrl+/';
+      const shortcut = commandSearch.querySelector('kbd');
+      if (shortcut) shortcut.textContent = shortcutLabel;
+      commandSearch.title = `명령 검색 (${shortcutLabel})`;
+      commandSearch.addEventListener('click', () => commandPalette?.open());
+    }
     inputHandler.setCellSelectionRenderer(
       new CellSelectionRenderer(container, canvasView.getVirtualScroll()),
     );
@@ -1133,6 +1144,12 @@ async function initialize(): Promise<void> {
         e.preventDefault();
         const cmd = (btn as HTMLElement).dataset.cmd;
         if (cmd) dispatcher.dispatch(cmd, { anchorEl: btn as HTMLElement });
+      });
+      (btn as HTMLElement).addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        const cmd = (btn as HTMLElement).dataset.cmd;
+        if (cmd && dispatcher.isEnabled(cmd)) dispatcher.dispatch(cmd, { anchorEl: btn as HTMLElement });
       });
     });
 
@@ -1359,6 +1376,16 @@ async function initialize(): Promise<void> {
  * 예: 문서 미로드 상태에서도 Alt+N(새 문서), Ctrl+O(열기) 등.
  */
 function setupGlobalShortcuts(): void {
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey
+      || e.key !== '/'
+      || e.isComposing || e.defaultPrevented) return;
+    const target = e.target instanceof Element ? e.target : null;
+    if (!allowsDocumentShortcut(target)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    commandPalette?.open();
+  }, true);
   document.addEventListener('keydown', (e) => {
     const target = e.target instanceof Element ? e.target : null;
     if (e.defaultPrevented || e.isComposing || !allowsDocumentShortcut(target)) return;
@@ -1689,6 +1716,11 @@ function setupEventListeners(): void {
     });
     defaultTbGroups.forEach((element) => {
       element.style.display = mode === 'default' ? '' : 'none';
+    });
+    document.querySelectorAll<HTMLButtonElement>(
+      '#icon-toolbar > .tb-group:not(.tb-mode-group) .tb-btn[data-cmd]',
+    ).forEach((button) => {
+      button.disabled = !dispatcher.isEnabled(button.dataset.cmd ?? '');
     });
     modeGroups.forEach((group) => {
       group.style.display = group.dataset.toolbarMode === mode ? '' : 'none';

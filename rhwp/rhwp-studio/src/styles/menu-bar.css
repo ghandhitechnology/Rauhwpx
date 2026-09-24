@@ -244,6 +244,7 @@ html.desktop-mac #menu-bar .menu-title {
   z-index: 1001;
 }
 
-.md-sub:not(.disabled):hover > .md-sub-panel {
+.md-sub:not(.disabled):hover > .md-sub-panel,
+.md-sub:not(.disabled):focus-within > .md-sub-panel {
   display: block;
 }
