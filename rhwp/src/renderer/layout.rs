@@ -3326,6 +3326,19 @@ impl LayoutEngine {
         } else {
             0.0
         };
+        // 혼합 footer(그림·표·도형)는 `reliable_band_height`와 별개다. 그 플래그는
+        // TAC 그림은 줄 높이에 넣는 쪽을 허용하지만, #7333 로고·rule은 Paper 그림이라
+        // 저장 줄 grid 선행 여백이 필요하다.
+        let text_only_footer = !hf_paragraphs.is_empty()
+            && hf_paragraphs.iter().all(|para| {
+                !para.line_segs.is_empty()
+                    && !para.controls.iter().any(|c| {
+                        matches!(
+                            c,
+                            Control::Table(_) | Control::Shape(_) | Control::Picture(_)
+                        )
+                    })
+            });
         // HWP5의 그림 혼합 footer는 저장 LINE_SEG가 footer 안 줄 grid를 완전히
         // 표현한다. `BOTTOM` subList에서 첫 줄의 vpos는 0이지만, 한컴은 첫 줄의
         // line_spacing을 footer 원점 뒤의 선행 여백으로 쓴다. 그림을 포함했다는
