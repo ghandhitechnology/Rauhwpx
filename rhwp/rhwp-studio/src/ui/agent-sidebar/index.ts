@@ -684,9 +684,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let conversationScrollRaf: number | null = null;
   let conversationScrollTargetNode: HTMLElement | null = null;
   let conversationScrollSmooth = false;
-  let conversationScrollLastFrame = 0;
+  let conversationScrollStart = 0;
+  let conversationScrollFrom = 0;
+  let conversationScrollTo = 0;
   let conversationScrollLock = false;
   let conversationScrollUnlock: number | null = null;
+  let conversationScrollPaused = false;
+  let conversationLastScrollTop = 0;
   let replyPending = false;
   /** 편대 카드가 대신 나타내는 스폰 도구 호출 — 결과 행도 함께 접는다. */
   const suppressedSpawnCalls = new Set<string>();
@@ -2880,11 +2884,26 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   turnPending.append(createHieumGlyph(), turnPendingLabel);
   messages.append(turnPending, messagesEnd);
   const onMessagesScroll = (): void => {
+    const previousTop = conversationLastScrollTop;
+    conversationLastScrollTop = messages.scrollTop;
     if (conversationScrollLock) return;
+    if (conversationScrollPaused) {
+      // 현재 턴으로 다시 내려오면 새 출력을 따라간다.
+      if (messages.scrollTop > previousTop && isConversationFollowingTurn()) {
+        conversationScrollPaused = false;
+        followConversation = true;
+      }
+      return;
+    }
     followConversation = isConversationFollowingTurn();
   };
   const onMessagesWheel = (event: WheelEvent): void => {
-    if (event.deltaY < 0) stopFollowingConversation();
+    if (event.deltaY === 0) return;
+    stopFollowingConversation();
+    if (event.deltaY > 0 && isConversationFollowingTurn()) {
+      conversationScrollPaused = false;
+      followConversation = true;
+    }
   };
   let messagesTouchStartY: number | null = null;
   const onMessagesTouchStart = (event: TouchEvent): void => {
@@ -2892,7 +2911,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   };
   const onMessagesTouchMove = (event: TouchEvent): void => {
     const y = event.touches[0]?.clientY;
-    if (y !== undefined && messagesTouchStartY !== null && y - messagesTouchStartY > 6) {
+    if (y !== undefined && messagesTouchStartY !== null && Math.abs(y - messagesTouchStartY) > 6) {
       stopFollowingConversation();
     }
   };
@@ -5171,7 +5190,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const bubble = pendingAssistantBubble;
     pendingAssistantBubble = null;
     if (!bubble) return;
-    renderAssistantMessage(bubble, assistantBubbleSources.get(bubble) ?? '');
+    withAutoScroll(() => renderAssistantMessage(bubble, assistantBubbleSources.get(bubble) ?? ''));
   }
 
   function scheduleAssistantRender(bubble: HTMLElement, text: string): void {
@@ -5182,7 +5201,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       assistantRenderFrame = null;
       const pending = pendingAssistantBubble;
       pendingAssistantBubble = null;
-      if (pending) renderAssistantMessage(pending, assistantBubbleSources.get(pending) ?? '');
+      if (pending) withAutoScroll(() => renderAssistantMessage(pending, assistantBubbleSources.get(pending) ?? ''));
     });
   }
 
@@ -5231,6 +5250,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     head.type = 'button';
     head.setAttribute('aria-expanded', 'false');
     const status = el('span', `ag-tool-status ${tool.status === 'completed' ? 'ag-ok' : 'ag-err'}`);
+    status.setAttribute('role', 'img');
+    status.setAttribute('aria-label', tool.status === 'completed' ? '완료' : '오류');
     status.appendChild(createIcon(tool.status === 'completed' ? 'check' : 'close'));
     const name = el('span', 'ag-tool-name', tool.tool);
     const summary = el('span', 'ag-tool-summary', truncate(tool.argsJson, 60));
@@ -6396,13 +6417,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function cancelConversationScroll(): void {
     conversationScrollTargetNode = null;
     conversationScrollSmooth = false;
-    conversationScrollLastFrame = 0;
+    conversationScrollStart = 0;
     if (conversationScrollRaf !== null) window.cancelAnimationFrame(conversationScrollRaf);
     conversationScrollRaf = null;
   }
 
   function stopFollowingConversation(): void {
     followConversation = false;
+    conversationScrollPaused = true;
+    conversationLastScrollTop = messages.scrollTop;
     cancelConversationScroll();
     conversationScrollLock = false;
     if (conversationScrollUnlock !== null) {
@@ -6419,32 +6442,41 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       return;
     }
 
-    const target = conversationScrollTarget(node);
-    const distance = target - messages.scrollTop;
-    if (!conversationScrollSmooth || Math.abs(distance) <= 1) {
+    if (!conversationScrollSmooth) {
       lockConversationScroll(80);
-      messages.scrollTop = target;
+      messages.scrollTop = conversationScrollTarget(node);
       conversationScrollTargetNode = null;
-      conversationScrollLastFrame = 0;
       return;
     }
-
-    const elapsed = conversationScrollLastFrame === 0
-      ? 16
-      : Math.min(32, Math.max(8, now - conversationScrollLastFrame));
-    conversationScrollLastFrame = now;
-    const progress = 1 - Math.exp(-elapsed / 90);
+    // 전송 때만 고정된 위치로 짧게 이동한다. 스트리밍 중에는 새 높이에
+    // 바로 맞춰 매 토큰마다 움직이는 목표를 뒤쫓지 않는다.
+    const progress = Math.min(1, (now - conversationScrollStart) / 260);
+    const eased = 1 - (1 - progress) ** 4;
     lockConversationScroll(80);
-    messages.scrollTop += distance * progress;
+    messages.scrollTop = conversationScrollFrom + (conversationScrollTo - conversationScrollFrom) * eased;
+    if (progress === 1) {
+      conversationScrollTargetNode = null;
+      conversationScrollSmooth = false;
+      conversationScrollStart = 0;
+      return;
+    }
     conversationScrollRaf = window.requestAnimationFrame(animateConversationScroll);
   }
 
   function scrollConversationToMessage(node: HTMLElement, opts?: { smooth?: boolean }): void {
+    if (conversationScrollSmooth && conversationScrollTargetNode === node && opts?.smooth !== true) return;
     followConversation = true;
+    conversationScrollPaused = false;
     syncConversationSpacer();
     const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const smooth = opts?.smooth === true && !reduce;
+    if (smooth && (!conversationScrollSmooth || conversationScrollTargetNode !== node)) {
+      conversationScrollStart = performance.now();
+      conversationScrollFrom = messages.scrollTop;
+      conversationScrollTo = conversationScrollTarget(node);
+    }
     conversationScrollTargetNode = node;
-    conversationScrollSmooth = opts?.smooth !== false && !reduce;
+    conversationScrollSmooth = smooth;
     if (conversationScrollRaf === null) conversationScrollRaf = window.requestAnimationFrame(animateConversationScroll);
   }
 
@@ -6467,24 +6499,27 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       return;
     }
     followConversation = true;
+    conversationScrollPaused = false;
     syncConversationSpacer();
   }
 
   /** 새 출력은 따라가되, 사용자가 위로 스크롤하면 현재 위치를 존중한다. */
   function withAutoScroll(mutate: () => void): void {
-    const shouldFollow = followConversation || isConversationFollowingTurn();
+    const shouldFollow = followConversation || (!conversationScrollPaused && isConversationFollowingTurn());
     mutate();
     if (shouldFollow) scrollConversationToEnd();
   }
 
   /** 실행 중인 도구 내역은 높이를 늘리지 않고 항상 최신 단계를 보여준다. */
-  function scrollActivityToLatest(content: HTMLElement): void {
+  function isActivityFollowingLatest(content: HTMLElement): boolean {
+    return content.scrollHeight - content.scrollTop - content.clientHeight <= 48;
+  }
+
+  function scrollActivityToLatest(content: HTMLElement, force = false): void {
+    const scrollTop = content.scrollTop;
     window.requestAnimationFrame(() => {
-      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      content.scrollTo({
-        top: content.scrollHeight,
-        behavior: reduce ? 'auto' : 'smooth',
-      });
+      if (!content.isConnected || (!force && content.scrollTop !== scrollTop)) return;
+      content.scrollTop = content.scrollHeight;
     });
   }
 
@@ -6527,24 +6562,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     return bubble;
   }
 
-  function animateActivityLabel(
+  function setActivityLabel(
     activity: TurnActivityState,
     text: string,
   ): void {
     if (activity.label.textContent === text) return;
     activity.label.textContent = text;
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    for (const animation of activity.label.getAnimations()) animation.cancel();
-    activity.label.animate(
-      [
-        { opacity: 0.35, transform: 'translateY(3px)' },
-        { opacity: 1, transform: 'translateY(0)' },
-      ],
-      {
-        duration: 200,
-        easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
-      },
-    );
   }
 
   /** 로그 행용 짧은 소요 시간 — 1초 미만은 ms, 그 위는 s. 폭이 흔들리지 않게 짧게. */
@@ -6575,10 +6598,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     activity.settled = true;
     const duration = formatActivityDuration(activity.startedAt);
     if (activity.failedToolCount > 0) {
-      animateActivityLabel(activity, `도구 호출 · ${activity.failedToolCount}개 오류 · ${duration}`);
+      setActivityLabel(activity, `도구 호출 · ${activity.failedToolCount}개 오류 · ${duration}`);
       activity.root.classList.add('ag-activity-error');
     } else {
-      animateActivityLabel(activity, `도구 호출 · ${activity.toolCount}개 완료 · ${duration}`);
+      setActivityLabel(activity, `도구 호출 · ${activity.toolCount}개 완료 · ${duration}`);
       activity.root.classList.add('ag-activity-complete');
     }
     activity.root.classList.remove('ag-activity-running');
@@ -6845,7 +6868,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       if (!collapsed) {
         // 도구 기록을 펼치면 편대 팝업은 접는다 — 살아 있는 기록은 한 번에 하나만 펼친다.
         fleetView.closePopup();
-        scrollActivityToLatest(content);
+        scrollActivityToLatest(content, true);
         if (followConversation) scrollConversationToEnd();
       }
     });
@@ -6916,7 +6939,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     activity.toolCount += 1;
     activity.activeTools.set(evt.callId, evt.tool);
     turnToolCount += 1;
-    animateActivityLabel(activity, activeToolLabel(activity));
+    setActivityLabel(activity, activeToolLabel(activity));
 
     const row = el('div', `ag-tool-row ag-${evt.agent}`);
     const head = el('button', 'ag-tool-head');
@@ -6925,7 +6948,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     // 로그 행의 주소: 왼쪽 거터의 op 번호 → 상태 → 도구 이름 → 인자 → 소요 시간.
     const opId = el('span', 'ag-op-id', String(activity.toolCount).padStart(2, '0'));
     opId.setAttribute('aria-hidden', 'true');
-    const status = el('span', 'ag-tool-status ag-spin');
+    const status = el('span', 'ag-tool-status ag-pending');
+    status.setAttribute('role', 'img');
+    status.setAttribute('aria-label', '실행 중');
     const name = el('span', 'ag-tool-name', evt.tool);
     const summary = el('span', 'ag-tool-summary', truncate(evt.argsJson, 60));
     const elapsed = el('span', 'ag-tool-elapsed');
@@ -6945,8 +6970,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     });
 
     row.append(head, body);
+    const followActivity = isActivityFollowingLatest(activity.content);
     withAutoScroll(() => activity.content.appendChild(row));
-    scrollActivityToLatest(activity.content);
+    if (followActivity) scrollActivityToLatest(activity.content);
     toolRows.set(evt.callId, {
       status,
       result,
@@ -6962,9 +6988,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function resolveToolRow(evt: Extract<AgentStreamEvent, { type: 'tool-result' }>): void {
     const entry = toolRows.get(evt.callId);
     if (!entry) return;
+    const followActivity = isActivityFollowingLatest(entry.scroller);
     toolRows.delete(evt.callId);
-    entry.status.classList.remove('ag-spin');
+    entry.status.classList.remove('ag-pending');
     entry.status.classList.add(evt.ok ? 'ag-ok' : 'ag-err');
+    entry.status.setAttribute('aria-label', evt.ok ? '완료' : '오류');
     entry.status.replaceChildren(createIcon(evt.ok ? 'check' : 'close'));
     entry.elapsed.textContent = formatElapsed(entry.startedAt);
     entry.result.textContent = evt.resultPreview;
@@ -6973,9 +7001,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       entry.activity.failedToolCount += 1;
       turnFailedToolCount += 1;
     }
-    animateActivityLabel(entry.activity, activeToolLabel(entry.activity));
+    setActivityLabel(entry.activity, activeToolLabel(entry.activity));
     settleActivity(entry.activity);
-    scrollActivityToLatest(entry.scroller);
+    if (followActivity) scrollActivityToLatest(entry.scroller);
   }
 
   /**
@@ -6985,8 +7013,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function sweepUnresolvedToolRows(): void {
     const touchedActivities = new Set<TurnActivityState>();
     for (const [callId, entry] of toolRows) {
-      entry.status.classList.remove('ag-spin');
+      entry.status.classList.remove('ag-pending');
       entry.status.classList.add('ag-err');
+      entry.status.setAttribute('aria-label', '중단');
       entry.status.replaceChildren(createIcon('close'));
       if (!entry.elapsed.textContent) entry.elapsed.textContent = '중단';
       if (!entry.result.textContent) entry.result.textContent = '(결과 없이 종료됨)';
@@ -6997,7 +7026,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     toolRows.clear();
     for (const activity of touchedActivities) {
-      animateActivityLabel(activity, activeToolLabel(activity));
+      setActivityLabel(activity, activeToolLabel(activity));
       settleActivity(activity);
     }
   }
@@ -7033,15 +7062,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         // 서브에이전트가 낸 텍스트는 그 행의 근황일 뿐, 루트 답변 버퍼에 섞이지 않는다.
         if (event.parentTaskId) recordTaskText(event.parentTaskId, event.text);
         if (event.parentTaskId && fleetView.routeTextDelta(event)) break;
-        if (!streamBubble && turnActivity) closeCurrentActivityGroup();
-        const bubble = streamBubble ?? openAssistantBubble(event.agent);
         assistantBuffer += event.text;
-        withAutoScroll(() => {
-          if (!bubble.classList.contains('ag-msg-enter')) {
+        if (!assistantBuffer.trim()) break;
+        if (!streamBubble && turnActivity) closeCurrentActivityGroup();
+        if (!streamBubble) {
+          const bubble = openAssistantBubble(event.agent);
+          withAutoScroll(() => {
+            renderAssistantMessage(bubble, assistantBuffer);
             bubble.classList.add('ag-msg-enter');
-          }
-          scheduleAssistantRender(bubble, assistantBuffer);
-        });
+          });
+        } else {
+          scheduleAssistantRender(streamBubble, assistantBuffer);
+        }
         break;
       }
       case 'tool-call': {

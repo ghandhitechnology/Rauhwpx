@@ -357,6 +357,43 @@ try {
       );
     },
   );
+  await step('Chat follows a send and yields to manual scrolling', async () => {
+    await open('scenario=chat&hold=1');
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'no-preference' }]);
+    await page.evaluate(() => {
+      const messages = document.querySelector('.ag-messages');
+      const history = document.createElement('div');
+      history.style.minHeight = '1200px';
+      messages.insertBefore(history, messages.querySelector('.ag-messages-end'));
+    });
+    await page.waitForFunction(() => document.querySelector('.ag-messages').scrollTop > 200);
+    await page.$eval('.ag-messages', (messages) => { messages.scrollTop = 0; });
+    await page.click('#play');
+    await page.waitForFunction(() => document.querySelector('.ag-messages').scrollTop > 400);
+    const messages = await page.$('.ag-messages');
+    const box = await messages.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    const followedTop = await messages.evaluate((node) => node.scrollTop);
+    await page.mouse.wheel({ deltaY: -350 });
+    await page.waitForFunction((top) => document.querySelector('.ag-messages').scrollTop < top - 80, {}, followedTop);
+    const pausedTop = await messages.evaluate((node) => node.scrollTop);
+    await page.waitForFunction(() => document.querySelector('.ag-messages').textContent.includes('필요한 부분을 선택'));
+    assert(Math.abs((await messages.evaluate((node) => node.scrollTop)) - pausedTop) < 4);
+    await page.mouse.wheel({ deltaY: 1800 });
+    await page.waitForFunction(() => {
+      const node = document.querySelector('.ag-messages');
+      return node.scrollHeight - node.scrollTop - node.clientHeight < 4;
+    });
+    const resumedTop = await messages.evaluate((node) => node.scrollTop);
+    await page.evaluate(() => {
+      const messages = document.querySelector('.ag-messages');
+      const more = document.createElement('div');
+      more.style.minHeight = '200px';
+      messages.insertBefore(more, messages.querySelector('.ag-messages-end'));
+    });
+    await page.waitForFunction((top) => document.querySelector('.ag-messages').scrollTop > top + 100, {}, resumedTop);
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
+  });
   await step('Provider, model and effort changes after the first reply', async () => {
     await play('chat');
     const messageCount = await page.$$eval('.ag-msg-user', (nodes) => nodes.length);

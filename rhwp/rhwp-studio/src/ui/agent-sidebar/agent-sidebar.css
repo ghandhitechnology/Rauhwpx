@@ -143,6 +143,9 @@ body.ag-sidebar-animating .ag-root {
   isolation: isolate;
   contain: layout style;
   transition: transform var(--ag-dur-slow) var(--ag-spring-edge);
+}
+
+body.ag-sidebar-animating .ag-root {
   will-change: transform;
 }
 
@@ -2725,6 +2728,22 @@ button.ag-skill-copy {
   animation: ag-message-arrive var(--ag-dur-slow) var(--ag-ease-out) both;
 }
 
+/* 첫 답변은 읽을 수 있는 상태로 짧게 자리 잡는다. */
+.ag-msg-assistant.ag-msg-enter {
+  animation: ag-assistant-arrive var(--ag-dur-fast) var(--ag-motion-out) both;
+}
+
+@keyframes ag-assistant-arrive {
+  from {
+    opacity: 0.72;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @keyframes ag-message-arrive {
   from {
     opacity: 0;
@@ -2814,7 +2833,6 @@ button.ag-skill-copy {
   border-radius: var(--ag-r-field);
   background: color-mix(in srgb, var(--ag-bg-2) 68%, transparent);
   overflow: hidden;
-  animation: ag-activity-arrive var(--ag-dur-base) var(--ag-motion-out) both;
 }
 
 @keyframes ag-activity-arrive {
@@ -2847,6 +2865,7 @@ button.ag-skill-copy {
   line-height: 1;
   text-align: left;
   cursor: pointer;
+  transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-activity-toggle::before {
@@ -2868,6 +2887,7 @@ button.ag-skill-copy {
 
 .ag-activity-toggle:hover {
   color: var(--ag-text);
+  background: var(--ag-hover);
 }
 
 .ag-activity-toggle:focus-visible {
@@ -2901,7 +2921,7 @@ button.ag-skill-copy {
   height: 12px;
   color: currentColor;
   transform: rotate(180deg);
-  transition: transform var(--ag-dur-base) var(--ag-ease-out);
+  transition: transform var(--ag-dur-base) var(--ag-spring-edge);
 }
 
 .ag-activity-collapsed .ag-activity-chevron {
@@ -2912,17 +2932,14 @@ button.ag-skill-copy {
   display: grid;
   grid-template-rows: 1fr;
   opacity: 1;
-  transform: translateY(0);
   transition:
-    grid-template-rows var(--ag-dur-slow) var(--ag-spring-soft),
-    opacity var(--ag-dur-base) var(--ag-motion-out),
-    transform var(--ag-dur-slow) var(--ag-motion-out);
+    grid-template-rows var(--ag-dur-base) var(--ag-spring-edge),
+    opacity var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-activity-collapsed .ag-activity-collapse {
   grid-template-rows: 0fr;
   opacity: 0;
-  transform: translateY(-5px);
 }
 
 .ag-activity-content {
@@ -2960,7 +2977,6 @@ button.ag-skill-copy {
   background: transparent;
   font-size: var(--font-size-base, 12px);
   overflow: hidden;
-  animation: ag-step-arrive var(--ag-dur-slow) var(--ag-motion-out) both;
 }
 
 @keyframes ag-step-arrive {
@@ -2991,6 +3007,7 @@ button.ag-skill-copy {
   text-align: left;
   cursor: pointer;
   user-select: none;
+  transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-tool-head:hover .ag-op-id {
@@ -3003,7 +3020,7 @@ button.ag-skill-copy {
 
 .ag-tool-head:hover {
   color: var(--ag-text);
-  background: transparent;
+  background: var(--ag-hover);
 }
 
 .ag-tool-head:focus-visible {
@@ -3027,55 +3044,18 @@ button.ag-skill-copy {
 
 .ag-tool-status.ag-ok {
   color: var(--ag-ok);
-  animation: ag-status-settle var(--ag-dur-base) var(--ag-motion-out) both;
 }
 
 .ag-tool-status.ag-err {
   color: var(--ag-err);
-  animation: ag-status-settle var(--ag-dur-base) var(--ag-motion-out) both;
 }
 
-@keyframes ag-status-settle {
-  from {
-    opacity: 0.25;
-    transform: scale(0.55);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-.ag-spin {
-  position: relative;
-  width: 10px;
-  height: 10px;
-  border: none;
-  border-radius: 50%;
-}
-
-.ag-spin::before {
+.ag-tool-status.ag-pending::before {
   content: '';
-  position: absolute;
-  inset: 0;
-  border: 1.5px solid var(--ag-border);
-  border-top-color: var(--ag-accent);
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  animation: ag-rotate 0.95s linear infinite;
-}
-
-@keyframes ag-rotate {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ag-spin::before {
-    animation: none;
-    border-top-color: var(--ag-border);
-    opacity: 0.7;
-  }
+  background: var(--ag-run);
 }
 
 .ag-tool-name {
@@ -3119,6 +3099,7 @@ button.ag-skill-copy {
   height: 11px;
   color: var(--ag-text-muted);
   transform: rotate(0deg);
+  transition: transform var(--ag-dur-base) var(--ag-spring-edge);
 }
 
 .ag-tool-open .ag-tool-chevron {
@@ -3198,7 +3179,8 @@ button.ag-skill-copy {
 
   .ag-activity-collapse,
   .ag-activity-chevron,
-  .ag-tool-chevron {
+  .ag-tool-chevron,
+  .ag-tool-body {
     transition: none;
   }
 }
@@ -4411,108 +4393,6 @@ button.ag-skill-copy {
   display: block;
   flex: 0 0 auto;
   overflow: visible;
-}
-
-.ag-hieum-top,
-.ag-hieum-mid,
-.ag-hieum-ring {
-  transform-box: fill-box;
-  transform-origin: center;
-}
-
-.ag-turn-pending:not([hidden]) .ag-hieum-top {
-  animation: ag-hieum-top 5.8s linear infinite;
-}
-
-.ag-turn-pending:not([hidden]) .ag-hieum-mid {
-  animation: ag-hieum-mid 5.8s linear infinite;
-}
-
-.ag-turn-pending:not([hidden]) .ag-hieum-ring {
-  animation: ag-hieum-ring 5.8s linear infinite;
-}
-
-@keyframes ag-hieum-top {
-  0%, 100% { transform: translate(0, 0) scaleX(1) rotate(0deg); stroke-width: 1; }
-  6% { transform: translate(-0.12px, 0.08px) scaleX(1.04) rotate(-1.4deg); }
-  12% { transform: translate(-0.16px, 0.55px) scaleX(1.2) rotate(-2deg); }
-  18% { transform: translate(-0.1px, 2.4px) scaleX(1.65) rotate(-1.6deg); stroke-width: 0.94; }
-  22% { transform: translate(0.08px, 4.2px) scaleX(2.15) rotate(0.6deg); }
-  26% { transform: translate(0.06px, 4.62px) scaleX(2.34) rotate(1.1deg); stroke-width: 0.82; }
-  30% { transform: translate(-0.04px, 4.22px) scaleX(2.18) rotate(-0.5deg); stroke-width: 0.95; }
-  34% { transform: translate(0, 4.4px) scaleX(2.26) rotate(0deg); stroke-width: 1; }
-  40% { transform: translate(0.16px, 5.15px) scaleX(1.85) rotate(1.8deg); }
-  46% { transform: translate(0.14px, 6.7px) scaleX(1.2) rotate(2.2deg); }
-  51% { transform: translate(0.06px, 7.48px) scaleX(0.92) rotate(1.1deg); stroke-width: 1.06; }
-  55% { transform: translate(0, 7.25px) scaleX(1) rotate(0.3deg); stroke-width: 1; }
-  60% { transform: translate(0, 7.25px) scaleX(1) rotate(0deg); }
-  66% { transform: translate(-0.14px, 6.05px) scaleX(1.45) rotate(-1.6deg); }
-  72% { transform: translate(0.08px, 4.62px) scaleX(2.34) rotate(0.9deg); stroke-width: 0.82; }
-  76% { transform: translate(-0.04px, 4.22px) scaleX(2.18) rotate(-0.4deg); }
-  80% { transform: translate(0, 4.4px) scaleX(2.26) rotate(0deg); stroke-width: 1; }
-  86% { transform: translate(0.14px, 2.1px) scaleX(1.45) rotate(1.9deg); }
-  92% { transform: translate(-0.08px, -0.16px) scaleX(0.94) rotate(-0.8deg); stroke-width: 1.05; }
-  96% { transform: translate(0.04px, 0.06px) scaleX(1.02) rotate(0.45deg); }
-}
-
-@keyframes ag-hieum-mid {
-  0%, 100% { transform: translate(0, 0) scaleX(1) rotate(0deg); stroke-width: 1; }
-  8% { transform: translate(0.06px, 0.1px) scaleX(1.01) rotate(0.7deg); }
-  16% { transform: translate(0.1px, 0.85px) scaleX(1.03) rotate(1.3deg); }
-  24% { transform: translate(0.08px, 2.15px) scaleX(1.08) rotate(1.6deg); stroke-width: 1.1; }
-  28% { transform: translate(-0.08px, 2.55px) scaleX(1.14) rotate(-0.8deg); stroke-width: 1.18; }
-  34% { transform: translate(0.04px, 2.3px) scaleX(1.06) rotate(0.4deg); stroke-width: 1.12; }
-  38% { transform: translate(0, 2.35px) scaleX(1.08) rotate(0deg); stroke-width: 1.14; }
-  46% { transform: translate(-0.12px, 2.62px) scaleX(1.05) rotate(-1.4deg); }
-  52% { transform: translate(0.08px, 2.92px) scaleX(0.97) rotate(0.9deg); stroke-width: 1.04; }
-  56% { transform: translate(-0.03px, 2.72px) scaleX(1.01) rotate(-0.25deg); }
-  60% { transform: translate(0, 2.75px) scaleX(1) rotate(0deg); stroke-width: 1; }
-  68% { transform: translate(0.12px, 2.6px) scaleX(1.04) rotate(1.2deg); }
-  74% { transform: translate(-0.08px, 2.55px) scaleX(1.14) rotate(-0.7deg); stroke-width: 1.18; }
-  80% { transform: translate(0, 2.35px) scaleX(1.08) rotate(0deg); stroke-width: 1.14; }
-  88% { transform: translate(-0.1px, 0.7px) scaleX(1.03) rotate(-1.1deg); }
-  94% { transform: translate(0.05px, -0.08px) scaleX(0.99) rotate(0.5deg); }
-  98% { transform: translate(-0.02px, 0.03px) scaleX(1.005) rotate(-0.15deg); }
-}
-
-@keyframes ag-hieum-ring {
-  0%, 100% { transform: translate(0, 0) scale(1, 1) rotate(0deg); stroke-width: 1; }
-  6% { transform: translate(0.1px, -0.08px) scale(1.02, 0.96) rotate(1.2deg); }
-  12% { transform: translate(0.16px, -0.35px) scale(1.06, 0.86) rotate(2.4deg); }
-  18% { transform: translate(0.12px, -1.15px) scale(1.14, 0.55) rotate(3.2deg); stroke-width: 0.94; }
-  24% { transform: translate(-0.06px, -2.15px) scale(1.2, 0.22) rotate(1.1deg); }
-  28% { transform: translate(-0.08px, -2.36px) scale(1.26, 0.14) rotate(-0.8deg); stroke-width: 0.82; }
-  32% { transform: translate(0.04px, -2.08px) scale(1.14, 0.22) rotate(0.5deg); }
-  36% { transform: translate(0, -2.2px) scale(1.2, 0.17) rotate(0deg); stroke-width: 1; }
-  42% { transform: translate(-0.16px, -3.25px) scale(1.06, 0.48) rotate(-2.4deg); }
-  48% { transform: translate(-0.14px, -4.7px) scale(0.92, 0.7) rotate(-3.1deg); }
-  53% { transform: translate(-0.06px, -5.36px) scale(0.84, 0.92) rotate(-1.2deg); stroke-width: 1.06; }
-  57% { transform: translate(0.03px, -5.16px) scale(0.89, 0.86) rotate(0.4deg); }
-  60% { transform: translate(0, -5.2px) scale(0.88, 0.88) rotate(0deg); stroke-width: 1; }
-  66% { transform: translate(0.14px, -4.05px) scale(0.98, 0.5) rotate(2.2deg); }
-  72% { transform: translate(-0.08px, -2.36px) scale(1.26, 0.14) rotate(-0.7deg); stroke-width: 0.82; }
-  76% { transform: translate(0.04px, -2.08px) scale(1.14, 0.22) rotate(0.4deg); }
-  80% { transform: translate(0, -2.2px) scale(1.2, 0.17) rotate(0deg); stroke-width: 1; }
-  86% { transform: translate(-0.14px, -0.7px) scale(1.08, 0.7) rotate(-2.6deg); }
-  92% { transform: translate(0.08px, 0.16px) scale(0.96, 1.08) rotate(1.1deg); stroke-width: 1.05; }
-  96% { transform: translate(-0.04px, -0.05px) scale(1.02, 0.98) rotate(-0.4deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ag-turn-pending:not([hidden]) .ag-hieum-top,
-  .ag-turn-pending:not([hidden]) .ag-hieum-mid,
-  .ag-turn-pending:not([hidden]) .ag-hieum-ring {
-    animation: none;
-  }
-
-  .ag-turn-pending:not([hidden]) .ag-hieum {
-    animation: ag-hieum-quiet 2.6s cubic-bezier(0.65, 0, 0.35, 1) infinite;
-  }
-}
-
-@keyframes ag-hieum-quiet {
-  0%, 100% { opacity: 0.72; }
-  50% { opacity: 1; }
 }
 
 .ag-composer-overlay:not(.ag-has-activity) {
