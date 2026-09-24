@@ -6,7 +6,7 @@ import { formatShortcutLabel } from '@/engine/navigation-keymap';
 /**
  * `/` 커맨드 팔레트
  *
- * 편집 영역에서 `/` 키를 누르면 열리는 검색형 커맨드 실행창.
+ * Ctrl/Cmd+/ 또는 메뉴 행의 검색 버튼으로 여는 명령 실행창.
  * Notion/Linear/GitHub 패턴: 한글/영문 레이블 + 단축키로 필터링.
  */
 export class CommandPalette {
@@ -16,6 +16,7 @@ export class CommandPalette {
   private items: CommandDef[] = [];
   private selectedIdx = 0;
   private captureHandler: ((e: KeyboardEvent) => void) | null = null;
+  private returnFocus: HTMLElement | null = null;
 
   constructor(
     private registry: CommandRegistry,
@@ -26,6 +27,8 @@ export class CommandPalette {
   open(): void {
     if (this.overlay) return; // 이미 열림
 
+    this.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
     this.items = this.buildItems();
     this.selectedIdx = 0;
 
@@ -34,6 +37,9 @@ export class CommandPalette {
 
     const panel = document.createElement('div');
     panel.className = 'cp-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-label', '명령 검색');
 
     // 입력 영역
     const inputWrap = document.createElement('div');
@@ -41,14 +47,20 @@ export class CommandPalette {
 
     const slash = document.createElement('span');
     slash.className = 'cp-slash';
-    slash.textContent = '/';
+    slash.setAttribute('aria-hidden', 'true');
+    slash.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4" stroke-linecap="round"/></svg>';
 
     this.input = document.createElement('input');
     this.input.type = 'text';
     this.input.className = 'cp-input';
-    this.input.placeholder = '커맨드 검색...';
+    this.input.placeholder = '명령 검색';
     this.input.autocomplete = 'off';
     this.input.spellcheck = false;
+    this.input.setAttribute('aria-label', '명령 검색');
+    this.input.setAttribute('role', 'combobox');
+    this.input.setAttribute('aria-autocomplete', 'list');
+    this.input.setAttribute('aria-expanded', 'true');
+    this.input.setAttribute('aria-controls', 'editor-command-results');
 
     inputWrap.appendChild(slash);
     inputWrap.appendChild(this.input);
@@ -57,6 +69,8 @@ export class CommandPalette {
     // 결과 목록
     this.list = document.createElement('div');
     this.list.className = 'cp-list';
+    this.list.id = 'editor-command-results';
+    this.list.setAttribute('role', 'listbox');
     panel.appendChild(this.list);
 
     this.overlay.appendChild(panel);
@@ -66,8 +80,8 @@ export class CommandPalette {
 
     // 입력 이벤트
     this.input.addEventListener('input', () => {
-      this.selectedIdx = 0;
       const filtered = this.filter(this.input!.value);
+      this.selectedIdx = filtered.findIndex(def => this.dispatcher.isEnabled(def.id));
       this.renderList(filtered);
     });
 
@@ -97,6 +111,11 @@ export class CommandPalette {
         this.executeSelected();
         return;
       }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        this.input?.focus();
+        return;
+      }
       // 그 외 키는 input으로 전달 허용 — stopPropagation만 (편집 영역 방지)
       e.stopPropagation();
     };
@@ -119,6 +138,8 @@ export class CommandPalette {
     this.overlay = null;
     this.input = null;
     this.list = null;
+    this.returnFocus?.focus();
+    this.returnFocus = null;
   }
 
   isOpen(): boolean {
@@ -153,8 +174,12 @@ export class CommandPalette {
   private renderList(filtered: CommandDef[]): void {
     if (!this.list) return;
     this.list.replaceChildren();
+    if (this.selectedIdx === 0 && filtered.length > 0 && !this.dispatcher.isEnabled(filtered[0].id)) {
+      this.selectedIdx = filtered.findIndex(def => this.dispatcher.isEnabled(def.id));
+    }
 
     if (filtered.length === 0) {
+      this.input?.removeAttribute('aria-activedescendant');
       const empty = document.createElement('div');
       empty.className = 'cp-empty';
       empty.textContent = '검색 결과 없음';
@@ -163,9 +188,15 @@ export class CommandPalette {
     }
 
     filtered.forEach((def, idx) => {
+      const enabled = this.dispatcher.isEnabled(def.id);
       const row = document.createElement('div');
-      row.className = 'cp-item' + (idx === this.selectedIdx ? ' cp-item--selected' : '');
+      row.className = 'cp-item' + (idx === this.selectedIdx ? ' cp-item--selected' : '')
+        + (enabled ? '' : ' cp-item--disabled');
       row.dataset.idx = String(idx);
+      row.id = `editor-command-option-${idx}`;
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', String(idx === this.selectedIdx));
+      row.setAttribute('aria-disabled', String(!enabled));
 
       const labelEl = document.createElement('span');
       labelEl.className = 'cp-item-label';
@@ -182,17 +213,21 @@ export class CommandPalette {
 
       row.addEventListener('mousedown', (e) => {
         e.preventDefault();
+        if (!enabled) return;
         this.selectedIdx = idx;
         this.executeSelected(filtered);
       });
 
       row.addEventListener('mousemove', () => {
+        if (!enabled) return;
         this.selectedIdx = idx;
         this.updateSelection(filtered.length);
       });
 
       this.list!.appendChild(row);
     });
+    if (this.selectedIdx >= 0) this.input?.setAttribute('aria-activedescendant', `editor-command-option-${this.selectedIdx}`);
+    else this.input?.removeAttribute('aria-activedescendant');
 
     // 현재 선택 항목이 보이도록 스크롤
     this.scrollToSelected();
@@ -202,7 +237,15 @@ export class CommandPalette {
     if (!this.list) return;
     const count = this.list.querySelectorAll('.cp-item').length;
     if (count === 0) return;
-    this.selectedIdx = (this.selectedIdx + delta + count) % count;
+    let next = this.selectedIdx;
+    for (let i = 0; i < count; i++) {
+      next = (next + delta + count) % count;
+      const row = this.list.querySelectorAll('.cp-item')[next];
+      if (row.getAttribute('aria-disabled') !== 'true') {
+        this.selectedIdx = next;
+        break;
+      }
+    }
     this.updateSelection(count);
     this.scrollToSelected();
   }
@@ -211,7 +254,10 @@ export class CommandPalette {
     if (!this.list) return;
     this.list.querySelectorAll('.cp-item').forEach((el, i) => {
       el.classList.toggle('cp-item--selected', i === this.selectedIdx);
+      el.setAttribute('aria-selected', String(i === this.selectedIdx));
     });
+    if (this.selectedIdx >= 0) this.input?.setAttribute('aria-activedescendant', `editor-command-option-${this.selectedIdx}`);
+    else this.input?.removeAttribute('aria-activedescendant');
     void count; // suppress unused warning
   }
 
@@ -224,7 +270,7 @@ export class CommandPalette {
   private executeSelected(filtered?: CommandDef[]): void {
     const items = filtered ?? this.filter(this.input?.value ?? '');
     const def = items[this.selectedIdx];
-    if (!def) return;
+    if (!def || !this.dispatcher.isEnabled(def.id)) return;
     this.close();
     this.dispatcher.dispatch(def.id);
   }

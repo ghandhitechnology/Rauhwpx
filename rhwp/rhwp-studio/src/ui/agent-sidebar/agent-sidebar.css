@@ -8,8 +8,8 @@
    포커스 모드는 같은 정보 구조를 공유한다: 위에는 문서 맥락, 가운데는
    읽기 편한 대화, 아래에는 입력과 실행 설정이 한 면에 모인다. 기술
    좌표와 원시 도구 출력은 필요할 때 펼쳐 보고, 검토는 변경이 있을 때만
-   여는 문맥 패널이다. 색은 기존 중성 램프를 유지하고 모서리, 여백,
-   활자 위계만 제품 전반의 SaaS 셸과 맞춘다. */
+   여는 문맥 패널이다. 중성 면은 편집기와 같은 램프를 쓰고 모서리, 여백,
+   활자 위계도 제품 전반의 셸과 맞춘다. */
 
 /* 모션 토큰은 motion.css 에 있다. */
 
@@ -62,6 +62,21 @@ body.ag-sidebar-animating .ag-root {
 /* --ag-* 는 이 파일 전체가 쓰는 간접층이다. 여기서 새 중성
    램프로 갈아끼우면 아래 규칙들이 함께 따라온다. */
 .ag-root {
+  --n-surface: #f2f3f5;
+  --n-surface-raised: #fff;
+  --n-surface-sunken: #e8eaee;
+  --n-canvas: #f2f3f5;
+  --n-text: #171b22;
+  --n-text-secondary: #424a55;
+  --n-text-muted: #626b77;
+  --n-text-placeholder: #6b7480;
+  --n-text-disabled: #9299a3;
+  --n-hairline: #d9dde3;
+  --n-hairline-strong: #b6bec9;
+  --n-fill-hover: #e5e8ed;
+  --n-fill-active: #dce1e8;
+  --n-fill-selected: #dfe5ec;
+  --n-fill-selected-soft: #e9edf2;
   --ag-bg: var(--n-surface);
   --ag-bg-2: var(--n-surface-sunken);
   --ag-raised: var(--n-surface-raised);
@@ -72,10 +87,19 @@ body.ag-sidebar-animating .ag-root {
   --ag-text-muted: var(--n-text-muted);
   --ag-border: var(--n-hairline);
   --ag-border-strong: var(--n-hairline-strong);
-  --ag-input-bg: var(--n-surface);
+  --ag-input-bg: var(--n-surface-raised);
   --ag-hover: var(--n-fill-hover);
   --ag-active: var(--n-fill-active);
   --ag-selected: var(--n-fill-selected);
+  --ui-surface: var(--n-surface);
+  --ui-surface-raised: var(--n-surface-raised);
+  --ui-text: var(--n-text);
+  --ui-text-hint: var(--n-text-muted);
+  --ui-border: var(--n-hairline);
+  --ui-border-strong: var(--n-hairline-strong);
+  --ui-hover-strong: var(--n-fill-active);
+  --ui-active: var(--n-fill-active);
+  --color-text: var(--n-text);
   --ag-rau: #8d8680;
   --ag-claude: #c4785a;
   --ag-codex: #5b8fd4;
@@ -241,16 +265,21 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 :root[data-theme-effective='dark'] .ag-root {
-  /* Keep the agent workspace visually heavier than the editor chrome while
-     lifting the composer one clear step above the conversation surface. */
-  --ag-bg: #111214;
-  --ag-bg-2: #0d0e10;
-  --ag-raised: #191a1d;
-  --ag-input-bg: #202124;
-  --ag-border: rgba(255, 255, 255, 0.075);
-  --ag-border-strong: rgba(255, 255, 255, 0.14);
-  --ag-hover: rgba(255, 255, 255, 0.075);
-  --ag-active: rgba(255, 255, 255, 0.12);
+  --n-surface: #262626;
+  --n-surface-raised: #2f2f2f;
+  --n-surface-sunken: #1c1c1c;
+  --n-canvas: #262626;
+  --n-text: #ededed;
+  --n-text-secondary: #c8c8c8;
+  --n-text-muted: #a1a1a1;
+  --n-text-placeholder: #8d8d8d;
+  --n-text-disabled: #6b6b6b;
+  --n-hairline: #393939;
+  --n-hairline-strong: #555555;
+  --n-fill-hover: #343434;
+  --n-fill-active: #3e3e3e;
+  --n-fill-selected: #444444;
+  --n-fill-selected-soft: #303030;
   --ag-rau: #d4cdc4;
   --ag-claude: #d49174;
   --ag-codex: #7aa8e0;
@@ -2288,6 +2317,71 @@ button.ag-skill-copy {
   color: var(--ag-text-muted);
 }
 
+/* 모델 목록: 칩 대신 한 줄씩 — 버전 이름, 카탈로그가 준 한 줄 설명, 선택 표시. */
+.ag-config-panel .ag-llm-menu {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 1px;
+}
+
+.ag-config-panel .ag-llm-item {
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 8px;
+  border-radius: 7px;
+}
+
+.ag-llm-item-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.ag-llm-item-name {
+  overflow: hidden;
+  color: var(--ag-text);
+  font-size: var(--font-size-base, 12px);
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-llm-item-description {
+  overflow: hidden;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 400;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-llm-item-check {
+  display: grid;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  color: var(--ag-accent);
+  opacity: 0;
+}
+
+.ag-llm-item-check .ag-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.ag-config-panel .ag-llm-item.ag-active {
+  background: color-mix(in srgb, var(--ag-accent) 13%, transparent);
+}
+
+.ag-config-panel .ag-llm-item.ag-active .ag-llm-item-check {
+  opacity: 1;
+}
+
 .ag-effort-trigger {
   font-weight: 500;
   font-size: var(--font-size-base, 12px);
@@ -2448,55 +2542,6 @@ button.ag-skill-copy {
 .ag-model-item.ag-active {
   background: var(--ag-selected);
   font-weight: 600;
-}
-
-/* User-selected models form a scrollable list inside the composer settings. */
-.ag-config-panel .ag-llm-menu {
-  display: flex;
-  flex-direction: column;
-  flex-wrap: nowrap;
-  gap: 2px;
-  max-height: min(208px, 29vh);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  padding: 3px;
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--ag-text) 5%, transparent);
-}
-
-.ag-config-panel .ag-llm-menu .ag-llm-group-label { padding: 6px 8px 3px; }
-.ag-config-panel .ag-llm-menu .ag-llm-item {
-  flex: 0 0 auto;
-  justify-content: space-between;
-  width: 100%;
-  min-height: 31px;
-  padding: 6px 9px;
-  border-radius: 7px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  transition: background 130ms ease-out;
-}
-.ag-config-panel .ag-llm-menu .ag-llm-item.ag-active {
-  background: var(--ag-bg);
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--ag-text) 10%, transparent);
-}
-.ag-config-panel .ag-llm-menu .ag-llm-item.ag-active::after {
-  content: '✓';
-  flex: 0 0 auto;
-  margin-left: 6px;
-  color: var(--ag-accent);
-  font-size: 12px;
-}
-.ag-config-panel .ag-llm-menu .ag-llm-item:active { background: var(--ag-selected); }
-.ag-config-panel .ag-llm-menu .ag-llm-item:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ag-config-panel .ag-llm-menu .ag-llm-item { transition: none; }
 }
 
 /* ─── 메시지 목록 ─────────────────────────────────────── */
@@ -3261,10 +3306,6 @@ button.ag-skill-copy {
   margin-bottom: -12px;
   opacity: 0;
   transform: scale(0.98);
-}
-
-.ag-review:has(> .ag-review-card-leaving) > .ag-review-empty {
-  display: none;
 }
 
 /* Review cards use the same neutral elevation as other contextual surfaces. */
@@ -5378,7 +5419,10 @@ body.ag-col-resizing {
   font-variant-numeric: tabular-nums;
 }
 
-.ag-review-column-close {
+.ag-review-column-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   margin-left: auto;
 }
 
@@ -5427,48 +5471,6 @@ body.ag-col-resizing {
 
 .ag-fullscreen .ag-review-column .ag-review-summary {
   max-height: calc(100dvh - 166px);
-}
-
-.ag-review-empty {
-  display: flex;
-  min-height: 220px;
-  padding: 28px;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  text-align: center;
-}
-
-.ag-review-empty-icon {
-  display: grid;
-  width: 36px;
-  height: 36px;
-  margin-bottom: 12px;
-  place-items: center;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-field);
-  background: var(--ag-raised);
-  color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: 15px;
-}
-
-.ag-review-empty-title {
-  color: var(--ag-text);
-  font-size: var(--font-size-md, 13px);
-  font-weight: 650;
-}
-
-.ag-review-empty-copy {
-  max-width: 280px;
-  margin-top: 5px;
-  color: var(--ag-text-muted);
-  font-size: var(--font-size-base, 12px);
-  line-height: 1.55;
-}
-
-.ag-root:not(.ag-fullscreen) .ag-review:has(> .ag-review-empty:only-child) {
-  display: none;
 }
 
 @media (max-width: 960px) {
@@ -6420,6 +6422,10 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   margin-inline: auto;
   padding: 34px 38px 40px;
 }
+
+/* 가운데 놓인 대화 열은 스크롤 막대 없이 스크롤한다. */
+.ag-fullscreen .ag-messages { scrollbar-width: none; }
+.ag-fullscreen .ag-messages::-webkit-scrollbar { display: none; }
 
 .ag-fullscreen .ag-composer {
   max-width: 860px;
@@ -8248,4 +8254,24 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   font-size: 10px;
   font-weight: 400;
   color: var(--ag-text-muted);
+}
+
+/* 승인 직후 나타나는 되돌리기 버튼은 한 번만 살짝 떠오르며 자리를 알린다. */
+.ag-header-icon-btn.ag-undo-arrive {
+  animation: ag-undo-arrive var(--ag-dur-slow) var(--ag-ease-out) both;
+}
+.ag-header-icon-btn.ag-undo-arrive .ag-icon {
+  animation: ag-undo-arrive-icon 520ms var(--ag-ease-out) both;
+}
+@keyframes ag-undo-arrive {
+  from { opacity: 0; transform: scale(.72); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ag-undo-arrive-icon {
+  0% { transform: rotate(40deg); }
+  100% { transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ag-header-icon-btn.ag-undo-arrive,
+  .ag-header-icon-btn.ag-undo-arrive .ag-icon { animation: none; }
 }

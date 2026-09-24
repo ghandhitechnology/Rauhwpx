@@ -7,7 +7,7 @@ export interface CapturedTurn {
   undoEntry: object | null;
 }
 
-/** 승인 이벤트가 원본 set을 제거하기 전에 턴별 검토 내용을 보관한다. */
+/** 승인 이벤트가 원본 set을 제거해도 해당 턴의 되돌리기 항목을 추적한다. */
 export class TurnChanges {
   private readonly turns = new Map<string, CapturedTurn>();
 

@@ -378,3 +378,21 @@
   gap: 8px;
   justify-content: flex-end;
 }
+
+.compare-dialog { top: 58px; right: 16px; width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 72px); border-color: var(--ui-border); border-radius: 10px; background: var(--ui-surface); color: var(--ui-text); }
+.compare-dialog-title { min-height: 44px; padding: 10px 16px; border-bottom-color: var(--ui-border); font-size: 14px; font-weight: 650; }
+.compare-dialog-body { padding: 16px; }
+.compare-options, .compare-result-item, .history-list, .compare-inspector-pane { border-color: var(--ui-border); border-radius: 8px; background: var(--ui-surface-raised); }
+.compare-result-item { padding: 10px 12px; }
+.compare-result-item:hover, .history-entry:hover { background: var(--ui-hover); }
+.compare-result-item.active, .history-entry.selected { border-color: var(--ui-text); background: var(--ui-selected); }
+.compare-result-kv-text, .compare-inspector-canvas-wrap { border-color: var(--ui-border); background: var(--ui-surface-muted); }
+.history-entry { padding: 10px 12px; border-bottom-color: var(--ui-border); }
+.compare-inspector-window { top: 16px; width: min(1460px, calc(100vw - 32px)); height: min(92dvh, 980px); max-height: calc(100dvh - 32px); border-color: var(--ui-border); border-radius: 12px; background: var(--ui-surface); color: var(--ui-text); }
+.compare-inspector-head { min-height: 48px; padding: 12px 16px; border-bottom-color: var(--ui-border); font-size: 14px; }
+.compare-inspector-body { padding: 16px; }
+.compare-dialog :is(button, input, select, textarea):focus-visible, .compare-inspector-window :is(button, input, select, textarea):focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+@media (max-width: 700px) { .compare-options { grid-template-columns: 1fr; } .compare-inspector-panes { grid-template-columns: 1fr; } .compare-inspector-window { overflow-y: auto; } .compare-inspector-pane { min-height: 240px; } }
+
+.compare-dialog, .compare-inspector-window { --ui-surface: #f2f3f5; --ui-surface-raised: #fff; --ui-surface-muted: #e8eaee; --ui-text: #171b22; --ui-border: #d9dde3; --ui-hover: #e5e8ed; --ui-selected: #dfe5ec; --focus-ring: #356caa; }
+:root[data-theme-effective='dark'] :is(.compare-dialog, .compare-inspector-window) { --ui-surface: #262626; --ui-surface-raised: #2f2f2f; --ui-surface-muted: #1c1c1c; --ui-text: #ededed; --ui-border: #393939; --ui-hover: #343434; --ui-selected: #444444; --focus-ring: #8fb3e0; }

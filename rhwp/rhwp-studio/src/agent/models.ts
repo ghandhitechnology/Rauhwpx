@@ -3,7 +3,7 @@ import type { AgentName, PiModelConfig, ServiceTier } from './types.ts';
 export interface AgentModelOption { id: string; label: string }
 export interface ModelCatalogEntry extends AgentModelOption { description?: string; supportedEfforts?: string[] }
 export interface AgentEffortOption { id: string; label: string }
-export interface AgentModelGroup { label: string | null; options: readonly AgentModelOption[] }
+export interface AgentModelGroup { label: string | null; options: readonly ModelCatalogEntry[] }
 export type CatalogAgent = 'claude' | 'codex';
 export type SelectedModels = Record<CatalogAgent, string[]>;
 
@@ -12,8 +12,9 @@ function isCatalogAgent(agent: AgentName): agent is CatalogAgent {
 }
 export const AGENT_MODELS: Record<CatalogAgent, readonly AgentModelOption[]> = {
   claude: [
-    { id: 'fable', label: 'Fable' }, { id: 'opus', label: 'Opus' },
-    { id: 'sonnet', label: 'Sonnet' }, { id: 'haiku', label: 'Haiku' },
+    // 허브 목록이 오기 전 표시값. 버전은 rhwp-agent/claude-model-label.mjs 의 공식 목록과 같다.
+    { id: 'fable', label: 'Fable 5.1' }, { id: 'opus', label: 'Opus 5.5' },
+    { id: 'sonnet', label: 'Sonnet 5' }, { id: 'haiku', label: 'Haiku 4.5' },
   ],
   codex: [
     { id: 'astra', label: 'Astra' }, { id: 'sol', label: 'Sol' },
@@ -51,7 +52,31 @@ let selectedModels: SelectedModels = {
   codex: AGENT_MODELS.codex.map((model) => model.id),
 };
 
-function readCatalog(raw: unknown): ModelCatalogEntry[] {
+const CLAUDE_MODEL_ID = /^claude-([a-z]+)((?:-\d+)+?)(?:-(\d{8}))?(\[[^\]]+\])?$/;
+
+/**
+ * claude-opus-5-5[1m] → "Opus 5.5 (1M)". CLI 표시 이름에는 버전이 없어 해석된 ID에서 만든다.
+ * 허브의 rhwp-agent/claude-model-label.mjs 와 같은 규칙이다 (agent-models.test.ts 가 비교).
+ */
+export function claudeModelLabel(id: string, fallback = id): string {
+  const match = CLAUDE_MODEL_ID.exec(id);
+  if (!match) return fallback;
+  const [, family = '', version = '', , context] = match;
+  const name = family.charAt(0).toUpperCase() + family.slice(1);
+  const suffix = context ? ` (${context.slice(1, -1).toUpperCase()})` : '';
+  return `${name} ${version.slice(1).split('-').join('.')}${suffix}`;
+}
+
+/** CLI 설명 앞의 "Sonnet 5 · " 같은 이름 반복을 걷는다. */
+export function claudeModelDescription(description: unknown): string {
+  if (typeof description !== 'string') return '';
+  const trimmed = description.trim();
+  const parts = trimmed.split(' · ');
+  if (parts.length > 1 && /^(Fable|Opus|Sonnet|Haiku)\b/i.test(parts[0] ?? '')) return parts.slice(1).join(' · ').trim();
+  return trimmed;
+}
+
+function readCatalog(raw: unknown, agent?: CatalogAgent): ModelCatalogEntry[] {
   if (!Array.isArray(raw)) return [];
   const seen = new Set<string>();
   const result: ModelCatalogEntry[] = [];
@@ -60,10 +85,15 @@ function readCatalog(raw: unknown): ModelCatalogEntry[] {
     const item = value as Record<string, unknown>;
     if (typeof item.id !== 'string' || !item.id.trim() || seen.has(item.id)) continue;
     seen.add(item.id);
+    const label = typeof item.label === 'string' && item.label.trim() ? item.label : item.id;
+    // 예전 허브가 남긴 캐시("Sonnet")도 같은 버전 이름으로 고친다.
+    const description = agent === 'claude'
+      ? claudeModelDescription(item.description)
+      : typeof item.description === 'string' ? item.description.trim() : '';
     result.push({
       id: item.id,
-      label: typeof item.label === 'string' && item.label.trim() ? item.label : item.id,
-      ...(typeof item.description === 'string' && item.description.trim() ? { description: item.description } : {}),
+      label: agent === 'claude' ? claudeModelLabel(item.id, label) : label,
+      ...(description ? { description } : {}),
       ...(Array.isArray(item.supportedEfforts)
         ? { supportedEfforts: item.supportedEfforts.filter((effort): effort is string => typeof effort === 'string') }
         : {}),
@@ -80,8 +110,8 @@ function ensureCache(): void {
     const raw = localStorage.getItem(CATALOG_STORAGE_KEY);
     if (!raw) return;
     const saved = JSON.parse(raw) as Record<string, unknown>;
-    catalogs.claude = readCatalog(saved.claude);
-    catalogs.codex = readCatalog(saved.codex);
+    catalogs.claude = readCatalog(saved.claude, 'claude');
+    catalogs.codex = readCatalog(saved.codex, 'codex');
   } catch { /* A stale cache must not block the picker. */ }
 }
 
@@ -97,7 +127,7 @@ export function hasLiveModelCatalog(agent: CatalogAgent): boolean {
 
 export function setModelCatalog(agent: CatalogAgent, models: readonly ModelCatalogEntry[]): void {
   ensureCache();
-  catalogs[agent] = readCatalog(models);
+  catalogs[agent] = readCatalog(models, agent);
   selectedModels[agent] = normalizeSelectedModels(selectedModels)[agent];
   try {
     if (typeof localStorage !== 'undefined') localStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify(catalogs));
@@ -157,15 +187,12 @@ export function normalizeSelectedModels(raw: unknown): SelectedModels {
   return normalized;
 }
 
-export function modelsForAgent(agent: AgentName): readonly AgentModelOption[] {
+export function modelsForAgent(agent: AgentName): readonly ModelCatalogEntry[] {
   if (agent === 'pi') return piModelRegistry.map((model) => ({ id: model.id, label: model.name }));
   if (!isCatalogAgent(agent)) return [];
-  const catalog = availableModelsForAgent(agent);
-  return selectedModels[agent].flatMap((id) => {
-    const concrete = concreteModelForAgent(agent, id);
-    const found = catalog.find((model) => model.id === concrete);
-    return found ? [found] : [];
-  });
+  // 고른 순서가 아니라 카탈로그 순서(프로바이더가 정한 성능 순)로 선다.
+  const selected = new Set(selectedModels[agent].map((id) => concreteModelForAgent(agent, id)));
+  return availableModelsForAgent(agent).filter((model) => selected.has(model.id));
 }
 export function modelGroupsForAgent(agent: AgentName): readonly AgentModelGroup[] { return [{ label: null, options: modelsForAgent(agent) }]; }
 export function defaultModelForAgent(agent: AgentName): string {

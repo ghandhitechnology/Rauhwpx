@@ -24,3 +24,7 @@
 @import './styles/command-palette.css';
 @import './styles/compare-dialog.css';
 @import './styles/responsive.css';
+@import './styles/editor-shell.css';
+@import './styles/editor-icons.css';
+@import './styles/editor-ribbon.css';
+@import './styles/editor-popovers.css';

@@ -6,7 +6,7 @@ import test from 'node:test';
 import puppeteer from 'puppeteer-core';
 import { createServer } from 'vite';
 
-test('narrow formatting ribbon stacks groups without overlap or clipping', { timeout: 30_000 }, async (context) => {
+test('narrow formatting ribbon keeps one row without overlap or clipping', { timeout: 30_000 }, async (context) => {
   const executablePath = browserExecutable();
 
   const root = fileURLToPath(new URL('../', import.meta.url));
@@ -47,8 +47,9 @@ test('narrow formatting ribbon stacks groups without overlap or clipping', { tim
     });
 
     assert.equal(layout.overlaps, false);
-    assert.equal(layout.clientHeight, layout.scrollHeight, 'all wrapped rows should remain visible');
-    assert.ok(layout.rows >= 2, 'constrained formatting groups should occupy multiple rows');
+    assert.equal(layout.clientHeight, layout.scrollHeight, 'the formatting row should not clip');
+    // 좁은 폭에서도 줄을 늘리지 않는다. 남는 묶음은 더 보기가 맡는다.
+    assert.equal(layout.rows, 1, 'constrained formatting groups should stay on one row');
   } finally {
     await browser?.close();
     await server.close();

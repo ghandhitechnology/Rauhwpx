@@ -17,6 +17,7 @@ import { normalizeSettingsDestination } from '../ui/agent-sidebar/settings-contr
 import { mountAuditNavigator } from './audit-scenarios.ts';
 import { mountAuditDialogs } from './audit-dialogs.ts';
 import { applyAuditState } from './audit-state.ts';
+import { mountEditorShell } from './editor-shell.ts';
 
 const params = new URLSearchParams(location.search);
 if (params.get('usage') === 'live') {
@@ -57,6 +58,7 @@ if (!localStorage.getItem('sidebar-preview-seeded')) {
   localStorage.setItem('sidebar-preview-seeded', '1');
 }
 applyTheme();
+if (params.get('editor') === '1') mountEditorShell(report, eventBus);
 const cloud = params.get('cloud') === '1' ? createMockCloud({ dashboard: params.get('dashboard') === '1' }) : null;
 mock.bridge.onEvent((event) => {
   if (event.type === 'account-status' && !event.status.authenticating)

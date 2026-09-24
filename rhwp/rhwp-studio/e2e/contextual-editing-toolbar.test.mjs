@@ -13,17 +13,16 @@ const wait = (page, ms = 200) => page.evaluate(
 async function toolbarState(page) {
   return page.evaluate(() => {
     const toolbar = document.getElementById('icon-toolbar');
-    const visibleMode = Array.from(toolbar.querySelectorAll('[data-toolbar-mode]'))
-      .find((element) => getComputedStyle(element).display !== 'none');
+    const visibleModes = Array.from(toolbar.querySelectorAll('[data-toolbar-mode]'))
+      .filter((element) => getComputedStyle(element).display !== 'none');
     return {
       mode: toolbar.dataset.contextMode,
-      visibleMode: visibleMode?.dataset.toolbarMode ?? null,
-      visibleCommands: visibleMode
-        ? Array.from(visibleMode.querySelectorAll('[data-cmd]')).map((button) => ({
+      visibleMode: visibleModes[0]?.dataset.toolbarMode ?? null,
+      visibleCommands: visibleModes.flatMap((group) =>
+        Array.from(group.querySelectorAll('[data-cmd]')).map((button) => ({
             command: button.dataset.cmd,
             disabled: button.disabled,
-          }))
-        : [],
+          }))),
       collapsed: toolbar.classList.contains('collapsed'),
     };
   });

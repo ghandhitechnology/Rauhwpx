@@ -16,6 +16,7 @@ export interface ChangesDrawerOptions {
 export interface ChangesDrawer {
   element: HTMLElement;
   reviewSlot: HTMLElement;
+  setCompactHost(host: HTMLElement | null): void;
   setOpen(open: boolean): void;
   refresh(): Promise<void>;
   refreshEditingState(): void;
@@ -882,6 +883,11 @@ export function createChangesDrawer(options: ChangesDrawerOptions): ChangesDrawe
   return {
     element: root,
     reviewSlot,
+    setCompactHost(host) {
+      if (disposed) return;
+      if (host) host.appendChild(workingSection);
+      else body.insertBefore(workingSection, historySection);
+    },
     setOpen,
     refresh,
     refreshEditingState,

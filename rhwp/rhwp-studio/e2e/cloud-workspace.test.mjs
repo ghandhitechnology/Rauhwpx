@@ -610,7 +610,7 @@ try {
     && !document.querySelector('[aria-label="프로바이더 선택"]').disabled);
   await page.click('[aria-label="모델 선택"]');
   await page.$eval('.ag-llm-item[data-model="haiku"]', (node) => node.click());
-  await page.waitForFunction(() => document.querySelector('.ag-llm-name').textContent === 'Haiku'
+  await page.waitForFunction(() => document.querySelector('.ag-llm-name').textContent === 'Haiku 4.5'
     && !document.querySelector('[aria-label="모델 선택"]').disabled);
   await page.click('[aria-label="추론 강도 선택"]');
   await page.focus('.ag-eslider');
@@ -634,7 +634,7 @@ try {
   await page.$eval('.ag-provider-item[data-agent="pi"]', (node) => node.click());
   await page.waitForFunction(() => document.querySelector('.ag-messages').textContent.includes('Provider is not connected on Cloud'));
   assert.equal(await page.$eval('.ag-root', (node) => node.dataset.agent), 'claude');
-  assert.equal(await page.$eval('.ag-llm-name', (node) => node.textContent), 'Haiku');
+  assert.equal(await page.$eval('.ag-llm-name', (node) => node.textContent), 'Haiku 4.5');
   assert.equal(await page.$eval('.ag-effort-name', (node) => node.textContent), 'Low');
   assert.equal(await page.$eval('[aria-label="프로바이더 선택"]', (node) => node.disabled), false);
   assert.equal(await page.$eval('.ag-input', (node) => node.value), 'Keep this unsent draft while changing providers.');

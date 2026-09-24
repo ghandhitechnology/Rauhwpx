@@ -5,266 +5,245 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>후원하기 | Rauhwpx</title>
 <meta name="description" content="Rauhwpx 개발자의 편지와 후원 안내.">
-<meta name="theme-color" content="#4f73e8">
+<meta name="theme-color" content="#ececea">
 <link rel="icon" type="image/png" href="assets/rauhwpx-logo.png">
 <link rel="apple-touch-icon" href="assets/rauhwpx-logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hahmlet:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/pretendard@1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" rel="stylesheet">
 <style>
+/* 흰 종이, 검은 목탄. index.html과 같은 토큰을 써요. */
 *,*::before,*::after{box-sizing:border-box}
 
 :root{
-  --paper:#f1ece1;
-  --paper-2:#e7e0d2;
-  --patch:#fdfbf6;
-  --ink:#14120f;
-  --ink-2:#3c3831;
-  --ink-3:#6e675c;
-  --rule:#d3cbbb;
-  --sans:'IBM Plex Sans KR',system-ui,-apple-system,'Apple SD Gothic Neo',sans-serif;
-  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='.05'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+  --ground:#ececea;
+  --sheet:#fcfcfb;
+  --ink:#1b1b1a;
+  --ink-2:#3a3a38;
+  --ink-3:#62625f;
+  --ink-4:#8d8d8a;
+  --rule:#cdcdca;
+  --sans:'Pretendard Variable',Pretendard,system-ui,-apple-system,'Apple SD Gothic Neo',sans-serif;
+  --serif:'Hahmlet','Apple SD Gothic Neo',serif;
+  --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  --gut:clamp(16px,4vw,48px);
+  --frame:83.333ms;
+  --tooth:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='t' x='0' y='0' width='100%25' height='100%25'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.78' numOctaves='3' seed='3' stitchTiles='stitch'/%3E%3CfeDiffuseLighting lighting-color='%23fff' surfaceScale='1.1' diffuseConstant='1'%3E%3CfeDistantLight azimuth='225' elevation='60'/%3E%3C/feDiffuseLighting%3E%3CfeComponentTransfer%3E%3CfeFuncR type='linear' slope='.07' intercept='.868'/%3E%3CfeFuncG type='linear' slope='.07' intercept='.868'/%3E%3CfeFuncB type='linear' slope='.07' intercept='.863'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23t)'/%3E%3C/svg%3E");
+  --dust:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='720' height='720'%3E%3Cfilter id='d' x='0' y='0' width='100%25' height='100%25'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.62' numOctaves='2' seed='11' stitchTiles='stitch' result='a'/%3E%3CfeColorMatrix in='a' values='0 0 0 0 .1 0 0 0 0 .1 0 0 0 0 .1 -64 0 0 0 16.4' result='f'/%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.2' numOctaves='2' seed='5' stitchTiles='stitch' result='b'/%3E%3CfeColorMatrix in='b' values='0 0 0 0 .1 0 0 0 0 .1 0 0 0 0 .1 -48 0 0 0 11.3' result='c'/%3E%3CfeMerge result='s'%3E%3CfeMergeNode in='f'/%3E%3CfeMergeNode in='c'/%3E%3C/feMerge%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.0045' numOctaves='2' seed='8' stitchTiles='stitch' result='m'/%3E%3CfeColorMatrix in='m' values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 5 0 0 0 -2.35' result='k'/%3E%3CfeComposite in='s' in2='k' operator='in'/%3E%3C/filter%3E%3Crect width='720' height='720' filter='url(%23d)' opacity='.42'/%3E%3C/svg%3E");
 }
 
-html,body{margin:0;min-height:100%}
-html{background:var(--paper);overflow-x:hidden}
+html{-webkit-text-size-adjust:100%;overflow-x:clip}
+html,body{margin:0;padding:0}
 body{
   min-height:100vh;
-  background-color:var(--paper);
-  background-image:var(--grain);
-  background-size:180px 180px;
+  background-color:var(--ground);
+  background-image:var(--dust),var(--tooth);
+  background-size:720px 720px,300px 300px;
   color:var(--ink);
-  font:400 17px/1.78 var(--sans);
+  font:400 17px/1.72 var(--sans);
   letter-spacing:-.006em;
   -webkit-font-smoothing:antialiased;
 }
-
+::selection{background:var(--ink);color:var(--sheet)}
 a{color:inherit}
-.wrap{width:min(100% - 48px,1180px);margin:0 auto}
+p,li,h1,h2{word-break:keep-all;overflow-wrap:break-word}
+:focus-visible{outline:2px solid var(--ink);outline-offset:4px;border-radius:2px}
+.wrap{max-width:1180px;margin:0 auto;padding:0 var(--gut)}
+.charcoal{filter:url(#cct)}
+.mono{font:500 12px/1.4 var(--mono);letter-spacing:.06em;text-transform:uppercase;font-variant-numeric:tabular-nums}
 
-.masthead{
-  border-bottom:1px solid var(--rule);
-  background:rgba(241,236,225,.94);
-  backdrop-filter:saturate(120%) blur(6px);
-}
-.masthead .wrap{
-  min-height:60px;
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:24px;
-}
-.brand{
-  font-size:19px;
-  font-weight:700;
-  letter-spacing:-.03em;
-  text-decoration:none;
-}
-.back{
-  min-height:44px;
-  display:inline-flex;
-  align-items:center;
-  gap:8px;
-  color:var(--ink-2);
-  font-size:15px;
-  font-weight:500;
-  text-underline-offset:4px;
-}
-.back svg{width:18px;height:18px;transition:transform .18s ease}
-.back:hover svg{transform:translateX(-3px)}
+/* 머리글 */
+.mast{position:sticky;top:0;z-index:40;height:60px;background:rgba(236,236,234,.9);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+.mast .wrap{display:flex;align-items:center;justify-content:space-between;gap:18px;height:100%;max-width:none}
+.mast__rule{position:absolute;left:0;right:0;bottom:-3px;width:100%;height:6px;overflow:visible;color:var(--ink);pointer-events:none;filter:url(#cc0)}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;font:700 18px/1 var(--serif);letter-spacing:-.03em;min-height:44px}
+.tile{position:relative;width:30px;height:30px;border-radius:8px;overflow:hidden;flex:0 0 auto;background:#1c1c1b;box-shadow:0 1px 0 rgba(0,0,0,.35)}
+.tile img{position:absolute;left:-6%;top:-6%;width:112%;height:112%;max-width:none;filter:url(#logo)}
+.back{min-height:44px;display:inline-flex;align-items:center;gap:8px;color:var(--ink-2);font-size:15px;text-decoration:none}
+.back:hover{color:var(--ink);text-decoration:underline;text-underline-offset:5px;text-decoration-thickness:1px}
+.back svg{width:18px;height:18px}
 
-.donate-main{
-  min-height:calc(100vh - 60px);
-  display:grid;
-  place-items:center;
-  padding:clamp(34px,5vw,72px) 0;
-}
-
+/* 편지 한 장 */
+.main{padding:clamp(40px,6vw,88px) 0 clamp(48px,6vw,80px)}
 .receipt{
-  position:relative;
-  width:min(100%,1120px);
-  background-color:var(--patch);
-  background-image:var(--grain);
-  background-size:180px 180px;
-  padding:clamp(38px,5.6vw,72px) clamp(38px,7vw,92px) clamp(36px,4.8vw,62px);
-  box-shadow:0 18px 42px rgba(20,18,15,.13),0 3px 8px rgba(20,18,15,.08);
+  position:relative;max-width:1060px;margin:0 auto;
+  background:var(--sheet);
+  padding:clamp(40px,5.6vw,72px) clamp(28px,7vw,92px) clamp(36px,4.8vw,62px);
+  box-shadow:0 .5px 1px rgba(10,10,10,.2),0 4px 14px -4px rgba(10,10,10,.16);
+  transform:rotate(-.35deg);
 }
-.receipt::before,.receipt::after{
-  content:"";
-  position:absolute;
-  top:24px;
-  bottom:24px;
-  width:18px;
-  background:radial-gradient(circle,var(--paper) 0 5px,rgba(20,18,15,.08) 5.5px 6.5px,transparent 7px) center top/18px 42px repeat-y;
-  pointer-events:none;
-}
-.receipt::before{left:12px}
-.receipt::after{right:12px}
+.receipt::after{content:'';position:absolute;inset:0;pointer-events:none;background:linear-gradient(165deg,rgba(255,255,255,.2),rgba(0,0,0,.025) 75%,rgba(0,0,0,.05))}
+/* 양옆 연속 용지 구멍 */
+.receipt .holes{position:absolute;top:22px;bottom:22px;width:16px;pointer-events:none;
+  background:radial-gradient(circle,var(--ground) 0 4.6px,rgba(0,0,0,.12) 5.2px 5.8px,transparent 6.3px) center top/16px 40px repeat-y}
+.receipt .holes.l{left:12px}.receipt .holes.r{right:12px}
+.tack{position:absolute;z-index:3;left:50%;top:-7px;width:17px;height:17px;margin-left:-8px;border-radius:50%;
+  background:radial-gradient(circle at 36% 30%,#9a9a97 0 1.6px,#3a3a38 3.4px,#141413 8.5px);
+  box-shadow:3px 5px 3px -1px rgba(0,0,0,.28),inset 0 -1px 1px rgba(0,0,0,.5)}
 
 .receipt-head{
-  min-height:224px;
-  display:grid;
-  grid-template-columns:minmax(0,.9fr) minmax(340px,1.1fr);
-  align-items:center;
-  gap:clamp(34px,5vw,72px);
-  padding-bottom:clamp(30px,4vw,48px);
-  border-top:1px solid var(--ink-3);
-  border-bottom:1px solid var(--ink-3);
+  display:grid;grid-template-columns:minmax(0,.9fr) minmax(300px,1.1fr);align-items:center;
+  gap:clamp(30px,5vw,72px);padding:clamp(20px,3vw,30px) 0 clamp(26px,4vw,44px);
+  border-top:1.5px solid var(--ink);border-bottom:1px solid var(--ink-3);
 }
-.receipt h1{
-  margin:0;
-  font-size:clamp(34px,4.1vw,52px);
-  line-height:1.18;
-  letter-spacing:-.032em;
-}
+.receipt-head .mono{color:var(--ink-3);margin-bottom:14px}
+.receipt h1{margin:0;font:800 clamp(36px,4.4vw,58px)/1.14 var(--serif);letter-spacing:-.04em}
 
-.token-loop{width:100%;max-height:250px;overflow:visible}
+.token-loop{width:100%;max-height:250px;overflow:visible;filter:url(#cc0)}
 .token-loop *{vector-effect:non-scaling-stroke}
-.token-loop .line{fill:none;stroke:var(--ink);stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round}
-.token-loop .fine{fill:none;stroke:var(--ink-3);stroke-width:1;stroke-linecap:round}
-.token-loop .paper{fill:var(--patch);stroke:var(--ink);stroke-width:1.4;stroke-linejoin:round}
+.token-loop .line{fill:none;stroke:var(--ink);stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round}
+.token-loop .fine{fill:none;stroke:var(--ink-3);stroke-width:1.1;stroke-linecap:round}
+.token-loop .paper{fill:var(--sheet);stroke:var(--ink);stroke-width:1.8;stroke-linejoin:round}
 .token-loop .token-word{font:600 13px/1 var(--sans);fill:var(--ink);letter-spacing:-.02em}
-.token-loop .clock-number{font:500 11px/1 var(--sans);fill:var(--ink-2)}
+.token-loop .clock-number{font:500 11px/1 var(--mono);fill:var(--ink-2)}
 .token-loop .token-a{transform-origin:116px 114px}
 .token-loop .token-b{transform-origin:375px 142px}
 
-.letter{
-  width:min(100%,72ch);
-  margin:clamp(32px,4vw,48px) auto 0;
-  color:var(--ink-2);
-  font-size:clamp(16px,1.55vw,19px);
-  line-height:1.82;
-}
-.letter p{margin:0 0 1.25em;word-break:keep-all;overflow-wrap:break-word}
-.supporters{
-  width:min(100%,720px);
-  margin:22px auto 0;
-  padding:20px 24px;
-  background:rgba(253,251,246,.72);
-  border:1px solid var(--rule);
-}
-.supporters-head{
-  margin-bottom:12px;
-}
-.supporters h2{
-  margin:0;
-  font-size:15px;
-  font-weight:600;
-  letter-spacing:-.01em;
-}
-.supporter-list{
-  margin:0;
-  padding:0;
-  list-style:none;
-  border-top:1px solid var(--ink-3);
-}
-.supporter-list li{
-  min-height:44px;
-  display:flex;
-  align-items:center;
-  border-bottom:1px solid var(--rule);
-}
-.supporter-name{font-size:16px;font-weight:600}
-.receipt-action{
-  margin-top:clamp(26px,3.6vw,42px);
-  padding-top:20px;
-  border-top:1px solid var(--ink-3);
-  display:flex;
-  justify-content:center;
-}
-.donate-button{
-  width:min(100%,430px);
-  min-height:58px;
-  display:inline-flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:20px;
-  padding:14px 18px 14px 22px;
-  background:var(--ink);
-  color:var(--patch);
-  border:0;
-  border-radius:3px;
-  font:inherit;
-  text-align:left;
-  cursor:pointer;
-  transition:background-color .16s ease,transform .16s ease;
-}
-.account-details{display:flex;flex-direction:column;gap:2px}
-.account-bank{font-size:13px;line-height:1.4;color:#b8b1a5}
-.account-number{font:500 19px/1.4 var(--sans);font-variant-numeric:tabular-nums;letter-spacing:.02em}
-.copy-label{flex:0 0 auto;font-size:14px;font-weight:600;color:var(--patch)}
-.donate-button:hover{background:#2c2822;transform:translateY(-2px)}
-.donate-button:focus-visible,.brand:focus-visible,.back:focus-visible{
-  outline:3px solid var(--ink);
-  outline-offset:4px;
-}
+.letter{max-width:66ch;margin:clamp(30px,4vw,46px) auto 0;color:var(--ink-2);font-size:clamp(16px,1.55vw,19px);line-height:1.85}
+.letter p{margin:0 0 1.2em}
+.letter p:last-child{margin-bottom:0}
 
+.receipt-action{margin-top:clamp(28px,3.6vw,42px);padding-top:26px;border-top:1px dashed var(--ink-4);display:flex;justify-content:center}
+/* 목탄 판 버튼 */
+.donate-button{
+  position:relative;isolation:isolate;
+  width:min(100%,440px);min-height:62px;
+  display:inline-flex;align-items:center;justify-content:space-between;gap:20px;
+  padding:12px 20px 12px 24px;
+  background:none;border:0;color:var(--sheet);
+  font:inherit;text-align:left;cursor:pointer;
+  -webkit-tap-highlight-color:transparent;
+}
+.donate-button::before{content:'';position:absolute;inset:0;z-index:-1;border-radius:3px;background:var(--ink);filter:url(#rough)}
+.donate-button::after{content:'';position:absolute;inset:0;z-index:-2;border-radius:3px;background:#000;transform:translateY(3px);filter:url(#rough)}
+.donate-button:active{transform:translateY(3px)}
+.donate-button:active::after{transform:none}
+.account-details{display:flex;flex-direction:column;gap:2px}
+.account-bank{font-size:13px;line-height:1.4;color:#b4b4b1}
+.account-number{font:500 19px/1.4 var(--mono);font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.copy-label{flex:0 0 auto;font-size:14px;font-weight:600}
+
+/* 후원자: 괘선 색인 카드 */
+.supporters{
+  position:relative;width:min(100%,560px);margin:44px auto 0;
+  background-color:var(--sheet);
+  background-image:linear-gradient(var(--sheet),var(--sheet)),repeating-linear-gradient(to bottom,transparent 0 47px,rgba(0,0,0,.12) 47px 48px);
+  background-size:100% 60px,auto;background-repeat:no-repeat,repeat;
+  background-position:0 0,0 58px;
+  padding:18px 26px 16px;
+  box-shadow:0 .5px 1px rgba(10,10,10,.2),0 3px 8px -2px rgba(10,10,10,.13);
+  transform:rotate(.8deg);
+}
+.supporters::before{content:'';position:absolute;left:0;right:0;top:56px;height:3px;border-top:1px solid var(--ink-2);border-bottom:1px solid var(--ink-2)}
+.supporters h2{margin:0;height:36px;display:flex;align-items:flex-end;justify-content:space-between;font:600 15px/1.2 var(--sans);letter-spacing:-.01em}
+.supporters h2 .mono{color:var(--ink-3);font-size:11px}
+.supporter-list{margin:12px 0 0;padding:0;list-style:none}
+.supporter-list li{height:48px;display:flex;align-items:flex-end;gap:16px;padding-bottom:9px}
+.supporter-list .mono{color:var(--ink-4);width:24px}
+.supporter-name{font-size:16px;font-weight:600}
+
+.foot{padding:40px 0 36px}
+.colophon{border-top:1px solid var(--rule);padding-top:18px;margin:0;font:400 12px/1.8 var(--mono);color:var(--ink-3);display:flex;flex-wrap:wrap;gap:4px 22px}
+.colophon a{color:var(--ink-2);text-underline-offset:3px;text-decoration-color:var(--ink-4)}
+
+/* 한 장씩 내려놓기 (초당 12장) */
 @media (prefers-reduced-motion:no-preference){
-  .receipt{animation:set-down .72s cubic-bezier(.16,1,.3,1) both}
-  .token-a{animation:token-left 4.8s cubic-bezier(.16,1,.3,1) infinite}
-  .token-b{animation:token-right 4.8s cubic-bezier(.16,1,.3,1) 2.4s infinite}
+  .receipt{animation:drop calc(var(--frame)*8) steps(1,end) both}
+  .supporters{animation:drop2 calc(var(--frame)*8) steps(1,end) calc(var(--frame)*5) both}
+  .token-a{animation:token-left 4.8s steps(1,end) infinite}
+  .token-b{animation:token-right 4.8s steps(1,end) 2.4s infinite}
 }
-@keyframes set-down{
-  from{opacity:.7;transform:translateY(22px) rotate(-.25deg);box-shadow:0 30px 58px rgba(20,18,15,.07),0 6px 14px rgba(20,18,15,.05)}
-  to{opacity:1;transform:none}
+@keyframes drop{
+  0%   {opacity:0;transform:translate(-10px,-90px) rotate(-3deg) scale(1.03)}
+  12.5%{opacity:1;transform:translate(-6px,-54px) rotate(.8deg) scale(1.025)}
+  25%  {transform:translate(4px,-22px) rotate(-1.2deg) scale(1.012)}
+  37.5%{transform:translate(1px,-5px) rotate(-.1deg) scale(1.005)}
+  50%  {transform:translate(0,2px) rotate(-.35deg) scale(1.006,.99)}
+  62.5%{transform:translate(0,-1px) rotate(-.2deg) scale(.998,1.004)}
+  75%,100%{opacity:1;transform:rotate(-.35deg)}
 }
-@keyframes token-left{0%,68%,100%{transform:none}76%{transform:translate(10px,-8px) rotate(2deg)}}
-@keyframes token-right{0%,68%,100%{transform:none}76%{transform:translate(-9px,-6px) rotate(-2deg)}}
+@keyframes drop2{
+  0%   {opacity:0;transform:translate(10px,-70px) rotate(4deg)}
+  12.5%{opacity:1;transform:translate(6px,-40px) rotate(-.5deg)}
+  25%  {transform:translate(-3px,-14px) rotate(1.6deg)}
+  50%  {transform:translate(0,2px) rotate(.8deg) scale(1.006,.99)}
+  75%,100%{opacity:1;transform:rotate(.8deg)}
+}
+@keyframes token-left{0%,66%,100%{transform:none}70%{transform:translate(5px,-4px) rotate(1deg)}74%{transform:translate(10px,-8px) rotate(2deg)}78%{transform:translate(6px,-3px) rotate(1deg)}}
+@keyframes token-right{0%,66%,100%{transform:none}70%{transform:translate(-5px,-3px) rotate(-1deg)}74%{transform:translate(-9px,-6px) rotate(-2deg)}78%{transform:translate(-5px,-2px) rotate(-1deg)}}
 
 @media (max-width:760px){
-  .wrap{width:min(100% - 28px,1180px)}
-  .donate-main{padding:24px 0 36px;place-items:start center}
-  .receipt{padding:34px 30px 34px}
-  .receipt::before,.receipt::after{display:none}
-  .receipt-head{grid-template-columns:1fr;gap:20px;min-height:0;padding-top:30px}
-  .receipt h1{text-align:center}
+  .receipt{padding:34px 22px 30px}
+  .receipt .holes{display:none}
+  .receipt-head{grid-template-columns:1fr;gap:18px}
   .token-loop{max-height:190px}
-  .letter{margin-top:30px;line-height:1.76}
+  .letter{margin-top:28px;line-height:1.78}
   .donate-button{width:100%}
-}
-
-@media (max-width:420px){
-  .masthead .wrap{min-height:56px}
-  .brand{font-size:18px}
-  .receipt{padding:28px 22px 28px}
-  .receipt-head{padding-top:24px}
-  .token-loop{margin-inline:-5px;width:calc(100% + 10px)}
-}
-
-@media (prefers-reduced-motion:reduce){
-  *{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
 }
 </style>
 </head>
 <body>
 <!--
 THESIS: A developer's honest token request arrives as one physical receipt; it refuses donation tiers, proof cards, and campaign copy.
-OWN-WORLD: Warm cream stock, near-black ink, perforated edges, tactile grain, thin office rules, and one authored technical diagram.
+OWN-WORLD: Paper white and charcoal black with the grays between, paper tooth and fixative dust, perforated edges, one charcoal diagram. Shares tokens with index.html.
 STORY: The visitor reads the developer's exact note, sees tokens circulating through a 24-hour work loop, and chooses whether to donate.
-FIRST VIEWPORT: A minimal masthead sits above one centered receipt; the heading and clock graphic share its top band, followed by the letter and bottom action.
-FORM: Centered token receipt, the assigned fourth grounded structure, seed 0df18c93; approved comp A at .impeccable/mocks/donate-a.png.
-FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+FORM: Centered token receipt pinned to the wall, supporters on a ruled index card.
 -->
-<header class="masthead">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <filter id="cc0" x="-8%" y="-8%" width="116%" height="116%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.03" numOctaves="2" seed="2" result="w"/>
+      <feDisplacementMap in="SourceGraphic" in2="w" scale="3.4" xChannelSelector="R" yChannelSelector="G" result="d"/>
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="5" result="g"/>
+      <feColorMatrix in="g" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 3.4 0 0 0 -0.8" result="m"/>
+      <feComposite in="d" in2="m" operator="in"/>
+    </filter>
+    <filter id="cct" x="-4%" y="-10%" width="108%" height="120%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.06" numOctaves="2" seed="4" result="w"/>
+      <feDisplacementMap in="SourceGraphic" in2="w" scale="1.8" xChannelSelector="R" yChannelSelector="G" result="d"/>
+      <feTurbulence type="fractalNoise" baseFrequency="1.1" numOctaves="1" seed="8" result="g"/>
+      <feColorMatrix in="g" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 2.6 0 0 0 -0.12" result="m"/>
+      <feComposite in="d" in2="m" operator="in"/>
+    </filter>
+    <filter id="rough" x="-4%" y="-10%" width="108%" height="120%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.09" numOctaves="2" seed="3" result="w"/>
+      <feDisplacementMap in="SourceGraphic" in2="w" scale="2.6" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <filter id="logo" color-interpolation-filters="sRGB">
+      <feColorMatrix type="saturate" values="0"/>
+      <feComponentTransfer><feFuncR type="linear" slope="1.56" intercept="-.6"/><feFuncG type="linear" slope="1.56" intercept="-.6"/><feFuncB type="linear" slope="1.56" intercept="-.6"/></feComponentTransfer>
+    </filter>
+  </defs>
+</svg>
+
+<header class="mast">
   <div class="wrap">
-    <a class="brand" href="index.html">Rauhwpx</a>
+    <a class="brand" href="index.html"><span class="tile"><img src="assets/rauhwpx-logo.png" width="1024" height="1024" alt=""></span>Rauhwpx</a>
     <a class="back" href="index.html">
       <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M15 9H3m0 0 4.2-4.2M3 9l4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
       돌아가기
     </a>
   </div>
+  <svg class="mast__rule" viewBox="0 0 1000 6" preserveAspectRatio="none" aria-hidden="true"><path d="M-4 3.2C180 2.1 330 4.4 520 3.1S850 2.2 1004 3.6" fill="none" stroke="currentColor" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>
 </header>
 
-<main class="donate-main">
+<main class="main">
   <div class="wrap">
     <article class="receipt" aria-labelledby="letter-title">
+      <i class="tack" aria-hidden="true"></i>
+      <i class="holes l" aria-hidden="true"></i><i class="holes r" aria-hidden="true"></i>
       <header class="receipt-head">
-        <h1 id="letter-title">개발자의 편지</h1>
+        <div>
+          <p class="mono">No. 07 · 후원</p>
+          <h1 id="letter-title" class="charcoal">개발자의 편지</h1>
+        </div>
 
         <svg class="token-loop" viewBox="0 0 500 250" role="img" aria-label="토큰이 24시간 작업 순환을 따라 이동하는 그림">
           <defs>
             <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="strokeWidth">
-              <path d="M1 1l5 3-5 3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M1 1l5 3-5 3" fill="none" stroke="#1b1b1a" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
             </marker>
           </defs>
 
@@ -285,7 +264,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
             <text class="clock-number" x="214" y="123">18</text>
             <text class="clock-number" x="370" y="123">6</text>
             <path class="line" d="M297 119V78M297 119l30 24"/>
-            <circle cx="297" cy="119" r="4" fill="var(--ink)"/>
+            <circle cx="297" cy="119" r="4" fill="#1b1b1a"/>
             <path class="line" d="M244 63c25-26 65-35 99-20 13 6 24 15 33 26" marker-end="url(#arrow)"/>
             <path class="line" d="M349 172c-24 27-64 36-99 22-14-6-25-15-34-27" marker-end="url(#arrow)"/>
           </g>
@@ -320,15 +299,23 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     </article>
 
     <section class="supporters" aria-labelledby="supporters-title">
-      <div class="supporters-head">
-        <h2 id="supporters-title">후원자 목록</h2>
-      </div>
+      <h2 id="supporters-title">후원자 목록 <span class="mono">1</span></h2>
       <ul class="supporter-list">
-        <li><span class="supporter-name">민**</span></li>
+        <li><span class="mono">01</span><span class="supporter-name">민**</span></li>
       </ul>
     </section>
   </div>
 </main>
+
+<footer class="foot">
+  <div class="wrap">
+    <p class="colophon">
+      <span><a href="index.html">Rauhwpx</a></span>
+      <span><a href="https://github.com/heemangstudio/Rauhwpx">GitHub</a></span>
+      <span>문의 <a href="mailto:heemang12bo@gmail.com">heemang12bo@gmail.com</a></span>
+    </p>
+  </div>
+</footer>
 <script>
 const accountButton=document.getElementById('copy-account');
 const copyLabel=accountButton.querySelector('.copy-label');

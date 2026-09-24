@@ -5,8 +5,9 @@
 
 /* ── 탭 패널 내부 공통 패딩 ── */
 .dialog-wrap.tcp-dialog {
-  width: min(670px, calc(100vw - 32px)) !important;
-  height: min(720px, calc(100vh - 32px));
+  width: min(760px, calc(100vw - 32px)) !important;
+  height: min(740px, calc(100dvh - 32px));
+  max-height: calc(100dvh - 32px);
   display: flex;
   flex-direction: column;
 }
@@ -16,11 +17,45 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 12px;
+  overflow: hidden;
+  padding: 14px 20px;
 }
 
 .dialog-wrap.tcp-dialog .dialog-footer {
   flex: 0 0 auto;
+}
+
+.modal-overlay:has(.tcp-dialog) { padding: 16px; box-sizing: border-box; background: #0009; }
+
+.tcp-dialog .dialog-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 12px;
+  padding: 3px;
+  gap: 2px;
+  overflow-x: auto;
+  border: 0;
+  border-radius: 8px;
+  background: var(--ui-surface-muted);
+}
+.tcp-dialog .dialog-tab {
+  min-height: 32px;
+  margin: 0;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--ui-text-secondary);
+  font: 600 12px var(--font-family-ui);
+  white-space: nowrap;
+}
+.tcp-dialog .dialog-tab:hover { background: var(--ui-hover); color: var(--ui-text); }
+.tcp-dialog .dialog-tab.active {
+  border: 0;
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  box-shadow: 0 1px 2px #0002;
 }
 
 .dialog-wrap.tcp-border-bg-dialog {
@@ -64,8 +99,45 @@
 }
 
 .tcp-tab-content {
-  padding: 12px;
+  padding: 4px 0 16px;
   box-sizing: border-box;
+}
+
+.tcp-dialog .dialog-section {
+  border-color: var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-surface);
+}
+.tcp-dialog .dialog-section-title { color: var(--ui-text-secondary); font-size: 12px; font-weight: 650; }
+.tcp-dialog .dialog-label { min-width: 0; text-align: left; font-size: 12px; font-weight: 550; }
+.tcp-dialog :is(.dialog-input, .dialog-select, .dialog-text-input) {
+  height: 32px;
+  padding-inline: 9px;
+  border-color: var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-surface);
+  font: 13px var(--font-family-ui);
+}
+.tcp-dialog :is(.dialog-btn-group button, .tcp-all-spinner-btn, .tcp-line-type-item, .tcp-dir-btn, .tcp-diag-btn, .tcp-caption-item) {
+  border-radius: 5px;
+}
+.tcp-dialog :is(.dialog-btn-group button.active, .tcp-line-type-item.active, .tcp-diag-btn.active, .tcp-caption-item.active) {
+  border-color: var(--ui-text);
+  background: var(--ui-selected);
+  color: var(--ui-text);
+  box-shadow: inset 0 0 0 1px var(--ui-text);
+}
+
+@media (max-width: 600px) {
+  .modal-overlay:has(.tcp-dialog) { padding: 12px; }
+  .dialog-wrap.tcp-dialog {
+    width: min(540px, calc(100vw - 24px)) !important;
+    height: min(740px, calc(100dvh - 24px));
+    max-height: calc(100dvh - 24px);
+  }
+  .dialog-wrap.tcp-dialog .dialog-body { padding: 12px 16px; }
+  .tcp-tab-content { padding-top: 2px; }
+  .tcp-dialog .tcp-diag-layout { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* ── "모두" 일괄 조정 스피너 ── */

@@ -5,7 +5,7 @@ import { VirtualScroll } from './virtual-scroll';
 import { CanvasPool } from './canvas-pool';
 import { MutationRefreshQueue, type MutationRefreshBatch } from './mutation-refresh-queue';
 import { PageRenderer, type PageRenderContext, type PageRenderResult } from './page-renderer';
-import { ViewportManager } from './viewport-manager';
+import { MAX_ZOOM, MIN_ZOOM, ViewportManager } from './viewport-manager';
 import { CoordinateSystem } from './coordinate-system';
 import type { CanvasKitRenderDiagnostics } from './canvaskit-renderer';
 import { clampRenderScale, type RenderBackend } from './render-backend';
@@ -184,7 +184,7 @@ export class CanvasView {
       const pageWidth = this.pages[0].width;
       if (pageWidth > 0 && containerWidth > 0) {
         const fitZoom = containerWidth / pageWidth;
-        this.viewportManager.setZoom(Math.max(0.1, Math.min(fitZoom, 4.0)));
+        this.viewportManager.setZoom(Math.max(MIN_ZOOM, Math.min(fitZoom, MAX_ZOOM)));
       }
     }
 
