@@ -202,7 +202,7 @@ jobs:
     name: Studio browser integration
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.browser == 'true') }}
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     env:
       PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
