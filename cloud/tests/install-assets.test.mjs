@@ -42,7 +42,7 @@ test('installer is streamable, channel-aware, preserves Serve routes, and emits 
   assert.match(source, /provider install codex/);
   assert.match(source, /provider install pi/);
   assert.doesNotMatch(source, /provider install (?:grok|cursor)/);
-  assert.ok(source.includes('github\\.com/heemangstudio/Rauhwpx/\\.github/workflows/release\\.yml@refs/tags/'));
+  assert.ok(source.includes('github\\.com/(ghandhitechnology|heemangstudio)/Rauhwpx/\\.github/workflows/release\\.yml@refs/tags/'));
   assert.doesNotMatch(source, /refs\/\(heads\|tags\)/);
   assert.match(source, /Strict-Transport-Security "max-age=31536000; includeSubDomains"/);
   assert.match(source, /X-Content-Type-Options "nosniff"/);
@@ -61,7 +61,7 @@ test('installer is streamable, channel-aware, preserves Serve routes, and emits 
   assert.match(update, /podman --cgroup-manager=cgroupfs run --rm[\s\S]*--uidmap 0:1:1000[\s\S]*--gidmap 1000:0:1[\s\S]*--entrypoint \/app\/bin\/rhwp/);
   assert.match(update, /chmod -R a\+rX "\$DESTINATION"/);
   assert.doesNotMatch(update, /(^|\s)(?:exec\s+)?runuser\s+--user/m);
-  assert.ok(update.includes('github\\.com/heemangstudio/Rauhwpx/\\.github/workflows/release\\.yml@refs/tags/'));
+  assert.ok(update.includes('github\\.com/(ghandhitechnology|heemangstudio)/Rauhwpx/\\.github/workflows/release\\.yml@refs/tags/'));
   assert.doesNotMatch(update, /refs\/\(heads\|tags\)/);
   const wrapper = await fs.readFile(path.join(root, 'install/rauhwpx-cloud'), 'utf8');
   assert.match(wrapper, /cd \/var\/lib\/rauhwpx-cloud\s+exec \/usr\/sbin\/runuser --user rauhwpx-cloud/);

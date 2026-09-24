@@ -127,7 +127,7 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "ghandhitechnology",
+      "owner": "heemangstudio",
       "repo": "Rauhwpx"
     },
     "electronLanguages": [
