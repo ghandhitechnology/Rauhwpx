@@ -520,6 +520,11 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     remove.title = '첨부 취소';
     remove.appendChild(createIcon('close'));
     const previewUrl = isImageFile(file) ? URL.createObjectURL(file) : null;
+    if (previewUrl) {
+      root.classList.add('ag-image');
+      retry.replaceChildren(createIcon('refresh'));
+      retry.title = '다시 시도';
+    }
     const visual = previewUrl
       ? el('img', 'ag-reference-upload-preview') as HTMLImageElement
       : createIcon('document');
@@ -575,7 +580,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     chip.root.removeAttribute('title');
     chip.state.textContent = '업로드 중';
     chip.retry.hidden = true;
-    chip.remove.hidden = true;
+    chip.remove.hidden = !chip.previewUrl;
     options.onDraftStateChange?.('status');
     try {
       const staged = await bridge.stageReference(chip.target.scopeId, chip.file);
