@@ -107,8 +107,8 @@ function raucloudLock(snapshot: CloudSnapshot): string | null {
   const gate = snapshot.account?.raucloud;
   if (!gate || gate.kind === 'available') return null;
   switch (gate.kind) {
-    case 'logged-out': return 'Raucloud를 시작하려면 Rauhwpx 계정으로 로그인하세요.';
-    case 'exhausted': return '오늘의 Raucloud 시간을 모두 사용했습니다. 실행 중인 응답까지만 끝낼 수 있습니다.';
+    case 'logged-out': return 'Raucloud는 Rauhwpx 로그인이 필요합니다.';
+    case 'exhausted': return '오늘 Raucloud 시간 소진 · 실행 중인 응답까지만 완료';
     case 'active-elsewhere': return `${gate.deviceName ?? '다른 기기'}에서 Raucloud가 실행 중입니다. 서버 강제 종료로 끊을 수 있습니다.`;
     case 'unavailable': return gate.reason;
   }
@@ -729,16 +729,16 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     });
     void recoveryOperation('recreating', async () => {
       if (binding && !bindingMatchesScope(binding)) {
-        throw new Error('작업을 시작한 문서와 대화에서 서버를 다시 만들어 주세요.');
+        throw new Error('작업을 시작한 문서와 대화에서 서버를 다시 만듭니다.');
       }
       const references = binding ? await deps.onPrepareRestartConversation?.(binding) ?? [] : [];
       const document = binding ? await deps.controller.prepareRestartDocument(binding.sessionId) : null;
       if (binding && !bindingMatchesScope(binding)) {
-        throw new Error('작업을 시작한 문서와 대화에서 서버를 다시 만들어 주세요.');
+        throw new Error('작업을 시작한 문서와 대화에서 서버를 다시 만듭니다.');
       }
       if (binding) {
         await deps.onRestartPrepared?.(binding);
-        if (!bindingMatchesScope(binding)) throw new Error('작업을 시작한 문서와 대화에서 서버를 다시 만들어 주세요.');
+        if (!bindingMatchesScope(binding)) throw new Error('작업을 시작한 문서와 대화에서 서버를 다시 만듭니다.');
       }
       snapshot = await deps.controller.recreateLink();
       selectedSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
@@ -921,8 +921,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     mergeButton.disabled = busy || workspaceLocked || (!offer?.durable && inferCloudLink(snapshot).kind !== 'ready');
     mergeButton.textContent = busy ? 'Cloud 변경 여는 중…' : `Cloud 변경 검토${offer ? ` · ${offer.turn}턴` : ''}`;
     mergeButton.title = offer?.localAvailable
-      ? '이 기기에 저장된 Cloud 변경을 검토합니다. 현재 로컬 편집은 그대로 유지됩니다.'
-      : '완료된 Cloud 변경을 가져와 검토합니다. 현재 로컬 편집은 그대로 유지됩니다.';
+      ? '이 기기에 저장된 Cloud 변경을 검토합니다.'
+      : '완료된 Cloud 변경을 가져와 검토합니다.';
     mergeButton.dataset.localAvailable = String(offer?.localAvailable === true);
     mergeButton.dataset.revision = offer ? String(offer.revision) : '';
   }
@@ -934,7 +934,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     const profileKey = mergeProfileKey(snapshot);
     const documentId = deps.getScope().documentId;
     const startId = offer.startId ?? mergeStartId(offer.sessionId);
-    if (!startId) return deps.onError('Cloud 시작 대화를 불러온 뒤 다시 병합하세요.');
+    if (!startId) return deps.onError('Cloud 시작 대화를 불러온 뒤 병합합니다.');
     await operation(async () => {
       const checkpoint = await deps.controller.downloadCheckpoint(offer.sessionId, offer.operationId, 'turn');
       if (snapshot.profileEpoch !== profileEpoch || mergeProfileKey(snapshot) !== profileKey || deps.getScope().documentId !== documentId) return;
@@ -963,7 +963,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       if (checkpoint.sessionId !== offer.sessionId || checkpoint.documentId !== documentId
         || checkpoint.kind !== 'turn' || checkpoint.revision !== offer.revision
         || checkpoint.operationId !== offer.operationId || checkpoint.sha256 !== digest
-        || checkpoint.byteLength !== checkpoint.bytes.length) throw new Error('Cloud 사본 검증에 실패했습니다. 다시 다운로드하세요.');
+        || checkpoint.byteLength !== checkpoint.bytes.length) throw new Error('Cloud 사본 검증 실패 · 다시 다운로드');
       const link = document.createElement('a');
       const url = URL.createObjectURL(new Blob([checkpoint.bytes.slice().buffer], { type: 'application/octet-stream' }));
       link.href = url;
@@ -1071,7 +1071,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
             ? appHosted ? 'Raucloud 상태를 확인해야 합니다.' : 'VPS 연결을 확인해야 합니다.'
             : 'Cloud 서버를 선택해야 합니다.';
         panelDetail.textContent = snapshot.profile.kind !== 'configured'
-          ? 'Raucloud를 쓰거나 내 서버를 연결하세요.'
+          ? 'Raucloud 또는 내 서버'
           : snapshot.profile.mode === 'app-hosted'
             ? `${snapshot.profile.name} · ${snapshot.profile.sandbox.host || snapshot.profile.sandbox.sandboxId}`
             : `${snapshot.profile.profile.name} · ${snapshot.profile.profile.host}`;
@@ -1120,7 +1120,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
             ? plan['summary']
             : typeof wait.payload['prompt'] === 'string'
               ? wait.payload['prompt']
-              : '결정 전까지 클라우드 대화는 안전하게 열린 상태로 유지됩니다.';
+              : '결정 전까지 대화는 열려 있습니다.';
           if (wait.kind === 'plan-approval' || wait.kind === 'question') {
             const feedback = el('textarea', 'ag-cloud-wait-feedback') as HTMLTextAreaElement;
             feedback.rows = 3;
@@ -1219,7 +1219,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
             ? 'Cloud 결과가 이 기기에 준비되었습니다.'
             : 'Cloud 작업이 끝났습니다.';
           panelDetail.textContent = offer?.localAvailable
-            ? '현재 문서의 편집을 유지한 채 변경 내용을 검토할 수 있습니다.'
+            ? '현재 편집을 유지한 채 검토합니다.'
             : '완료된 변경을 가져와 검토할 수 있습니다.';
           if (offer) panelActions.append(action('변경 검토', publishCheckpoint, 'ag-primary'));
           break;
@@ -1297,8 +1297,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     } else {
       recoveryTitle.textContent = 'Cloud 연결이 끊겼습니다';
       recoveryDetail.textContent = link.canRecreate
-        ? '대화 기록은 남아 있습니다. 다시 연결하거나 새 서버에서 이어가세요.'
-        : '대화 기록은 남아 있습니다. 서버가 켜져 있는지 확인한 뒤 다시 연결하세요.';
+        ? '대화 기록 보존됨 · 다시 연결하거나 새 서버에서 이어가기'
+        : '대화 기록 보존됨 · 서버 확인 후 다시 연결';
       recoveryActions.append(action('다시 연결', reconnectLink, 'ag-primary'));
       if (link.canRecreate) {
         recoveryActions.append(action('서버 다시 만들기', recreateLink));
@@ -1584,7 +1584,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       : null;
     if (host?.type === 'session-stream-error' || host?.type === 'remote-session-stream-error') {
       if (host.retryable === false) {
-        deps.onError(typeof host.error === 'string' ? host.error : '클라우드 연결을 확인해 주세요.');
+        deps.onError(typeof host.error === 'string' ? host.error : '클라우드 연결 확인 필요');
         return;
       }
       const link = inferCloudLink(snapshot);

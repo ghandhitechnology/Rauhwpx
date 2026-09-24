@@ -1,6 +1,7 @@
 import { createSetupTerminal } from './setup-terminal.ts';
 /** 설정 허브의 탐색과 AI·연결 목적지를 소유한다. 편집 설정은 전용 모듈이 맡는다. */
 import './settings.css';
+import { confirmSheet } from './sheet.ts';
 
 import {
   effortsForAgent,
@@ -138,8 +139,7 @@ const INSTALL_PROGRESS_CEILING: Record<string, number> = {
   done: 100,
 };
 
-const UNRESTRICTED_DEFAULT_WARNING =
-  '전체 접근을 기본값으로 두면 새 대화가 열릴 때부터 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 닿습니다. 계속할까요?';
+const UNRESTRICTED_DEFAULT_WARNING = '승인 없이 편집하고 파일에 접근합니다.';
 
 /** 미터가 경고 색으로 넘어가는 소진율. */
 const METER_WARN_PERCENT = 80;
@@ -627,19 +627,19 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   // ── 1-1. 원격 브라우저 (Browserbase) ──────────────────
   // 여기 넣은 키는 허브 메모리에만 머물고, 이 탭을 쓰는 동안만 환경 변수를 덮는다.
   const browserbaseSection = createSection('원격 브라우저');
-  const browserbaseStatusLine = el('p', 'ag-settings-status', '허브에 연결되면 확인해요');
+  const browserbaseStatusLine = el('p', 'ag-settings-status', '허브 연결 대기');
   const browserbaseKey = createTextField('Browserbase 키', {
     type: 'password',
     placeholder: 'bb_live_…',
     autocomplete: 'new-password',
   });
-  const browserbaseProject = createTextField('프로젝트 ID', { placeholder: '비우면 계정에서 골라요' });
+  const browserbaseProject = createTextField('프로젝트 ID', { placeholder: '비우면 자동 선택' });
   const browserbaseGemini = createTextField('Gemini 키', {
     type: 'password',
     placeholder: 'AIza…',
     autocomplete: 'new-password',
   });
-  const browserbaseNote = el('p', 'ag-settings-note', '이 탭을 쓰는 동안만 허브 환경 변수 대신 써요.');
+  const browserbaseNote = el('p', 'ag-settings-note', '이 탭에서만 허브 환경 변수 대신 사용합니다.');
   const browserbaseError = el('p', 'ag-settings-cliproxy-error');
   browserbaseError.hidden = true;
   const browserbaseActions = el('div', 'ag-settings-actions');
@@ -711,7 +711,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // 2단계 — OpenRouter 키
   const piKeyStep = el('div', 'ag-pi-step');
-  const piKeyNote = el('p', 'ag-settings-note', 'OpenRouter 계정으로 로그인하거나 API 키를 직접 연결하세요.');
+  const piKeyNote = el('p', 'ag-settings-note', 'OpenRouter 로그인 또는 API 키');
   const piOauth = el('button', 'ag-settings-primary ag-agent-auth-choice');
   piOauth.type = 'button';
   piOauth.append(el('strong', '', '브라우저로 로그인'), el('span', '', 'OpenRouter OAuth'));
@@ -747,7 +747,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // 4단계 — 이름 짓기 + 기본 강도
   const piNamingStep = el('div', 'ag-pi-step');
-  const piNamingNote = el('p', 'ag-settings-note', '사이드바에 보일 이름이에요.');
+  const piNamingNote = el('p', 'ag-settings-note', '사이드바 표시 이름');
   const piNamingRows = el('div', 'ag-pi-naming');
   const piNamingActions = el('div', 'ag-settings-actions');
   const piNamingSave = el('button', 'ag-settings-primary', '저장');
@@ -867,20 +867,20 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const setupUserCodeCaption = el(
     'p',
     'ag-agent-login-caption',
-    '브라우저에서 이 코드를 확인해 주세요.',
+    '브라우저에서 이 코드를 확인합니다.',
   );
   setupUserCodeRow.append(setupUserCodeValue, setupUserCodeCopy, setupUserCodeCaption);
   const setupLoginWait = el(
     'p',
     'ag-agent-login-wait',
-    '브라우저에서 로그인을 마치면 자동으로 완료돼요.',
+    '브라우저에서 로그인하면 자동으로 완료됩니다.',
   );
   const setupLoginCancel = el('button', 'ag-settings-btn ag-agent-login-cancel', '로그인 취소');
   setupLoginCancel.type = 'button';
   setupLoginBox.append(setupAuthUrlRow, setupUserCodeRow, setupLoginWait, setupLoginCancel);
   const setupCodeBox = el('div', 'ag-agent-key-box');
   setupCodeBox.hidden = true;
-  const setupCodeNote = el('p', 'ag-agent-setup-copy', '브라우저에서 로그인하면 인증 코드가 표시됩니다. 코드를 붙여넣어 주세요.');
+  const setupCodeNote = el('p', 'ag-agent-setup-copy', '브라우저에 표시된 인증 코드 붙여넣기');
   const setupCode = createTextField('인증 코드', { autocomplete: 'off' });
   const setupCodeSubmit = el('button', 'ag-agent-setup-primary', '코드 확인');
   setupCodeSubmit.type = 'button';
@@ -903,7 +903,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const setupRauAuthFeedbackCopy = el('div', 'ag-agent-setup-auth-feedback-copy');
   setupRauAuthFeedbackCopy.append(
     el('strong', '', '로그인이 완료되었습니다'),
-    el('span', '', '계정을 확인하고 계속하세요.'),
+    el('span', '', '계정 확인 후 계속'),
   );
   setupRauAuthFeedback.append(setupRauAuthFeedbackMark, setupRauAuthFeedbackCopy);
 
@@ -913,7 +913,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const setupAccountTitle = el('h3', 'ag-agent-setup-section-title', '로그인된 계정');
   const setupAccountEmail = el('p', 'ag-agent-setup-account-email');
   const setupAccountRows = el('div', 'ag-agent-setup-account-rows');
-  const setupAccountEmpty = el('p', 'ag-settings-note', '체험 크레딧을 다 썼어요. 다른 모델을 연결해 주세요.');
+  const setupAccountEmpty = el('p', 'ag-settings-note', '체험 크레딧 소진 · 다른 모델 연결');
   setupAccountEmpty.hidden = true;
   setupAccountPane.append(setupAccountTitle, setupAccountEmail, setupAccountRows, setupAccountEmpty);
 
@@ -993,7 +993,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       onAgentSetupAbandoned?.({
         agent: 'rau',
         code: 'RAU_LOGIN_CANCELLED',
-        message: 'Rau 로그인을 취소했어요.',
+        message: 'Rau 로그인 취소됨',
       });
     }
   });
@@ -1173,8 +1173,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   });
   instructionsProposalConfirm.addEventListener('click', () => void confirmAgentInstructionsDraft());
   instructionsProposalReject.addEventListener('click', () => void rejectAgentInstructionsDraft());
-  instructionsReload.addEventListener('click', () => {
-    if (instructionsDirty && !window.confirm('작성 중인 지시 변경을 버리고 다시 불러올까요?')) return;
+  instructionsReload.addEventListener('click', async () => {
+    if (instructionsDirty && !await confirmSheet(instructionsReload, '변경 버리기', '작성 중인 지시를 버리고 다시 불러옵니다.', { confirmLabel: '버리기', destructive: true })) return;
     instructionsDirty = false;
     instructionsMessage = '';
     void refreshAgentInstructions(true);
@@ -1182,7 +1182,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // ── 5. 글쓰기 보정 ────────────────────────────────────
   const calibration = createSection('글쓰기 보정');
-  const calibrationStatus = el('p', 'ag-settings-status', '아직 보정되지 않았어요');
+  const calibrationStatus = el('p', 'ag-settings-status', '보정 전');
   const calibrationSummary = el('p', 'ag-settings-note');
   calibrationSummary.hidden = true;
   const calibrationBtn = el('button', 'ag-settings-primary', '보정 시작');
@@ -1192,7 +1192,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // ── 6. 템플릿 ─────────────────────────────────────────
   const templatesSection = createSection('템플릿');
-  const templatesNote = el('p', 'ag-settings-note', '채팅에서는 /templates로 선택하세요.');
+  const templatesNote = el('p', 'ag-settings-note', '채팅에서 /templates로 선택');
   const templatesList = el('div', 'ag-template-list');
   const templatesStatus = el('p', 'ag-settings-cliproxy-error');
   templatesStatus.hidden = true;
@@ -1255,7 +1255,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     event.preventDefault();
     const name = templateNameInput.value.trim();
     if (!name) {
-      templateNameInput.setCustomValidity('템플릿 이름을 입력하세요.');
+      templateNameInput.setCustomValidity('템플릿 이름 입력');
       templateNameInput.reportValidity();
       return;
     }
@@ -1318,7 +1318,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     toggle.setAttribute('aria-controls', content.id);
     const credits = el('div', 'ag-settings-row-detail');
     const meters = el('div', 'ag-settings-meters');
-    const empty = el('p', 'ag-settings-note', '체험 크레딧을 다 썼어요. 다른 모델을 연결해 주세요.');
+    const empty = el('p', 'ag-settings-note', '체험 크레딧 소진 · 다른 모델 연결');
     empty.hidden = true;
     const session = el('div', 'ag-settings-usage-session');
     const models = el('div', 'ag-settings-usage-models');
@@ -1492,15 +1492,15 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (instructionsDirty) {
       const maxChars = agentInstructions?.maxChars ?? 30_000;
       if (!agentInstructions || instructionsEditor.value.length > maxChars) {
-        instructionsMessage = 'AGENTS.md 내용을 확인한 뒤 다시 시도하세요.';
+        instructionsMessage = 'AGENTS.md 내용 확인 필요';
         renderAgentInstructions();
         return false;
       }
     }
     if (nextPrefs.defaultPermissionProfile === 'unrestricted'
       && prefsBaseline.defaultPermissionProfile !== 'unrestricted'
-      && !window.confirm(UNRESTRICTED_DEFAULT_WARNING)) {
-      aiStatus.textContent = '전체 접근 권한 적용을 취소했습니다.';
+      && !await confirmSheet(aiStatus, '기본값을 전체 접근으로', UNRESTRICTED_DEFAULT_WARNING, { confirmLabel: '적용' })) {
+      aiStatus.textContent = '적용 취소';
       aiStatus.hidden = false;
       return false;
     }
@@ -1557,12 +1557,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     dialog.setAttribute('aria-modal', 'true');
     dialog.setAttribute('aria-labelledby', 'ag-settings-dirty-title');
     dialog.setAttribute('aria-describedby', 'ag-settings-dirty-description');
-    const dialogTitle = el('h2', 'ag-settings-dirty-title', '변경 사항을 적용할까요?');
+    const dialogTitle = el('h2', 'ag-settings-dirty-title', '적용하지 않은 변경');
     dialogTitle.id = 'ag-settings-dirty-title';
     const description = el(
       'p',
       'ag-settings-dirty-description',
-      '적용하지 않은 설정이 있습니다. 이동하기 전에 처리해 주세요.',
+      '이동하기 전에 적용하거나 버립니다.',
     );
     description.id = 'ag-settings-dirty-description';
     const actions = el('div', 'ag-settings-dirty-actions');
@@ -1682,8 +1682,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       });
       const remove = el('button', 'ag-settings-btn ag-template-delete', '삭제');
       remove.type = 'button';
-      remove.addEventListener('click', () => {
-        if (window.confirm(`“${template.name}” 템플릿을 삭제할까요?`)) void deleteTemplate(template.id);
+      remove.addEventListener('click', async () => {
+        if (await confirmSheet(remove, `“${template.name}” 삭제`, undefined, { confirmLabel: '삭제', destructive: true })) void deleteTemplate(template.id);
       });
       actions.append(rename, replace, remove);
       row.append(text, actions);
@@ -1820,7 +1820,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       : authenticating
         ? '로그인 확인 중…'
         : accountStatus?.state === 'unknown'
-          ? '상태 확인이 지연되고 있어요'
+          ? '상태 확인 지연'
           : '로그인되지 않음';
     accountAction.textContent = signedIn ? '로그아웃' : '로그인';
     accountAction.disabled = connectionState !== 'connected' || accountBusy
@@ -1866,7 +1866,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (disposed) return;
     if (!started?.authRunId) {
       accountBusy = false;
-      if (!accountMessage) accountMessage = '로그인을 시작하지 못했어요.';
+      if (!accountMessage) accountMessage = '로그인 시작 실패';
       renderAccount();
       return;
     }
@@ -1903,7 +1903,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (disposed) return;
     accountBusy = false;
     if (status) accountStatus = status;
-    else if (!accountMessage) accountMessage = '로그아웃하지 못했어요.';
+    else if (!accountMessage) accountMessage = '로그아웃 실패';
     renderAccount();
   }
 
@@ -1925,11 +1925,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   function browserbaseErrorLabel(code: string, message: string): string {
     switch (code) {
-      case 'BROWSERBASE_KEY_INVALID': return 'Browserbase 가 이 키를 거부했어요.';
-      case 'BROWSERBASE_UNREACHABLE': return 'Browserbase API 에 닿지 못했어요. 허브 네트워크를 확인해 주세요.';
-      case 'BROWSERBASE_PROJECT_NOT_FOUND': return '이 API 키로 해당 프로젝트를 찾을 수 없어요. 프로젝트 ID를 확인하거나 비운 뒤 다시 시도해 주세요.';
-      case 'BROWSERBASE_PROJECT_REQUIRED': return '프로젝트를 자동으로 찾을 수 없어요. Browserbase 프로젝트 ID를 입력해 주세요.';
-      case 'BROWSERBASE_NO_PROJECT': return '이 계정에는 프로젝트가 없어요. Browserbase 에서 먼저 만들어 주세요.';
+      case 'BROWSERBASE_KEY_INVALID': return 'Browserbase 키 거부됨';
+      case 'BROWSERBASE_UNREACHABLE': return 'Browserbase API 연결 실패';
+      case 'BROWSERBASE_PROJECT_NOT_FOUND': return '프로젝트를 찾을 수 없습니다 · 프로젝트 ID 확인';
+      case 'BROWSERBASE_PROJECT_REQUIRED': return '프로젝트 ID 입력 필요';
+      case 'BROWSERBASE_NO_PROJECT': return 'Browserbase 프로젝트 없음';
       default: return message;
     }
   }
@@ -1938,11 +1938,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const online = connectionState === 'connected';
     const status = browserbaseStatus;
     if (!online) {
-      browserbaseStatusLine.textContent = '허브에 연결되면 확인해요';
+      browserbaseStatusLine.textContent = '허브 연결 대기';
     } else if (!status) {
       browserbaseStatusLine.textContent = '확인 중…';
     } else if (status.keySource === null) {
-      browserbaseStatusLine.textContent = '키가 없어요. 아래에 입력하거나 허브에 BROWSERBASE_API_KEY 를 내보내세요.';
+      browserbaseStatusLine.textContent = '키 없음 · 아래에 입력하거나 BROWSERBASE_API_KEY 설정';
     } else {
       const parts = [`${browserbaseSourceLabel(status.keySource)} 키 ····${status.keyTail ?? ''}`];
       parts.push(status.projectId ? `프로젝트 ${status.projectId}` : '프로젝트 없음');
@@ -1991,7 +1991,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       browserbaseProject.input.value = status.projectId ?? '';
       browserbaseProjectAutoFilled = browserbaseProject.input.value !== '';
     } else if (!browserbaseMessage) {
-      browserbaseMessage = '키를 확인하지 못했어요.';
+      browserbaseMessage = '키 확인 실패';
     }
     renderBrowserbase();
   }
@@ -2010,7 +2010,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       browserbaseProject.input.value = '';
       browserbaseProjectAutoFilled = false;
     } else if (!browserbaseMessage) {
-      browserbaseMessage = 'Browserbase 설정을 되돌리지 못했어요.';
+      browserbaseMessage = 'Browserbase 설정 되돌리기 실패';
     }
     renderBrowserbase();
   }
@@ -2033,25 +2033,25 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       let message: string;
       if (!online) {
         label = '허브 연결 필요';
-        message = '에이전트 허브에 다시 연결한 뒤 계정을 관리할 수 있어요.';
+        message = '허브 연결 후 관리합니다.';
       } else if (working) {
         label = setup?.installing ? '설치 중…' : '로그인 중…';
-        message = '설정 화면에서 진행 상황을 확인해 주세요.';
+        message = '설정에서 진행 상황 확인';
       } else if (setup?.updateRequired) {
         label = '업데이트 필요';
-        message = '계속 사용하려면 설정 화면에서 업데이트해 주세요.';
+        message = '설정에서 업데이트';
       } else if (!setup && !health) {
         label = '확인 중…';
-        message = '이 기기의 연결 상태를 확인하고 있어요.';
+        message = '연결 확인 중';
       } else if (setup?.error || health?.error) {
         label = '확인 필요';
-        message = setup?.error || health?.error || '연결 상태를 확인해 주세요.';
+        message = setup?.error || health?.error || '연결 상태 확인 필요';
       } else if (connected) {
         label = identity || '연결됨';
-        message = identity ? `연결된 계정: ${identity}` : '이 기기에 연결된 계정을 사용하고 있어요.';
+        message = identity ? `연결된 계정: ${identity}` : '이 기기의 계정 사용 중';
       } else {
         label = detected ? '로그인 필요' : '연결하기';
-        message = detected ? '설정 화면에서 로그인해 연결을 완료해 주세요.' : `${AGENT_LABEL[agent]}를 연결해 대화를 시작하세요.`;
+        message = detected ? '설정에서 로그인' : `${AGENT_LABEL[agent]} 연결 필요`;
       }
       row.dot.dataset.state = !online || working ? 'unknown' : connected && !setup?.updateRequired && !setup?.error && !health?.error ? 'connected' : 'disconnected';
       row.detail.textContent = label;
@@ -2269,7 +2269,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       onAgentSetupAbandoned?.({
         agent: 'rau',
         code: 'RAU_LOGIN_CANCELLED',
-        message: 'Rau 로그인을 취소했어요.',
+        message: 'Rau 로그인 취소됨',
       });
     }
   }
@@ -2421,8 +2421,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     renderSetupLoginBox();
     setupCodeBox.hidden = supportsTerminalSetup(agent) || (agent !== 'claude' && agent !== 'rau') || !setupCodePending || !setupBusy;
     setupCodeNote.textContent = agent === 'rau'
-      ? '브라우저에 표시된 12자리 반환 코드를 붙여넣어 주세요.'
-      : '브라우저에서 로그인하면 인증 코드가 표시됩니다. 코드를 붙여넣어 주세요.';
+      ? '브라우저에 표시된 12자리 코드 붙여넣기'
+      : '브라우저에 표시된 인증 코드 붙여넣기';
     setupCodeSubmit.disabled = connectionState !== 'connected' || !setupCode.input.value.trim();
     restoreSetupFocus();
   }
@@ -2440,8 +2440,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupUserCodeRow.hidden = !setupUserCode;
     if (setupUserCode) setupUserCodeValue.textContent = setupUserCode;
     setupUserCodeCaption.textContent = setupAgent === 'rau'
-      ? '브라우저에 같은 연결 코드가 표시되는지 확인해 주세요.'
-      : '브라우저에서 이 코드를 확인해 주세요.';
+      ? '브라우저에 같은 코드가 보이는지 확인합니다.'
+      : '브라우저에서 이 코드를 확인합니다.';
   }
 
   async function refreshSetupStatuses(refresh = false): Promise<void> {
@@ -2468,7 +2468,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (disposed) return;
     setupBusy = false;
     if (statuses) setupStatuses = statuses;
-    else if (!setupMessage) setupMessage = '설치를 완료하지 못했어요.';
+    else if (!setupMessage) setupMessage = '설치 실패';
     renderAgentSetup();
     renderProviders();
   }
@@ -2492,7 +2492,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           defaultModel: resolveModelForAgent(fallback, null),
         }, { preserveDraft: true });
       }
-    } else if (!setupMessage) setupMessage = '이 기기 연결을 끊지 못했어요.';
+    } else if (!setupMessage) setupMessage = '연결 해제 실패';
     renderAgentSetup();
     renderProviders();
     renderUsage();
@@ -2522,7 +2522,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }
     if (!started) {
       setupBusy = false;
-      setupMessage = '로그인을 시작하지 못했어요.';
+      setupMessage = '로그인 시작 실패';
       resetRauAuthFeedback();
       clearSetupAuthPrompt();
       renderAgentSetup();
@@ -2537,7 +2537,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }
     if (!started.authRunId) {
       setupBusy = false;
-      setupMessage = '로그인 보안 정보를 받지 못했어요. 다시 시도해 주세요.';
+      setupMessage = '로그인 보안 정보 수신 실패 · 다시 시도';
       resetRauAuthFeedback();
       clearSetupAuthPrompt();
       renderAgentSetup();
@@ -2587,7 +2587,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       calibrationBtn.textContent = '다시 보정';
       return;
     }
-    calibrationStatus.textContent = '아직 보정되지 않았어요';
+    calibrationStatus.textContent = '보정 전';
     calibrationSummary.hidden = true;
     calibrationBtn.textContent = '보정 시작';
   }
@@ -2679,9 +2679,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   function piHeadText(): string {
     if (piProgress) return piProgress;
-    if (!piStatus) return connectionState === 'connected' ? '확인 중…' : '허브에 연결되면 확인해요';
+    if (!piStatus) return connectionState === 'connected' ? '확인 중…' : '허브 연결 대기';
     const version = piStatus.version ?? '설치됨';
-    if (!piStatus.installed) return '설치되지 않았어요';
+    if (!piStatus.installed) return '설치 안 됨';
     if (!piStatus.keyConfigured) return `${version} · 키 필요`;
     if (piStatus.models.length === 0) return `${version} · 모델 필요`;
     return `${version} · 모델 ${piStatus.models.length}개`;
@@ -2704,7 +2704,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (piDraft.some((draft) => draft.id === model.id)) {
       piDraft = piDraft.filter((draft) => draft.id !== model.id);
     } else if (piDraft.length >= PI_MODEL_MAX) {
-      piMessage = `모델은 ${PI_MODEL_MAX}개까지 고를 수 있어요.`;
+      piMessage = `모델 최대 ${PI_MODEL_MAX}개`;
       renderPi();
       return;
     } else {
@@ -2774,9 +2774,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const visible = matches.slice(0, PI_CATALOG_VISIBLE_MAX);
     piList.replaceChildren(...visible.map(buildPiCatalogRow));
     if (piCatalog.length === 0) {
-      piCatalogNote.textContent = '목록을 불러오지 못했어요.';
+      piCatalogNote.textContent = '목록 불러오기 실패';
     } else if (matches.length === 0) {
-      piCatalogNote.textContent = '검색 결과가 없어요.';
+      piCatalogNote.textContent = '결과 없음';
     } else if (matches.length > visible.length) {
       piCatalogNote.textContent = `${matches.length}개 중 ${visible.length}개`;
     } else {
@@ -2844,8 +2844,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     piProgressLine.hidden = !piProgress;
 
     piKeyNote.textContent = piStatus?.keyConfigured
-      ? '새 키를 넣으면 이전 키는 지워져요.'
-      : 'openrouter.ai/keys 에서 만든 키를 넣어 주세요.';
+      ? '새 키를 넣으면 이전 키를 대체합니다.'
+      : 'openrouter.ai/keys 에서 만든 키';
     piKeySubmit.disabled = piBusy || !online;
     piKeyCancel.hidden = piStepOverride !== 'key';
 
@@ -2958,7 +2958,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       piStatus = status;
       piStepOverride = null;
     } else if (!piMessage) {
-      piMessage = '설치하지 못했어요.';
+      piMessage = '설치 실패';
     }
     renderPi();
     syncPrefsInputs();
@@ -2981,7 +2981,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       piCatalogTried = false;
       piStepOverride = status.models.length === 0 ? 'catalog' : null;
     } else if (!piMessage) {
-      piMessage = '키를 확인하지 못했어요.';
+      piMessage = '키 확인 실패';
     }
     renderPi();
     syncPrefsInputs();
@@ -2997,7 +2997,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (disposed) return;
     piCatalogLoading = false;
     if (models) piCatalog = models;
-    else if (!piMessage) piMessage = '모델 목록을 불러오지 못했어요.';
+    else if (!piMessage) piMessage = '모델 목록 불러오기 실패';
     renderPi();
   }
 
@@ -3019,7 +3019,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       piStatus = status;
       piStepOverride = null;
     } else if (!piMessage) {
-      piMessage = '모델을 저장하지 못했어요.';
+      piMessage = '모델 저장 실패';
     }
     renderPi();
     syncPrefsInputs();
@@ -3062,14 +3062,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     try {
       const result = await bridge.requestUsage(refresh);
       if (disposed) return;
-      if (!result) throw new Error('허브 연결을 확인해 주세요.');
+      if (!result) throw new Error('허브 연결 필요');
       usage = result;
       renderUsage();
-      usageFeedback.textContent = refresh ? '조회했어요.' : '';
+      usageFeedback.textContent = refresh ? '조회 완료' : '';
       usageFeedback.hidden = !refresh;
     } catch (error) {
       if (!disposed) {
-        usageFeedback.textContent = `조회하지 못했어요. 다시 시도해 주세요. ${error instanceof Error ? error.message : ''}`;
+        usageFeedback.textContent = `조회 실패 · 다시 시도 ${error instanceof Error ? error.message : ''}`;
         usageFeedback.hidden = false;
       }
     } finally {
@@ -3093,13 +3093,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     agentInstructions = status;
     if (changedElsewhere && !force) {
       instructionsMessage = changedByAgent
-        ? '에이전트가 지시를 변경했어요. 초안을 보존했으니 다시 불러와 비교하세요.'
-        : '다른 창에서 지시가 변경됐어요. 초안을 보존했으니 다시 불러와 비교하세요.';
+        ? '에이전트가 지시를 변경했습니다 · 초안 보존됨'
+        : '다른 창에서 지시가 변경됐습니다 · 초안 보존됨';
     } else {
       instructionsEditor.value = status.content;
       instructionsDraftRevision = status.revision;
       instructionsDirty = false;
-      if (changedByAgent) instructionsMessage = '승인한 에이전트 변경안을 AGENTS.md에 적용했어요.';
+      if (changedByAgent) instructionsMessage = '변경안을 AGENTS.md에 적용했습니다.';
     }
     renderAgentInstructions();
     if (shellReady) renderDestinationState();
@@ -3146,7 +3146,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     instructionsBusy = false;
     if (status) acceptAgentInstructions(status, 'system', force);
     else {
-      instructionsMessage = 'AGENTS.md를 불러오지 못했어요.';
+      instructionsMessage = 'AGENTS.md 불러오기 실패';
       renderAgentInstructions();
     }
   }
@@ -3165,9 +3165,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     instructionsBusy = false;
     if (status) {
       acceptAgentInstructions(status, 'user', true);
-      instructionsMessage = '저장했어요. 다음 턴부터 모든 Rauhwpx 채팅에 적용됩니다.';
+      instructionsMessage = '저장됨 · 다음 턴부터 적용';
     } else if (!instructionsMessage) {
-      instructionsMessage = '저장하지 못했어요. 최신 지시를 다시 불러온 뒤 시도하세요.';
+      instructionsMessage = '저장 실패 · 최신 지시를 다시 불러옵니다';
     }
     renderAgentInstructions();
     renderDestinationState();
@@ -3178,7 +3178,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const draft = pendingAgentInstructionsDraft;
     if (!draft || instructionsProposalBusy || connectionState !== 'connected') return;
     if (instructionsDirty
-      && !window.confirm('작성 중인 직접 편집 내용을 버리고 에이전트 변경안을 적용할까요?')) return;
+      && !await confirmSheet(instructionsProposalConfirm, '변경안 적용', '직접 편집한 내용을 버리고 에이전트 변경안을 적용합니다.', { confirmLabel: '적용' })) return;
     instructionsProposalBusy = true;
     instructionsMessage = '';
     renderAgentInstructions();
@@ -3188,9 +3188,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (status) {
       pendingAgentInstructionsDraft = null;
       acceptAgentInstructions(status, `agent-confirmed:${draft.requestedBy}`, true);
-      instructionsMessage = '에이전트 변경안을 적용했어요. 다음 턴부터 모든 Rauhwpx 채팅에 적용됩니다.';
+      instructionsMessage = '변경안 적용됨 · 다음 턴부터 적용';
     } else if (!instructionsMessage) {
-      instructionsMessage = '변경안을 적용하지 못했어요. 최신 지시를 다시 불러오세요.';
+      instructionsMessage = '변경안 적용 실패 · 최신 지시를 다시 불러옵니다';
     }
     renderAgentInstructions();
   }
@@ -3206,9 +3206,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     instructionsProposalBusy = false;
     if (rejected) {
       pendingAgentInstructionsDraft = null;
-      instructionsMessage = '에이전트 변경안을 거절했어요. AGENTS.md는 바뀌지 않았습니다.';
+      instructionsMessage = '변경안 거절됨';
     } else if (!instructionsMessage) {
-      instructionsMessage = '변경안을 거절하지 못했어요. 이미 만료되었을 수 있습니다.';
+      instructionsMessage = '변경안 거절 실패';
     }
     renderAgentInstructions();
   }
@@ -3327,16 +3327,16 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         case 'agent-instructions-draft':
           pendingAgentInstructionsDraft = ev.draft;
           instructionsProposalBusy = false;
-          instructionsMessage = '에이전트가 지시 변경안을 제안했어요. 내용을 확인한 뒤 적용하거나 거절하세요.';
+          instructionsMessage = '에이전트 변경안';
           renderAgentInstructions();
           break;
         case 'agent-instructions-draft-cleared':
           if (pendingAgentInstructionsDraft?.id === ev.draftId) {
             pendingAgentInstructionsDraft = null;
             instructionsProposalBusy = false;
-            if (ev.outcome === 'expired') instructionsMessage = '에이전트 변경안이 만료됐어요.';
-            if (ev.outcome === 'replaced') instructionsMessage = '에이전트가 새 변경안으로 교체했어요.';
-            if (ev.outcome === 'stale') instructionsMessage = '지시가 먼저 변경되어 에이전트 변경안이 만료됐어요.';
+            if (ev.outcome === 'expired') instructionsMessage = '변경안 만료';
+            if (ev.outcome === 'replaced') instructionsMessage = '새 변경안으로 교체됨';
+            if (ev.outcome === 'stale') instructionsMessage = '지시가 먼저 바뀌어 변경안이 만료됐습니다.';
             renderAgentInstructions();
           }
           break;

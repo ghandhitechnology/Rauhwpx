@@ -312,7 +312,7 @@
 @media (prefers-reduced-motion: no-preference) {
   .ag-version-row,
   .ag-versions-tab::after {
-    transition: background-color 120ms ease, opacity 120ms ease;
+    transition: background-color var(--ag-dur-fast) var(--ag-ease-out), opacity var(--ag-dur-fast) var(--ag-ease-out);
   }
 }
 
@@ -553,7 +553,7 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .ag-versions-page button {
-    transition: background-color 130ms ease, border-color 130ms ease;
+    transition: background-color var(--ag-dur-fast) var(--ag-ease-out), border-color var(--ag-dur-fast) var(--ag-ease-out);
   }
 }
 
@@ -710,7 +710,7 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .ag-version-date-tooltip {
-    transition: opacity 120ms ease, transform 120ms ease, visibility 120ms;
+    transition: opacity var(--ag-dur-fast) var(--ag-ease-out), transform var(--ag-dur-fast) var(--ag-ease-out), visibility var(--ag-dur-fast);
   }
   .ag-version-date-tooltip.ag-visible {
     transition-delay: 180ms;
@@ -879,13 +879,13 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .ag-version-node-halo {
-    transition: opacity 150ms ease;
+    transition: opacity var(--ag-dur-fast) var(--ag-ease-out);
   }
   .ag-version-title {
-    transition: color 120ms ease;
+    transition: color var(--ag-dur-fast) var(--ag-ease-out);
   }
   .ag-versions-toolbar button {
-    transition: background-color 130ms ease, border-color 130ms ease, transform 90ms ease;
+    transition: background-color var(--ag-dur-fast) var(--ag-ease-out), border-color var(--ag-dur-fast) var(--ag-ease-out), transform var(--ag-dur-fast) var(--ag-ease-out);
   }
 }
 
@@ -901,7 +901,7 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .ag-version-node-connector {
-    transition: opacity 120ms ease;
+    transition: opacity var(--ag-dur-fast) var(--ag-ease-out);
   }
 }
 
@@ -935,7 +935,7 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .ag-version-connector-arrow {
-    transition: opacity 120ms ease;
+    transition: opacity var(--ag-dur-fast) var(--ag-ease-out);
   }
 }
 

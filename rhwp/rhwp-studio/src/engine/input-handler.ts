@@ -4952,7 +4952,11 @@ export class InputHandler {
   moveCursorTo(pos: DocumentPosition): boolean {
     // 이동 전 위치가 유효한지 사전 검증 (경고 로그 방지)
     try {
-      const testRect = this.wasm.getCursorRect(pos.sectionIndex, pos.paragraphIndex, pos.charOffset);
+      const testRect = pos.cellPath?.length && pos.parentParaIndex !== undefined
+        ? this.wasm.getCursorRectByPath(pos.sectionIndex, pos.parentParaIndex, JSON.stringify(pos.cellPath), pos.charOffset)
+        : pos.parentParaIndex !== undefined && pos.controlIndex !== undefined && pos.cellIndex !== undefined
+          ? this.wasm.getCursorRectInCell(pos.sectionIndex, pos.parentParaIndex, pos.controlIndex, pos.cellIndex, pos.cellParaIndex ?? pos.paragraphIndex, pos.charOffset)
+          : this.wasm.getCursorRect(pos.sectionIndex, pos.paragraphIndex, pos.charOffset);
       if (!testRect || testRect.pageIndex === undefined) return false;
     } catch {
       return false;
@@ -5504,6 +5508,18 @@ export class InputHandler {
 
   /** Redo 가능한가? */
   canRedo(): boolean { return !this.readOnly && this.history.canRedo(); }
+
+  /** 최신 에이전트 적용 명령의 정체성. 다른 편집이 쌓이면 일치하지 않는다. */
+  getAgentUndoEntry(): object | null {
+    const top = this.history.peekUndoTop();
+    return top?.type === 'snapshot:agentApplyChangeSet' ? top : null;
+  }
+
+  undoAgentTurn(entry: object): boolean {
+    if (this.readOnly || this.getAgentUndoEntry() !== entry) return false;
+    this.performUndo();
+    return this.getAgentUndoEntry() !== entry;
+  }
 
   /** Undo 실행 (커맨드 시스템용) */
   performUndo(ignoreReadOnly = false): void {

@@ -10,7 +10,7 @@ const markdown = readFileSync(new URL('../src/ui/agent-sidebar/plan-markdown.ts'
 test('plan and build slash commands accept a trailing prompt and switch before sending', () => {
   assert.match(source, /const workflowInvocation = text\.match\(\/\^\\\/\(plan\|build\|question\)\(\?:\\s\+\(\[\\s\\S\]\*\)\)\?\$\/i\)/);
   assert.match(source, /command === 'question' \? 'question'/);
-  assert.match(source, /if \(!requestWorkflow\(next\)\) return;/);
+  assert.match(source, /if \(!requestWorkflow\(next\)\) \{\s*if \(rest\) input\.value = rest;\s*return;\s*\}/);
   assert.match(source, /if \(!rest\) \{\s*input\.focus\(\);\s*return;\s*\}/);
   assert.match(source, /text = rest;/);
   assert.match(source, /function requestWorkflow\(next: AgentWorkflow\): boolean/);
@@ -32,8 +32,8 @@ test('workflow switches use local slash commands without changing the access pro
   assert.doesNotMatch(css, /\.ag-composer-utilities\s*\{[^}]*flex-direction:\s*column;/s);
   assert.match(source, /permissionBtn\.textContent = unrestricted \? '전체' : '안전'/);
   assert.match(source, /const planReadOnly = chatWorkflow === 'question'\s*\|\| \(chatWorkflow === 'plan' && planningPhase !== 'implementing'\)/);
-  assert.match(source, /계획 단계는 읽기 전용입니다\. 승인 후 실행 단계부터 전체 접근을 적용합니다/);
-  assert.match(source, /질문 단계는 읽기 전용입니다\. \/build 로 전환하면 전체 접근을 적용합니다/);
+  assert.match(source, /'전체 접근 · 계획 단계는 읽기 전용'/);
+  assert.match(source, /'전체 접근 · 질문 단계는 읽기 전용'/);
   assert.doesNotMatch(source, /planPermissionDefaultPending/);
   assert.doesNotMatch(source, /e\.workflow === 'plan'[\s\S]{0,300}bridge\.setPermissionProfile\('unrestricted'\)/);
   assert.doesNotMatch(source, /workflowTransitionPending = true;\s*applyWorkflow\(next\);\s*bridge\.setWorkflow\(next\)/);
@@ -127,7 +127,7 @@ test('approval disables duplicate actions and switches only after hub acknowledg
 
 test('plan mode warns once about full remote-browser control and scoped downloads', () => {
   assert.match(source, /BROWSERBASE_FULL_CONTROL_WARNING/);
-  assert.match(source, /원격 브라우저\(Browserbase\)를 전체 제어/);
+  assert.match(source, /BROWSERBASE_FULL_CONTROL_TITLE = '원격 브라우저 전체 제어'/);
   assert.match(source, /양식을 제출하고/);
   assert.match(source, /로그인된 계정의 설정을 바꿀 수 있습니다/);
   assert.match(source, /이 채팅 전용 다운로드 폴더에만 저장됩니다/);
@@ -143,7 +143,9 @@ test('plan mode warns once about full remote-browser control and scoped download
     /browserbaseAcknowledged = true;\s*systemMessage\(BROWSERBASE_ENABLED_NOTICE\)/,
   );
   // 동작마다 다시 묻지 않는다.
-  assert.match(source, /동작마다 다시 묻지 않고/);
+  assert.match(source, /에이전트가 묻지 않고 페이지를 열고/);
+  // 확인 시트는 비동기라 승인 후 같은 전환을 다시 요청한다.
+  assert.match(source, /confirmSheet\(root, BROWSERBASE_FULL_CONTROL_TITLE, BROWSERBASE_FULL_CONTROL_WARNING[\s\S]{0,400}requestWorkflow\(next\);/);
 });
 
 test('mode, model and permission switches are locked while a turn runs or the chat is switching', () => {
@@ -166,7 +168,7 @@ test('mode, model and permission switches are locked while a turn runs or the ch
 test('entering plan mode is blocked while document edits await review', () => {
   assert.match(source, /function hasPendingDocumentEdits\(\)/);
   assert.match(source, /bridge\.pendingEdits\.getChangeSets\(\)\.length > 0/);
-  assert.match(source, /검토 대기 중인 문서 편집이 있습니다/);
+  assert.match(source, /검토 대기 중인 편집을 먼저 처리합니다/);
 });
 
 test('completed plans open as history without reactivating live plan UI', () => {
@@ -250,7 +252,7 @@ test('pending HWP review stays unchanged for plan-driven implementations', () =>
   assert.match(source, /const changeSets = bridge\.pendingEdits\.getChangeSets\(\);/);
   assert.match(source, /const reviewSets = changeSets\.filter\(\(set\) => set\.status !== 'open'\)/);
   assert.match(source, /for \(const set of reviewSets\) \{/);
-  assert.match(source, /실행 중입니다\. 문서 편집은 기존처럼 검토 후 승인합니다\./);
+  assert.match(source, /'실행 중 · 편집은 검토 후 반영'/);
   // 구상·승인 대기 턴은 문서를 편집하지 않았으므로 일반 작업 완료 문구를 붙이지 않는다.
   assert.match(source, /const editingPhase = chatWorkflow === 'direct' \|\| planningPhase === 'implementing'/);
   assert.match(source, /turnToolCount > 0 && !turnPresentedPlan && !finalBubble && completed && editingPhase/);

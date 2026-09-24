@@ -15,9 +15,9 @@
   pointer-events: none;
   transform: translateX(20px);
   transition:
-    opacity 240ms var(--ag-sidebar-ease),
-    transform 280ms var(--ag-sidebar-ease),
-    visibility 0s linear 280ms;
+    opacity var(--ag-dur-base) var(--ag-sidebar-ease),
+    transform var(--ag-dur-slow) var(--ag-sidebar-ease),
+    visibility 0s linear var(--ag-dur-slow);
 }
 
 .ag-references-open .ag-chat-page {
@@ -34,8 +34,8 @@
   pointer-events: auto;
   transform: translateX(0);
   transition:
-    opacity 240ms var(--ag-sidebar-ease),
-    transform 280ms var(--ag-sidebar-ease),
+    opacity var(--ag-dur-base) var(--ag-sidebar-ease),
+    transform var(--ag-dur-slow) var(--ag-sidebar-ease),
     visibility 0s linear 0s;
 }
 

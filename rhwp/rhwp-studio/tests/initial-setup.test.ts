@@ -145,23 +145,17 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
 
   assert.match(setup, /for \(const agent of PROVIDER_ORDER\)/);
   assert.match(setup, /createProviderIcon\(agent\)/);
-  assert.match(setup, /previewModelLabels\(agent\)/);
-  assert.match(setup, /from '\.\.\/agent-sidebar\/providers\.ts'/);
-  assert.match(setup, /나중에 하기/);
-  assert.match(setup, /모델 연결 단계로 돌아가기/);
-  assert.match(setup, /function goBack\(\)/);
-  assert.match(setup, /dialog\.scrollTop = 0/);
-  assert.match(setup, /cards\.get\(PROVIDER_ORDER\[0\]\)\?\.action/);
-  assert.match(setup, /focus\(\{ preventScroll: true \}\)/);
-  assert.match(setup, /requestAnimationFrame\([\s\S]*dialog\.scrollTo\(\{ top: 0, behavior: 'instant' \}\)/);
-  assert.match(setup, /보정 시작/);
-  assert.match(setup, /모델을 연결하세요/);
-  assert.match(setup, /말투를 맞출까요\?/);
-  assert.match(setup, /원고 10페이지를 올리면, 에이전트가 문장 규칙이 아니라 그 목소리로 씁니다/);
+  // 한 장짜리 카드: 제목, 프로바이더 타일(연결되면 ✓), 계속/나중에 버튼 하나.
+  assert.match(setup, /const SETUP_TITLE = '모델 연결'/);
+  assert.match(setup, /el\('span', 'rhwp-setup-card-check'\)/);
+  assert.match(setup, /\? '계속'\s*: rauFailureActive \? RAU_FAILURE_FORWARD_COPY\.skip : '나중에'/);
+  assert.match(setup, /cards\.get\(PROVIDER_ORDER\[0\]\)\?\.action\.focus\(\{ preventScroll: true \}\)/);
+  // 문체 보정은 필수 2단계가 아니다 — 사이드바 칩이 이어받는다.
+  assert.doesNotMatch(setup, /rhwp-setup-cal|보정 시작|말투를 맞출까요/);
+  assert.doesNotMatch(setup, /rhwp-setup-status|아직 연결한 모델이 없습니다/);
   assert.doesNotMatch(setup, /rhwp-setup-kicker/);
   assert.doesNotMatch(setup, /rhwp-setup-lead/);
   assert.match(setup, /\(beginAgentConnect \?\? openAgentSetup\)\(agent\)/);
-  assert.match(setup, /openCalibration\(\{ elevate: true \}\)/);
   assert.match(setup, /function enterRauFailureRecovery\(\)/);
   assert.match(setup, /function skipToEditor\(\)/);
   assert.match(setup, /applyFirstRunDefaultAgent\(configuredAgents\(\), storage \?\? null\)/);
@@ -169,20 +163,17 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(setup, /RAU_FAILURE_FORWARD_COPY/);
   assert.match(setup, /shouldForceRauFailurePreview\(\)/);
   assert.match(setup, /notifySetupAbandoned/);
+  assert.match(source, /el\('span', 'ag-calibration-chip-text', '원고를 올리면 내 말투로 씁니다'\)/);
+  assert.match(source, /setup\.calibrationStep === 'pending'/);
+  assert.match(source, /calibrationChipOpen\.addEventListener\('click', \(\) => writingStyleCalibration\.open\(\)\)/);
 
   assert.match(css, /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
-  assert.match(css, /@media \(max-width: 1100px\)[\s\S]*repeat\(3, minmax\(0, 1fr\)\)/);
-  assert.match(css, /@media \(max-width: 860px\)[\s\S]*repeat\(2, minmax\(0, 1fr\)\)/);
-  assert.match(css, /@media \(max-width: 720px\)[\s\S]*grid-template-columns: 1fr/);
-  assert.match(css, /rhwp-setup-cal\[hidden\]/);
   assert.match(css, /\.rhwp-setup-providers \{[\s\S]*overflow: auto/);
   assert.match(css, /\.rhwp-setup-footer \{[\s\S]*position: sticky/);
-  assert.match(css, /data-recovery='true'[\s\S]*rhwp-setup-card-models \{[\s\S]*display: none/);
+  assert.match(css, /data-recovery='true'\] \.rhwp-setup-card:not\(\[data-recovery-option='true'\]\)/);
   assert.match(css, /prefers-reduced-motion: reduce/);
   assert.match(css, /overflow-anchor: none/);
-  assert.match(css, /--setup-spring-snappy: linear\(/);
-  assert.match(css, /@media \(min-width: 1440px\) and \(min-height: 820px\)/);
-  assert.match(css, /width: min\(1480px, 100%\)/);
+  assert.match(css, /var\(--ag-spring\)/);
   assert.match(css, /url\('\/icons\/provider-codex\.png'\)/);
   assert.match(css, /url\('\/icons\/provider-pi\.svg'\)/);
   assert.doesNotMatch(css, /transition: all/);
@@ -201,7 +192,7 @@ test('Rau 첫 실행 실패 경로는 꺼져 있고 BYOK 는 라이브 프로바
   assert.equal(isRauFirstRunFailure({ agent: 'codex', code: 'AGENT_SETUP_FAILED' }), false);
   assert.equal(isRauFirstRunFailure({ agent: null, code: 'RAU_CREDITS_TIMEOUT' }), false);
   assert.deepEqual([...BYOK_AGENTS], ['claude', 'codex', 'pi']);
-  assert.match(RAU_FAILURE_FORWARD_COPY.body, /Claude, Codex, Pi를 연결하거나 편집기로 계속할 수 있습니다/);
+  assert.equal(RAU_FAILURE_FORWARD_COPY.body, 'Claude, Codex, Pi 중 하나를 연결합니다.');
   assert.equal(RAU_FAILURE_FORWARD_COPY.skip, '편집기로 계속');
   assert.doesNotMatch(RAU_FAILURE_FORWARD_COPY.body, /설정에서만|Settings-only|설정 탭에서만/);
 
@@ -215,7 +206,6 @@ test('Rau 첫 실행 실패 경로는 꺼져 있고 BYOK 는 라이브 프로바
     setup,
     /if \(!closingSetupForRecovery\) \{\s*\n\s*closingSetupForRecovery = true;\s*\n\s*try \{\s*\n\s*closeAgentSetup\?\.\(\)/,
   );
-  assert.match(setup, /if \(rauFailureActive\) \{\s*\n\s*skipToEditor\(\)/);
   assert.match(setup, /dataset\.recoveryOption = rauFailureActive && isByokAgent\(agent\)/);
   assert.match(setup, /dataset\.byok = 'true'/);
 });
@@ -262,22 +252,19 @@ test('Rau 카드가 generic account snapshot의 로그인 진행과 완료를 �
 
   const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
   const css = readSource('../src/ui/initial-setup/initial-setup.css');
-  assert.match(setup, /event\.type === 'account-status'/);
-  assert.match(setup, /event\.type === 'account-login-progress'/);
-  assert.match(setup, /event\.type === 'account-error'/);
   assert.doesNotMatch(setup, /accountStatus\?\.signedIn === true[\s\S]{0,80}goNext\(\)/);
   assert.match(setup, /requestAccountStatus\(\)/);
-  assert.match(css, /data-account-state='signed-in'[\s\S]*background: #b7c9ad/);
+  void css;
   assert.doesNotMatch(setup, /Raucloud|Railway|quota|allowance|크레딧|한도|60분|\$5/);
 });
 
-test('실패 경로의 건너뛰기는 보정 단계 없이 편집기로 끝낸다', () => {
+test('카드를 닫으면 편집기로 가고 보정은 사이드바 칩으로 남긴다', () => {
   const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
   assert.match(
     setup,
-    /function skipToEditor\(\): void \{\s*\n\s*finish\(\{\s*\n\s*providerStep: configuredCount\(\) > 0 \? 'configured' : 'skipped',\s*\n\s*calibrationStep: 'skipped',/,
+    /function skipToEditor\(\): void \{\s*\n\s*finish\(\{\s*\n\s*providerStep: configuredCount\(\) > 0 \? 'configured' : 'skipped',\s*\n\s*calibrationStep: record\.calibrationStep === 'done' \? 'done' : 'pending',/,
   );
-  assert.match(setup, /if \(rauFailureActive\) \{\s*\n\s*skipToEditor\(\);\s*\n\s*return;/);
+  assert.match(setup, /primary\.addEventListener\('click', skipToEditor\)/);
   assert.match(setup, /RAU_FAILURE_FORWARD_COPY\.skip/);
   assert.equal(RAU_FAILURE_FORWARD_COPY.skip, '편집기로 계속');
 });

@@ -1,8 +1,9 @@
 /**
- * 첫 실행 마법사 — Rau 로그인/민트가 기본 길이고, 실패하면 같은 화면에서
- * BYOK 를 고르거나 편집기로 바로 간다. 실제 로그인·설치는 설정 모달을,
- * 보정은 기존 캘리브레이션 창을 그대로 연다.
+ * 첫 실행 카드 — 모델 한 곳을 연결하거나 바로 편집기로 간다.
+ * 실제 로그인·설치는 설정 모달이 맡는다. 문체 보정은 여기서 묻지 않고,
+ * 첫 대화 뒤 사이드바의 작은 칩이 권한다.
  */
+import '../agent-sidebar/motion.css';
 import './initial-setup.css';
 
 import {
@@ -19,10 +20,8 @@ import {
   isByokAgent,
   isProviderConfigured,
   isRauFirstRunFailure,
-  previewModelLabels,
   PROVIDER_VENDOR,
   RAU_FAILURE_FORWARD_COPY,
-  rauSignInFeedback,
   SUGGESTED_AGENT,
 } from './catalog.ts';
 import {
@@ -34,7 +33,7 @@ import {
   type InitialSetupStorage,
 } from './state.ts';
 
-type SetupStage = 'providers' | 'calibration';
+const SETUP_TITLE = '모델 연결';
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -47,44 +46,24 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-function createPixelCloudArtwork(): HTMLElement {
-  const artwork = el('div', 'rhwp-setup-pixel-cloud');
-  artwork.setAttribute('aria-hidden', 'true');
-  artwork.innerHTML = `
-    <svg viewBox="0 0 240 160" focusable="false" shape-rendering="crispEdges">
-      <g class="rhwp-setup-cloud-stars">
-        <path class="rhwp-setup-cloud-star rhwp-setup-cloud-star-a" d="M34 31h4v8h8v4h-8v8h-4v-8h-8v-4h8z" />
-        <path class="rhwp-setup-cloud-star rhwp-setup-cloud-star-b" d="M195 43h3v6h6v3h-6v6h-3v-6h-6v-3h6z" />
-        <rect class="rhwp-setup-cloud-star rhwp-setup-cloud-star-c" x="55" y="105" width="5" height="5" />
-        <rect class="rhwp-setup-cloud-star rhwp-setup-cloud-star-d" x="205" y="91" width="4" height="4" />
-      </g>
-      <g class="rhwp-setup-cloud-streams">
-        <path d="M21 70h18v4H21zm8 11h22v4H29z" />
-        <path d="M192 70h27v4h-27zm8 11h17v4h-17z" />
-      </g>
-      <g class="rhwp-setup-cloud-shadow">
-        <rect x="68" y="133" width="104" height="4" />
-        <rect x="84" y="137" width="72" height="3" />
-      </g>
-      <g class="rhwp-setup-cloud-float">
-        <path class="rhwp-setup-cloud-outline" d="M44 76h16V60h24V44h24V32h48v12h20v16h20v16h16v40h-16v12H60v-12H44z" />
-        <path class="rhwp-setup-cloud-main" d="M52 80h16V64h24V48h24V40h32v8h20v16h20v16h16v28h-16v12H68v-12H52z" />
-        <path class="rhwp-setup-cloud-shade" d="M52 100h16v12h16v8h84v-8h20v-12h16v8h-16v12h-20v8H68v-8H52z" />
-        <path class="rhwp-setup-cloud-light" d="M92 56h24V44h32v8h-24v8H92zm-24 20h16V64h8v8H76v12h-8z" />
-        <path class="rhwp-setup-cloud-glint" d="M152 64h16v8h8v8h-8v-4h-16z" />
-      </g>
-    </svg>
-  `;
-  return artwork;
+function checkMark(): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 12 12');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', 'M2.5 6.4 5 8.9l4.5-5.4');
+  svg.appendChild(path);
+  return svg;
 }
 
 export interface InitialSetupDeps {
   openAgentSetup: (agent: AgentName) => void;
   beginAgentConnect?: (agent: AgentName) => void;
-  /** 실패 경로에서 설정 모달을 닫아 마법사 카드가 다시 보이게 한다. */
+  /** 실패 경로에서 설정 모달을 닫아 카드가 다시 보이게 한다. */
   closeAgentSetup?: () => void;
   requestAccountStatus?: () => Promise<AccountSessionStatus | null>;
-  openCalibration: (options?: { elevate?: boolean }) => void;
+  /** 예전 2단계 흐름의 보정 창 열기. 카드는 더 이상 쓰지 않는다. */
+  openCalibration?: (options?: { elevate?: boolean }) => void;
   storage?: InitialSetupStorage | null;
 }
 
@@ -104,14 +83,11 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     beginAgentConnect,
     closeAgentSetup,
     requestAccountStatus,
-    openCalibration,
     storage,
   } = deps;
   let disposed = false;
   let record: InitialSetupRecord = loadInitialSetup(storage);
-  let stage: SetupStage = 'providers';
   let setupStatuses: AgentSetupStatusMap | null = null;
-  let accountStatus: AccountSessionStatus | null = null;
   let rauFailureActive = false;
   /** closeAgentSetup 이 abandoned 로 다시 들어오면 모달을 닫지 않는다. 재시도 실패는 다시 닫는다. */
   let closingSetupForRecovery = false;
@@ -125,104 +101,49 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   dialog.setAttribute('aria-labelledby', 'rhwp-setup-title');
   dialog.tabIndex = -1;
 
-  const nav = el('nav', 'rhwp-setup-nav');
-  nav.setAttribute('aria-label', '처음 설정 진행');
-  const back = el('button', 'rhwp-setup-back', '이전');
-  back.type = 'button';
-  back.hidden = true;
-  back.setAttribute('aria-label', '모델 연결 단계로 돌아가기');
-  const backIcon = el('span', 'rhwp-setup-back-icon', '←');
-  backIcon.setAttribute('aria-hidden', 'true');
-  back.prepend(backIcon);
-  const brand = el('span', 'rhwp-setup-brand', 'Rauhwpx');
-  const progress = el('div', 'rhwp-setup-progress');
-  progress.setAttribute('aria-hidden', 'true');
-  progress.append(el('span', 'rhwp-setup-progress-bar'), el('span', 'rhwp-setup-progress-bar'));
-  nav.append(back, brand, progress);
-
-  const chrome = el('header', 'rhwp-setup-chrome');
-  const heading = el('div', 'rhwp-setup-heading');
-  const title = el('h1', 'rhwp-setup-title', '모델을 연결하세요');
+  const title = el('h1', 'rhwp-setup-title', SETUP_TITLE);
   title.id = 'rhwp-setup-title';
-  heading.append(title);
-  const step = el('span', 'rhwp-setup-step', '1 / 2');
-  chrome.append(heading, step);
+
+  const recovery = el('p', 'rhwp-setup-recovery', RAU_FAILURE_FORWARD_COPY.body);
+  recovery.hidden = true;
+  recovery.setAttribute('role', 'status');
+  recovery.setAttribute('aria-live', 'polite');
 
   const providersPanel = el('div', 'rhwp-setup-providers');
   const grid = el('div', 'rhwp-setup-grid');
   grid.setAttribute('role', 'list');
-  const cards = new Map<AgentName, {
-    root: HTMLElement;
-    action: HTMLButtonElement;
-  }>();
+  const cards = new Map<AgentName, { root: HTMLElement; action: HTMLButtonElement }>();
 
   for (const agent of PROVIDER_ORDER) {
-    const card = el('article', 'rhwp-setup-card');
+    const card = el('div', 'rhwp-setup-card');
     card.setAttribute('role', 'listitem');
     card.dataset.agent = agent;
     card.dataset.suggested = agent === SUGGESTED_AGENT ? 'true' : 'false';
     if (isByokAgent(agent)) card.dataset.byok = 'true';
-    const logo = el('div', 'rhwp-setup-card-logo');
-    logo.appendChild(createProviderIcon(agent));
-    const artwork = null;
-    const name = el('h2', 'rhwp-setup-card-name', AGENT_LABEL[agent]);
-    const vendor = el('p', 'rhwp-setup-card-vendor', PROVIDER_VENDOR[agent]);
-    const models = el('ul', 'rhwp-setup-card-models');
-    for (const label of previewModelLabels(agent)) {
-      models.appendChild(el('li', '', label));
-    }
-    const action = el('button', 'rhwp-setup-card-action', '설정');
+    const action = el('button', 'rhwp-setup-card-action');
     action.type = 'button';
+    const logo = el('span', 'rhwp-setup-card-logo');
+    logo.appendChild(createProviderIcon(agent));
+    const name = el('span', 'rhwp-setup-card-name', AGENT_LABEL[agent]);
+    const vendor = el('span', 'rhwp-setup-card-vendor', PROVIDER_VENDOR[agent]);
+    const check = el('span', 'rhwp-setup-card-check');
+    check.appendChild(checkMark());
+    action.append(logo, name, vendor, check);
     action.addEventListener('click', () => {
-      if (false) {
-        goNext();
-        return;
-      }
       (beginAgentConnect ?? openAgentSetup)(agent);
     });
-    card.append(logo);
-    if (artwork) card.append(artwork);
-    card.append(name, vendor, models, action);
+    card.append(action);
     grid.appendChild(card);
     cards.set(agent, { root: card, action });
   }
-  const recovery = el('aside', 'rhwp-setup-recovery');
-  recovery.hidden = true;
-  recovery.setAttribute('role', 'status');
-  recovery.setAttribute('aria-live', 'polite');
-  const recoveryCopy = el('p', 'rhwp-setup-recovery-copy', RAU_FAILURE_FORWARD_COPY.body);
-  recovery.append(recoveryCopy);
-  providersPanel.append(recovery, grid);
-
-  const calPanel = el('div', 'rhwp-setup-cal');
-  calPanel.hidden = true;
-  const calMark = el('div', 'rhwp-setup-cal-mark', '✎');
-  calMark.setAttribute('aria-hidden', 'true');
-  const calTitle = el('h2', 'rhwp-setup-cal-title', '말투를 맞출까요?');
-  const calCopy = el(
-    'p',
-    'rhwp-setup-cal-copy',
-    '원고 10페이지를 올리면, 에이전트가 문장 규칙이 아니라 그 목소리로 씁니다.',
-  );
-  const calActions = el('div', 'rhwp-setup-cal-actions');
-  const calSkip = el('button', 'rhwp-setup-text-btn', '나중에 하기');
-  calSkip.type = 'button';
-  const calStart = el('button', 'rhwp-setup-footer-btn rhwp-setup-primary', '보정 시작');
-  calStart.type = 'button';
-  calStart.dataset.kind = 'next';
-  calActions.append(calSkip, calStart);
-  calPanel.append(calMark, calTitle, calCopy, calActions);
+  providersPanel.append(grid);
 
   const footer = el('footer', 'rhwp-setup-footer');
-  const status = el('p', 'rhwp-setup-status');
-  const skip = el('button', 'rhwp-setup-text-btn', '나중에 하기');
-  skip.type = 'button';
-  const next = el('button', 'rhwp-setup-footer-btn', '다음');
-  next.type = 'button';
-  next.dataset.kind = 'next';
-  footer.append(status, skip, next);
+  const primary = el('button', 'rhwp-setup-primary', '나중에');
+  primary.type = 'button';
+  footer.append(primary);
 
-  dialog.append(nav, chrome, providersPanel, calPanel, footer);
+  dialog.append(title, recovery, providersPanel, footer);
   overlay.appendChild(dialog);
 
   function configuredAgents(): AgentName[] {
@@ -233,85 +154,26 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     return configuredAgents().length;
   }
 
-  function connectActionLabel(agent: AgentName, configured: boolean): string {
-    if (configured) return '연결됨';
-    if (false) return rauFailureActive ? RAU_FAILURE_FORWARD_COPY.retry : 'Rau로 시작';
-    return '설정';
-  }
-
   function renderCards(): void {
     dialog.dataset.recovery = rauFailureActive ? 'true' : 'false';
     recovery.hidden = !rauFailureActive;
-    skip.textContent = rauFailureActive ? RAU_FAILURE_FORWARD_COPY.skip : '나중에 하기';
-    skip.classList.toggle('rhwp-setup-footer-btn', rauFailureActive);
-    skip.classList.toggle('rhwp-setup-text-btn', !rauFailureActive);
-    skip.dataset.kind = rauFailureActive ? 'next' : '';
-    if (rauFailureActive && stage === 'providers') {
-      title.textContent = RAU_FAILURE_FORWARD_COPY.title;
-    }
+    title.textContent = rauFailureActive ? RAU_FAILURE_FORWARD_COPY.title : SETUP_TITLE;
     for (const agent of PROVIDER_ORDER) {
       const card = cards.get(agent);
       if (!card) continue;
       const configured = isProviderConfigured(agent, setupStatuses);
-      const rauFeedback = false
-        ? rauSignInFeedback(
-          accountStatus,
-          connectActionLabel(agent, configured),
-          configured,
-        )
-        : null;
       card.root.dataset.configured = configured ? 'true' : 'false';
-      if (rauFeedback) card.root.dataset.accountState = rauFeedback.state;
       card.root.dataset.recoveryOption = rauFailureActive && isByokAgent(agent) ? 'true' : 'false';
-      card.action.textContent = rauFeedback?.label ?? connectActionLabel(agent, configured);
-      card.action.disabled = rauFeedback?.state === 'pending';
-      card.action.setAttribute('aria-label', rauFeedback?.ariaLabel ?? card.action.textContent);
-      card.action.title = rauFeedback?.title ?? '';
-      const models = card.root.querySelector('.rhwp-setup-card-models');
-      if (models) {
-        models.replaceChildren();
-        for (const label of previewModelLabels(agent)) {
-          models.appendChild(el('li', '', label));
-        }
-      }
+      card.action.setAttribute(
+        'aria-label',
+        configured ? `${AGENT_LABEL[agent]} 연결됨` : `${AGENT_LABEL[agent]} 연결`,
+      );
     }
     const ready = configuredCount() > 0;
-    next.disabled = !ready;
-    next.title = ready
-      ? '문체 보정으로'
-      : rauFailureActive
-        ? '다른 모델을 연결하거나 편집기로 계속을 누르세요'
-        : '모델 한 곳을 연결하거나 나중에 하기를 누르세요';
-    status.textContent = ready
-      ? `${configuredCount()}곳 연결됨`
-      : rauFailureActive
-        ? RAU_FAILURE_FORWARD_COPY.status
-        : '아직 연결한 모델이 없습니다';
-  }
-
-  function showStage(nextStage: SetupStage): void {
-    stage = nextStage;
-    const providers = nextStage === 'providers';
-    providersPanel.hidden = !providers;
-    calPanel.hidden = providers;
-    footer.hidden = !providers;
-    back.hidden = providers;
-    dialog.dataset.stage = nextStage;
-    step.textContent = providers ? '1 / 2' : '2 / 2';
-    title.textContent = providers
-      ? (rauFailureActive ? RAU_FAILURE_FORWARD_COPY.title : '모델을 연결하세요')
-      : '문체를 맞추세요';
-    if (providers) renderCards();
-  }
-
-  function goBack(): void {
-    if (stage !== 'calibration') return;
-    showStage('providers');
-    dialog.scrollTop = 0;
-    window.requestAnimationFrame(() => {
-      cards.get(PROVIDER_ORDER[0])?.action.focus({ preventScroll: true });
-      dialog.scrollTo({ top: 0, behavior: 'instant' });
-    });
+    dialog.dataset.ready = ready ? 'true' : 'false';
+    primary.textContent = ready
+      ? '계속'
+      : rauFailureActive ? RAU_FAILURE_FORWARD_COPY.skip : '나중에';
   }
 
   function finish(partial: Pick<InitialSetupRecord, 'providerStep' | 'calibrationStep'>): void {
@@ -320,16 +182,16 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     close();
   }
 
+  /** 문체 보정은 묻지 않고 넘긴다 — 첫 대화 뒤 사이드바 칩이 이어받는다. */
   function skipToEditor(): void {
     finish({
       providerStep: configuredCount() > 0 ? 'configured' : 'skipped',
-      calibrationStep: 'skipped',
+      calibrationStep: record.calibrationStep === 'done' ? 'done' : 'pending',
     });
   }
 
   function enterRauFailureRecovery(): void {
     if (disposed || !overlay.isConnected) return;
-    if (stage !== 'providers') showStage('providers');
     rauFailureActive = true;
     if (!closingSetupForRecovery) {
       closingSetupForRecovery = true;
@@ -340,47 +202,16 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
       }
     }
     renderCards();
-    window.requestAnimationFrame(() => skip.focus());
+    window.requestAnimationFrame(() => primary.focus());
   }
 
-  function skipProviders(): void {
-    if (rauFailureActive) {
-      skipToEditor();
-      return;
-    }
-    record = { ...record, providerStep: record.providerStep === 'configured' ? 'configured' : 'skipped' };
-    showStage('calibration');
-  }
-
-  function goNext(): void {
-    if (configuredCount() === 0) return;
-    record = { ...record, providerStep: 'configured' };
-    showStage('calibration');
-  }
-
-  function skipCalibration(): void {
-    finish({
-      providerStep: configuredCount() > 0 ? 'configured' : 'skipped',
-      calibrationStep: 'skipped',
-    });
-  }
-
-  function startCalibration(): void {
-    openCalibration({ elevate: true });
-  }
-
-  skip.addEventListener('click', skipProviders);
-  next.addEventListener('click', goNext);
-  calSkip.addEventListener('click', skipCalibration);
-  calStart.addEventListener('click', startCalibration);
-  back.addEventListener('click', goBack);
+  primary.addEventListener('click', skipToEditor);
 
   function onKeyDown(event: KeyboardEvent): void {
     if (!overlay.isConnected || !overlay.classList.contains('rhwp-setup-open')) return;
     if (event.key !== 'Escape') return;
     event.preventDefault();
-    if (stage === 'providers') skipProviders();
-    else goBack();
+    skipToEditor();
   }
 
   function open(): void {
@@ -388,22 +219,13 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     lastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     document.body.appendChild(overlay);
     overlay.setAttribute('aria-hidden', 'false');
-    showStage('providers');
-    if (shouldForceRauFailurePreview()) {
-      rauFailureActive = true;
-      renderCards();
-    }
+    if (shouldForceRauFailurePreview()) rauFailureActive = true;
+    renderCards();
     requestAnimationFrame(() => {
       overlay.classList.add('rhwp-setup-open');
-      dialog.focus();
+      cards.get(PROVIDER_ORDER[0])?.action.focus({ preventScroll: true });
     });
-    if (requestAccountStatus) {
-      void requestAccountStatus().then((status) => {
-        if (disposed || !status) return;
-        accountStatus = status;
-        if (stage === 'providers') renderCards();
-      });
-    }
+    if (requestAccountStatus) void requestAccountStatus();
   }
 
   function close(): void {
@@ -426,52 +248,12 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
         if (isRauFirstRunFailure(event)) enterRauFailureRecovery();
         return;
       }
-      if (event.type === 'account-status') {
-        accountStatus = event.status;
-        if (stage === 'providers') renderCards();
-        return;
-      }
-      if (event.type === 'account-login-progress') {
-        accountStatus = {
-          state: 'pending',
-          signedIn: false,
-          account: null,
-          updatedAt: new Date().toISOString(),
-          authenticating: true,
-          authRunId: event.authRunId,
-          authUrl: event.authUrl,
-          pairingCode: event.pairingCode,
-          expiresAt: event.expiresAt,
-        };
-        if (stage === 'providers') renderCards();
-        return;
-      }
-      if (event.type === 'account-error') {
-        if (accountStatus?.signedIn !== true) {
-          accountStatus = {
-            state: 'signed-out',
-            signedIn: false,
-            account: null,
-            updatedAt: new Date().toISOString(),
-            authenticating: false,
-            error: event.message,
-          };
-        }
-        if (stage === 'providers') renderCards();
-        return;
-      }
       if (event.type !== 'agent-setup-status') return;
       setupStatuses = event.statuses;
-      if (false) rauFailureActive = false;
-      if (stage === 'providers') renderCards();
+      renderCards();
     },
-    notifyCalibrationClosed(completed: boolean): void {
-      if (disposed || !overlay.isConnected || stage !== 'calibration') return;
-      if (!completed) return;
-      finish({
-        providerStep: configuredCount() > 0 ? 'configured' : 'skipped',
-        calibrationStep: 'done',
-      });
+    notifyCalibrationClosed(): void {
+      // 카드에는 보정 단계가 없다. 사이드바 칩이 결과를 기록한다.
     },
     notifySetupAbandoned(info: { agent?: AgentName | null; code?: string; message?: string }): void {
       if (disposed) return;

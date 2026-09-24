@@ -12,6 +12,7 @@ import { checkSetupTerminal } from './setup-terminal.check.mjs';
 import { checkFleetPreview } from './fleet.check.mjs';
 import { checkCloudRecovery } from './cloud-recovery.check.mjs';
 import { checkCloudStream } from './cloud-stream.check.mjs';
+import { checkChangesPreview } from './changes.check.mjs';
 import { browserLaunchArgs } from '../tests/browser-support.ts';
 
 const studio = resolve(import.meta.dirname, '..');
@@ -357,6 +358,63 @@ try {
       );
     },
   );
+  await step('Tool activity labels stay compact during and after a turn', async () => {
+    await play('chat');
+    assert.equal(await page.$eval('.ag-activity-label', node => node.textContent), 'read_document');
+    await open('scenario=tools');
+    await page.click('#play');
+    await page.waitForFunction(() => !window.sidebarPreview.bridge.isTurnRunning()
+      && document.querySelector('.ag-activity-label')?.textContent === '3개의 도구를 호출함');
+    await page.click('.ag-activity-toggle');
+    assert.equal(await page.$$eval('.ag-tool-name', nodes => nodes.map(node => node.textContent).join(',')),
+      'read_document,search_document,edit_document');
+    await page.click('.ag-header .ag-threads-btn');
+    const threadId = await page.$eval('.ag-threads-item.ag-active', node => node.dataset.threadId);
+    await page.reload({ waitUntil: 'networkidle0' });
+    await page.click('.ag-header .ag-threads-btn');
+    await page.$eval('.ag-threads-list', (list, id) =>
+      [...list.querySelectorAll('.ag-threads-item')].find(node => node.dataset.threadId === id)?.click(), threadId);
+    await page.waitForSelector('.ag-activity-label');
+    assert.equal(await page.$eval('.ag-activity-label', node => node.textContent), '3개의 도구를 호출함');
+    await screenshot('tool-activity');
+  });
+  await step('Chat follows a send and yields to manual scrolling', async () => {
+    await open('scenario=chat&hold=1');
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'no-preference' }]);
+    await page.evaluate(() => {
+      const messages = document.querySelector('.ag-messages');
+      const history = document.createElement('div');
+      history.style.minHeight = '1200px';
+      messages.insertBefore(history, messages.querySelector('.ag-messages-end'));
+    });
+    await page.waitForFunction(() => document.querySelector('.ag-messages').scrollTop > 200);
+    await page.$eval('.ag-messages', (messages) => { messages.scrollTop = 0; });
+    await page.click('#play');
+    await page.waitForFunction(() => document.querySelector('.ag-messages').scrollTop > 400);
+    const messages = await page.$('.ag-messages');
+    const box = await messages.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    const followedTop = await messages.evaluate((node) => node.scrollTop);
+    await page.mouse.wheel({ deltaY: -350 });
+    await page.waitForFunction((top) => document.querySelector('.ag-messages').scrollTop < top - 80, {}, followedTop);
+    const pausedTop = await messages.evaluate((node) => node.scrollTop);
+    await page.waitForFunction(() => document.querySelector('.ag-messages').textContent.includes('필요한 부분을 선택'));
+    assert(Math.abs((await messages.evaluate((node) => node.scrollTop)) - pausedTop) < 4);
+    await page.mouse.wheel({ deltaY: 1800 });
+    await page.waitForFunction(() => {
+      const node = document.querySelector('.ag-messages');
+      return node.scrollHeight - node.scrollTop - node.clientHeight < 4;
+    });
+    const resumedTop = await messages.evaluate((node) => node.scrollTop);
+    await page.evaluate(() => {
+      const messages = document.querySelector('.ag-messages');
+      const more = document.createElement('div');
+      more.style.minHeight = '200px';
+      messages.insertBefore(more, messages.querySelector('.ag-messages-end'));
+    });
+    await page.waitForFunction((top) => document.querySelector('.ag-messages').scrollTop > top + 100, {}, resumedTop);
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
+  });
   await step('Provider, model and effort changes after the first reply', async () => {
     await play('chat');
     const messageCount = await page.$$eval('.ag-msg-user', (nodes) => nodes.length);
@@ -431,6 +489,8 @@ try {
     assert.deepEqual(await visible(), []);
   });
   await step('Compact live subagent previews', () => checkFleetPreview(page, origin));
+  await step('Full-screen changes, history, commit, discard, and review',
+    () => checkChangesPreview(page, origin, artifacts));
   await step('Subagent fleet, failure, and offline recovery', async () => {
     await play('fleet');
     await page.waitForSelector('.ag-fleet-slot:not([hidden]) .ag-fleet-toggle');
@@ -443,7 +503,7 @@ try {
     );
     assert(
       !(await page.$eval('.ag-root', (element) =>
-        element.innerText.includes('작업을 마쳤습니다.'),
+        element.innerText.includes('작업 완료 · 문서 확인'),
       )),
     );
     await page.select('#connection', 'disconnected');
@@ -509,6 +569,9 @@ try {
       visible: true,
     });
     await page.click('[aria-label="sample.txt 참고자료 제거"]');
+    // 제거 확인은 사이드바 안의 확인 시트로 뜬다.
+    await page.waitForSelector('.ag-sheet-layer.ag-sheet-open .ag-sheet-confirm', { visible: true });
+    await page.click('.ag-sheet-confirm');
     await page.waitForSelector('[aria-label="sample.txt 참고자료 제거"]', {
       hidden: true,
     });
@@ -561,7 +624,7 @@ try {
       await page.click('[data-action="confirm-reset"]');
       assert.equal(await page.$eval('[data-action="confirm-reset"]', (el) => el.disabled), true);
       assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('rhwp-codex-pending-reset')).account), 'preview-codex');
-      await page.waitForFunction(() => document.querySelector('.ag-provider-quotas').textContent.includes('한도를 리셋했어요.'));
+      await page.waitForFunction(() => document.querySelector('.ag-provider-quotas').textContent.includes('한도 리셋 완료'));
       assert.match(await page.$eval('.ag-provider-quotas', (el) => el.textContent), /보관한 리셋 1개/);
       assert.equal(await page.evaluate(() => localStorage.getItem('rhwp-codex-pending-reset')), null);
       assert.equal(await page.$eval('.ag-settings-quota-card[data-provider="codex"] [role="meter"]', (el) => el.getAttribute('aria-valuenow')), '100');
@@ -676,7 +739,7 @@ try {
     assert.equal(await page.$eval('[data-action="confirm-reset"]', (el) => el.disabled), false,
       'An interrupted reset can be checked again after reload even with zero credits');
     await page.click('[data-action="confirm-reset"]');
-    await page.waitForFunction(() => document.querySelector('.ag-provider-quotas').textContent.includes('사용할 리셋 크레딧이 없어요.'));
+    await page.waitForFunction(() => document.querySelector('.ag-provider-quotas').textContent.includes('리셋 크레딧 없음'));
     assert.equal(await page.evaluate(() => localStorage.getItem('rhwp-codex-pending-reset')), null);
   });
   await step(

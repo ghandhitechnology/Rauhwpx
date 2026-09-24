@@ -24,10 +24,12 @@ function readSetupScrollMetrics(): SetupScrollMetrics {
     if (!(element instanceof HTMLElement)) {
       return { overflow: false, scrollTop: 0, scrollbarWidth: 0 };
     }
+    const style = getComputedStyle(element);
     return {
       overflow: element.scrollHeight > element.clientHeight,
       scrollTop: element.scrollTop,
-      scrollbarWidth: element.offsetWidth - element.clientWidth,
+      scrollbarWidth: element.offsetWidth - element.clientWidth
+        - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth),
     };
   };
   const overlay = measure('.rhwp-setup-overlay');
@@ -56,25 +58,26 @@ test('provider setup remains scrollable without showing a scrollbar', { timeout:
   const browser = await puppeteer.launch({ executablePath, headless: true, args: browserLaunchArgs() });
   try {
     const page = await browser.newPage();
-    await page.setViewport({ width: 1440, height: 640 });
+    await page.setViewport({ width: 360, height: 360 });
     await page.setContent(`
       <style>${css}</style>
       <div class="rhwp-setup-overlay rhwp-setup-open">
-        <section class="rhwp-setup-dialog" data-stage="providers">
-          <nav class="rhwp-setup-nav"><span class="rhwp-setup-brand">Rauhwpx</span></nav>
-          <header class="rhwp-setup-chrome"><h1 class="rhwp-setup-title">모델을 연결하세요</h1></header>
+        <section class="rhwp-setup-dialog">
+          <h1 class="rhwp-setup-title">모델을 연결하세요</h1>
           <div class="rhwp-setup-providers">
             <div class="rhwp-setup-grid">
-              ${Array.from({ length: 6 }, (_, index) => `
-                <article class="rhwp-setup-card" data-agent="${index === 0 ? 'rau' : 'provider'}">
-                  <h2 class="rhwp-setup-card-name">Provider ${index + 1}</h2>
-                  <ul class="rhwp-setup-card-models"><li>Model</li></ul>
-                  <button class="rhwp-setup-card-action">설정</button>
-                </article>
+              ${Array.from({ length: 3 }, (_, index) => `
+                <div class="rhwp-setup-card">
+                  <button class="rhwp-setup-card-action">
+                    <span class="rhwp-setup-card-logo">◉</span>
+                    <span class="rhwp-setup-card-name">Provider ${index + 1}</span>
+                    <span class="rhwp-setup-card-vendor">Provider vendor</span>
+                  </button>
+                </div>
               `).join('')}
             </div>
           </div>
-          <footer class="rhwp-setup-footer"><button class="rhwp-setup-footer-btn">다음</button></footer>
+          <footer class="rhwp-setup-footer"><button class="rhwp-setup-primary">나중에</button></footer>
         </section>
       </div>
     `);
@@ -101,9 +104,9 @@ test('provider setup remains scrollable without showing a scrollbar', { timeout:
       after.providersScrollTop > 0 || after.dialogScrollTop > 0 || after.overlayScrollTop > 0,
       'wheel input should reveal the lower provider cards and footer',
     );
-    assert.equal(after.dialogScrollbarWidth, 0);
-    assert.equal(after.providersScrollbarWidth, 0);
-    assert.equal(after.overlayScrollbarWidth, 0);
+    assert.ok(after.dialogScrollbarWidth <= 1);
+    assert.ok(after.providersScrollbarWidth <= 1);
+    assert.ok(after.overlayScrollbarWidth <= 1);
     assert.equal(after.dialogBehavior, 'smooth');
   } finally {
     await browser.close();

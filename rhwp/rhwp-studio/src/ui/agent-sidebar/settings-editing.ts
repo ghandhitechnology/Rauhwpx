@@ -5,6 +5,7 @@ import {
   type EditorScalarSettings,
   type FontSet,
 } from '../../core/user-settings.ts';
+import { confirmSheet } from './sheet.ts';
 import {
   clearStoredLocalFonts,
   detectLocalFonts,
@@ -99,7 +100,7 @@ function fontValue(fontSet: FontSet, index: number): string {
 function localFontStatus(state: LocalFontState): string {
   if (state.lastError) return `저장소 접근 실패 · ${state.lastError}`;
   if (!state.stored) {
-    if (!state.supported) return '이 브라우저에서는 로컬 글꼴 전체 감지를 지원하지 않습니다.';
+    if (!state.supported) return '이 브라우저는 로컬 글꼴 감지 미지원';
     return '저장된 감지 결과가 없습니다.';
   }
   const date = state.detectedAt ? new Date(state.detectedAt).toLocaleDateString('ko-KR') : '';
@@ -132,7 +133,7 @@ export function createEditingSettings(options: {
   const conflictCopy = el(
     'span',
     'ag-settings-conflict-copy',
-    '다른 문서 창에서 설정이 변경됐습니다. 이 초안을 다시 불러오거나 유지하세요.',
+    '다른 창에서 설정이 변경됐습니다.',
   );
   const conflictActions = el('span', 'ag-settings-actions');
   const conflictReload = el('button', 'ag-settings-btn', '다시 불러오기');
@@ -285,8 +286,8 @@ export function createEditingSettings(options: {
         });
         const remove = el('button', 'ag-settings-btn ag-settings-danger', '삭제');
         remove.type = 'button';
-        remove.addEventListener('click', () => {
-          if (!window.confirm(`“${fontSet.name}” 대표 글꼴을 삭제할까요?`)) return;
+        remove.addEventListener('click', async () => {
+          if (!await confirmSheet(remove, `“${fontSet.name}” 삭제`, undefined, { confirmLabel: '삭제', destructive: true })) return;
           userSettings.removeFontSet(index);
           renderFontSets();
           eventBus?.emit('font-settings-changed');
@@ -337,7 +338,7 @@ export function createEditingSettings(options: {
     detectFonts.disabled = !isLocalFontAccessSupported();
   });
   clearFonts.addEventListener('click', async () => {
-    if (!window.confirm('저장된 로컬 글꼴 감지 결과를 초기화할까요?')) return;
+    if (!await confirmSheet(clearFonts, '로컬 글꼴 감지 초기화', undefined, { confirmLabel: '초기화', destructive: true })) return;
     detectFonts.disabled = true;
     clearFonts.disabled = true;
     localStatus.textContent = '초기화 중…';

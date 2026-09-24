@@ -9,7 +9,7 @@ const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', im
 
 test('sidebar exposes safe/full permissions without allowing changes during a turn', () => {
   assert.match(source, /permissionProfile === 'safe'/);
-  assert.match(source, /window\.confirm\('전체 접근/);
+  assert.match(source, /await confirmSheet\(permissionBtn, '전체 접근', '승인 없이 편집하고 파일에 접근합니다\.'/);
   assert.match(source, /permissionBtn\.disabled = controlsLocked \|\| connState !== 'connected'/);
   assert.match(bridge, /chat-permission-set/);
   assert.match(bridge, /this\.permissionProfile = 'safe'/);

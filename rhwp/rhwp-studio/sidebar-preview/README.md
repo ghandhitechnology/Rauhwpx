@@ -97,6 +97,21 @@ Dashboard fixtures expose quota exhaustion, sign-out, self-hosted and unavailabl
 states through the typed `setDashboardState` method. Sample history is isolated to
 the preview account and only seeded with `dashboard=1`.
 
+## Changes drawer
+
+Open `?audit=1&auditScene=chat-changes-full` to inspect an applied full-access turn,
+uncommitted paragraphs, table/image changes, and expandable commit history in the
+production fullscreen drawer. The safe-mode change review scene keeps the same
+paragraph diff rows with accept/reject actions. The drawer defaults to 560px and
+retains its resize handle.
+
+The full-access fixture emits the same finalized-then-approved lifecycle as the
+editor. Browser checks cover commit, confirmed discard, top-entry undo, navigation,
+long paragraphs, editing locks, stale document responses, and light/dark widths.
+Latest-turn content is held in memory per thread; commits remain in the version
+store. Historical diffs open the comparison view rather than using old paragraph
+positions in the live document.
+
 ## Behavior and placeholders
 
 ### Live account usage audit
