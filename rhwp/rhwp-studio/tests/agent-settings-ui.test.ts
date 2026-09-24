@@ -192,7 +192,7 @@ test('저장 설정은 짧은 라벨만 보이고 PDF 안내는 기본값을 쓴
 test('한컴용 Git 토글은 기본 이력과 Git 버전 관리 진입을 전환한다', () => {
   assert.match(settings, /createToggleRow\('한컴용 Git 사용하기'\)/);
   assert.match(settings, /userSettings\.setUseHancomGit\(hancomGit\.input\.checked\)/);
-  assert.match(settings, /instructionsSection\.body\.append\([\s\S]*hancomGit\.root/);
+  assert.match(settings, /const gitSection = createSection\('Git'\);[\s\S]*?gitSection\.body\.append\(hancomGit\.root\)/);
   assert.match(editingSettings, /userSettings\.tryApplyEditorScalarSettings\(next\)/);
   assert.match(editingSettings, /next\.versionControl\.useHancomGit = userSettings\.getUseHancomGit\(\)/);
   assert.match(settingsCss, /\.ag-settings-toggle-input:checked \+ \.ag-settings-toggle-track/);
@@ -216,7 +216,7 @@ test('사이드바 버전 버튼은 한컴 Git 설정을 따르고 상단 메뉴
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {
   assert.match(
     settings,
-    /aiContent\.append\(defaults\.root, calibration\.root, instructionsSection\.root, templatesSection\.root, aiFooter\)/,
+    /aiContent\.append\(defaults\.root, modelCatalogSection\.root, calibration\.root, instructionsSection\.root, gitSection\.root, templatesSection\.root, aiFooter\)/,
   );
   assert.doesNotMatch(editingSettings, /documentResources/);
   assert.match(settings, /requestTemplateName\('템플릿 추가'/);
@@ -410,12 +410,6 @@ test('글쓰기 보정 상태와 진입 버튼', () => {
   assert.match(settings, /calibrationBtn\.textContent = '다시 보정'/);
   assert.match(settings, /openCalibration\(\)/);
   assert.match(source, /openCalibration: \(\) => writingStyleCalibration\.open\(\)/);
-});
-
-test('Pi 모델 목록은 검색 결과 수와 선택 한도를 표시한다', () => {
-  assert.match(settings, /piCatalogNote\.textContent = `\$\{matches\.length\}개 · 최대 \$\{PI_MODEL_MAX\}개`/);
-  assert.match(settings, /piCatalogNote\.textContent = `\$\{matches\.length\}개 중 \$\{visible\.length\}개`/);
-  assert.doesNotMatch(settings, /검색으로 좁혀 보세요/);
 });
 
 test('구독 한도는 직접 조회하고 로컬 토큰 기록과 분리한다', () => {

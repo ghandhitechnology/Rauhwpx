@@ -62,6 +62,8 @@ import { createRauCreditsClient } from './rau-credits-client.mjs';
 import { createAccountSession } from './account-session.mjs';
 import { AuthRunRegistry } from './auth-run-registry.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
+import { createClaudeModelCatalog } from './claude-model-catalog.mjs';
+import { createCodexModelCatalog, createCodexModelResolver } from './codex-model-routing.mjs';
 import { createOpenRouter, creditBalanceEmpty } from './openrouter.mjs';
 import { createIpcSecretStore } from './secret-store.mjs';
 import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
@@ -587,15 +589,18 @@ const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi']);
 const OPENROUTER_AGENTS = new Set(['pi']);
 const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
 
-const CLAUDE_MODELS = new Set(['claude-fable-5-1', 'claude-opus-5-5', 'opus', 'fable', 'sonnet', 'haiku']);
-const CODEX_MODELS = new Set(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
+const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
+const CODEX_LINEUPS = new Set(['astra', 'sol', 'luna', 'terra']);
 const DEFAULT_MODEL = {
   claude: 'sonnet',
-  codex: 'gpt-5.6-sol',
+  codex: 'sol',
 };
+const resolveCodexModel = createCodexModelResolver();
+const claudeModelCatalog = createClaudeModelCatalog();
+const codexModelCatalog = createCodexModelCatalog();
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const CLAUDE_EFFORTS_HAIKU = new Set(['low', 'medium', 'high']);
-const CODEX_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const CODEX_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const DEFAULT_EFFORT = { claude: 'high', codex: 'medium' };
 
 /** 알 수 없는 에이전트가 코덱스/클로드로 조용히 넘어가지 않도록 명시 테이블로 찾는다. */
@@ -1019,27 +1024,75 @@ function beginAccountLogin(record, sock, requestId) {
   );
 }
 
-function resolveModel(agent, requested) {
+function isModelIdentifier(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128
+    && /^[a-zA-Z0-9][a-zA-Z0-9._:/\[\]-]*$/.test(value)
+    && !value.split('/').some((segment) => segment === '.' || segment === '..');
+}
+
+async function modelCatalog(agent, record, { refresh = false } = {}) {
+  let models;
+  if (agent === 'claude') models = await claudeModelCatalog({
+    bin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
+    env: claudeRuntimeEnv(record.isolatedHome),
+    cwd: record.workDir ?? ROOT,
+  }, { refresh });
+  else if (agent === 'codex') models = await codexModelCatalog({
+    bin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
+    env: cliSetup.envFor('codex'),
+    isolatedHome: record.isolatedHome,
+    codexHome: record.codexHome,
+    cwd: record.workDir ?? ROOT,
+  }, { refresh });
+  else throw unknownAgentError(agent);
+  record.modelCatalogs ??= {};
+  record.modelCatalogs[agent] = models;
+  return models;
+}
+
+function resolveModel(agent, requested, record = null) {
   if (OPENROUTER_AGENTS.has(agent)) {
     const status = openRouterStatus(agent);
     if (typeof requested === 'string' && piModelConfig(requested, agent)) return requested;
     if (status.defaultModelId && piModelConfig(status.defaultModelId, agent)) return status.defaultModelId;
     return status.models[0]?.id ?? null;
   }
-  const tables = { claude: CLAUDE_MODELS, codex: CODEX_MODELS };
-  const allowed = tables[agent];
-  if (!allowed) throw unknownAgentError(agent);
-  if (typeof requested === 'string' && allowed.has(requested)) return requested;
   const envDefaults = {
     claude: process.env.RHWP_CLAUDE_MODEL,
     codex: process.env.RHWP_CODEX_MODEL,
   };
-  const envDefault = envDefaults[agent];
-  if (typeof envDefault === 'string' && allowed.has(envDefault)) return envDefault;
-  return DEFAULT_MODEL[agent];
+  if (typeof requested === 'string' && requested && !isModelIdentifier(requested)) {
+    throw Object.assign(new Error(`Invalid model identifier: ${requested}`), { code: 'MODEL_UNAVAILABLE' });
+  }
+  if (agent === 'claude') {
+    if (CLAUDE_MODELS.has(requested)) return requested;
+    if (isModelIdentifier(requested) && requested.startsWith('claude-')) return requested;
+    if (isModelIdentifier(requested)) throw Object.assign(new Error(`Unknown Claude model: ${requested}`), {
+      code: 'MODEL_UNAVAILABLE',
+    });
+    if (CLAUDE_MODELS.has(envDefaults.claude)) return envDefaults.claude;
+    if (isModelIdentifier(envDefaults.claude) && envDefaults.claude.startsWith('claude-')) return envDefaults.claude;
+    return DEFAULT_MODEL.claude;
+  }
+  if (agent === 'codex') {
+    if (isModelIdentifier(requested) && !CODEX_LINEUPS.has(requested)) return requested;
+    const lineup = CODEX_LINEUPS.has(requested) ? requested
+      : CODEX_LINEUPS.has(envDefaults.codex) ? envDefaults.codex : DEFAULT_MODEL.codex;
+    if (!requested && isModelIdentifier(envDefaults.codex) && !CODEX_LINEUPS.has(envDefaults.codex)) {
+      return envDefaults.codex;
+    }
+    return resolveCodexModel(lineup, {
+      bin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
+      env: cliSetup.envFor('codex'),
+      isolatedHome: record?.isolatedHome,
+      codexHome: record?.codexHome,
+      cwd: record?.workDir ?? ROOT,
+    });
+  }
+  throw unknownAgentError(agent);
 }
 
-function resolveEffort(agent, model, requested) {
+function resolveEffort(agent, model, requested, record = null) {
   if (OPENROUTER_AGENTS.has(agent)) {
     // 추론을 지원하지 않는 모델은 effort 자체가 없다 — 붙이면 요청이 거부된다.
     const efforts = piModelConfig(model, agent)?.efforts ?? [];
@@ -1050,10 +1103,16 @@ function resolveEffort(agent, model, requested) {
   }
   const tables = {
     codex: CODEX_EFFORTS,
-    claude: model === 'haiku' ? CLAUDE_EFFORTS_HAIKU : CLAUDE_EFFORTS,
+    claude: model === 'haiku' || model.startsWith('claude-haiku-')
+      ? CLAUDE_EFFORTS_HAIKU : CLAUDE_EFFORTS,
   };
-  const allowed = tables[agent];
+  const catalogEntry = record?.modelCatalogs?.[agent]?.find((entry) => entry.id === model);
+  const supported = catalogEntry?.supportedEfforts;
+  const allowed = Array.isArray(supported)
+    ? new Set(supported.filter((effort) => tables[agent]?.has(effort)))
+    : tables[agent];
   if (!allowed) throw unknownAgentError(agent);
+  if (allowed.size === 0) return null;
   if (typeof requested === 'string' && allowed.has(requested)) return requested;
   const preferred = DEFAULT_EFFORT[agent];
   return allowed.has(preferred) ? preferred : [...allowed][0];
@@ -1481,6 +1540,8 @@ function writingStyleCatalog(record) {
   return buildWritingStyleCatalog({
     health: providerHealth.cached(),
     piStatus,
+    codexModels: record.modelCatalogs?.codex,
+    claudeModels: record.modelCatalogs?.claude,
     currentSelection: activeSession ? { agent: activeSession.agent, model: activeSession.model, effort: activeSession.effort } : null,
   });
 }
@@ -1669,7 +1730,7 @@ function checkpointTitleDeps(record, health, signal) {
         ),
         model: deepSeek?.id ?? '',
       },
-      codex: { ready: codex.ready, model: 'gpt-5.6-luna' },
+      codex: { ready: codex.ready, model: 'luna' },
       claude: { ready: claude.ready, model: 'haiku' },
     },
     piManager,
@@ -1685,6 +1746,7 @@ function checkpointTitleDeps(record, health, signal) {
       codex: { ...cliSetup.envFor('codex'), CODEX_HOME: record.codexHome },
       claude: claudeRuntimeEnv(record.isolatedHome),
     },
+    resolveCodexTitleModel: () => resolveModel('codex', 'luna', record),
     spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
     terminateProcess: terminateProcessTree,
     cleanupProcessOutcome: (child) => beginAuxiliaryProcessCleanupOutcome(record, child),
@@ -2633,8 +2695,8 @@ async function startSession(
   requestedServiceTier,
 ) {
   if (record.processCleanupUncertain === true) throw agentProcessCleanupUncertain();
-  const model = resolveModel(agent, requestedModel);
-  const effort = resolveEffort(agent, model, requestedEffort);
+  const model = await resolveModel(agent, requestedModel, record);
+  const effort = resolveEffort(agent, model, requestedEffort, record);
   const permissionProfile = resolvePermissionProfile(requestedPermission);
   const serviceTier = resolveServiceTier(agent, requestedServiceTier);
   const workflow = resolveWorkflow(requestedWorkflow);
@@ -3141,7 +3203,14 @@ async function handleStudioMessage(record, sock, msg) {
         return;
       }
       const preview = typeof msg.preview === 'string' ? msg.preview : '';
-      generateChatTitle(preview, auxDeps(record, msg.agent, 'codex'))
+      void Promise.resolve().then(async () => {
+        const deps = auxDeps(record, msg.agent, 'codex');
+        if (!deps.useOpenRouter) {
+          deps.model = await resolveModel('codex', 'luna', record).catch(() => null);
+          if (!deps.model) return null;
+        }
+        return generateChatTitle(preview, deps);
+      })
         .then((title) => {
           sendJson(sock, {
             v: 1,
@@ -3993,6 +4062,19 @@ async function handleStudioMessage(record, sock, msg) {
         .catch((e) => sendPiError(record, sock, requestId, e, 'OPENROUTER_UNREACHABLE'));
       return;
     }
+    case 'model-catalog-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      const agent = msg.agent;
+      void modelCatalog(agent, record, { refresh: msg.refresh === true })
+        .then((models) => replyToStudio(record, sock, {
+          v: 1, type: 'model-catalog', requestId, agent, models,
+        }))
+        .catch((error) => replyToStudio(record, sock, {
+          v: 1, type: 'model-catalog-error', requestId, agent,
+          code: error?.code ?? 'MODEL_CATALOG_FAILED', message: String(error?.message ?? error),
+        }));
+      return;
+    }
     case 'pi-set-models': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void piManager.setModels(Array.isArray(msg.models) ? msg.models : [])
@@ -4038,6 +4120,8 @@ async function handleStudioMessage(record, sock, msg) {
           {
             health: providerHealth.cached(),
             piStatus,
+            codexModels: record.modelCatalogs?.codex,
+            claudeModels: record.modelCatalogs?.claude,
             currentSelection: record.agentSession ? { agent: record.agentSession.agent, model: record.agentSession.model, effort: record.agentSession.effort } : null,
           },
         );
@@ -4076,7 +4160,7 @@ async function handleStudioMessage(record, sock, msg) {
               language: msg.language,
               files: calibrationSources,
               agent: selection.agent,
-              model: selection.model,
+              model: await resolveModel(selection.agent, selection.model, record),
               effort: selection.effort,
             },
             {

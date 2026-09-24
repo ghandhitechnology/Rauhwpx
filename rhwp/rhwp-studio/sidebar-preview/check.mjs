@@ -1,3 +1,4 @@
+import { checkPiModels } from './pi-models.check.mjs';
 import { checkCloudMergeRecovery } from './cloud-merge-recovery.check.mjs';
 import { checkCloudSetup } from './cloud-setup.check.mjs';
 import { checkCliTerminalDefaults } from './cli-terminal-defaults.check.mjs';
@@ -429,8 +430,8 @@ try {
     await page.click('[aria-label="프로바이더 선택"]');
     await page.waitForSelector('.ag-config-panel.ag-open');
     await page.click('.ag-provider-item[data-agent="codex"]');
-    await page.click('.ag-llm-item[data-model="gpt-5.6-luna"]');
-    await page.click('.ag-llm-item[data-model="gpt-6-astra"]');
+    await page.click('.ag-llm-item[data-model="luna"]');
+    await page.click('.ag-llm-item[data-model="astra"]');
     await page.focus('.ag-eslider');
     await page.keyboard.press('End');
     await page.waitForFunction(() => document.querySelector('.ag-effort-name').textContent === 'Max');
@@ -490,6 +491,7 @@ try {
     );
   });
   await step('New CLI installs default to terminal login', () => checkCliTerminalDefaults(page, origin));
+  await step('Shared Pi model selection', () => checkPiModels(page, origin));
   await step('Embedded CLI login terminal', () => checkSetupTerminal(page, origin));
   await step('Provider picker only lists connected providers', async () => {
     await open();
@@ -880,6 +882,23 @@ try {
     await screenshot('versions-light-narrow');
     assert(await page.$eval('.ag-versions-page', (el) => el.scrollWidth <= el.clientWidth), 'Narrow panel overflows');
     await open('width=480');
+  });
+  await step('AI model choices stage, cancel, save, and filter the composer', async () => {
+    await open('page=settings&destination=ai&reset=1&width=360');
+    await page.waitForSelector('.ag-settings-model-row[data-model-id="claude-haiku-4-5"]');
+    await page.type('.ag-settings-model-search-input', 'haiku');
+    assert.equal(await page.$$eval('.ag-settings-model-row', (rows) => rows.length), 1);
+    await page.click('.ag-settings-model-row');
+    assert.equal(await page.$eval('.ag-settings-ai-footer .ag-settings-primary', (button) => button.disabled), false);
+    await clickText('.ag-settings-ai-footer button', '취소');
+    assert.equal(await page.$eval('.ag-settings-model-row', (row) => row.getAttribute('aria-pressed')), 'true');
+    await page.click('.ag-settings-model-row');
+    await clickText('.ag-settings-ai-footer button', '적용');
+    assert.equal(await page.$eval('.ag-settings-ai-footer .ag-settings-primary', (button) => button.disabled), true);
+    await page.click('.ag-settings-close');
+    await page.click('.ag-llm-trigger');
+    assert.deepEqual(await page.$$eval('.ag-llm-item', (rows) => rows.map((row) => row.dataset.model)),
+      ['claude-opus-4-6', 'claude-sonnet-4-6']);
   });
   await step(
     'Document context, reset, clean canvas, and backend isolation',

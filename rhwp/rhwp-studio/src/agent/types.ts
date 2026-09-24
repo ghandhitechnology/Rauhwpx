@@ -12,6 +12,7 @@ import type { InputHandler } from '../engine/input-handler.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 import type { CellPathEntry } from '../core/types.ts';
+import type { CatalogAgent, ModelCatalogEntry } from './models.ts';
 
 export const AGENT_PROTOCOL_VERSION = 5;
 
@@ -875,6 +876,8 @@ export type SidebarEvent =
   | { type: 'writing-style-error'; requestId: string; code: string; message: string }
   | { type: 'writing-style-catalog'; requestId: string; catalog: WritingStyleCatalog }
   | { type: 'provider-status'; providers: ProviderStatusMap }
+  | { type: 'model-catalog'; agent: CatalogAgent; requestId: string; models: ModelCatalogEntry[] }
+  | { type: 'model-catalog-error'; agent: CatalogAgent; requestId: string; code: string; message: string }
   | { type: 'agent-setup-status'; statuses: AgentSetupStatusMap }
   | {
       type: 'agent-setup-progress';

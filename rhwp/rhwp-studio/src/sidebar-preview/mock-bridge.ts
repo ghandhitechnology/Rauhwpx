@@ -3,8 +3,10 @@ import type * as T from '../agent/types.ts';
 import { deriveAgentEditingLease } from '../agent/editing-lease.ts';
 import {
   defaultModelForAgent,
+  setModelCatalog,
   setPiModels,
 } from '../agent/models.ts';
+import type { CatalogAgent, ModelCatalogEntry } from '../agent/models.ts';
 import { loadAgentPrefs } from '../agent/agent-prefs.ts';
 import { createFixtures, samplePlan, timestamp, agents } from './fixtures.ts';
 import { requestLiveUsage, consumeLiveCodexReset } from './live-usage.ts';
@@ -21,6 +23,21 @@ export const scenarios = [
   'error',
 ] as const;
 export type Scenario = (typeof scenarios)[number];
+
+const sampleModelCatalogs: Record<CatalogAgent, ModelCatalogEntry[]> = {
+  claude: [
+    { id: 'claude-opus-4-6', label: 'Claude Opus 4.6', description: 'Complex reasoning and long-form work', supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', description: 'Balanced speed and depth', supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', description: 'Fast everyday assistance', supportedEfforts: ['low', 'medium', 'high'] },
+  ],
+  codex: [
+    { id: 'gpt-6-astra', label: 'GPT-6 Astra', description: 'Deep reasoning for demanding work', supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'gpt-6-sol', label: 'GPT-6 Sol', description: 'Coding and everyday work', supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'gpt-6-luna', label: 'GPT-6 Luna', description: 'Quick answers and simple tasks', supportedEfforts: ['low', 'medium', 'high', 'xhigh'] },
+    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', description: 'Balanced general reasoning', supportedEfforts: ['low', 'medium', 'high', 'xhigh'] },
+    { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', description: 'Coding model', supportedEfforts: ['low', 'medium', 'high', 'xhigh'] },
+  ],
+};
 
 /** Implements the actual UI contract: new bridge methods produce a type error here. */
 export function createMockBridge(report: (message: string) => void, onApproved?: () => void) {
@@ -234,6 +251,12 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
     takeOverConnection: () => setConnection('connected'),
     reconnectNow: async () => setConnection('connected'),
     requestProviderStatus: async () => data.providers,
+    requestModelCatalog: async (modelAgent) => {
+      const models = sampleModelCatalogs[modelAgent];
+      setModelCatalog(modelAgent, models);
+      emit({ type: 'model-catalog', agent: modelAgent, requestId: crypto.randomUUID(), models });
+      return models;
+    },
     requestAgentSetupStatus: async () => data.setups,
     requestAccountStatus: async () => data.account,
     requestBrowserbaseStatus: async () => {
@@ -472,18 +495,19 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
       data.pi.keyTail = 'demo';
       return data.pi;
     },
-    requestPiCatalog: async () =>
-      data.writingCatalog.providers.flatMap((provider) =>
-        provider.models.map((model) => ({
-          id: model.id,
-          name: model.name,
-          provider: provider.id,
-          contextLength: 200000,
-          pricing: { prompt: 0.000003, completion: 0.000015 },
-          reasoning: true,
-          supportsImages: true,
-        })),
-      ),
+    requestPiCatalog: async () => [
+      { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6', provider: 'anthropic' },
+      { id: 'anthropic/claude-opus-4.6', name: 'Claude Opus 4.6', provider: 'anthropic' },
+      { id: 'openai/gpt-5.2', name: 'GPT-5.2', provider: 'openai' },
+      { id: 'google/gemini-3-pro-preview', name: 'Gemini 3 Pro', provider: 'google' },
+      { id: 'deepseek/deepseek-v3.2', name: 'DeepSeek V3.2', provider: 'deepseek' },
+    ].map((model) => ({
+      ...model,
+      contextLength: 200000,
+      pricing: { prompt: 0.000003, completion: 0.000015 },
+      reasoning: true,
+      supportsImages: true,
+    })),
     setPiModels: async (models) => {
       data.pi.models = models.map((model) => ({
         ...model,

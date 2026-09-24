@@ -131,6 +131,8 @@ test('live hub applies model/effort/provider changes after a turn and preserves 
   const codex = await start({ agent: 'codex', model: 'gpt-5.6-luna', effort: 'low', history });
   assert.equal(codex.agent, 'codex');
   assert.equal(codex.threadId, first.threadId);
+  const claude = await start({ agent: 'claude', model: 'claude-opus-5-6', effort: 'high', history });
+  assert.equal(claude.model, 'claude-opus-5-6');
   const back = await start({ history });
   assert.equal(back.agent, 'pi');
   assert.match((await turn('Continue again.')).prompt, /orchard/);

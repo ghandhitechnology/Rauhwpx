@@ -1170,6 +1170,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         const item = el('button', 'ag-model-item ag-llm-item', opt.label);
         item.type = 'button';
         item.dataset.model = opt.id;
+        item.title = opt.id;
         item.setAttribute('role', 'menuitemradio');
         const active = opt.id === selectedModel;
         item.setAttribute('aria-checked', active ? 'true' : 'false');
@@ -6657,6 +6658,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   /** 설정 탭에서 저장된 기본값 — 새 대화부터 적용된다. */
   function applyAgentPrefs(prefs: AgentPrefs): void {
     agentPrefs = prefs;
+    rebuildLlmMenu();
   }
 
   function openAssistantBubble(agent: AgentName): HTMLElement {
@@ -7281,6 +7283,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       cloudUi.handleAccountEvent({ signedIn: e.status.signedIn });
     } else if (e.type === 'account-error') {
       cloudUi.handleAccountEvent({ signedIn: false, error: e.message });
+    } else if (e.type === 'model-catalog') {
+      rebuildLlmMenu();
     }
     if (handlePlanningSidebarEvent(e)) return;
     switch (e.type) {
