@@ -2774,6 +2774,21 @@ impl HwpDocument {
         Ok(para.text.chars().count() as u32)
     }
 
+    /// 셀 문단의 커서 길이: 텍스트와 인라인 개체 슬롯을 함께 센다.
+    #[wasm_bindgen(js_name = getCellLogicalLengthByPath)]
+    pub fn get_cell_logical_length_by_path(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+    ) -> Result<u32, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        let paragraph = self
+            .resolve_paragraph_by_path(section_idx as usize, parent_para_idx as usize, &path)
+            .map_err(|e| -> JsValue { e.into() })?;
+        Ok(crate::document_core::helpers::logical_paragraph_length(paragraph) as u32)
+    }
+
     /// 표 셀의 텍스트 방향을 반환한다 (0=가로, 1=세로/영문눕힘, 2=세로/영문세움).
     #[wasm_bindgen(js_name = getCellTextDirection)]
     pub fn get_cell_text_direction(
@@ -4222,6 +4237,32 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 본문 및 중첩 표 셀 사이의 인라인 그림 이동. 빈 경로는 본문이다.
+    #[wasm_bindgen(js_name = movePictureControlByPath)]
+    pub fn move_picture_control_by_path(
+        &mut self,
+        section_idx: u32,
+        from_para_idx: u32,
+        from_cell_path_json: &str,
+        from_control_idx: u32,
+        to_para_idx: u32,
+        to_cell_path_json: &str,
+        to_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        let from_path = parse_cell_path_arg(from_cell_path_json)?;
+        let to_path = parse_cell_path_arg(to_cell_path_json)?;
+        self.move_picture_control_by_path_native(
+            section_idx as usize,
+            from_para_idx as usize,
+            &from_path,
+            from_control_idx as usize,
+            to_para_idx as usize,
+            &to_path,
+            to_char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// [Task #1171 / PR #1254] 표 셀/글상자 내부 Picture 삭제 (by_path).
     #[wasm_bindgen(js_name = deleteCellPictureControlByPath)]
     pub fn delete_cell_picture_control_by_path(
@@ -4632,6 +4673,33 @@ impl HwpDocument {
     ) -> Result<String, JsValue> {
         self.render_equation_preview_native(script, font_size_hwpunit, color)
             .map_err(|e| e.into())
+    }
+
+    /// Rendered bounds of an agent-inserted image or equation. Cell coordinates
+    /// identify the equation itself, rather than its containing table cell.
+    #[wasm_bindgen(js_name = getObjectBBox)]
+    pub fn get_object_bbox(
+        &self,
+        kind: &str,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: Option<u32>,
+        cell_para_idx: Option<u32>,
+        inner_control_idx: Option<u32>,
+        cell_path_json: Option<String>,
+    ) -> Result<String, JsValue> {
+        self.get_object_bbox_native(
+            kind,
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            cell_idx.map(|n| n as usize),
+            cell_para_idx.map(|n| n as usize),
+            inner_control_idx.map(|n| n as usize),
+            cell_path_json.as_deref(),
+        )
+        .map_err(|e| e.into())
     }
 
     #[wasm_bindgen(js_name = renderEquationPreviewWithFont)]
@@ -8369,6 +8437,31 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 중첩 셀 선택을 cellPath와 논리적 커서 오프셋으로 처리한다.
+    #[wasm_bindgen(js_name = copySelectionInCellByPath)]
+    pub fn copy_selection_in_cell_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        start_para_idx: u32,
+        start_offset: u32,
+        end_para_idx: u32,
+        end_offset: u32,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.copy_selection_in_cell_by_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            start_para_idx as usize,
+            start_offset as usize,
+            end_para_idx as usize,
+            end_offset as usize,
+        )
+        .map_err(Into::into)
+    }
+
     /// `copySelectionInCell` 의 options object 변형 (#1413).
     ///
     /// options JSON 키: `{ sectionIdx, parentParaIdx, controlIdx, cellIdx, startCellParaIdx,
@@ -8415,6 +8508,12 @@ impl HwpDocument {
     #[wasm_bindgen(js_name = clipboardHasControl)]
     pub fn clipboard_has_control(&self) -> bool {
         self.clipboard_has_control_native()
+    }
+
+    /// 텍스트나 추가 문단 없이 표/그림/도형 하나만 복사되었는지 확인한다.
+    #[wasm_bindgen(js_name = clipboardIsSingleControl)]
+    pub fn clipboard_is_single_control(&self) -> bool {
+        self.clipboard_is_single_control_native()
     }
 
     /// 내부 클립보드의 컨트롤 객체를 캐럿 위치에 붙여넣는다.
@@ -8592,6 +8691,31 @@ impl HwpDocument {
             end_char_offset as usize,
         )
         .map_err(|e| e.into())
+    }
+
+    /// 중첩 셀 선택을 cellPath와 논리적 커서 오프셋으로 처리한다.
+    #[wasm_bindgen(js_name = exportSelectionInCellByPathHtml)]
+    pub fn export_selection_in_cell_by_path_html(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        start_para_idx: u32,
+        start_offset: u32,
+        end_para_idx: u32,
+        end_offset: u32,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.export_selection_in_cell_by_path_html_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            start_para_idx as usize,
+            start_offset as usize,
+            end_para_idx as usize,
+            end_offset as usize,
+        )
+        .map_err(Into::into)
     }
 
     /// `exportSelectionInCellHtml` 의 options object 변형 (#1413).

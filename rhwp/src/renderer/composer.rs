@@ -100,8 +100,10 @@ pub struct ComposedParagraph {
     /// 개요 번호/글머리표 등 문단 머리 텍스트 (렌더링 전용)
     /// 문서 좌표 char_offset에 포함되지 않으며 별도 TextRunNode로 렌더링된다.
     pub numbering_text: Option<String>,
-    /// treat_as_char 컨트롤의 텍스트 위치와 HWPUNIT 너비 목록
-    /// (para.text 내 절대 char 인덱스, 폭 HWPUNIT, para.controls 내 인덱스)
+    /// treat_as_char 컨트롤의 텍스트 위치와 점유 폭(HWPUNIT) 목록.
+    /// 그림의 점유 폭에는 좌우 외곽 여백이 포함되며, 그림 자체의 폭은
+    /// `Picture.common.width` 로 유지한다.
+    /// (para.text 내 절대 char 인덱스, 점유 폭 HWPUNIT, para.controls 내 인덱스)
     pub tac_controls: Vec<(usize, i32, usize)>,
     /// 각주/미주 위치: (텍스트 내 char 인덱스, 번호, para.controls 내 인덱스)
     pub footnote_positions: Vec<(usize, u16, usize)>,
@@ -113,6 +115,15 @@ pub struct ComposedParagraph {
 /// 구역의 문단 목록을 구성한다.
 pub fn compose_section(section: &Section) -> Vec<ComposedParagraph> {
     section.paragraphs.iter().map(compose_paragraph).collect()
+}
+
+/// The inline slot includes the picture's outer left and right margins. The
+/// image content itself retains `common.width` for painting and serialization.
+pub(crate) fn inline_picture_occupied_width_hu(pic: &crate::model::image::Picture) -> i32 {
+    (i64::from(pic.common.width)
+        + i64::from(pic.common.margin.left)
+        + i64::from(pic.common.margin.right))
+    .clamp(0, i64::from(i32::MAX)) as i32
 }
 
 /// [Task #991] HWP5 parser 가 extended ctrl (1-3, 11-12, 14-18, 21-23) 의
@@ -285,14 +296,14 @@ pub fn compose_paragraph(para: &Paragraph) -> ComposedParagraph {
             let pos = *tac_positions.get(i)?;
             match ctrl {
                 Control::Picture(p) if p.common.treat_as_char => {
-                    Some((pos, p.common.width as i32, i))
+                    Some((pos, inline_picture_occupied_width_hu(p), i))
                 }
                 Control::Shape(s) if s.common().treat_as_char => {
                     Some((pos, s.common().width as i32, i))
                 }
                 Control::Equation(eq) if eq.common.treat_as_char => {
                     // HWP 저장값을 사용 — 한컴 편집기가 실제 폰트로 계산한 정확한 너비
-                    Some((pos, eq.common.width as i32, i))
+                    Some((pos, super::equation::occupied_width_hwp(eq), i))
                 }
                 Control::Form(f) => Some((pos, f.width as i32, i)),
                 Control::Table(t)

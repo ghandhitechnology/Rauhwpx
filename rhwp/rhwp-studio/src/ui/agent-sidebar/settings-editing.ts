@@ -9,8 +9,12 @@ import { confirmSheet } from './sheet.ts';
 import {
   clearStoredLocalFonts,
   detectLocalFonts,
+  getImportedLocalFontCount,
+  getLocalFonts,
   getLocalFontState,
+  importLocalFontFiles,
   isLocalFontAccessSupported,
+  localFontImportMessage,
   loadStoredLocalFonts,
   type LocalFontState,
 } from '../../core/local-fonts.ts';
@@ -98,13 +102,15 @@ function fontValue(fontSet: FontSet, index: number): string {
 }
 
 function localFontStatus(state: LocalFontState): string {
+  const imported = getImportedLocalFontCount();
+  const session = imported > 0 ? ` · 이번 세션에 ${imported}개 가져옴` : '';
   if (state.lastError) return `저장소 접근 실패 · ${state.lastError}`;
   if (!state.stored) {
-    if (!state.supported) return '이 브라우저는 로컬 글꼴 감지 미지원';
-    return '저장된 감지 결과가 없습니다.';
+    if (!state.supported) return `이 브라우저는 로컬 글꼴 감지 미지원${session}`;
+    return `저장된 감지 결과가 없습니다.${session}`;
   }
   const date = state.detectedAt ? new Date(state.detectedAt).toLocaleDateString('ko-KR') : '';
-  return `${state.count.toLocaleString()}개 감지${date ? ` · ${date}` : ''}`;
+  return `${state.count.toLocaleString()}개 감지${date ? ` · ${date}` : ''}${session}`;
 }
 
 export interface EditingSettingsController {
@@ -230,7 +236,15 @@ export function createEditingSettings(options: {
   detectFonts.type = 'button';
   const clearFonts = el('button', 'ag-settings-btn', '감지 결과 초기화');
   clearFonts.type = 'button';
-  localActions.append(detectFonts, clearFonts);
+  const importFonts = el('button', 'ag-settings-btn', '글꼴 파일 가져오기');
+  importFonts.type = 'button';
+  importFonts.title = 'TTF/OTF 파일과 HFT 수식 글꼴을 이번 세션에서 사용합니다.';
+  const importInput = el('input', '');
+  importInput.type = 'file';
+  importInput.accept = '.ttf,.otf,.hft,font/ttf,font/otf';
+  importInput.multiple = true;
+  importInput.hidden = true;
+  localActions.append(detectFonts, importFonts, clearFonts, importInput);
   localHeader.append(localCopy, localActions);
   fonts.body.append(recentFonts.root, recentCount.root, fontSets, localHeader);
 
@@ -336,6 +350,28 @@ export function createEditingSettings(options: {
       renderLocalFonts(error instanceof Error ? error.message : String(error));
     }
     detectFonts.disabled = !isLocalFontAccessSupported();
+  });
+  importFonts.addEventListener('click', () => importInput.click());
+  importInput.addEventListener('change', async () => {
+    const selected = Array.from(importInput.files ?? []);
+    importInput.value = '';
+    if (selected.length === 0) return;
+    importFonts.disabled = true;
+    localStatus.textContent = '글꼴 파일을 불러오는 중…';
+    try {
+      const result = await importLocalFontFiles(selected);
+      renderLocalFonts(localFontImportMessage(result));
+      if (result.imported.length > 0) {
+        eventBus?.emit('local-fonts-changed', {
+          fonts: getLocalFonts({ includeRegistered: true }), source: 'settings-import',
+        });
+        eventBus?.emit('font-files-imported');
+      }
+    } catch (error) {
+      renderLocalFonts(error instanceof Error ? error.message : String(error));
+    } finally {
+      importFonts.disabled = false;
+    }
   });
   clearFonts.addEventListener('click', async () => {
     if (!await confirmSheet(clearFonts, '로컬 글꼴 감지 초기화', undefined, { confirmLabel: '초기화', destructive: true })) return;

@@ -201,9 +201,51 @@ impl EqParser {
             return EqNode::Empty;
         }
         self.depth += 1;
-        let node = self.parse_element_inner();
+        let mut node = self.parse_element_inner();
+        // 공백 없이 이어진 문자/숫자는 하나의 피연산자다. 토크나이저가 ASCII와
+        // Unicode 경계에서 나누어도 dΔx, 10a^3 전체가 OVER의 분자가 되어야 한다.
+        if Self::is_literal_operand(&node) {
+            let mut parts = vec![node];
+            while self.current().is_some_and(|token| {
+                if token.space_before {
+                    return false;
+                }
+                match token.ty {
+                    TokenType::Number => true,
+                    TokenType::Text => token.value.chars().all(char::is_alphabetic),
+                    TokenType::Command => {
+                        let name = token.value.as_str();
+                        let lower = name.to_ascii_lowercase();
+                        !is_structure_command(name)
+                            && !is_structure_command(&name.to_ascii_uppercase())
+                            && !is_function(name)
+                            && !FONT_STYLES.contains_key(lower.as_str())
+                            && !DECORATIONS.contains_key(lower.as_str())
+                            && lookup_symbol(name).map_or(true, |symbol| {
+                                symbol.chars().all(|c| matches!(c, '\u{0391}'..='\u{03c9}'))
+                            })
+                    }
+                    _ => false,
+                }
+            }) {
+                parts.push(self.parse_element_inner());
+            }
+            node = EqNode::Row(parts).simplify();
+        }
         self.depth -= 1;
         node
+    }
+
+    fn is_literal_operand(node: &EqNode) -> bool {
+        match node {
+            EqNode::Text(text) => text.chars().all(char::is_alphabetic),
+            EqNode::Number(_) => true,
+            EqNode::MathSymbol(text) => text.chars().all(|c| matches!(c, '\u{0391}'..='\u{03c9}')),
+            EqNode::Superscript { base, .. }
+            | EqNode::Subscript { base, .. }
+            | EqNode::SubSup { base, .. } => Self::is_literal_operand(base),
+            _ => false,
+        }
     }
 
     /// 단일 요소 파싱
@@ -1763,6 +1805,28 @@ mod tests {
         // 회귀 가드: x^2 는 영향 없음
         let x2 = format!("{:?}", parse("x^2"));
         assert!(x2.contains("Superscript"), "x^2 정상: {x2}");
+    }
+
+    #[test]
+    fn adjacent_literal_atoms_remain_one_fraction_operand() {
+        let EqNode::Fraction { numer, denom } = parse("dΔx over 2a") else {
+            panic!("expected fraction");
+        };
+        assert!(matches!(*numer, EqNode::Row(ref parts) if parts.len() == 3));
+        assert!(matches!(*denom, EqNode::Row(ref parts) if parts.len() == 2));
+        let EqNode::Fraction { numer, .. } = parse("10a^3 over b^2") else {
+            panic!("expected fraction");
+        };
+        assert!(matches!(*numer, EqNode::Row(ref parts)
+            if matches!(parts.as_slice(), [EqNode::Number(_), EqNode::Superscript { .. }])));
+        // 공백, 연산자, 명시적 그룹은 기존 operand 경계를 유지한다.
+        for script in ["d x over L", "d+ x over L", "d{x} over L"] {
+            let EqNode::Row(parts) = parse(script) else {
+                panic!("expected row: {script}")
+            };
+            assert!(matches!(parts.last(), Some(EqNode::Fraction { numer, .. })
+                if matches!(numer.as_ref(), EqNode::Text(text) if text == "x")));
+        }
     }
 
     #[test]

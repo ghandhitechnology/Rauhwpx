@@ -3335,6 +3335,122 @@ impl DocumentCore {
         )))
     }
 
+    /// Agent pending preview needs the rendered pixels of a picture or equation,
+    /// including an equation inside one table cell. A shape bbox cannot resolve
+    /// either control type, and a cell bbox colors unrelated cell content.
+    pub(crate) fn get_object_bbox_native(
+        &self,
+        kind: &str,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: Option<usize>,
+        cell_para_idx: Option<usize>,
+        inner_control_idx: Option<usize>,
+        cell_path_json: Option<&str>,
+    ) -> Result<String, HwpError> {
+        use crate::renderer::render_tree::{RenderNode, RenderNodeType};
+
+        let cell_path = cell_path_json.map(Self::parse_cell_path_json).transpose()?;
+        if let Some(path) = &cell_path {
+            if path[0].0 != control_idx {
+                return Err(HwpError::RenderError(
+                    "개체 셀 경로의 표 컨트롤이 일치하지 않습니다".to_string(),
+                ));
+            }
+        }
+
+        fn matches_path(
+            context: Option<&crate::renderer::layout::CellContext>,
+            parent_para: usize,
+            path: &[(usize, usize, usize)],
+        ) -> bool {
+            context.is_some_and(|ctx| {
+                ctx.parent_para_index == parent_para
+                    && ctx.path.len() == path.len()
+                    && ctx.path.iter().zip(path).all(|(entry, requested)| {
+                        (entry.control_index, entry.cell_index, entry.cell_para_index) == *requested
+                    })
+            })
+        }
+
+        fn find(
+            node: &RenderNode,
+            kind: &str,
+            sec: usize,
+            para: usize,
+            ctrl: usize,
+            cell: Option<usize>,
+            cell_para: Option<usize>,
+            inner_ctrl: Option<usize>,
+            cell_path: Option<&[(usize, usize, usize)]>,
+        ) -> Option<crate::renderer::render_tree::BoundingBox> {
+            let matches = match (&node.node_type, kind) {
+                (RenderNodeType::Image(image), "image") => {
+                    image.section_index == Some(sec)
+                        && if let Some(path) = cell_path {
+                            matches_path(image.cell_context.as_ref(), para, path)
+                                && image.control_index == inner_ctrl
+                        } else {
+                            image.para_index == Some(para)
+                                && image.control_index == Some(ctrl)
+                                && image.cell_index == cell
+                                && image.cell_para_index == cell_para
+                        }
+                }
+                (RenderNodeType::Equation(eq), "equation") => {
+                    eq.section_index == Some(sec)
+                        && eq.inner_control_index == inner_ctrl
+                        && if let Some(path) = cell_path {
+                            matches_path(eq.cell_context.as_ref(), para, path)
+                        } else {
+                            eq.para_index == Some(para)
+                                && eq.control_index == Some(ctrl)
+                                && eq.cell_index == cell
+                                && eq.cell_para_index == cell_para
+                        }
+                }
+                _ => false,
+            };
+            if matches {
+                return Some(node.bbox);
+            }
+            node.children.iter().find_map(|child| {
+                find(
+                    child, kind, sec, para, ctrl, cell, cell_para, inner_ctrl, cell_path,
+                )
+            })
+        }
+
+        if kind != "image" && kind != "equation" {
+            return Err(HwpError::RenderError(format!(
+                "지원하지 않는 개체 종류: {kind}"
+            )));
+        }
+        for page in 0..self.page_count() as usize {
+            let tree = self.build_page_tree_cached(page as u32)?;
+            if let Some(bbox) = find(
+                &tree.root,
+                kind,
+                section_idx,
+                parent_para_idx,
+                control_idx,
+                cell_idx,
+                cell_para_idx,
+                inner_control_idx,
+                cell_path.as_deref(),
+            ) {
+                return Ok(format!(
+                    "{{\"pageIndex\":{},\"x\":{:.1},\"y\":{:.1},\"width\":{:.1},\"height\":{:.1}}}",
+                    page, bbox.x, bbox.y, bbox.width, bbox.height,
+                ));
+            }
+        }
+        Err(HwpError::RenderError(format!(
+            "개체 노드를 찾을 수 없습니다 (kind={kind}, sec={section_idx}, ppi={parent_para_idx}, ci={control_idx})"
+        )))
+    }
+
     /// 표 컨트롤을 문단에서 삭제한다 (네이티브).
     ///
     /// 확장 컨트롤은 para.text에 포함되지 않고 char_offsets 간의 갭(8 code unit)에 배치된다.

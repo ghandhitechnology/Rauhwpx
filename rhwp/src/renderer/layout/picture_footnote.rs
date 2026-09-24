@@ -72,6 +72,108 @@ pub(crate) fn caption_height_px(caption: &Option<Caption>, dpi: f64) -> f64 {
 }
 
 impl LayoutEngine {
+    /// 셀 그림을 배치한 뒤 실제 그림 프레임에 캡션을 붙인다. 분할 셀에서도
+    /// 같은 경로를 사용하며, 이미 저장 줄 높이에 포함된 캡션 높이를 재가산하지 않는다.
+    pub(crate) fn layout_cell_picture_captions(
+        &self,
+        tree: &mut PageRenderTree,
+        parent: &mut RenderNode,
+        para: &Paragraph,
+        styles: &ResolvedStyleSet,
+        area: &LayoutRect,
+        bin_data: &[BinDataContent],
+        section_index: usize,
+        cell_ctx: &super::CellContext,
+    ) {
+        fn picture_bounds(
+            node: &RenderNode,
+            control_index: usize,
+            ctx: &super::CellContext,
+        ) -> Option<BoundingBox> {
+            if let RenderNodeType::Image(image) = &node.node_type {
+                if image.control_index == Some(control_index)
+                    && image.cell_context.as_ref().is_some_and(|other| {
+                        other.parent_para_index == ctx.parent_para_index
+                            && other.path.len() == ctx.path.len()
+                            && other.path.iter().zip(&ctx.path).all(|(a, b)| {
+                                (a.control_index, a.cell_index, a.cell_para_index)
+                                    == (b.control_index, b.cell_index, b.cell_para_index)
+                            })
+                    })
+                {
+                    return Some(node.bbox);
+                }
+            }
+            node.children
+                .iter()
+                .find_map(|child| picture_bounds(child, control_index, ctx))
+        }
+        for (ci, control) in para.controls.iter().enumerate() {
+            let Control::Picture(picture) = control else {
+                continue;
+            };
+            let Some(caption) = &picture.caption else {
+                continue;
+            };
+            let Some(bounds) = picture_bounds(parent, ci, cell_ctx) else {
+                continue;
+            };
+            let spacing = hwpunit_to_px(i32::from(caption.spacing), self.dpi);
+            let height = self.calculate_caption_height(&picture.caption, styles);
+            let (x, y, width) = match caption.direction {
+                CaptionDirection::Top => (bounds.x, bounds.y - height - spacing, bounds.width),
+                CaptionDirection::Bottom => {
+                    (bounds.x, bounds.y + bounds.height + spacing, bounds.width)
+                }
+                CaptionDirection::Left | CaptionDirection::Right => {
+                    let width = hwpunit_to_px(caption.width as i32, self.dpi);
+                    let x = if caption.direction == CaptionDirection::Left {
+                        bounds.x - width - spacing
+                    } else {
+                        bounds.x + bounds.width + spacing
+                    };
+                    let y = bounds.y
+                        + match caption.vert_align {
+                            crate::model::shape::CaptionVertAlign::Top => 0.0,
+                            crate::model::shape::CaptionVertAlign::Center => {
+                                (bounds.height - height).max(0.0) / 2.0
+                            }
+                            crate::model::shape::CaptionVertAlign::Bottom => {
+                                (bounds.height - height).max(0.0)
+                            }
+                        };
+                    (x, y, width)
+                }
+            };
+            let mut caption_ctx = cell_ctx.clone();
+            caption_ctx.path.push(super::CellPathEntry {
+                control_index: ci,
+                cell_index: 0,
+                cell_para_index: 0,
+                text_direction: 0,
+            });
+            self.layout_caption(
+                tree,
+                parent,
+                caption,
+                styles,
+                area,
+                x,
+                width,
+                y,
+                &mut self.auto_counter.borrow_mut(),
+                bin_data,
+                Some(caption_ctx),
+                CaptionOwner::new(
+                    Some(section_index),
+                    Some(cell_ctx.parent_para_index),
+                    Some(ci),
+                    CaptionControlKind::Image,
+                ),
+            );
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn layout_picture(
         &self,

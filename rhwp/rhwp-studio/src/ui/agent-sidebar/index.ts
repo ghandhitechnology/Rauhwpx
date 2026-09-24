@@ -637,6 +637,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let replyPending = false;
   /** 편대 카드가 대신 나타내는 스폰 도구 호출 — 결과 행도 함께 접는다. */
   const suppressedSpawnCalls = new Set<string>();
+  const reviewImageUrls = new Map<string, string>();
   /**
    * 서브에이전트·워크플로 카드. 턴이 도는 동안 입력기 위 도크 팝업이 서브에이전트
    * 작업을 보는 자리이고, 턴이 끝나면 태어날 때 예약한 슬롯으로 접혀 정착한다.
@@ -7614,7 +7615,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
    * 아랫줄이 실제 -/+ diff 를 보여준다 — 요약 문장 대신 검토 가능한 형태.
    */
   function buildReviewOp(op: PendingOp, canNavigate = true): HTMLElement {
-    const entry = renderPendingOpDiff(op);
+    const entry = renderPendingOpDiff(op, reviewImageUrls);
     const range = 'range' in op ? op.range : null;
     const obj = op.kind === 'object' ? op.obj : null;
     const cell = range?.cell ?? (obj && 'cell' in obj ? obj.cell : undefined);
@@ -8346,6 +8347,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     const changeSets = bridge.pendingEdits.getChangeSets();
     const reviewSets = changeSets.filter((set) => set.status !== 'open');
+    const latestTurn = turnChanges.get(currentThread.id, currentDocumentId);
+    const activeOps = new Set([
+      ...changeSets.flatMap(set => set.ops.map(op => op.id)),
+      ...(reviewSets.length === 0 && latestTurn?.applied ? latestTurn.set.ops.map(op => op.id) : []),
+    ]);
+    for (const [id, url] of reviewImageUrls) {
+      if (!activeOps.has(id)) {
+        URL.revokeObjectURL(url);
+        reviewImageUrls.delete(id);
+      }
+    }
     updateComposerActivity(changeSets);
     for (const set of reviewSets) {
       const card = buildReviewCard(set);
@@ -8359,7 +8371,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         collapseLeavingReviewCard(card, height);
       }
     }
-    const latestTurn = turnChanges.get(currentThread.id, currentDocumentId);
     if (reviewSets.length === 0 && latestTurn?.applied) {
       const card = el('div', 'ag-review-card ag-applied-turn');
       const head = el('div', 'ag-review-title');
@@ -8622,6 +8633,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     dispose(): void {
       if (root.dataset.disposed === 'true') return;
       root.dataset.disposed = 'true';
+      for (const url of reviewImageUrls.values()) URL.revokeObjectURL(url);
+      reviewImageUrls.clear();
       threadComposerDrafts.clear();
       cloudTransferCloseWaiter?.reject(new Error('클라우드 전송을 기다리는 동안 사이드바가 닫혔습니다.'));
       cloudTransferCloseWaiter = null;
