@@ -232,6 +232,7 @@ html.desktop-mac #editor-command-search { -webkit-app-region: no-drag; }
 @media (max-width: 1023px) {
   #icon-toolbar { padding: 5px 8px; }
   #icon-toolbar .tb-btn { min-width: 40px; }
+  #icon-toolbar .tb-label { display: none; }
   #icon-toolbar > .tb-group { flex-wrap: wrap; }
 }
 @media (max-width: 767px) {
