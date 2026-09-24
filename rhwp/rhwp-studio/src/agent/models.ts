@@ -10,14 +10,12 @@ function isSupportedAgent(agent: AgentName): agent is 'claude' | 'codex' | 'pi' 
 }
 export const AGENT_MODELS: Record<StaticAgentName, readonly AgentModelOption[]> = {
   claude: [
-    { id: 'claude-fable-5-1', label: 'Fable 5.1' }, { id: 'fable', label: 'Fable 5' },
-    { id: 'claude-opus-5-5', label: 'Opus 5.5' }, { id: 'opus', label: 'Opus 5' },
-    { id: 'sonnet', label: 'Sonnet 5' }, { id: 'haiku', label: 'Haiku 4.5' },
+    { id: 'fable', label: 'Fable' }, { id: 'opus', label: 'Opus' },
+    { id: 'sonnet', label: 'Sonnet' }, { id: 'haiku', label: 'Haiku' },
   ],
   codex: [
-    { id: 'gpt-6-astra', label: 'Astra' }, { id: 'gpt-6-sol', label: 'Sol 6' },
-    { id: 'gpt-6-luna', label: 'Luna 6' }, { id: 'gpt-5.6-sol', label: 'Sol 5.6' },
-    { id: 'gpt-5.6-terra', label: 'Terra' }, { id: 'gpt-5.6-luna', label: 'Luna 5.6' },
+    { id: 'astra', label: 'Astra' }, { id: 'sol', label: 'Sol' },
+    { id: 'luna', label: 'Luna' }, { id: 'terra', label: 'Terra' },
   ],
 } as const;
 
@@ -34,13 +32,19 @@ const CODEX_EFFORTS = [
 ] as const;
 const PI_EFFORT_IDS = ['high', 'medium', 'low'] as const;
 const PI_EFFORT_LABELS: Record<string, string> = { low: 'Low', medium: 'Medium', high: 'High' };
-export const DEFAULT_AGENT_MODEL: Record<StaticAgentName, string> = { claude: 'sonnet', codex: 'gpt-5.6-sol' };
+export const DEFAULT_AGENT_MODEL: Record<StaticAgentName, string> = { claude: 'sonnet', codex: 'sol' };
 export const DEFAULT_AGENT_EFFORT: Record<StaticAgentName, string> = { claude: 'high', codex: 'medium' };
 
 let piModelRegistry: readonly PiModelConfig[] = [];
 export function setPiModels(models: readonly PiModelConfig[]): void { piModelRegistry = models; }
 export function piModels(): readonly PiModelConfig[] { return piModelRegistry; }
 function findPiModel(id: string | null | undefined): PiModelConfig | undefined { return piModelRegistry.find((model) => model.id === id); }
+
+function legacyLineup(agent: AgentName, model: string): string | null {
+  if (agent === 'codex') return /^gpt-\d+(?:\.\d+)*-(astra|sol|luna|terra)$/.exec(model)?.[1] ?? null;
+  if (agent === 'claude') return /^claude-(fable|opus|sonnet|haiku)-\d+(?:[-.]\d+)*$/.exec(model)?.[1] ?? null;
+  return null;
+}
 
 export function modelsForAgent(agent: AgentName): readonly AgentModelOption[] {
   if (agent === 'pi') return piModelRegistry.map((model) => ({ id: model.id, label: model.name }));
@@ -54,9 +58,13 @@ export function modelSupportsImages(agent: AgentName, model?: string | null): bo
 }
 export function resolveModelForAgent(agent: AgentName, model?: string | null): string {
   if (agent === 'pi' && piModelRegistry.length === 0) return model ?? '';
+  const lineage = model ? legacyLineup(agent, model) : null;
+  if (lineage) return lineage;
   return model && isModelForAgent(agent, model) ? model : defaultModelForAgent(agent);
 }
-export function labelForModel(agent: AgentName, modelId: string): string { return modelsForAgent(agent).find((model) => model.id === modelId)?.label ?? modelId; }
+export function labelForModel(agent: AgentName, modelId: string): string {
+  return modelsForAgent(agent).find((model) => model.id === (legacyLineup(agent, modelId) ?? modelId))?.label ?? modelId;
+}
 export function effortsForAgent(agent: AgentName, model?: string | null): readonly AgentEffortOption[] {
   if (agent === 'pi') {
     const config = findPiModel(resolveModelForAgent('pi', model));

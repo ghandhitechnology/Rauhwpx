@@ -429,8 +429,8 @@ try {
     await page.click('[aria-label="프로바이더 선택"]');
     await page.waitForSelector('.ag-config-panel.ag-open');
     await page.click('.ag-provider-item[data-agent="codex"]');
-    await page.click('.ag-llm-item[data-model="gpt-5.6-luna"]');
-    await page.click('.ag-llm-item[data-model="gpt-6-astra"]');
+    await page.click('.ag-llm-item[data-model="luna"]');
+    await page.click('.ag-llm-item[data-model="astra"]');
     await page.focus('.ag-eslider');
     await page.keyboard.press('End');
     await page.waitForFunction(() => document.querySelector('.ag-effort-name').textContent === 'Max');

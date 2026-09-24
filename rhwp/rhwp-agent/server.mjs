@@ -62,6 +62,7 @@ import { createRauCreditsClient } from './rau-credits-client.mjs';
 import { createAccountSession } from './account-session.mjs';
 import { AuthRunRegistry } from './auth-run-registry.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
+import { codexLineup, createCodexModelResolver } from './codex-model-routing.mjs';
 import { createOpenRouter, creditBalanceEmpty } from './openrouter.mjs';
 import { createIpcSecretStore } from './secret-store.mjs';
 import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
@@ -587,12 +588,12 @@ const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi']);
 const OPENROUTER_AGENTS = new Set(['pi']);
 const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
 
-const CLAUDE_MODELS = new Set(['claude-fable-5-1', 'claude-opus-5-5', 'opus', 'fable', 'sonnet', 'haiku']);
-const CODEX_MODELS = new Set(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
+const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
 const DEFAULT_MODEL = {
   claude: 'sonnet',
-  codex: 'gpt-5.6-sol',
+  codex: 'sol',
 };
+const resolveCodexModel = createCodexModelResolver();
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const CLAUDE_EFFORTS_HAIKU = new Set(['low', 'medium', 'high']);
 const CODEX_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
@@ -1019,24 +1020,36 @@ function beginAccountLogin(record, sock, requestId) {
   );
 }
 
-function resolveModel(agent, requested) {
+function resolveModel(agent, requested, record = null) {
   if (OPENROUTER_AGENTS.has(agent)) {
     const status = openRouterStatus(agent);
     if (typeof requested === 'string' && piModelConfig(requested, agent)) return requested;
     if (status.defaultModelId && piModelConfig(status.defaultModelId, agent)) return status.defaultModelId;
     return status.models[0]?.id ?? null;
   }
-  const tables = { claude: CLAUDE_MODELS, codex: CODEX_MODELS };
-  const allowed = tables[agent];
-  if (!allowed) throw unknownAgentError(agent);
-  if (typeof requested === 'string' && allowed.has(requested)) return requested;
   const envDefaults = {
     claude: process.env.RHWP_CLAUDE_MODEL,
     codex: process.env.RHWP_CODEX_MODEL,
   };
-  const envDefault = envDefaults[agent];
-  if (typeof envDefault === 'string' && allowed.has(envDefault)) return envDefault;
-  return DEFAULT_MODEL[agent];
+  if (agent === 'claude') {
+    const alias = (value) => /^claude-(opus|fable|sonnet|haiku)-\d+(?:[.-]\d+)*$/.exec(value ?? '')?.[1] ?? value;
+    if (CLAUDE_MODELS.has(alias(requested))) return alias(requested);
+    if (CLAUDE_MODELS.has(alias(envDefaults.claude))) return alias(envDefaults.claude);
+    return DEFAULT_MODEL.claude;
+  }
+  if (agent === 'codex') {
+    const lineup = codexLineup(requested)
+      ?? codexLineup(envDefaults.codex)
+      ?? DEFAULT_MODEL.codex;
+    return resolveCodexModel(lineup, {
+      bin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
+      env: cliSetup.envFor('codex'),
+      isolatedHome: record?.isolatedHome,
+      codexHome: record?.codexHome,
+      cwd: record?.workDir ?? ROOT,
+    });
+  }
+  throw unknownAgentError(agent);
 }
 
 function resolveEffort(agent, model, requested) {
@@ -1669,7 +1682,7 @@ function checkpointTitleDeps(record, health, signal) {
         ),
         model: deepSeek?.id ?? '',
       },
-      codex: { ready: codex.ready, model: 'gpt-5.6-luna' },
+      codex: { ready: codex.ready, model: 'luna' },
       claude: { ready: claude.ready, model: 'haiku' },
     },
     piManager,
@@ -1685,6 +1698,7 @@ function checkpointTitleDeps(record, health, signal) {
       codex: { ...cliSetup.envFor('codex'), CODEX_HOME: record.codexHome },
       claude: claudeRuntimeEnv(record.isolatedHome),
     },
+    resolveCodexTitleModel: () => resolveModel('codex', 'luna', record),
     spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
     terminateProcess: terminateProcessTree,
     cleanupProcessOutcome: (child) => beginAuxiliaryProcessCleanupOutcome(record, child),
@@ -2633,7 +2647,7 @@ async function startSession(
   requestedServiceTier,
 ) {
   if (record.processCleanupUncertain === true) throw agentProcessCleanupUncertain();
-  const model = resolveModel(agent, requestedModel);
+  const model = await resolveModel(agent, requestedModel, record);
   const effort = resolveEffort(agent, model, requestedEffort);
   const permissionProfile = resolvePermissionProfile(requestedPermission);
   const serviceTier = resolveServiceTier(agent, requestedServiceTier);
@@ -3141,7 +3155,14 @@ async function handleStudioMessage(record, sock, msg) {
         return;
       }
       const preview = typeof msg.preview === 'string' ? msg.preview : '';
-      generateChatTitle(preview, auxDeps(record, msg.agent, 'codex'))
+      void Promise.resolve().then(async () => {
+        const deps = auxDeps(record, msg.agent, 'codex');
+        if (!deps.useOpenRouter) {
+          deps.model = await resolveModel('codex', 'luna', record).catch(() => null);
+          if (!deps.model) return null;
+        }
+        return generateChatTitle(preview, deps);
+      })
         .then((title) => {
           sendJson(sock, {
             v: 1,
@@ -4076,7 +4097,7 @@ async function handleStudioMessage(record, sock, msg) {
               language: msg.language,
               files: calibrationSources,
               agent: selection.agent,
-              model: selection.model,
+              model: await resolveModel(selection.agent, selection.model, record),
               effort: selection.effort,
             },
             {

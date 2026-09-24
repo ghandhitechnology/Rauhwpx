@@ -52,7 +52,7 @@ test('모르는 모델은 프로바이더 기본 모델로 접힌다', () => {
 test('프로바이더가 다르면 모델도 그 프로바이더 기준으로 다시 해석된다', () => {
   const prefs = loadAgentPrefs(makeStorage({ defaultAgent: 'codex', defaultModel: 'opus' }));
   assert.equal(prefs.defaultAgent, 'codex');
-  assert.equal(prefs.defaultModel, 'gpt-5.6-sol');
+  assert.equal(prefs.defaultModel, 'sol');
 });
 
 test('모델이 지원하지 않는 추론 강도는 그 모델의 기본값으로 내려간다', () => {
@@ -98,7 +98,7 @@ test('저장은 부분 갱신이고, 저장된 값은 다시 읽힌다', () => {
   // 프로바이더를 바꾸면 남아 있던 모델은 새 프로바이더 기준으로 접히고,
   // 강도는 codex 도 max 를 받으니 그대로 살아남는다.
   const switched = saveAgentPrefs({ defaultAgent: 'codex' }, storage);
-  assert.equal(switched.defaultModel, 'gpt-5.6-sol');
+  assert.equal(switched.defaultModel, 'sol');
   assert.equal(switched.defaultEffort, 'max');
   assert.equal(JSON.parse(storage.map.get(AGENT_PREFS_STORAGE_KEY)!).defaultAgent, 'codex');
 });
@@ -106,7 +106,7 @@ test('저장은 부분 갱신이고, 저장된 값은 다시 읽힌다', () => {
 test('저장소가 없으면 정규화된 값만 돌려주고 던지지 않는다', () => {
   const prefs = saveAgentPrefs({ defaultAgent: 'codex' }, null);
   assert.equal(prefs.defaultAgent, 'codex');
-  assert.equal(prefs.defaultModel, 'gpt-5.6-sol');
+  assert.equal(prefs.defaultModel, 'sol');
 });
 
 const PI_MODEL: PiModelConfig = {
@@ -215,9 +215,9 @@ for (const model of ['gpt-5.6-terra', 'gpt-6-astra']) {
     assert.equal(hasExplicitDefaultAgent(storage), true);
     const kept = applyFirstRunDefaultAgent(['claude'], storage);
     assert.equal(kept.defaultAgent, 'codex');
-    assert.equal(kept.defaultModel, model);
+    assert.equal(kept.defaultModel, model.endsWith('terra') ? 'terra' : 'astra');
     assert.equal(loadAgentPrefs(storage).defaultAgent, 'codex');
-    assert.equal(loadAgentPrefs(storage).defaultModel, model);
+    assert.equal(loadAgentPrefs(storage).defaultModel, model.endsWith('terra') ? 'terra' : 'astra');
   });
 }
 
@@ -236,5 +236,5 @@ test('첫 실행에서 BYOK 만 연결하면 그 프로바이더가 기본값이
   assert.equal(firstRunDefaultAgent(['codex', 'claude']), 'codex');
   const seeded = applyFirstRunDefaultAgent(['codex'], storage);
   assert.equal(seeded.defaultAgent, 'codex');
-  assert.equal(seeded.defaultModel, 'gpt-5.6-sol');
+  assert.equal(seeded.defaultModel, 'sol');
 });

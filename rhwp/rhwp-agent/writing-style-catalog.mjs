@@ -1,22 +1,24 @@
 import { StyleCalibrationError } from './style-calibrator.mjs';
 
 const CODEX_MODELS = Object.freeze([
-  { id: 'gpt-6-astra', name: 'GPT-6 Astra', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
-  { id: 'gpt-6-sol', name: 'GPT-6 Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
-  { id: 'gpt-6-luna', name: 'GPT-6 Luna', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
-  { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
-  { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
-  { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
+  { id: 'astra', name: 'Astra', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
+  { id: 'sol', name: 'Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
+  { id: 'luna', name: 'Luna', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
+  { id: 'terra', name: 'Terra', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
 ]);
 
 const CLAUDE_MODELS = Object.freeze([
-  { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
-  { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
-  { id: 'opus', name: 'Claude Opus', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
   { id: 'fable', name: 'Claude Fable', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
+  { id: 'opus', name: 'Claude Opus', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
   { id: 'sonnet', name: 'Claude Sonnet', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
   { id: 'haiku', name: 'Claude Haiku', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
 ]);
+
+function currentLineup(agent, model) {
+  if (agent === 'codex') return /^gpt-\d+(?:\.\d+)*-(astra|sol|luna|terra)$/.exec(model)?.[1] ?? model;
+  if (agent === 'claude') return /^claude-(fable|opus|sonnet|haiku)-\d+(?:[-.]\d+)*$/.exec(model)?.[1] ?? model;
+  return model;
+}
 
 function piModels(piStatus) {
   return (Array.isArray(piStatus?.models) ? piStatus.models : []).map((model) => ({
@@ -54,14 +56,14 @@ export function buildWritingStyleCatalog({
   let selection = null;
   if (currentSelection?.agent && currentSelection?.model) {
     const provider = providers.find((entry) => entry.id === currentSelection.agent && entry.available);
-    const model = provider?.models.find((entry) => entry.id === currentSelection.model);
+    const model = provider?.models.find((entry) => entry.id === currentLineup(provider.id, currentSelection.model));
     if (provider && model) selection = { agent: provider.id, model: model.id, effort: currentSelection.effort ?? model.defaultEffort };
   }
   if (!selection) {
     const preferred = providers.find((entry) => entry.available && entry.models.length > 0);
     const model = preferred?.id === 'pi'
       ? preferred.models.find((entry) => entry.id === piStatus?.defaultModelId) ?? preferred.models[0]
-      : preferred?.models.find((entry) => entry.id === (preferred.id === 'codex' ? 'gpt-5.6-terra' : 'sonnet')) ?? preferred?.models[0];
+      : preferred?.models.find((entry) => entry.id === (preferred.id === 'codex' ? 'terra' : 'sonnet')) ?? preferred?.models[0];
     if (preferred && model) selection = { agent: preferred.id, model: model.id, effort: model.defaultEffort };
   }
   return { providers, defaultSelection: selection };
@@ -76,7 +78,7 @@ export function resolveWritingStyleSelection(request, options = {}) {
   const provider = catalog.providers.find((entry) => entry.id === agent);
   if (!provider) throw new StyleCalibrationError('PROVIDER_UNAVAILABLE', `Unknown calibration provider: ${agent || '(none)'}.`);
   if (!provider.available) throw new StyleCalibrationError('PROVIDER_UNAVAILABLE', provider.error || `${provider.name} is unavailable.`);
-  const modelId = explicitModel ? String(request.model) : (catalog.defaultSelection?.agent === agent ? catalog.defaultSelection.model : null);
+  const modelId = explicitModel ? currentLineup(agent, String(request.model)) : (catalog.defaultSelection?.agent === agent ? catalog.defaultSelection.model : null);
   const model = provider.models.find((entry) => entry.id === modelId);
   if (!model) throw new StyleCalibrationError('MODEL_UNAVAILABLE', `The selected ${provider.name} model is unavailable: ${modelId || '(none)'}.`);
   const requestedEffort = typeof request?.effort === 'string' && request.effort ? request.effort : null;
