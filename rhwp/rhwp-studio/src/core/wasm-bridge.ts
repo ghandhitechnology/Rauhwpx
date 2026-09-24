@@ -1344,6 +1344,11 @@ export class WasmBridge {
     return this.doc.getParagraphLength(sec, para);
   }
 
+  getLogicalLength(sec: number, para: number): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.getLogicalLength(sec, para);
+  }
+
   /**
    * 논리적 오프셋(텍스트 문자 + 인라인 컨트롤 1개당 +1) → 텍스트 오프셋 변환.
    * 커서/선택 좌표는 논리 오프셋이라 에이전트 툴의 텍스트 오프셋과 맞추려면 필요하다.
@@ -1678,6 +1683,11 @@ export class WasmBridge {
   getCellParagraphLengthByPath(sec: number, parentPara: number, pathJson: string): number {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.getCellParagraphLengthByPath(sec, parentPara, pathJson);
+  }
+
+  getCellLogicalLengthByPath(sec: number, parentPara: number, pathJson: string): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).getCellLogicalLengthByPath(sec, parentPara, pathJson);
   }
 
   getCellTextDirection(sec: number, parentPara: number, controlIdx: number, cellIdx: number): number {
@@ -2768,6 +2778,11 @@ export class WasmBridge {
     return this.doc.copySelectionInCell(sec, parentPara, controlIdx, cellIdx, startCellPara, startOffset, endCellPara, endOffset);
   }
 
+  copySelectionInCellByPath(sec: number, parentPara: number, pathJson: string, startCellPara: number, startOffset: number, endCellPara: number, endOffset: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).copySelectionInCellByPath(sec, parentPara, pathJson, startCellPara, startOffset, endCellPara, endOffset);
+  }
+
   pasteInternal(sec: number, para: number, charOffset: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.pasteInternal(sec, para, charOffset);
@@ -2841,6 +2856,11 @@ export class WasmBridge {
     return this.doc.clipboardHasControl();
   }
 
+  clipboardIsSingleControl(): boolean {
+    if (!this.doc) return false;
+    return (this.doc as any).clipboardIsSingleControl?.() === true;
+  }
+
   pasteControl(sec: number, para: number, charOffset: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.pasteControl(sec, para, charOffset);
@@ -2861,6 +2881,11 @@ export class WasmBridge {
   exportSelectionInCellHtml(sec: number, parentPara: number, controlIdx: number, cellIdx: number, startCellPara: number, startOffset: number, endCellPara: number, endOffset: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.exportSelectionInCellHtml(sec, parentPara, controlIdx, cellIdx, startCellPara, startOffset, endCellPara, endOffset);
+  }
+
+  exportSelectionInCellByPathHtml(sec: number, parentPara: number, pathJson: string, startCellPara: number, startOffset: number, endCellPara: number, endOffset: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).exportSelectionInCellByPathHtml(sec, parentPara, pathJson, startCellPara, startOffset, endCellPara, endOffset);
   }
 
   /**
