@@ -145,7 +145,7 @@
 -                    )
 -                };
 +                // 끝점에 renderingInfo affine을 이미 넣었으면 flip/rotation을 다시
-+                // 쓰우지 않는다. SVG/Skia가 bbox 기준으로 한 번 더 뒤집으면 화살표가 반대가 된다.
++                // 씌우지 않는다. SVG/Skia가 bbox 기준으로 한 번 더 뒤집으면 화살표가 반대가 된다.
 +                let line_transform =
 +                    if Self::line_uses_signed_rendering_affine(line, matrix_positioned) {
 +                        ShapeTransform::default()
