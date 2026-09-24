@@ -227,6 +227,7 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
         element('span', 'ag-question-option-number', String(index + 1)),
         element('span', 'ag-question-option-copy'),
       );
+      button.title = option.description ? `${option.label} · ${option.description}` : option.label;
       const copy = button.lastElementChild!;
       copy.append(
         element('strong', 'ag-question-option-label', option.label),
@@ -250,7 +251,7 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
         element('strong', 'ag-question-option-label', '직접 입력'),
         element('span', 'ag-question-option-description', active && draft.otherTextByQuestionId[question.id]
           ? draft.otherTextByQuestionId[question.id]!
-          : '입력창에 원하는 답을 직접 적습니다.'),
+          : '입력창에 적습니다'),
       );
       other.addEventListener('click', selectOther);
       optionsGroup.appendChild(other);
@@ -270,6 +271,12 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
     back.type = 'button';
     back.disabled = submitting || draft.activeQuestionIndex === 0;
     back.addEventListener('click', () => navigate(draft.activeQuestionIndex - 1));
+    if (interaction.questions.length > 1) {
+      const step = element('span', 'ag-question-step',
+        `${draft.activeQuestionIndex + 1}/${interaction.questions.length}`);
+      step.setAttribute('aria-hidden', 'true');
+      navigation.appendChild(step);
+    }
     navigation.appendChild(back);
     const final = draft.activeQuestionIndex === interaction.questions.length - 1;
     const next = element('button', 'ag-question-next', submitting ? '제출 중…' : final ? '제출' : '다음');
