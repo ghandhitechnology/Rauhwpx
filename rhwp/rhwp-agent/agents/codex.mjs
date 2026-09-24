@@ -155,7 +155,9 @@ export function buildCodexArgv(opts, threadId) {
     ...(sessionDisplayReady(opts)
       ? []
       : ['--disable', 'browser_use', '--disable', 'computer_use']),
-    '--disable', 'image_generation',
+    ...(opts.toolProfile === 'copy-layout-worker'
+      ? ['--disable', 'image_generation']
+      : ['--enable', 'image_generation']),
     // 네이티브 서브에이전트는 항상 켠다. `--disable multi_agent` 는 0.147.0 에서
     // 실제로 스폰을 막지 못하므로(프로브 확인) 토글할 이유가 없고, 명시적으로 켜 두면
     // exec 와 exec resume 이 같은 능력으로 돈다.

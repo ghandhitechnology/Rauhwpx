@@ -149,7 +149,7 @@ runTest('인라인 프롬프트 선택 칩/입력 상자 테스트', async ({ pa
   // 돌지 않도록 bridge.sendUserMessage 를 기록 스텁으로 바꾼다.
   const sendRouteReady = await page.evaluate(() =>
     window.__agentBridge?.getConnectionState?.() === 'connected'
-      && !document.querySelector('.ag-input')?.placeholder?.includes('연결을 먼저 완료'),
+      && !document.querySelector('.ag-input')?.placeholder?.includes('연결 필요'),
   );
   if (sendRouteReady) {
     setTestCase('전송 성공 시 사이드바에 선택 인용과 지시가 기록된다');

@@ -1,0 +1,213 @@
+/* Editor-only popovers that are mounted outside the header. */
+.bullet-popup,
+.table-create-popup {
+  --popover-surface: #f8f9fb;
+  --popover-control: #fff;
+  --popover-text: #171b22;
+  --popover-muted: #626b77;
+  --popover-border: #d9dde3;
+  --popover-hover: #e5e8ed;
+  --popover-selected: #dfe5ec;
+  --popover-focus: #626b77;
+  position: fixed;
+  z-index: 1000;
+  box-sizing: border-box;
+  border: 1px solid var(--popover-border);
+  border-radius: 10px;
+  background: var(--popover-surface);
+  color: var(--popover-text);
+  box-shadow: 0 12px 30px #18253624;
+  font: 13px/1.4 var(--font-family-ui);
+  color-scheme: light;
+}
+
+:root[data-theme-effective='dark'] :is(.bullet-popup, .table-create-popup) {
+  --popover-surface: #2f2f2f;
+  --popover-control: #262626;
+  --popover-text: #ededed;
+  --popover-muted: #a1a1a1;
+  --popover-border: #555555;
+  --popover-hover: #3a3a3a;
+  --popover-selected: #444444;
+  --popover-focus: #cfcfcf;
+  box-shadow: 0 16px 36px #0008;
+  color-scheme: dark;
+}
+
+.bullet-popup {
+  display: grid;
+  grid-template-columns: repeat(6, 32px);
+  gap: 3px;
+  padding: 7px;
+}
+.bullet-popup button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: 18px/1 var(--font-family-ui);
+  cursor: pointer;
+}
+.bullet-popup button:hover { background: var(--popover-hover); }
+.bullet-popup button:active { background: var(--popover-selected); }
+.bullet-popup button:focus-visible,
+.table-create-popup button:focus-visible {
+  outline: 2px solid var(--popover-focus);
+  outline-offset: -2px;
+}
+
+.table-create-backdrop { position: fixed; inset: 0; z-index: 9998; }
+.table-create-popup { z-index: 9999; min-width: 254px; user-select: none; }
+.table-create-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 39px;
+  padding: 0 9px 0 13px;
+  border-bottom: 1px solid var(--popover-border);
+  font-weight: 600;
+}
+.table-create-header button {
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--popover-muted);
+  font: 22px/1 var(--font-family-ui);
+  cursor: pointer;
+}
+.table-create-header button:hover { background: var(--popover-hover); color: var(--popover-text); }
+.table-create-grid-wrap { padding: 13px 12px 10px; }
+.table-create-grid { margin: 0 auto; cursor: crosshair; }
+.table-create-cell {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--popover-border);
+  border-radius: 3px;
+  background: var(--popover-control);
+  pointer-events: none;
+}
+.table-create-cell.selected {
+  border-color: var(--popover-focus);
+  background: var(--popover-selected);
+}
+.table-create-size {
+  height: 19px;
+  margin-top: 9px;
+  color: var(--popover-muted);
+  text-align: center;
+  font: 12px/19px var(--font-family-ui);
+}
+.table-create-more {
+  display: block;
+  width: 100%;
+  padding: 10px 13px;
+  border: 0;
+  border-top: 1px solid var(--popover-border);
+  border-radius: 0 0 9px 9px;
+  background: transparent;
+  color: var(--popover-text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.table-create-more:hover { background: var(--popover-hover); }
+
+#icon-toolbar .tb-split-menu,
+#style-bar :is(.sb-dropdown-menu, .sb-hl-palette) {
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-surface-raised);
+  box-shadow: var(--shadow-dropdown);
+}
+#icon-toolbar .tb-split-menu { min-width: 220px; padding: 5px; }
+#icon-toolbar .tb-split-item { min-height: 32px; padding: 6px 9px; border-radius: 5px; }
+#icon-toolbar .tb-split-item:hover { background: var(--ui-hover); }
+#style-bar .sb-dropdown-menu { min-width: 132px; padding: 5px; }
+#style-bar .sb-dropdown-item { min-height: 30px; padding: 5px 8px; border-radius: 5px; }
+#style-bar .sb-dropdown-item:hover { background: var(--ui-hover); }
+#style-bar .sb-hl-palette { padding: 8px; }
+#style-bar .sb-hl-palette-row { gap: 3px; margin-bottom: 3px; }
+#style-bar .sb-hl-swatch { width: 18px; height: 18px; border-radius: 3px; }
+#style-bar .sb-hl-palette-actions { margin-top: 7px; padding-top: 7px; }
+#style-bar .sb-hl-palette-actions button { min-height: 28px; border-radius: 5px; }
+
+.endnote-shape-preview-button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 104px;
+  height: 29px;
+  padding: 0 20px 0 8px;
+  border: 1px solid var(--ui-border-light);
+  border-radius: 6px;
+  background: var(--ui-surface-raised);
+  color: var(--ui-text);
+  cursor: pointer;
+  color-scheme: inherit;
+}
+.endnote-shape-preview-button:hover { background: var(--ui-hover); }
+.endnote-shape-preview-button:focus-visible,
+.endnote-shape-popup-menu button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.endnote-shape-popup-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 1200;
+  box-sizing: border-box;
+  max-height: 260px;
+  overflow: auto;
+  padding: 5px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-surface-raised);
+  color: var(--ui-text);
+  box-shadow: var(--shadow-dropdown);
+}
+.endnote-shape-popup-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.endnote-shape-popup-option:hover { background: var(--ui-hover); }
+.endnote-shape-swatch {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+.endnote-shape-swatch:hover { background: var(--ui-hover); border-color: var(--ui-border-light); }
+.endnote-shape-custom-color {
+  grid-column: 1 / -1;
+  height: 29px;
+  margin-top: 4px;
+  border: 1px solid var(--ui-border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ui-text);
+  font: 12px var(--font-family-ui);
+  cursor: pointer;
+}
+.endnote-shape-custom-color:hover { background: var(--ui-hover); }

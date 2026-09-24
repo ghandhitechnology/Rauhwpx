@@ -24,5 +24,5 @@
   const colorSchemeMeta = document.querySelector('meta[name="color-scheme"]');
   if (colorSchemeMeta) colorSchemeMeta.setAttribute('content', scheme);
   const themeColorMeta = document.querySelector('meta[name="theme-color"]');
-  if (themeColorMeta) themeColorMeta.setAttribute('content', effective === 'dark' ? '#2b3037' : '#f5f5f5');
+  if (themeColorMeta) themeColorMeta.setAttribute('content', effective === 'dark' ? '#000000' : '#ffffff');
 })();

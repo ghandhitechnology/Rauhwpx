@@ -5,7 +5,48 @@ import type {
 } from '../ui/agent-sidebar/version-manager.ts';
 import { layoutCommitGraph, orderBranchHeadFrontier, type GraphCommit } from '../versioning/graph-layout.ts';
 import { commitId } from '../versioning/types.ts';
+import type { DiffItem, DiffKind, DiffSeverity } from '../compare/types.ts';
 import { timestamp } from './fixtures.ts';
+
+function sampleDiff(
+  id: string,
+  kind: DiffKind,
+  severity: DiffSeverity,
+  title: string,
+  leftPreview: string,
+  rightPreview: string,
+  paragraph: number,
+): DiffItem {
+  return {
+    id, kind, severity, title, leftPreview, rightPreview,
+    path: { section: 0, paragraph },
+    leftSectionPage: 1,
+    rightSectionPage: 1,
+  };
+}
+
+const longProposal = [
+  '지역 소상공인이 예약과 재고를 한 화면에서 관리할 수 있도록 주문 흐름을 정리합니다.',
+  '첫 달에는 참여 매장 다섯 곳의 접수 방식을 조사하고, 직원이 수기로 옮겨 적는 항목을 확인합니다.',
+  '다음 달에는 예약 변경 알림과 재고 부족 표시를 시범 적용합니다.',
+  '매장별 처리 시간을 매주 기록해 중복 입력이 줄었는지 살펴보고, 사용하지 않는 입력란은 제거합니다.',
+  '시범 운영이 끝나면 참여 매장의 의견을 모아 교육 자료와 도움말을 고칩니다.',
+  '운영팀은 문의가 몰리는 시간대를 확인해 대응 인력을 배치하고, 서비스 장애가 나면 종이 접수표로 업무를 이어갈 수 있게 합니다.',
+].join(' ');
+
+/** The working copy covers text edits and document objects in one review. */
+export const workingDiffFixture: DiffItem[] = [
+  sampleDiff('working-replace', 'text', 'modified', '사업 목표 수정',
+    '이번 사업은 업무 효율을 높이는 것을 목표로 합니다.',
+    '이번 사업은 지역 소상공인의 주문과 예약 업무를 줄이는 것을 목표로 합니다.', 0),
+  sampleDiff('working-insert', 'text', 'added', '실행 계획 추가', '', longProposal, 2),
+  sampleDiff('working-delete', 'text', 'removed', '이전 일정 삭제',
+    '시범 운영은 3월 첫째 주에 시작합니다.', '', 4),
+  sampleDiff('working-table', 'table', 'modified', '예산표 수정',
+    '홍보비 200만 원 · 교육비 100만 원', '홍보비 150만 원 · 교육비 150만 원', 6),
+  sampleDiff('working-image', 'image', 'added', '서비스 흐름도 추가', '',
+    '주문 접수부터 정산까지 이어지는 흐름도', 8),
+];
 
 export function createMockVersions(
   report: (message: string) => void,
@@ -111,6 +152,18 @@ export function createMockVersions(
     ];
     state.activeBranch = '표지-디자인';
   }
+  let workingDiffs = [...workingDiffFixture];
+  const committedDiffs = new Map<string, DiffItem[]>(state.commits.map((item, index) => [
+    item.id,
+    index === state.commits.length - 1
+      ? [sampleDiff(`${item.id}-initial`, 'text', 'added', '문서 작성', '', '사업 제안서 초안', 0)]
+      : [
+          sampleDiff(`${item.id}-text`, 'text', 'modified', '본문 수정',
+            '검토 전 문장입니다.', `${item.title} 변경 내용을 반영했습니다.`, index),
+          sampleDiff(`${item.id}-table`, 'table', 'modified', '일정표 수정',
+            '1단계 · 2주', '1단계 · 3주', index + 1),
+        ],
+  ]));
   function changed() {
     const frontier = orderBranchHeadFrontier(
       state.branches.map((branch) => ({ name: branch.name, target: commitId(branch.headId) })),
@@ -150,6 +203,8 @@ export function createMockVersions(
     const next = commit(crypto.randomUUID(), title, [active.headId, ...additionalParents], true);
     next.createdAt = Date.now();
     state.commits.unshift(next);
+    committedDiffs.set(next.id, [...workingDiffs]);
+    workingDiffs = [];
     active.headId = next.id;
     active.updatedAt = next.createdAt;
     state.dirty = false;
@@ -182,6 +237,7 @@ export function createMockVersions(
     restore: async (id) => {
       state.branches.find((branch) => branch.isActive)!.headId = id;
       state.dirty = false;
+      workingDiffs = [];
       changed();
       report('Sample document restored');
     },
@@ -194,6 +250,14 @@ export function createMockVersions(
       report(
         `Document comparison placeholder: ${state.commits.find((item) => item.id === id)?.title}`,
       ),
+    diffWorkingTree: async () => state.dirty ? structuredClone(workingDiffs) : [],
+    diffCommit: async (id) => structuredClone(committedDiffs.get(id) ?? []),
+    discardUncommitted: async () => {
+      workingDiffs = [];
+      state.dirty = false;
+      changed();
+      report('Sample uncommitted changes discarded');
+    },
     amendTitle: async (id, title) => {
       state.commits.find((item) => item.id === id)!.title = title;
       changed();
@@ -262,6 +326,7 @@ export function createMockVersions(
     },
     applyShelf: async (id, remove) => {
       state.dirty = true;
+      if (workingDiffs.length === 0) workingDiffs = [...workingDiffFixture];
       if (remove)
         state.shelves = state.shelves.filter((item) => item.id !== id);
       changed();

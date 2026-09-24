@@ -105,21 +105,21 @@ test('setup issues turn backend failures into actionable Korean guidance', () =>
   assert.equal(mapCloudSetupIssue(new Error('Permission denied (publickey)')).title, 'SSH 인증에 실패했습니다');
   assert.match(
     mapCloudSetupIssue(new Error('Permission denied (publickey)')).guidance,
-    /OpenSSH 인증 에이전트 서비스/,
+    /Windows: ssh-add/,
   );
   assert.equal(mapCloudSetupIssue(new Error('spawn ssh ENOENT')).title, '이 기기에 OpenSSH 클라이언트가 없습니다');
   assert.match(mapCloudSetupIssue(new Error('spawn ssh ENOENT')).guidance, /선택 기능/);
   assert.equal(mapCloudSetupIssue(new Error('passwordless sudo is required')).title, '비밀번호 없는 sudo가 필요합니다');
-  assert.equal(mapCloudSetupIssue(new Error('tailscale is not connected')).title, 'VPS의 Tailscale을 확인하세요');
-  assert.match(mapCloudSetupIssue(new Error('No route to host'), 'https').guidance, /방화벽과 HTTPS/);
+  assert.equal(mapCloudSetupIssue(new Error('tailscale is not connected')).title, 'VPS Tailscale 확인 필요');
+  assert.match(mapCloudSetupIssue(new Error('No route to host'), 'https').guidance, /방화벽, HTTPS/);
   assert.equal(mapCloudSetupIssue(new Error('Provisioned cloud service failed identity verification')).title, '서버 ID를 확인하지 못했습니다');
   const missingRelease = mapCloudSetupIssue(new Error('ssh exited with 22: curl: (22) The requested URL returned error: 404'));
   assert.equal(missingRelease.title, 'Cloud 설치 파일을 찾을 수 없습니다');
-  assert.match(missingRelease.guidance, /앱을 업데이트하거나 잠시 후/);
+  assert.match(missingRelease.guidance, /앱 업데이트/);
   const missingMagicDns = mapCloudSetupIssue(new Error('net::ERR_NAME_NOT_RESOLVED'), 'tailscale');
-  assert.equal(missingMagicDns.title, 'Tailscale DNS를 켜 주세요');
+  assert.equal(missingMagicDns.title, 'Tailscale DNS 꺼짐');
   assert.match(missingMagicDns.guidance, /Accept DNS/);
-  assert.equal(mapCloudSetupIssue(new TypeError('fetch failed'), 'tailscale').title, 'Tailscale DNS를 켜 주세요');
+  assert.equal(mapCloudSetupIssue(new TypeError('fetch failed'), 'tailscale').title, 'Tailscale DNS 꺼짐');
   assert.equal(mapCloudSetupIssue(new Error('unexpected failure')).detail, 'unexpected failure');
 });
 

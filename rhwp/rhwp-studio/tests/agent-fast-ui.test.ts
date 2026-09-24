@@ -21,7 +21,7 @@ test('local /fast commands finish before a user message is sent', () => {
   assert.ok(fastHandler < source.indexOf('recordUserMessage(messageText,'));
   assert.ok(fastHandler < source.indexOf('bridge.sendUserMessage(requestText, skillNameForMessage,'));
   assert.match(source, /option\.local === 'fast'/);
-  assert.match(source, /지원하지 않는 \/fast 인자입니다/);
+  assert.match(source, /\/fast 인자: on, off, status/);
 });
 
 test('hub and Codex consume a ServiceTier session field', () => {

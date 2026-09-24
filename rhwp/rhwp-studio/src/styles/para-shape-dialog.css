@@ -1,50 +1,142 @@
 /* ================================================================
    문단 모양 다이얼로그
    ================================================================ */
-.ps-dialog {
-  width: 480px;
+.modal-overlay:has(.ps-dialog) { padding: 16px; box-sizing: border-box; background: #0009; }
+.modal-overlay .ps-dialog {
+  width: min(720px, calc(100vw - 32px)) !important;
+  max-height: min(760px, calc(100dvh - 32px));
+}
+.ps-dialog .cs-main-row {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+.ps-dialog .cs-left-col {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+.ps-dialog .dialog-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  width: fit-content;
+  max-width: calc(100% - 40px);
+  margin: 12px 20px 0;
+  padding: 3px;
+  gap: 2px;
+  overflow-x: auto;
+  border: 0;
+  border-radius: 8px;
+  background: var(--ui-surface-muted);
+}
+.ps-dialog .dialog-tab {
+  min-height: 32px;
+  margin: 0;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--ui-text-secondary);
+  font: 600 12px var(--font-family-ui);
+  white-space: nowrap;
+}
+.ps-dialog .dialog-tab:hover { background: var(--ui-hover); color: var(--ui-text); }
+.ps-dialog .dialog-tab.active {
+  border: 0;
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  box-shadow: 0 1px 2px #0002;
+}
+.modal-overlay .ps-dialog .dialog-body {
+  min-height: 0;
+  padding: 14px 20px 20px;
+  overflow: auto;
+}
+.ps-dialog .cs-right-col {
+  position: sticky;
+  z-index: 1;
+  bottom: 0;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: row-reverse;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 12px 20px 16px;
+  border: 0;
+  border-top: 1px solid var(--ui-border);
+  background: var(--ui-surface);
+}
+.ps-dialog .cs-right-col .dialog-btn {
+  width: auto;
+  min-width: 76px;
+  height: 34px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 6px;
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  font: 600 12px var(--font-family-ui);
+}
+.ps-dialog .cs-right-col .dialog-btn-primary {
+  border-color: var(--ui-text);
+  background: var(--ui-text);
+  color: var(--ui-surface);
+}
+.ps-dialog .cs-right-col .dialog-btn:hover { background: var(--ui-hover); }
+.ps-dialog .cs-right-col .dialog-btn-primary:hover { background: var(--ui-text); opacity: .82; }
+.ps-dialog .dialog-row { min-height: 34px; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.ps-dialog .dialog-label { min-width: 0; text-align: left; font-size: 12px; font-weight: 550; }
+.ps-dialog :is(.dialog-input, .dialog-select, .dialog-text-input) {
+  height: 32px;
+  padding-inline: 9px;
+  border-color: var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-surface);
+  font: 13px var(--font-family-ui);
 }
 .ps-align-row {
   display: flex;
-  gap: 4px;
-  margin-bottom: 8px;
+  gap: 5px;
+  margin-bottom: 12px;
 }
 .ps-align-btn {
-  width: 36px;
-  height: 28px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  width: 38px;
+  height: 36px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-surface);
   cursor: pointer;
   font-size: var(--font-size-base);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--color-text-secondary);
+  color: var(--ui-text-secondary);
 }
 .ps-align-btn:hover {
-  background: var(--color-accent-bg);
-  border-color: var(--accent-hover);
+  background: var(--ui-hover);
+  border-color: var(--ui-border-strong);
 }
 .ps-align-btn.active {
-  background: var(--color-accent-bg-light);
-  border-color: var(--color-primary);
-  color: var(--color-primary-dark);
+  background: var(--ui-selected);
+  border-color: var(--ui-text);
+  color: var(--ui-text);
+  box-shadow: inset 0 0 0 1px var(--ui-text);
 }
 .ps-two-col {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 16px;
 }
 .ps-preview {
-  margin-top: 8px;
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-md);
+  margin-top: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 7px;
   background: var(--doc-paper);
-  padding: 10px;
-  min-height: 56px;
+  padding: 12px;
+  min-height: 64px;
   font-size: var(--font-size-sm);
-  color: #111111;
+  color: #000;
   line-height: 1.6;
 }
 /* 탭 설정 탭 */
@@ -56,24 +148,24 @@
 }
 .ps-tab-list-col { flex: 1; min-width: 0; }
 .ps-tab-table-wrap {
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
   overflow-y: auto;
-  height: 118px;  /* 헤더 + 5행 고정 높이 */
+  height: 140px;
   background: var(--color-surface);
 }
 .ps-tab-table { width: 100%; border-collapse: collapse; font-size: var(--font-size-base); }
 .ps-tab-table th {
-  background: var(--color-bg);
-  border-bottom: 1px solid var(--ui-border-light);
-  padding: 3px 6px;
+  background: var(--ui-surface-muted);
+  border-bottom: 1px solid var(--ui-border);
+  padding: 6px 8px;
   text-align: left;
   font-weight: 500;
   position: sticky;
   top: 0;
 }
-.ps-tab-table td { padding: 2px 6px; cursor: pointer; }
-.ps-tab-table tr:hover { background: var(--color-bg-light); }
+.ps-tab-table td { padding: 4px 8px; cursor: pointer; }
+.ps-tab-table tr:hover { background: var(--ui-hover); }
 .ps-tab-table tr.selected { background: var(--ui-selected); }
 .ps-tab-list-btns {
   display: flex;
@@ -82,9 +174,9 @@
   padding-top: 20px;
 }
 .ps-tab-del-btn {
-  min-width: 28px;
-  padding: 2px 6px;
-  font-size: var(--font-size-md);
+  min-width: 32px;
+  padding: 4px 8px;
+  font-size: 12px;
   color: var(--ui-danger);
 }
 
@@ -94,19 +186,19 @@
 .ps-border-right { flex: 1; display: flex; flex-direction: column; align-items: center; }
 .ps-border-preview {
   width: 140px; height: 120px;
-  border: 1px solid var(--color-border); background: var(--doc-paper);
+  border: 1px solid var(--ui-border-strong); background: var(--doc-paper);
   display: flex; align-items: center; justify-content: center;
 }
 .ps-border-inner { width: 100px; height: 80px; border: 1px dashed #d0d0d0; }
 .ps-border-presets { display: flex; gap: 2px; margin-top: 4px; }
 .ps-preset-btn {
-  width: 28px; height: 26px;
-  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
-  background: var(--color-surface); cursor: pointer;
+  width: 32px; height: 30px;
+  border: 1px solid var(--ui-border); border-radius: 5px;
+  background: var(--ui-surface); cursor: pointer;
   font-size: var(--font-size-base);
   display: inline-flex; align-items: center; justify-content: center;
 }
-.ps-preset-btn:hover { background: var(--ui-hover); }
+.ps-preset-btn:hover { background: var(--ui-hover); border-color: var(--ui-border-strong); }
 .ps-spacing-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -121,4 +213,17 @@
   display: inline-block;
   min-width: 62px;
   text-align: right;
+}
+
+@media (max-width: 600px) {
+  .modal-overlay:has(.ps-dialog) { padding: 12px; }
+  .modal-overlay .ps-dialog { width: min(540px, calc(100vw - 24px)) !important; }
+  .ps-dialog .dialog-tabs { max-width: calc(100% - 32px); margin-inline: 16px; }
+  .ps-dialog .dialog-tab { padding-inline: 9px; }
+  .modal-overlay .ps-dialog .dialog-body { padding: 12px 16px 16px; }
+  .ps-dialog .cs-right-col { padding-inline: 16px; }
+  .ps-dialog .ps-two-col { grid-template-columns: minmax(0, 1fr); }
+  .ps-dialog .ps-border-layout { flex-wrap: wrap; }
+  .ps-dialog .ps-spacing-grid { grid-template-columns: minmax(0, 1fr); }
+  .ps-dialog .ps-tab-list-area { flex-wrap: wrap; }
 }

@@ -167,7 +167,7 @@ const BASELINE: Readonly<Record<string, number>> = {
   // record에 넘겨 undo/redo 및 removedParaMeta 복원을 보존한다.
   'src/engine/input-handler-keyboard.ts': 26, // 중첩 셀 수식 삭제 분기도 deleteObject snapshot 내부
   'src/engine/input-handler-mouse.ts': 3,
-  'src/engine/input-handler-picture.ts': 13, // 중첩 셀 수식 삭제가 exact by-path API로 라우팅
+  'src/engine/input-handler-picture.ts': 14, // movePictureControlByPath 분류 포함
   'src/engine/input-handler-table.ts': 8, // +1: [#7189] 같은 executeOperation 안의 resizeTableCellsByPath 전용 분기
   'src/engine/input-handler-hyperlink-delete.ts': 3, // #6963: removeHyperlink + 본문/셀 deleteText는 모두 deleteHyperlink snapshot 안에서 실행
   'src/engine/input-handler-text.ts': 11, // #2424: raw IME delete를 command 공통 typed helper로 이관

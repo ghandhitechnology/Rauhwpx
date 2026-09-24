@@ -22,7 +22,7 @@ export const AGENT_HUB_ENSURE_PATH = '/__rhwp/ensure-agent-hub';
 const DEV_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
 
 /** Capability minting is browser-only: require the request's exact transport origin. */
-export function isExactSameOriginRequest(req) {
+export function isExactSameOriginRequest(req, publicOrigin = null) {
   const originHeader = req?.headers?.origin;
   const hostHeader = req?.headers?.host;
   if (typeof originHeader !== 'string' || typeof hostHeader !== 'string'
@@ -36,7 +36,14 @@ export function isExactSameOriginRequest(req) {
     const expected = new URL(`${protocol}//${hostHeader}`);
     if (expected.username || expected.password || expected.pathname !== '/'
       || expected.search || expected.hash) return false;
-    return origin.origin === expected.origin;
+    if (origin.origin === expected.origin) return true;
+    // Tailscale terminates HTTPS before forwarding to Vite over loopback.
+    // Only the explicitly configured public origin may use that transport split.
+    const peer = req?.socket?.remoteAddress;
+    return publicOrigin === origin.origin
+      && expected.host === origin.host
+      && req?.socket?.encrypted !== true
+      && (peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1');
   } catch {
     return false;
   }
@@ -54,7 +61,8 @@ function explicitHubConfig() {
   const hubUrl = process.env.VITE_RHWP_AGENT_URL;
   if (!hubUrl) return null;
   const url = new URL(hubUrl);
-  const port = Number(url.port || (url.protocol === 'wss:' ? 443 : 80));
+  // The public TLS proxy port may differ from the hub's loopback port.
+  const port = Number(process.env.RHWP_AGENT_PORT || url.port || (url.protocol === 'wss:' ? 443 : 80));
   return {
     hubUrl: hubUrl.replace(/\/$/, ''),
     hubToken: process.env.RHWP_AGENT_TOKEN ?? 'dev',
@@ -75,6 +83,9 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
   const token = external?.hubToken ?? process.env.RHWP_AGENT_TOKEN ?? createHubToken();
   const launchId = external?.launchId ?? randomUUID();
   const script = resolve(studioRoot, '..', 'rhwp-agent', 'server.mjs');
+  const publicOrigin = process.env.RHWP_PUBLIC_HOST
+    ? new URL(`https://${process.env.RHWP_PUBLIC_HOST}:${Number(process.env.RHWP_PUBLIC_HTTPS_PORT ?? 443)}`).origin
+    : null;
 
   let child = null;
   let context = external;
@@ -260,7 +271,7 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
           sendJson(res, 405, { started: false, ready: false, error: 'POST required' });
           return;
         }
-        if (!isExactSameOriginRequest(req)) {
+        if (!isExactSameOriginRequest(req, publicOrigin)) {
           sendJson(res, 403, { started: false, ready: false, error: 'Same-origin request required' });
           return;
         }

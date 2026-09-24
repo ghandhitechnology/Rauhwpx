@@ -189,18 +189,16 @@ export function parseProviderSelection(value) {
   const input = object(value, 'selection');
   const provider = string(input.provider, 'provider', { max: 32 });
   if (!PROVIDERS.includes(provider)) throw new CloudError('INVALID_PROVIDER', 'Provider is not supported');
-  const model = string(input.model, 'model', { max: 256, pattern: /^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/ });
-  const models = {
-    claude: ['claude-fable-5-1', 'claude-opus-5-5', 'opus', 'fable', 'sonnet', 'haiku'],
-    codex: ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'],
-  };
-  if (models[provider] && !models[provider].includes(model)) {
-    throw new CloudError('INVALID_MODEL', 'Model is not supported by this provider');
+  const model = string(input.model, 'model', { max: 256, pattern: /^[a-zA-Z0-9][a-zA-Z0-9._:/\[\]-]*$/ });
+  if (model.split('/').some((segment) => segment === '.' || segment === '..')) {
+    throw new CloudError('INVALID_MODEL', 'Model identifier is invalid');
   }
+  // The selected provider validates availability against its live account catalog.
   const effort = string(input.effort, 'effort', { min: 0, max: 64 });
   const efforts = provider === 'pi' ? ['', 'low', 'medium', 'high']
-    : provider === 'claude' && model === 'haiku' ? ['low', 'medium', 'high']
-      : ['low', 'medium', 'high', 'xhigh', 'max'];
+    : provider === 'codex' ? ['', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+      : model === 'haiku' || model.startsWith('claude-haiku-') ? ['', 'low', 'medium', 'high']
+        : ['', 'low', 'medium', 'high', 'xhigh', 'max'];
   if (!efforts.includes(effort)) throw new CloudError('INVALID_EFFORT', 'Reasoning effort is not supported by this model');
   return { provider, model, effort };
 }

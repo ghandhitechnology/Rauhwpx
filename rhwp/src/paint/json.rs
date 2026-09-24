@@ -942,11 +942,12 @@ impl PaintOp {
                 write_bbox(buf, *bbox);
                 let _ = write!(
                     buf,
-                    ",\"svgContent\":{},\"color\":{},\"fontSize\":{:.3},\"fontName\":{},\"layoutBox\":",
+                    ",\"svgContent\":{},\"color\":{},\"fontSize\":{:.3},\"fontName\":{},\"versionInfo\":{},\"layoutBox\":",
                     json_escape(&equation.svg_content),
                     json_escape(&equation.color_str),
                     equation.font_size,
-                    json_escape(&equation.font_name)
+                    json_escape(&equation.font_name),
+                    json_escape(&equation.version_info)
                 );
                 write_equation_layout_box(buf, &equation.layout_box);
                 buf.push('}');
@@ -2722,8 +2723,16 @@ fn write_equation_layout_kind(buf: &mut String, kind: &LayoutKind) {
                 json_escape(name)
             );
         }
-        LayoutKind::Fraction { numer, denom } => {
-            buf.push_str("{\"type\":\"fraction\",\"numer\":");
+        LayoutKind::Fraction {
+            numer,
+            denom,
+            bar_inset,
+        } => {
+            let _ = write!(
+                buf,
+                "{{\"type\":\"fraction\",\"barInset\":{:.6},\"numer\":",
+                bar_inset
+            );
             write_equation_layout_box(buf, numer);
             buf.push_str(",\"denom\":");
             write_equation_layout_box(buf, denom);
@@ -4379,12 +4388,14 @@ mod tests {
                             color: 0x00000000,
                             font_size: 12.0,
                             font_name: "serif".to_string(),
+                            version_info: "Equation Version 60".to_string(),
                             section_index: None,
                             para_index: None,
                             control_index: None,
                             inner_control_index: None,
                             cell_index: None,
                             cell_para_index: None,
+                            cell_context: None,
                             note_ref: None,
                         },
                     ),

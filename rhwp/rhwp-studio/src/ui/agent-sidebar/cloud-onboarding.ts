@@ -10,7 +10,6 @@ import type {
 import { labelForEffort, labelForModel } from '../../agent/models.ts';
 import { inferCloudLink } from '../../cloud/link.ts';
 import { isCloudSupportedAgent } from '../../cloud/cloud-start.ts';
-import cloudPixelUrl from './cloud-pixel.svg';
 import {
   appServerProvider,
   createCloudSetupState,
@@ -86,7 +85,7 @@ function raucloudLock(snapshot: CloudSnapshot): string | null {
   if (!gate || gate.kind === 'available') return null;
   switch (gate.kind) {
     case 'logged-out': return 'Rauhwpx 계정으로 로그인하면 사용할 수 있습니다.';
-    case 'exhausted': return '오늘 사용 시간을 모두 사용했습니다. 다음 초기화 뒤 다시 시작할 수 있습니다.';
+    case 'exhausted': return '오늘 사용 시간 소진 · 다음 초기화 후 사용';
     case 'active-elsewhere': return `${gate.deviceName ?? '다른 기기'}에서 실행 중입니다. 서버 강제 종료로 끊을 수 있습니다.`;
     case 'unavailable': return gate.reason;
   }
@@ -157,22 +156,23 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   const settingsElement = el('section', 'ag-settings-section ag-cloud-settings');
   const settingsTitle = el('h3', 'ag-settings-section-title', 'Cloud 서버');
   const settingsCard = el('div', 'ag-cloud-settings-card');
-  const settingsIcon = el('span', 'ag-cloud-settings-icon');
-  const pixelCloud = document.createElement('img');
-  pixelCloud.className = 'ag-cloud-settings-pixel';
-  pixelCloud.src = cloudPixelUrl;
-  pixelCloud.alt = '';
-  pixelCloud.setAttribute('aria-hidden', 'true');
-  settingsIcon.appendChild(pixelCloud);
+  const settingsRow = el('div', 'ag-cloud-settings-row');
+  const settingsDot = el('span', 'ag-settings-dot ag-cloud-settings-dot');
+  settingsDot.setAttribute('aria-hidden', 'true');
   const settingsCopy = el('div', 'ag-cloud-settings-copy');
   const settingsStatus = el('strong', 'ag-cloud-settings-status');
   const settingsDetail = el('span', 'ag-cloud-settings-detail');
   settingsCopy.append(settingsStatus, settingsDetail);
+  const settingsActions = el('div', 'ag-cloud-settings-actions');
   const settingsAction = el('button', 'ag-settings-btn ag-cloud-settings-action') as HTMLButtonElement;
   settingsAction.type = 'button';
   settingsAction.addEventListener('click', () => open('manage', settingsAction));
-  settingsCard.append(settingsIcon, settingsCopy, settingsAction);
-  settingsElement.append(settingsTitle, settingsCard);
+  settingsActions.append(settingsAction);
+  settingsRow.append(settingsDot, settingsCopy, settingsActions);
+  settingsCard.append(settingsRow);
+  const settingsHead = el('div', 'ag-settings-section-head');
+  settingsHead.append(settingsTitle);
+  settingsElement.append(settingsHead, settingsCard);
 
   function button(label: string, tone: 'primary' | 'quiet' | 'danger' = 'quiet'): HTMLButtonElement {
     const item = el('button', `ag-cloud-setup-button ag-${tone}`, label) as HTMLButtonElement;
@@ -460,7 +460,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     const draft = defaultCloudProfileDraft(state.draft);
     const errors = validateCloudProfileDraft(draft);
     if (Object.keys(errors).length) {
-      setState({ kind: 'editing', draft, intent: state.intent, errors }, '입력한 연결 정보를 확인하세요.');
+      setState({ kind: 'editing', draft, intent: state.intent, errors }, '연결 정보 확인 필요');
       return;
     }
     const intent = state.intent;
@@ -499,7 +499,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     const pairingCode = state.pairingCode.trim().toUpperCase();
     const errors = validateCloudProfileDraft(draft, { existing: true, pairingCode });
     if (Object.keys(errors).length) {
-      setState({ ...state, draft, pairingCode, errors }, '입력한 서버 ID와 페어링 코드를 확인하세요.');
+      setState({ ...state, draft, pairingCode, errors }, '서버 ID와 페어링 코드 확인 필요');
       return;
     }
     const intent = state.intent;
@@ -528,14 +528,14 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     state = { ...state, mode };
     renderDialog();
     await deps.controller.selectServerMode(mode).catch(() => {
-      liveStatus.textContent = '선택한 서버 방식을 저장하지 못했습니다. 다시 시도해 주세요.';
+      liveStatus.textContent = '서버 방식 저장 실패 · 다시 시도';
     });
   }
 
   async function startAccountLogin(): Promise<void> {
     if (!deps.loginAccount || accountBusy || accountAuthPending) return;
     accountBusy = true;
-    liveStatus.textContent = '브라우저에서 로그인을 마쳐 주세요.';
+    liveStatus.textContent = '브라우저에서 로그인 진행 중';
     renderDialog();
     try {
       const next = await deps.loginAccount();
@@ -669,10 +669,10 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const settled = createCloudSetupState(next, intent);
       setState(
         released && settled.kind === 'choose'
-          ? { ...settled, notice: `${name}의 연결만 놓았습니다. 남은 서버는 공급자 콘솔에서 직접 삭제하세요.` }
+          ? { ...settled, notice: `${name} 연결 해제됨 · 남은 서버는 공급자 콘솔에서 삭제` }
           : settled,
         released
-          ? '연결을 놓았습니다. 남은 서버는 공급자 콘솔에서 직접 삭제하세요.'
+          ? '연결 해제됨 · 남은 서버는 공급자 콘솔에서 삭제'
           : 'Raucloud를 종료했습니다.',
       );
     } catch (error) {
@@ -715,7 +715,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     selected: boolean,
     note = '',
     disabled = false,
-  ): HTMLButtonElement {
+  ): HTMLElement {
     const option = el('button', 'ag-cloud-setup-option') as HTMLButtonElement;
     option.type = 'button';
     option.dataset.serverMode = mode;
@@ -724,14 +724,29 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     option.disabled = disabled;
     option.setAttribute('aria-disabled', String(disabled));
     if (selected) option.classList.add('ag-selected');
+    // 이름과 한 줄 사양만 보이고, 긴 설명은 ⓘ 뒤에 둔다.
     const copy = el('div', 'ag-cloud-setup-option-copy');
-    copy.append(el('strong', '', heading), el('p', '', text));
+    copy.append(el('strong', '', heading));
     if (note) copy.appendChild(el('span', 'ag-cloud-setup-option-note', note));
     option.append(copy);
     option.addEventListener('click', () => {
       if (!disabled) void selectMode(mode);
     });
-    return option;
+    const row = el('div', 'ag-cloud-setup-option-row');
+    const detail = el('p', 'ag-cloud-setup-option-detail', text);
+    detail.id = `ag-cloud-setup-detail-${mode}`;
+    detail.hidden = true;
+    const info = el('button', 'ag-cloud-setup-option-info', 'i') as HTMLButtonElement;
+    info.type = 'button';
+    info.setAttribute('aria-label', `${heading} 자세히`);
+    info.setAttribute('aria-expanded', 'false');
+    info.setAttribute('aria-controls', detail.id);
+    info.addEventListener('click', () => {
+      detail.hidden = !detail.hidden;
+      info.setAttribute('aria-expanded', String(!detail.hidden));
+    });
+    row.append(option, info, detail);
+    return row;
   }
 
   function renderDialog(): void {
@@ -754,8 +769,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const provider = appServerProvider(snapshot);
       const appHostedLock = raucloudLock(snapshot);
       title.textContent = 'Cloud 서버 선택';
-      body.append(description('에이전트가 앱을 닫아도 계속 작업할 서버를 고르세요. 나중에 바꿀 수 있습니다.'));
-      if (state.notice) body.append(callout('cloud', '남은 서버를 확인하세요', state.notice));
+      if (state.notice) body.append(callout('cloud', '남은 서버 확인', state.notice));
       const options = el('div', 'ag-cloud-setup-options');
       options.setAttribute('role', 'radiogroup');
       options.setAttribute('aria-label', 'Cloud 서버 선택');
@@ -768,21 +782,19 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
           provider
             ? provider.configured
               ? appHostedLock ?? `${provider.displayName} 사용 가능`
-              : '이 빌드에서는 아직 사용할 수 없습니다'
-            : '이 빌드에는 포함되지 않았습니다',
+              : '이 빌드에서 사용 불가'
+            : '이 빌드에 없음',
           Boolean(raucloudHardLock(snapshot)),
         ),
         serverOption(
           'self-hosted',
           '내 서버 사용',
-          '보유한 Ubuntu 또는 Debian VPS에 개인 Cloud 환경을 설치합니다.',
+          '보유한 Ubuntu 또는 Debian VPS에 개인 Cloud 환경을 설치합니다. SSH와 비밀번호 없는 sudo가 필요합니다.',
           mode === 'self-hosted',
-          'SSH와 비밀번호 없는 sudo가 필요합니다',
+          'Ubuntu·Debian VPS · SSH',
         ),
       );
       body.appendChild(options);
-      const context = transferContext(intent);
-      if (context) body.appendChild(context);
       const loginRequired = mode === 'app-hosted' && needsRaucloudLogin(snapshot);
       const hardLock = mode === 'app-hosted' ? raucloudHardLock(snapshot) : null;
       const primary = button(
@@ -812,7 +824,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         description(intent === 'transfer'
           ? '서버를 준비한 뒤 작성한 요청과 문서를 바로 보냅니다.'
           : 'Rauhwpx가 샌드박스를 만들고 이 기기에 연결합니다.'),
-        callout('cloud', provider.displayName, '파일과 작업 상태를 샌드박스로 전송합니다. 서버를 종료하면 샌드박스도 삭제됩니다.'),
+        callout('cloud', provider.displayName, '문서와 작업 상태를 이 서버로 보냅니다. 서버를 종료하면 함께 삭제됩니다.'),
       );
       const context = transferContext(intent);
       if (context) body.appendChild(context);
@@ -826,13 +838,13 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const { draft, intent, provider } = state;
       title.textContent = 'Raucloud를 사용할 수 없습니다';
       body.append(
-        description('이 빌드에는 Raucloud 설정이 없습니다. 내 서버를 연결하면 지금 바로 사용할 수 있습니다.'),
+        description('이 빌드에 Raucloud 설정이 없습니다.'),
         callout(
           'cloud',
           provider ? `${provider.displayName} 설정 필요` : 'Raucloud 없음',
           provider?.missingConfig.length
             ? `운영자가 ${provider.missingConfig.join(', ')}을 설정해야 합니다.`
-            : '앱을 업데이트하거나 내 서버를 사용하세요.',
+            : '앱 업데이트 또는 내 서버 사용',
         ),
       );
       back.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
@@ -842,7 +854,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     } else if (state.kind === 'sandbox-provisioning') {
       title.textContent = 'Raucloud 준비 중';
       body.append(
-        description(`${state.intent === 'transfer' ? '요청을 보낼 서버를' : '샌드박스를'} 기기에 연결하고 있습니다. 서버 생성과 첫 시작에는 최대 ${RAUCLOUD_SETUP_WAIT_MINUTES}분이 걸릴 수 있습니다.`),
+        description(`${state.intent === 'transfer' ? '서버' : '샌드박스'} 연결 중 · 최대 ${RAUCLOUD_SETUP_WAIT_MINUTES}분`),
         el('div', 'ag-cloud-setup-indeterminate'),
         el('p', 'ag-cloud-setup-wait', setupProgressText(state.startedAt)),
       );
@@ -865,7 +877,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         ? 'Raucloud를 종료하지 못했습니다'
         : 'Raucloud를 준비하지 못했습니다';
       const explanation = phase === 'teardown'
-        ? description('샌드박스가 아직 남아 있습니다. 문제를 해결한 뒤 다시 종료하세요.')
+        ? description('샌드박스가 아직 남아 있습니다.')
         : issue.title === title.textContent
           ? description(issue.guidance)
           : callout('cloud', issue.title, issue.guidance);
@@ -902,7 +914,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       title.textContent = 'Raucloud가 준비되었습니다';
       body.append(
         callout('check', name, sandbox.host || sandbox.sandboxId),
-        description('이제 작업을 Cloud로 보내면 앱을 닫아도 앱 샌드박스에서 에이전트가 계속 작업합니다.'),
+        description('앱을 닫아도 에이전트가 계속 작업합니다.'),
       );
       if (snapshot.server.message) {
         body.appendChild(callout('cloud', '서버 상태', snapshot.server.message));
@@ -927,8 +939,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const { draft, intent } = state;
       title.textContent = '내 VPS에서 Cloud 시작하기';
       body.append(
-        description('Rauhwpx가 원격 Mac mini 또는 Linux VPS에 개인 Cloud 환경을 설치합니다. 일반 SSH, Tailscale, 공개 HTTPS를 지원하며 앱을 닫아도 에이전트는 계속 작업합니다.'),
-        callout('cloud', '내 서버에서만 실행', '문서와 작업 상태는 사용자가 선택한 VPS로 전송됩니다.'),
+        description('원격 Mac mini 또는 Linux VPS에 설치합니다. 앱을 닫아도 에이전트는 계속 작업합니다.'),
+        callout('cloud', '내 서버에서만 실행', '문서와 작업 상태를 이 VPS로 보냅니다.'),
       );
       const requirements = el('div', 'ag-cloud-setup-requirements');
       requirements.append(el('strong', '', '준비할 것'));
@@ -947,10 +959,10 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     } else if (state.kind === 'editing') {
       title.textContent = 'VPS 연결 정보';
       body.append(description(state.draft.transport.kind === 'tailscale'
-        ? 'Tailscale에서 보이는 VPS 주소와 SSH 정보를 입력하세요. 공개 인터넷 주소는 필요하지 않습니다.'
+        ? 'Tailscale VPS 주소와 SSH 정보'
         : state.draft.transport.kind === 'ssh-tunnel'
-          ? 'Mac mini 또는 Linux 호스트의 일반 SSH 정보를 입력하세요. Tailscale과 공개 포트는 필요하지 않습니다.'
-          : 'VPS의 SSH 정보와 Cloud 서비스의 공개 HTTPS 주소를 입력하세요.'));
+          ? 'Mac mini 또는 Linux 호스트의 SSH 정보'
+          : 'VPS SSH 정보와 공개 HTTPS 주소'));
       const form = profileForm(false);
       form.addEventListener('submit', (event) => { event.preventDefault(); void checkConnection(); });
       submitOnEnter(form);
@@ -972,9 +984,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       footer.append(cancel);
     } else if (state.kind === 'check-failed' || state.kind === 'install-failed') {
       const installFailure = state.kind === 'install-failed';
-      title.textContent = installFailure ? 'Cloud 설정을 마치지 못했습니다' : 'VPS 연결을 확인하세요';
+      title.textContent = installFailure ? 'Cloud 설정을 마치지 못했습니다' : 'VPS 연결 실패';
       body.append(
-        description('문제를 해결한 뒤 다시 시도하거나 연결 정보를 수정하세요.'),
+        description('다시 시도하거나 연결 정보를 수정합니다.'),
         callout('cloud', state.issue.title, state.issue.guidance),
         issueDetails(state.issue),
       );
@@ -1010,7 +1022,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         callout('check', 'VPS 준비 확인 완료', `${state.draft.host}에 안전하게 연결할 수 있습니다.`),
         description(intent === 'transfer'
           ? 'Cloud 서비스를 설치한 뒤 작성한 요청과 문서를 바로 보냅니다.'
-          : '이제 Rauhwpx Cloud 서비스를 설치하고 이 기기를 자동으로 연결합니다.'),
+          : 'Cloud 서비스를 설치하고 이 기기를 연결합니다.'),
       );
       const context = transferContext(intent);
       if (context) body.appendChild(context);
@@ -1029,7 +1041,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     } else if (state.kind === 'existing') {
       const intent = state.intent;
       title.textContent = '설치된 환경 연결';
-      body.append(description('직접 설치한 환경의 서버 ID와 일회용 페어링 코드를 사용합니다. VPS에서 아래 명령을 실행해 10분 동안 유효한 새 코드를 만드세요.'));
+      body.append(description('VPS에서 아래 명령으로 새 페어링 코드를 만듭니다. 10분간 유효합니다.'));
       const command = el('div', 'ag-cloud-setup-command');
       const commandText = 'sudo rauhwpx-cloud pairing create rauhwpx-desktop';
       command.appendChild(el('code', '', commandText));
@@ -1040,7 +1052,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
           liveStatus.textContent = '페어링 명령을 복사했습니다.';
           copy.textContent = '복사됨';
         } catch {
-          liveStatus.textContent = '명령을 복사하지 못했습니다. 명령을 직접 선택해 복사하세요.';
+          liveStatus.textContent = '복사 실패 · 직접 선택해 복사';
         }
       });
       command.appendChild(copy);
@@ -1068,7 +1080,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       title.textContent = 'Cloud가 준비되었습니다';
       body.append(
         callout('check', state.profile.name, state.profile.host),
-        description(`${state.profile.transport.kind === 'tailscale' ? 'Tailscale로 연결되었습니다.' : state.profile.transport.kind === 'ssh-tunnel' ? '안전한 SSH 터널로 연결되었습니다.' : '공개 HTTPS 주소로 연결되었습니다.'} 이제 작업을 Cloud로 보내면 앱을 닫아도 원격 호스트에서 에이전트가 계속 작업합니다.`),
+        description(`${state.profile.transport.kind === 'tailscale' ? 'Tailscale로 연결되었습니다.' : state.profile.transport.kind === 'ssh-tunnel' ? '안전한 SSH 터널로 연결되었습니다.' : '공개 HTTPS 주소로 연결되었습니다.'} 앱을 닫아도 에이전트가 계속 작업합니다.`),
       );
       const primary = button(state.intent === 'transfer' ? 'Cloud로 계속' : '완료', 'primary');
       if (state.intent === 'manage') {
@@ -1099,6 +1111,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
 
   function renderSettings(): void {
     settingsAction.disabled = !snapshot.available || mutationLocked;
+    settingsDot.dataset.state = 'unknown';
     if (!snapshot.available) {
       settingsStatus.textContent = '이 빌드에서는 사용할 수 없습니다';
       settingsDetail.textContent = 'Cloud 지원 데스크톱 앱이 필요합니다.';
@@ -1115,6 +1128,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
           ? `${raucloudSetupElapsed(state.startedAt)}째 Raucloud를 만들고 있습니다.`
           : 'Raucloud를 만들고 있습니다.';
         settingsAction.textContent = '진행 보기';
+        settingsDot.dataset.state = 'connecting';
         return;
       }
       settingsStatus.textContent = '설정되지 않음';
@@ -1153,6 +1167,12 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       ? appHostedLock ?? `Raucloud · ${snapshot.profile.name}${snapshot.profile.sandbox.host ? `, ${snapshot.profile.sandbox.host}` : ''}`
       : `내 서버 · ${snapshot.profile.profile.name}, ${snapshot.profile.profile.host}`;
     settingsAction.textContent = '관리';
+    settingsDot.dataset.state = appHostedLock || link.kind === 'failed' || lifecycle === 'error'
+      || snapshot.profile.connection === 'error'
+      ? 'disconnected'
+      : link.kind === 'ready' && snapshot.profile.connection === 'ready' && !sandboxLabel
+        ? 'connected'
+        : 'connecting';
   }
 
   function open(intent: CloudSetupIntent, nextTrigger: HTMLElement): void {
@@ -1162,6 +1182,14 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     sidebarResizeObserver.disconnect();
     const sidebar = trigger.closest('.ag-root');
     if (sidebar) sidebarResizeObserver.observe(sidebar);
+    // body에 붙은 창도 사이드바와 같은 강조색을 쓴다.
+    if (sidebar) {
+      const tokens = getComputedStyle(sidebar);
+      for (const name of ['--accent-primary', '--n-on-accent', '--focus-ring']) {
+        const value = tokens.getPropertyValue(name).trim();
+        if (value) dialog.style.setProperty(name, value);
+      }
+    }
     const preservedFailure = preserveOnOpen
       && (state?.kind === 'install-failed' || state?.kind === 'sandbox-failed');
     if (!operationActive(state) && !preservedFailure) {

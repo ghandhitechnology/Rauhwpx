@@ -12,9 +12,16 @@ export function installDocumentTitle(
     '(display-mode: standalone), (display-mode: minimal-ui), (display-mode: window-controls-overlay)',
   );
   const update = () => {
-    document.title = bridge.hasLoadedDocument()
+    const loaded = bridge.hasLoadedDocument();
+    document.title = loaded
       ? (appModes.matches ? bridge.fileName : `${bridge.fileName} - Rauhwpx`)
       : 'Rauhwpx';
+    const visibleTitle = document.getElementById?.('editor-document-title');
+    if (visibleTitle) {
+      visibleTitle.textContent = loaded ? bridge.fileName : '';
+      visibleTitle.title = loaded ? bridge.fileName : '';
+      visibleTitle.hidden = !loaded;
+    }
   };
   bridge.onFileNameChanged = update;
   appModes.addEventListener('change', update);

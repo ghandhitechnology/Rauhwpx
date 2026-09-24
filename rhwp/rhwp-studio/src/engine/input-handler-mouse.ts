@@ -11,6 +11,7 @@ import { editableTargetFromPosition } from './edit-target';
 import { findWordSelectionRange } from './word-selection';
 import { selectCurrentTableCell } from './table-cell-selection';
 import { CursorState } from './cursor';
+import { startPictureMoveDrag } from './input-handler-picture';
 import { isTopLevelBodyObject } from '@/core/object-address';
 import { emitHeaderFooterModeChanged } from './header-footer-mode';
 import { cacheTableCellBboxes, ensureTableCellBboxCache, type TableRef } from './table-bbox-cache';
@@ -824,53 +825,7 @@ export function onClick(this: any, e: MouseEvent): void {
             if (!e.shiftKey && pi === picBbox.pageIndex &&
                 px >= picBbox.x && px <= picBbox.x + picBbox.w &&
                 py >= picBbox.y && py <= picBbox.y + picBbox.h) {
-              try {
-                const props = this.getObjectProperties(ref);
-                // tac(글자처럼 취급) 그림도 인라인 위치 이동 드래그를 허용한다 —
-                // Rust movePictureControl 이 Picture 만 받으므로 type==='image' 로 제한하고
-                // 셀/머리글·바닥글 tac 개체는 이동 명령이 본문 문단 전제라 제외한다.
-                const inlineTac = !!props.treatAsChar
-                  && ref.type === 'image'
-                  && !ref.cellPath
-                  && !ref.headerFooter;
-                // undo 원본 자리 = 드래그 시작 시 그림의 논리(캐럿) 위치. hitTest 는 인라인
-                // 그림 좌측 절반에서 find_logical_control_positions 값을 돌려주므로 좌측으로 캡처한다.
-                let originCharOffset = 0;
-                if (inlineTac) {
-                  try {
-                    const originHit = this.wasm.hitTest(
-                      pi, picBbox.x + Math.min(2, picBbox.w * 0.25), picBbox.y + picBbox.h / 2,
-                    );
-                    if (originHit.sectionIndex !== ref.sec || originHit.paragraphIndex !== ref.ppi
-                        || !Number.isFinite(originHit.charOffset)) throw new Error('hitTest mismatch');
-                    originCharOffset = originHit.charOffset;
-                  } catch {
-                    return; // 원본 자리 캡처 실패 시 인라인 드래그를 시작하지 않는다
-                  }
-                }
-                if (!props.treatAsChar || inlineTac) {
-                  e.preventDefault();
-                  this.isPictureMoveDragging = true;
-                  this.pictureMoveState = {
-                    ref: { sec: ref.sec, ppi: ref.ppi, ci: ref.ci, type: ref.type, cellPath: ref.cellPath, headerFooter: ref.headerFooter },
-                    origHorzOffset: props.horzOffset,
-                    origVertOffset: props.vertOffset,
-                    inlineTac: inlineTac || undefined,
-                    originCharOffset: inlineTac ? originCharOffset : undefined,
-                    startPageX: px, startPageY: py,
-                    lastPageX: px, lastPageY: py,
-                    totalDeltaH: 0, totalDeltaV: 0,
-                    pageIndex: pi,
-                    bbox: { x: picBbox.x, y: picBbox.y, w: picBbox.w, h: picBbox.h },
-                    rotationAngle: (props.rotationAngle ?? 0) as number,
-                  };
-                  this.container.style.cursor = 'move';
-                  document.addEventListener('mousemove', this.onMouseMoveBound);
-                  document.addEventListener('mouseup', this.onMouseUpBound, { once: true });
-                  this.textarea.focus();
-                  return;
-                }
-              } catch { /* ignore */ }
+              if (startPictureMoveDrag.call(this, e, ref, picBbox, pi, px, py)) return;
             }
           }
         }
@@ -1420,6 +1375,10 @@ export function onClick(this: any, e: MouseEvent): void {
         this.renderPictureObjectSelection();
         this.eventBus.emit('picture-object-selection-changed', true);
         this.textarea.focus();
+        if (picHit.type === 'image' && e.detail < 2) {
+          const bbox = this.findPictureBbox(picHit);
+          if (bbox) startPictureMoveDrag.call(this, e, picHit, bbox, pageIdx, pageX, pageY);
+        }
         return;
       }
     }

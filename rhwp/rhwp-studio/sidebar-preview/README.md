@@ -54,6 +54,14 @@ The focus-mode button shows a placeholder because this preview covers the sideba
 
 ## Useful URLs
 
+Open **http://127.0.0.1:7715/?editor=1** to review the whole editor shell with
+the production header, menus, toolbars, status bar, and sidebar. The production
+menu and command palette controllers use fixture commands, so their keyboard and
+focus behavior can be reviewed without the document engine. The page carries an
+explicit fixture label; document rendering and command actions are samples.
+Add `&theme=dark` or `&width=360`
+for layout review at other settings. Fixture controls are hidden in this mode.
+
 | URL suffix | Opens |
 | --- | --- |
 | `?scenario=plan` | Next submitted message produces an approval plan |
@@ -96,6 +104,21 @@ settings layout. The ordinary chat focus button still uses the preview placehold
 Dashboard fixtures expose quota exhaustion, sign-out, self-hosted and unavailable
 states through the typed `setDashboardState` method. Sample history is isolated to
 the preview account and only seeded with `dashboard=1`.
+
+## Changes drawer
+
+Open `?audit=1&auditScene=chat-changes-full` to inspect an applied full-access turn,
+uncommitted paragraphs, table/image changes, and expandable commit history in the
+production fullscreen drawer. The safe-mode change review scene keeps the same
+paragraph diff rows with accept/reject actions. The drawer defaults to 560px and
+retains its resize handle.
+
+The full-access fixture emits the same finalized-then-approved lifecycle as the
+editor. Browser checks cover commit, confirmed discard, top-entry undo, navigation,
+long paragraphs, editing locks, stale document responses, and light/dark widths.
+Latest-turn content is held in memory per thread; commits remain in the version
+store. Historical diffs open the comparison view rather than using old paragraph
+positions in the live document.
 
 ## Behavior and placeholders
 
@@ -166,6 +189,7 @@ origins where the browser does not expose `crypto.randomUUID()`.
 ```sh
 npm run test:sidebar
 npm run build:sidebar
+node rhwp/rhwp-studio/sidebar-preview/editor-shell.check.mjs
 ```
 
 The browser check starts its own Vite server on an ephemeral port and launches a

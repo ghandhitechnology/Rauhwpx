@@ -8,7 +8,8 @@
 import type { DocumentFontStatusItem, DocumentFontStatusReport } from '@/core/document-font-status';
 import { enableDialogDrag } from './dialog-drag';
 
-export type LocalFontsChoice = 'detect' | 'web-substitute' | 'cancel';
+export type LocalFontsChoice = 'detect' | 'web-substitute' | 'cancel'
+  | { type: 'import'; files: File[] };
 
 export interface LocalFontsModalOptions {
   disableExternalWebFonts?: boolean;
@@ -84,6 +85,13 @@ export class LocalFontsModal {
       ? '이 브라우저에서는 설치된 모든 글꼴 목록을 가져오지 않고, 현재 문서에 필요한 글꼴만 확인합니다. 확인 결과는 이 브라우저/확장 로컬 저장소에만 보관되며 서버로 전송하지 않습니다. 감지를 건너뛰면 대체 글꼴로 계속 표시합니다.'
       : '감지 결과는 이 브라우저/확장 로컬 저장소에만 보관되며 서버로 전송하지 않습니다. 감지를 건너뛰면 대체 글꼴로 계속 표시합니다.';
     body.appendChild(privacy);
+
+    const importHint = document.createElement('p');
+    importHint.style.margin = '0 0 12px 0';
+    importHint.style.fontSize = '13px';
+    importHint.style.color = 'var(--color-text-secondary)';
+    importHint.textContent = 'TTF/OTF 파일과 HFT 수식 글꼴을 이번 세션에서 사용할 수 있습니다. 파일은 서버로 전송하지 않습니다.';
+    body.appendChild(importHint);
 
     if (this.options.disableExternalWebFonts) {
       const offlineNotice = document.createElement('div');
@@ -172,8 +180,25 @@ export class LocalFontsModal {
     webBtn.textContent = '대체 글꼴로 보기';
     webBtn.addEventListener('click', () => this.resolve('web-substitute'));
 
+    const importInput = document.createElement('input');
+    importInput.type = 'file';
+    importInput.accept = '.ttf,.otf,.hft,font/ttf,font/otf';
+    importInput.multiple = true;
+    importInput.hidden = true;
+    importInput.addEventListener('change', () => {
+      const files = Array.from(importInput.files ?? []);
+      if (files.length > 0) this.resolve({ type: 'import', files });
+    });
+
+    const importBtn = document.createElement('button');
+    importBtn.className = 'dialog-btn';
+    importBtn.textContent = '글꼴 파일 가져오기 (이번 세션)';
+    importBtn.addEventListener('click', () => importInput.click());
+
     footer.appendChild(detectBtn);
+    footer.appendChild(importBtn);
     footer.appendChild(webBtn);
+    footer.appendChild(importInput);
     dialog.appendChild(footer);
 
     this.overlay.appendChild(dialog);

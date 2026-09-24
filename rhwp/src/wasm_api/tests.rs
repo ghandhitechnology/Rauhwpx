@@ -4716,6 +4716,57 @@ fn test_clipboard_copy_control_cell_path_json_arg() {
     assert!(r_arr.unwrap().contains("[표]"));
 }
 
+#[test]
+fn cell_logical_length_keeps_text_after_inline_equation_in_select_all() {
+    use crate::model::control::{Control, Equation};
+    use crate::model::table::{Cell, Table};
+    let mut doc = create_doc_with_table();
+    let mut equation = Equation {
+        script: "x".into(),
+        ..Default::default()
+    };
+    equation.common.treat_as_char = true;
+    let source = Paragraph {
+        text: "ABC".into(),
+        char_offsets: vec![0, 9, 10],
+        char_count: 12,
+        controls: vec![Control::Equation(Box::new(equation))],
+        ..Default::default()
+    };
+    let Control::Table(table) = &mut doc.document.sections[0].paragraphs[0].controls[0] else {
+        panic!("table");
+    };
+    table.cells[0].paragraphs = vec![source.clone()];
+    let flat = r#"[{"controlIndex":0,"cellIndex":0,"cellParaIndex":0}]"#;
+    assert_eq!(
+        doc.get_cell_paragraph_length_by_path(0, 0, flat).unwrap(),
+        3
+    );
+    assert_eq!(doc.get_cell_logical_length_by_path(0, 0, flat).unwrap(), 4);
+
+    let Control::Table(table) = &mut doc.document.sections[0].paragraphs[0].controls[0] else {
+        unreachable!()
+    };
+    table.cells[0].paragraphs = vec![Paragraph {
+        controls: vec![Control::Table(Box::new(Table {
+            row_count: 1,
+            col_count: 1,
+            cells: vec![Cell {
+                paragraphs: vec![source],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))],
+        ..Default::default()
+    }];
+    let nested = r#"[{"controlIndex":0,"cellIndex":0,"cellParaIndex":0},{"controlIndex":0,"cellIndex":0,"cellParaIndex":0}]"#;
+    let end = doc.get_cell_logical_length_by_path(0, 0, nested).unwrap();
+    assert_eq!(end, 4);
+    doc.copy_selection_in_cell_by_path(0, 0, nested, 0, 0, 0, end)
+        .unwrap();
+    assert_eq!(doc.get_clipboard_text(), "ABC");
+}
+
 /// [Task #1161] 떠 있는 그림(tac=false)을 반복 붙여넣으면 cascade 오프셋이 누적된다.
 fn create_doc_with_floating_picture(tac: bool, voff: u32, hoff: u32) -> HwpDocument {
     use crate::model::control::Control;

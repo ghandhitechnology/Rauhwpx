@@ -5,8 +5,8 @@ import {
   type ZoomAnchor,
 } from './zoom-anchor.ts';
 
-const MIN_ZOOM = 0.25;
-const MAX_ZOOM = 4.0;
+export const MIN_ZOOM = 0.1;
+export const MAX_ZOOM = 5.0;
 const ZOOM_SETTLE_EPSILON = 0.001;
 const ZOOM_SMOOTHING_TIME_MS = 16;
 const WHEEL_ZOOM_SENSITIVITY = 0.00625;

@@ -514,6 +514,8 @@ export class EquationEditorDialog {
     const okBtn = document.createElement('button');
     okBtn.className = 'dialog-btn dialog-btn-primary';
     okBtn.textContent = '확인';
+    okBtn.title = '확인 (Shift+Enter)';
+    okBtn.setAttribute('aria-keyshortcuts', 'Shift+Enter');
     okBtn.addEventListener('click', () => this.handleOk());
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'dialog-btn';
@@ -531,7 +533,7 @@ export class EquationEditorDialog {
         e.stopPropagation();
         this.hide();
       }
-      if (e.key === 'Enter' && e.ctrlKey) {
+      if (e.key === 'Enter' && !e.isComposing && !e.altKey && !e.metaKey && (e.ctrlKey || e.shiftKey)) {
         e.preventDefault();
         e.stopPropagation();
         this.handleOk();
@@ -662,6 +664,7 @@ export class EquationEditorDialog {
   }
 
   private onScriptKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Enter' && (e.shiftKey || e.ctrlKey)) return;
     if (!this.acVisible) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -782,11 +785,30 @@ export class EquationEditorDialog {
       const preview = this.readPreview(script);
       this.previewContainer.replaceChildren();
       appendSvgMarkup(this.previewContainer, preview.svg);
+      const svg = this.previewContainer.querySelector('svg');
+      if (svg) this.fitPreviewInk(svg);
       this.showDiagnostics(preview);
     } catch (err) {
       this.showPreviewMessage('eq-preview-error', '미리보기 오류');
       console.warn('[EquationEditor] 미리보기 오류:', err);
     }
+  }
+
+  /** SVG text can paint beyond the layout width when the browser uses a different font. */
+  private fitPreviewInk(svg: SVGSVGElement): void {
+    const view = svg.viewBox.baseVal;
+    const ink = svg.getBBox();
+    if (![view.x, view.y, view.width, view.height, ink.x, ink.y, ink.width, ink.height]
+      .every(Number.isFinite) || view.width <= 0 || view.height <= 0) return;
+
+    const padding = 1.5;
+    const left = Math.min(view.x, ink.x) - padding;
+    const top = Math.min(view.y, ink.y) - padding;
+    const right = Math.max(view.x + view.width, ink.x + ink.width) + padding;
+    const bottom = Math.max(view.y + view.height, ink.y + ink.height) + padding;
+    svg.setAttribute('viewBox', `${left} ${top} ${right - left} ${bottom - top}`);
+    svg.setAttribute('width', String(right - left));
+    svg.setAttribute('height', String(bottom - top));
   }
 
   private showPreviewMessage(className: string, message: string): void {

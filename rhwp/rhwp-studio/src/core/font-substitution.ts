@@ -12,6 +12,7 @@
 
 import { REGISTERED_FONTS } from './font-loader.ts';
 import { resolveLocalFont } from './local-fonts.ts';
+import { equationFontFamilies } from './equation-font.ts';
 
 // 치환 엔트리: [원본폰트, 원본타입, 대체폰트, 대체타입]
 // 타입: 1=TTF, 2=HFT
@@ -221,6 +222,11 @@ function pushUniqueFontFamily(families: string[], fontName: string): void {
 
 function systemFallbackFamilies(fontName: string): string[] {
   if (GENERIC_FONTS.has(fontName)) return [fontName];
+  // 수식 글꼴을 일반 미등록 서체로 처리하면 Canvas font 치환이 엔진의
+  // 수식 fallback 앞에 sans-serif를 넣어 변수와 숫자까지 고딕으로 바꾼다.
+  if (/^(hyhwpeq|latin modern math|stix two (text|math)|cambria math)$/i.test(fontName.trim())) {
+    return equationFontFamilies(fontName).slice(1);
+  }
   // 고정폭 '명조' (바탕체) — 고정폭보다 명조 계열 보존이 우선이다.
   // 고딕 고정폭(D2Coding)으로 떨어뜨리면 serif→sans 로 계열이 뒤집힌다.
   if (/바탕체|batangche/i.test(fontName)) {
@@ -237,7 +243,11 @@ function systemFallbackFamilies(fontName: string): string[] {
     return ['Batang', 'AppleMyungjo', 'Noto Serif KR', 'serif'];
   }
   // Sans-serif (기본)
-  return ['Malgun Gothic', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Pretendard', 'sans-serif'];
+  // Hancom uses HCR Dotum when a requested sans face lacks a glyph (for
+  // example, Malgun's geometric symbols or MDotum's Latin subset). Imported
+  // HCR faces share a runtime CSS family across regular and bold weights.
+  const hcr = resolveLocalFont('HCR Dotum');
+  return [hcr?.runtimeFamily ?? '함초롬돋움', 'Malgun Gothic', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Pretendard', 'sans-serif'];
 }
 
 /**
@@ -336,7 +346,7 @@ export function fontFamilyChainForDisplay(
     confirmedLocalFontSet.has(fontName.toLocaleLowerCase('en-US'));
 
   if (localRecord) {
-    pushUniqueFontFamily(families, localRecord.family);
+    pushUniqueFontFamily(families, localRecord.runtimeFamily ?? localRecord.family);
   } else if (originalAllowed) {
     pushUniqueFontFamily(families, fontName);
   }

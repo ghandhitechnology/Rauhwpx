@@ -48,7 +48,7 @@ export const MUTATING_METHODS: readonly string[] = [
   // 그림/도형/수식 개체
   'insertPicture', 'assignPictureImage', 'setPictureProperties',
   'setHeaderFooterPictureProperties', 'setCellPicturePropertiesByPath',
-  'setCellShapePropertiesByPath', 'deletePictureControl', 'movePictureControl', 'deleteCellPictureControlByPath',
+  'setCellShapePropertiesByPath', 'deletePictureControl', 'movePictureControl', 'movePictureControlByPath', 'deleteCellPictureControlByPath',
   'createShapeControl', 'setShapeProperties', 'deleteShapeControl', 'changeObjectZOrder',
   'groupShapes', 'ungroupShape', 'moveLineEndpoint', 'updateConnectorsInSection',
   'insertEquation', 'promoteOleEquation', 'setEquationProperties', 'setEquationPropertiesByPath', 'setNoteEquationProperties', 'deleteEquationControl',
@@ -94,7 +94,7 @@ export const MUTATING_METHODS: readonly string[] = [
  * They are agent-visible because structured/transposed paste requires the matching copy step.
  */
 export const AGENT_EDIT_SESSION_METHODS: readonly string[] = [
-  'copySelection', 'copySelectionAcrossSections', 'copySelectionInCell', 'copyControl',
+  'copySelection', 'copySelectionAcrossSections', 'copySelectionInCell', 'copySelectionInCellByPath', 'copyControl',
   'copyTableCellsTransposed', 'toggleHideHeaderFooter',
 ];
 

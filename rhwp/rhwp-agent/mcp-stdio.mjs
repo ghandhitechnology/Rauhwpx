@@ -1,7 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { open } from 'node:fs/promises';
-import path from 'node:path';
 import WebSocket from 'ws';
 import {
   HUB_CAPABILITY_AUDIENCES,
@@ -9,7 +7,8 @@ import {
   sessionIdFromScopedHubToken,
 } from './hub-session-registry.mjs';
 import { filterToolDefinitions, toToolContent, toolAnnotations } from './tools.mjs';
-import { assertImagePathInsideRoots, imageRootsFromEnv } from './image-path-policy.mjs';
+import { imageRootsFromEnv } from './image-path-policy.mjs';
+import { prepareInsertImageArgs } from './insert-image-source.mjs';
 
 const WS_URL = process.env.RHWP_WS_URL ?? 'ws://127.0.0.1:5175/mcp';
 const { token: TOKEN, development: DEVELOPMENT_AUTH } = resolveHubIdentity();
@@ -210,78 +209,8 @@ for (const def of visibleTools) {
 }
 
 // ─── 이미지 삽입 — 파일은 이 프로세스(로컬)가 읽어 base64 로 전달한다 ───
-const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
-const IMAGE_EXTS = ['png', 'jpg', 'gif', 'bmp'];
-
-/** PNG/JPEG/GIF/BMP 헤더에서 픽셀 크기를 읽는다. 실패 시 null. */
-function parseImageDims(buf, ext) {
-  try {
-    if (ext === 'png') {
-      if (buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47) return null;
-      return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
-    }
-    if (ext === 'gif') {
-      if (buf.length < 10 || buf.toString('ascii', 0, 3) !== 'GIF') return null;
-      return { width: buf.readUInt16LE(6), height: buf.readUInt16LE(8) };
-    }
-    if (ext === 'bmp') {
-      if (buf.length < 26 || buf.toString('ascii', 0, 2) !== 'BM') return null;
-      return { width: Math.abs(buf.readInt32LE(18)), height: Math.abs(buf.readInt32LE(22)) };
-    }
-    if (ext === 'jpg') {
-      if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
-      let i = 2;
-      while (i + 9 < buf.length) {
-        if (buf[i] !== 0xff) { i++; continue; }
-        const marker = buf[i + 1];
-        if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
-        const segLen = buf.readUInt16BE(i + 2);
-        // SOF0..SOF15 (DHT/DNL/DAC 제외) 에 크기가 실린다
-        if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-          return { width: buf.readUInt16BE(i + 7), height: buf.readUInt16BE(i + 5) };
-        }
-        i += 2 + segLen;
-      }
-      return null;
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
 
 // insert_image 만 커스텀 등록 — description/shape 는 tools.mjs 정의를 그대로 쓴다.
-
-/** imagePath 가 허용된 루트(실제 경로 기준) 안에 있는지 확인한다. */
-function assertImagePathAllowed(imagePath) {
-  return assertImagePathInsideRoots(imagePath, IMAGE_ALLOWED_ROOTS);
-}
-
-async function readImageFile(filePath) {
-  const handle = await open(filePath, 'r');
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile()) throw hubError('INVALID_ARGS', 'image path must name a regular file');
-    if (stat.size < 1) throw hubError('INVALID_ARGS', 'image file is empty');
-    if (stat.size > IMAGE_MAX_BYTES) {
-      throw hubError('INVALID_ARGS', `image is ${(stat.size / 1048576).toFixed(1)}MB — max 5MB`);
-    }
-    const bytes = Buffer.allocUnsafe(stat.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
-      if (bytesRead === 0) throw hubError('INVALID_ARGS', 'image file changed while it was read');
-      offset += bytesRead;
-    }
-    const extra = Buffer.allocUnsafe(1);
-    if ((await handle.read(extra, 0, 1, bytes.length)).bytesRead !== 0) {
-      throw hubError('INVALID_ARGS', 'image file changed while it was read');
-    }
-    return bytes;
-  } finally {
-    await handle.close();
-  }
-}
 
 function registerInsertImageTool(def) {
   server.registerTool(
@@ -294,38 +223,8 @@ function registerInsertImageTool(def) {
     },
     async (args) => {
       try {
-        const { imagePath, imageBase64, extension, ...rest } = args ?? {};
-        let buf;
-        let ext;
-        if (typeof imagePath === 'string' && imagePath.length > 0) {
-          const resolvedImagePath = await assertImagePathAllowed(imagePath);
-          buf = await readImageFile(resolvedImagePath);
-          ext = path.extname(resolvedImagePath).slice(1).toLowerCase().replace('jpeg', 'jpg');
-        } else if (typeof imageBase64 === 'string' && imageBase64.length > 0) {
-          if (!extension) throw hubError('INVALID_ARGS', 'extension is required with imageBase64');
-          buf = Buffer.from(imageBase64, 'base64');
-          ext = extension.toLowerCase().replace('jpeg', 'jpg');
-        } else {
-          throw hubError('INVALID_ARGS', 'either imagePath or imageBase64 is required');
-        }
-        if (!IMAGE_EXTS.includes(ext)) {
-          throw hubError('INVALID_ARGS', `unsupported image type "${ext}" — use png/jpg/gif/bmp`);
-        }
-        if (buf.length === 0) throw hubError('INVALID_ARGS', 'image file is empty');
-        if (buf.length > IMAGE_MAX_BYTES) {
-          throw hubError('INVALID_ARGS', `image is ${(buf.length / 1048576).toFixed(1)}MB — max 5MB`);
-        }
-        const dims = parseImageDims(buf, ext);
-        if (!dims || dims.width < 1 || dims.height < 1) {
-          throw hubError('INVALID_ARGS', 'could not read image dimensions — is the file a valid image?');
-        }
-        const result = await callHub('insert_image', {
-          ...rest,
-          imageBase64: buf.toString('base64'),
-          extension: ext,
-          naturalWidthPx: dims.width,
-          naturalHeightPx: dims.height,
-        });
+        const payload = await prepareInsertImageArgs(args, IMAGE_ALLOWED_ROOTS);
+        const result = await callHub('insert_image', payload);
         return { content: toToolContent(result) };
       } catch (e) {
         const code = e.code ?? (e.syscall === 'open' ? 'FILE_NOT_FOUND' : 'RPC_ERROR');

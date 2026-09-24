@@ -156,6 +156,24 @@ test('providers run in fixed order, skip unavailable routes, and cascade on fail
   assert.doesNotMatch(calls[0].prompt, /chat transcript|binary document/i);
 });
 
+test('Codex Luna is resolved only when the title reaches its Codex route', async () => {
+  let discoveries = 0;
+  const deps = {
+    readiness: readiness({ codex: { ready: true, model: 'luna' } }),
+    resolveCodexTitleModel: async () => { discoveries++; return 'gpt-6.1-luna'; },
+    runProvider: async ({ provider }) => provider === 'pi' ? '표 제목 정리' : '여백 정리',
+  };
+  assert.equal((await generateCheckpointTitle(request(), deps)).provider, 'pi');
+  assert.equal(discoveries, 0);
+  const fallback = await generateCheckpointTitle(request(), {
+    ...deps,
+    readiness: readiness({ pi: { ready: false, model: '' }, codex: { ready: true, model: 'luna' } }),
+  });
+  assert.equal(fallback.provider, 'codex');
+  assert.equal(fallback.model, 'gpt-6.1-luna');
+  assert.equal(discoveries, 1);
+});
+
 test('the first successful Pi route returns its exact live model metadata', async () => {
   const calls = [];
   const result = await generateCheckpointTitle(request(), {
@@ -182,7 +200,8 @@ test('all provider failures settle to null', async () => {
 test('CLI specs use explicit arrays, fixed low-effort models, and no tools', () => {
   const codex = buildCheckpointTitleCliSpec('codex');
   assert.ok(Array.isArray(codex.argv));
-  assert.ok(codex.argv.includes('gpt-5.6-luna'));
+  assert.ok(codex.argv.includes('gpt-6-luna'));
+  assert.ok(buildCheckpointTitleCliSpec('codex', { model: 'gpt-6.1-luna' }).argv.includes('gpt-6.1-luna'));
   assert.ok(codex.argv.includes('model_reasoning_effort="low"'));
   assert.ok(codex.argv.includes('read-only'));
   assert.ok(codex.argv.includes('shell_tool'));

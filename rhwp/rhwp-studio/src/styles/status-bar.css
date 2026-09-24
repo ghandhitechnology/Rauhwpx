@@ -1,109 +1,136 @@
-/* ================================================================
-   하단 상태 바 — 한컴 웹기안기 #status_bar 패턴
-   ================================================================ */
+/* 문서 정보와 확대 조절을 한 줄에 유지한다. */
 #status-bar {
   display: flex;
   align-items: center;
-  height: 22px;
+  gap: 16px;
+  height: 32px;
+  min-height: 32px;
   padding: 0 10px;
-  /* 본문의 연장이 아니라 바닥 판이다 — 위쪽 가장자리를 드리운다 */
   position: relative;
   z-index: 5;
+  flex-shrink: 0;
   background: var(--ui-footer-bg);
   border-top: 1px solid var(--ui-border);
-  box-shadow: var(--ui-footer-edge);
-  flex-shrink: 0;
-  font-size: var(--font-size-sm);
-  color: var(--color-text);
-  font-family: 'Malgun Gothic', dotum, Arial, sans-serif;
+  color: var(--ui-text-secondary);
+  font: 12px / 1 var(--font-family-ui);
+  font-variant-numeric: tabular-nums;
   user-select: none;
 }
 
-/* 좌측 항목 — 한컴 .status_bar .inline_panel */
-.stb-item {
-  line-height: 22px;
-  white-space: nowrap;
-  flex-shrink: 0;
-  flex-basis: auto;
-  flex-wrap: nowrap;
+.stb-document {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+.stb-document::-webkit-scrollbar { display: none; }
+.stb-item { flex: 0 0 auto; white-space: nowrap; line-height: 28px; }
+.stb-count { color: var(--ui-text); }
+.stb-secondary { color: var(--ui-text-muted); }
 
-/* 세로 구분선 — 한컴 .vertical_line_wrap .col_line */
-.stb-divider {
-  display: inline-block;
-  position: relative;
-  align-self: stretch;
-  padding: 0 10px;
-  flex-shrink: 0;
-}
-
-.stb-divider::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 10px;
-  /* 흰 베벨 한 줄은 어두운 테마에서 밝은 선으로 튄다 — 헤어라인 하나로 */
-  border-left: 1px solid var(--ui-border-strong);
-}
-
-/* 상태 메시지 — 한컴 .status_bar .message */
 .stb-message {
-  flex: 1;
+  min-width: 0;
+  flex: 1 1 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--accent-primary);
-  padding: 0 12px;
-  line-height: 22px;
+  color: var(--ui-text-muted);
 }
+.stb-message:empty { display: none; }
 
-/* 우측 줌 영역 — 한컴 .inline_panel.justify_right.align_item_center */
-.stb-right {
+.stb-right,
+.stb-fit-controls {
   display: flex;
   align-items: center;
-  gap: 0;
-  flex-shrink: 0;
-  margin-left: auto;
-  flex-wrap: nowrap;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+.stb-right { margin-left: auto; }
+.stb-fit-controls {
+  gap: 2px;
+  margin-right: 8px;
+  padding-right: 8px;
+  border-right: 1px solid var(--ui-border);
 }
 
-/* 한컴 zoom_out 버튼 margin: 0 8px */
-#sb-zoom-out { margin: 0 8px; }
-
-/* 아이콘 버튼 — 한컴 .btn_wo.btn_icon (24x24) */
-.stb-icon-btn {
-  width: 24px;
-  height: 24px;
-  border: 1px solid transparent;
-  border-radius: 0;
-  background: transparent;
-  cursor: pointer;
+#status-bar :is(.stb-icon-btn, .stb-zoom-val) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
   box-sizing: border-box;
+  height: 26px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ui-text-secondary);
+  font: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
 }
+#status-bar .stb-icon-btn { width: 26px; }
+#status-bar .stb-icon-btn .tb-sprite { width: 17px; height: 17px; }
+#status-bar .stb-zoom-val { width: 46px; color: var(--ui-text); }
+#status-bar :is(.stb-icon-btn, .stb-zoom-val):hover { background: var(--ui-hover); }
+#status-bar :is(.stb-icon-btn, .stb-zoom-val):active { background: var(--ui-active); }
+#status-bar :is(button, input):focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+#status-bar button:disabled { opacity: .4; cursor: default; }
 
-.stb-icon-btn:hover {
-  background: var(--ui-hover);
-  border-color: var(--ui-border-strong);
+#sb-zoom-range {
+  --zoom-progress: 18.367%;
+  appearance: none;
+  -webkit-appearance: none;
+  width: clamp(64px, 10vw, 136px);
+  height: 24px;
+  margin: 0 5px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ui-text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
 }
-
-/* 줌 값 표시 — 한컴 .btn_dropdown (height:20px) */
-.stb-zoom-val {
-  font-size: var(--font-size-sm);
-  height: 20px;
-  line-height: 20px;
-  min-width: 32px;
-  text-align: center;
-  color: var(--color-text);
-  padding: 0 4px;
+#sb-zoom-range::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--ui-text-secondary) var(--zoom-progress), var(--ui-border-strong) var(--zoom-progress));
 }
+#sb-zoom-range::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4.5px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 50%;
+  background: var(--ui-text);
+  box-shadow: 0 1px 2px #0002;
+}
+#sb-zoom-range::-moz-range-track { height: 3px; border-radius: 2px; background: var(--ui-border-strong); }
+#sb-zoom-range::-moz-range-progress { height: 3px; border-radius: 2px; background: var(--ui-text-secondary); }
+#sb-zoom-range::-moz-range-thumb { width: 11px; height: 11px; border: 1px solid var(--ui-border-strong); border-radius: 50%; background: var(--ui-text); }
+#sb-zoom-range:disabled { opacity: .4; cursor: default; }
 
-/* 줌 스프라이트 아이콘 — 한컴 hcwo.css 참조 (row 24, -960px) */
-.icon-zoom-out       { background-position: 0 -960px; }
-.icon-zoom-in        { background-position: -40px -960px; }
-.icon-zoom-fit-width { background-position: -80px -960px; }
-.icon-zoom-fit       { background-position: -120px -960px; }
+@media (max-width: 900px) {
+  #status-bar { gap: 12px; }
+  .stb-document { gap: 12px; }
+  #sb-section, #sb-mode { display: none; }
+}
+@media (max-width: 640px) {
+  #status-bar { gap: 8px; padding-inline: 8px; }
+  .stb-document { gap: 12px; }
+  .stb-fit-controls, .stb-message { display: none; }
+  #sb-zoom-range { width: clamp(44px, 11vw, 70px); margin-inline: 3px; }
+}
+@media (max-width: 380px) {
+  #status-bar { padding-inline: 6px; font-size: 11px; }
+  .stb-document { gap: 8px; }
+  #status-bar .stb-icon-btn { width: 24px; }
+  #status-bar .stb-zoom-val { width: 38px; }
+  #sb-zoom-range { width: 36px; }
+}
