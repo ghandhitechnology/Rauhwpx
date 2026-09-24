@@ -1,18 +1,6 @@
 /**
  * 표 만들기 그리드 피커 (TableCreateDialog)
- * 한컴 스타일: 도구상자 버튼 아래 드롭다운으로 행×열 그리드 선택
- *
- *  ┌────────────────────┐
- *  │      [ 취소 ]      │
- *  ├────────────────────┤
- *  │ ■ ■ ■ □ □ □ □ □   │
- *  │ ■ ■ ■ □ □ □ □ □   │
- *  │ □ □ □ □ □ □ □ □   │
- *  │ □ □ □ □ □ □ □ □   │
- *  │ □ □ □ □ □ □ □ □   │
- *  ├────────────────────┤
- *  │  ⊞ 표 만들기...    │
- *  └────────────────────┘
+ * 도구상자 버튼 아래에서 행×열을 빠르게 고른다.
  */
 
 import { makeOption } from './dom-utils';
@@ -21,8 +9,8 @@ import { HWPUNIT_PER_MM } from '@/core/hwp-constants';
 
 const GRID_ROWS = 8;
 const GRID_COLS = 10;
-const CELL_SIZE = 16;   // px
-const CELL_GAP = 2;     // px
+const CELL_SIZE = 19;   // px
+const CELL_GAP = 4;     // px
 
 export interface TableCreateOptions {
   treatAsChar?: boolean;
@@ -98,33 +86,35 @@ export class TableCreateDialog {
   private build(): void {
     // 투명 오버레이 (클릭 시 닫기)
     this.overlay = document.createElement('div');
-    this.overlay.style.cssText = 'position:fixed;inset:0;z-index:9998;';
+    this.overlay.className = 'table-create-backdrop';
     this.overlay.addEventListener('click', () => this.hide());
 
     // 팝업 컨테이너
     this.popup = document.createElement('div');
-    this.popup.style.cssText =
-      'position:fixed;z-index:9999;background:var(--color-surface-raised);border:1px solid var(--ui-border-light);' +
-      'box-shadow:var(--shadow-dropdown);padding:0;user-select:none;color:var(--color-text);';
+    this.popup.className = 'table-create-popup';
+    this.popup.setAttribute('role', 'dialog');
+    this.popup.setAttribute('aria-label', '표 삽입');
 
     // ── 상단: 취소 버튼 ──
     const header = document.createElement('div');
-    header.style.cssText = 'padding:4px 6px;border-bottom:1px solid var(--ui-border-light);';
+    header.className = 'table-create-header';
+    const heading = document.createElement('span');
+    heading.textContent = '표 삽입';
+    header.appendChild(heading);
     const cancelBtn = document.createElement('button');
-    cancelBtn.textContent = '취소';
-    cancelBtn.style.cssText =
-      'width:100%;padding:3px 0;font-size:12px;border:1px solid var(--color-border);' +
-      'background:var(--color-surface);color:var(--color-text);cursor:pointer;border-radius:2px;color-scheme:inherit;';
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = '×';
+    cancelBtn.title = '닫기';
+    cancelBtn.setAttribute('aria-label', '닫기');
     cancelBtn.addEventListener('click', () => this.hide());
-    cancelBtn.addEventListener('mouseenter', () => { cancelBtn.style.background = 'var(--ui-hover)'; });
-    cancelBtn.addEventListener('mouseleave', () => { cancelBtn.style.background = 'var(--color-surface)'; });
     header.appendChild(cancelBtn);
     this.popup.appendChild(header);
 
     // ── 중앙: 그리드 ──
     const gridWrap = document.createElement('div');
-    gridWrap.style.cssText = 'padding:6px;';
+    gridWrap.className = 'table-create-grid-wrap';
     const grid = document.createElement('div');
+    grid.className = 'table-create-grid';
     const gridW = GRID_COLS * (CELL_SIZE + CELL_GAP) - CELL_GAP;
     const gridH = GRID_ROWS * (CELL_SIZE + CELL_GAP) - CELL_GAP;
     grid.style.cssText =
@@ -134,10 +124,11 @@ export class TableCreateDialog {
     for (let r = 0; r < GRID_ROWS; r++) {
       for (let c = 0; c < GRID_COLS; c++) {
         const cell = document.createElement('div');
-        cell.style.cssText =
-          `position:absolute;width:${CELL_SIZE}px;height:${CELL_SIZE}px;` +
-          `left:${c * (CELL_SIZE + CELL_GAP)}px;top:${r * (CELL_SIZE + CELL_GAP)}px;` +
-          'border:1px solid var(--color-border);box-sizing:border-box;background:var(--color-surface);';
+        cell.className = 'table-create-cell';
+        cell.style.width = `${CELL_SIZE}px`;
+        cell.style.height = `${CELL_SIZE}px`;
+        cell.style.left = `${c * (CELL_SIZE + CELL_GAP)}px`;
+        cell.style.top = `${r * (CELL_SIZE + CELL_GAP)}px`;
         cell.dataset.row = String(r);
         cell.dataset.col = String(c);
         grid.appendChild(cell);
@@ -178,23 +169,16 @@ export class TableCreateDialog {
 
     // 라벨: "3 × 4"
     this.label = document.createElement('div');
-    this.label.style.cssText =
-      'text-align:center;margin-top:4px;font-size:11px;color:var(--color-text-muted);font-family:sans-serif;height:14px;';
+    this.label.className = 'table-create-size';
     gridWrap.appendChild(this.label);
 
     this.popup.appendChild(gridWrap);
 
     // ── 하단: 표 만들기... 링크 ──
-    const footer = document.createElement('div');
-    footer.style.cssText =
-      'padding:5px 8px;border-top:1px solid var(--ui-border-light);cursor:pointer;font-size:12px;color:var(--color-text);';
-    const icon = document.createElement('span');
-    icon.style.marginRight = '4px';
-    icon.textContent = '\u229E';
-    footer.appendChild(icon);
-    footer.appendChild(document.createTextNode('표 만들기...'));
-    footer.addEventListener('mouseenter', () => { footer.style.background = 'var(--color-accent-bg)'; });
-    footer.addEventListener('mouseleave', () => { footer.style.background = ''; });
+    const footer = document.createElement('button');
+    footer.type = 'button';
+    footer.className = 'table-create-more';
+    footer.textContent = '표 만들기…';
     footer.addEventListener('click', () => {
       this.hide();
       this.showInputDialog();
@@ -219,11 +203,9 @@ export class TableCreateDialog {
       const r = parseInt(cell.dataset.row!, 10);
       const c = parseInt(cell.dataset.col!, 10);
       if (this.hoverRow >= 0 && r <= this.hoverRow && c <= this.hoverCol) {
-        cell.style.background = 'var(--color-accent-bg-light)';
-        cell.style.borderColor = 'var(--color-primary)';
+        cell.classList.add('selected');
       } else {
-        cell.style.background = 'var(--color-surface)';
-        cell.style.borderColor = 'var(--color-border)';
+        cell.classList.remove('selected');
       }
     }
     if (this.hoverRow >= 0) {

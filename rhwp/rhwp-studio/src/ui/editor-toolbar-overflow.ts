@@ -23,13 +23,13 @@ export class EditorToolbarOverflow {
     this.more = document.createElement('button');
     this.more.id = 'editor-toolbar-more';
     this.more.type = 'button';
-    this.more.className = 'tb-btn';
+    this.more.className = 'tb-btn tb-lg';
     this.more.title = '더 보기';
     this.more.setAttribute('aria-label', '더 보기');
     this.more.setAttribute('aria-haspopup', 'dialog');
     this.more.setAttribute('aria-expanded', 'false');
     this.more.setAttribute('aria-controls', 'editor-toolbar-overflow');
-    this.more.innerHTML = '<span class="tb-icon-text" aria-hidden="true">⋯</span><span class="tb-label">더 보기</span>';
+    this.more.innerHTML = '<svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-more"/></svg><span class="tb-label">더 보기</span>';
     this.more.hidden = true;
 
     this.popover = document.createElement('div');
@@ -61,13 +61,20 @@ export class EditorToolbarOverflow {
     });
     this.resizeObserver.observe(toolbar);
     this.lastCollapsed = toolbar.classList.contains('collapsed');
-    this.mutationObserver = new MutationObserver(() => {
+    this.mutationObserver = new MutationObserver((records) => {
       const collapsed = toolbar.classList.contains('collapsed');
-      if (collapsed !== this.lastCollapsed || (toolbar.dataset.contextMode ?? 'default') !== this.lastMode) {
+      // 사이드바 토글처럼 나중에 붙는 고정 요소도 폭 계산에 넣는다.
+      const pinnedAdded = records.some(record => Array.from(record.addedNodes).some(node =>
+        node instanceof HTMLElement && node !== this.more && node !== this.popover
+        && !node.classList.contains('tb-group') && !node.classList.contains('tb-sep')));
+      if (pinnedAdded || collapsed !== this.lastCollapsed
+        || (toolbar.dataset.contextMode ?? 'default') !== this.lastMode) {
         this.refresh();
       }
     });
-    this.mutationObserver.observe(toolbar, { attributes: true, attributeFilter: ['class', 'data-context-mode'] });
+    this.mutationObserver.observe(toolbar, {
+      attributes: true, attributeFilter: ['class', 'data-context-mode'], childList: true,
+    });
     window.addEventListener('resize', this.onWindowResize);
     this.refresh();
   }
@@ -134,6 +141,10 @@ export class EditorToolbarOverflow {
       else Array.from(this.toolbar.querySelectorAll<HTMLButtonElement>('.tb-group .tb-btn:not(:disabled)'))
         .find(button => button.getClientRects().length > 0)?.focus({ preventScroll: true });
     }
+  }
+
+  closePopover(): void {
+    this.close(false);
   }
 
   destroy(): void {

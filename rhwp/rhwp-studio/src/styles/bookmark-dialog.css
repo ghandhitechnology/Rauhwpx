@@ -163,3 +163,20 @@
   font-size: var(--font-size-base);
   cursor: pointer;
 }
+
+.modal-overlay .bm-dialog { width: min(440px, calc(100vw - 24px)); }
+.bm-body { padding: 16px 20px; }
+.bm-row { margin-bottom: 14px; }
+.bm-label { margin-bottom: 6px; color: var(--ui-text-secondary); font-weight: 600; }
+.bm-name-input { min-height: 36px; padding: 7px 10px; margin-top: 6px; border-color: var(--ui-border-strong); border-radius: 6px; background: var(--ui-surface-raised); color: var(--ui-text); }
+.bm-mid { gap: 12px; }
+.bm-list-header { padding: 7px 10px; border-color: var(--ui-border); border-radius: 8px 8px 0 0; background: var(--ui-surface-muted); }
+.bm-list { height: 180px; border-color: var(--ui-border); border-radius: 0 0 8px 8px; background: var(--ui-surface-raised); }
+.bm-item { min-height: 32px; align-items: center; padding: 6px 10px; }
+.bm-item:hover { background: var(--ui-hover); }
+.bm-btn-col { gap: 6px; }
+.bm-icon-btn { width: 32px; height: 32px; border-color: var(--ui-border); background: var(--ui-surface-raised); color: var(--ui-text); }
+.bm-icon-btn:hover { background: var(--ui-hover); }
+.bm-sort-row { border-top-color: var(--ui-border); }
+.bm-dialog :is(button, input, select):focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+@media (max-width: 480px) { .bm-body { padding: 12px; } .bm-mid { flex-direction: column; } .bm-btn-col { flex-direction: row; flex-wrap: wrap; } .bm-btn-col .dialog-btn { flex: 1; } }

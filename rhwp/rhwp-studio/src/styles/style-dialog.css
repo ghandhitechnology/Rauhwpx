@@ -242,3 +242,25 @@
   padding-top: 8px;
   margin-top: 2px;
 }
+
+/* Dialog-specific layout within the shared editor dialog shell. */
+.sd-body { min-height: 0; gap: 16px; }
+.sd-left { width: min(220px, 42%); min-width: 0; }
+.sd-style-list { background: var(--ui-surface-raised); border-color: var(--ui-border); border-radius: 8px; }
+.sd-style-item { min-height: 34px; padding: 6px 10px; border-bottom-color: var(--ui-border-subtle); }
+.sd-style-item:last-child { border-bottom: 0; }
+.sd-style-item:hover { background: var(--ui-hover); }
+.sd-style-item.sd-selected { background: var(--ui-selected); }
+.sd-icon-btn, .se-shape-btn { min-height: 34px; border-color: var(--ui-border); background: var(--ui-surface-raised); color: var(--ui-text); }
+.sd-icon-btn:hover, .se-shape-btn:hover { background: var(--ui-hover); }
+.sd-info-section { padding: 12px; border-color: var(--ui-border); border-radius: 8px; background: var(--ui-surface-raised); }
+.sd-info-title { color: var(--ui-text); border-bottom: 0; margin-bottom: 6px; }
+.se-field-input, .se-field-select { height: 34px; padding: 6px 10px; border-color: var(--ui-border-strong); background: var(--ui-surface-raised); color: var(--ui-text); }
+.se-body :is(button, input, select):focus-visible, .sd-body :is(button, input, select, .sd-style-item):focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+@media (max-width: 560px) {
+  .sd-body { flex-direction: column; }
+  .sd-left { width: 100%; }
+  .sd-style-list { max-height: 160px; min-height: 120px; }
+  .se-name-row, .se-type-row { flex-wrap: wrap; gap: 10px; }
+  .se-field-group { min-width: 150px; }
+}

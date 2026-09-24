@@ -7,6 +7,7 @@ import type { EventBus } from '../core/event-bus.ts';
 import { MenuBar } from '../ui/menu-bar.ts';
 import { CommandPalette } from '../ui/command-palette.ts';
 import { EditorToolbarOverflow } from '../ui/editor-toolbar-overflow.ts';
+import { EditorStyleOverflow } from '../ui/editor-style-overflow.ts';
 
 /** Mount the production chrome around a plainly simulated document page. */
 export function mountEditorShell(report: (message: string) => void, eventBus: EventBus): void {
@@ -18,6 +19,12 @@ export function mountEditorShell(report: (message: string) => void, eventBus: Ev
 
   document.body.classList.add('preview-editor');
   document.title = 'Editor shell preview · Rauhwpx';
+  const visibleTitle = header.querySelector<HTMLElement>('#editor-document-title');
+  if (visibleTitle) {
+    visibleTitle.textContent = '사업 제안서.hwpx';
+    visibleTitle.title = visibleTitle.textContent;
+    visibleTitle.hidden = false;
+  }
   document.getElementById('preview-controls')!.hidden = true;
   // The sidebar-only controls contain a placeholder with the same production ID.
   document.querySelector('#preview-controls #icon-toolbar')?.remove();
@@ -98,6 +105,7 @@ export function mountEditorShell(report: (message: string) => void, eventBus: Ev
     });
   });
   new EditorToolbarOverflow(header.querySelector<HTMLElement>('#icon-toolbar')!);
+  new EditorStyleOverflow(header.querySelector<HTMLElement>('#style-bar')!);
   footer.addEventListener('click', (event) => {
     const button = (event.target as Element).closest<HTMLButtonElement>('button');
     if (button) report(`${button.title} · editor fixture`);

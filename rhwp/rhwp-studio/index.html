@@ -125,7 +125,7 @@
           <div class="md-sep"></div>
           <div class="md-item" data-cmd="insert:image"><span class="md-icon icon-image"></span><span class="md-label">그림</span></div>
           <div class="md-item" data-cmd="insert:textbox"><span class="md-icon icon-textbox"></span><span class="md-label">글상자</span></div>
-          <div class="md-item" data-cmd="insert:equation"><span class="md-icon"></span><span class="md-label">수식</span><span class="md-shortcut">Ctrl+N,M</span></div>
+          <div class="md-item" data-cmd="insert:equation"><span class="md-icon"></span><span class="md-label">수식</span><span class="md-shortcut">Ctrl+M,M</span></div>
           <div class="md-sep"></div>
           <div class="md-item disabled" data-cmd="insert:field"><span class="md-icon"></span><span class="md-label">필드 입력</span><span class="md-shortcut">Ctrl+K+E</span></div>
           <div class="md-sep"></div>
@@ -404,138 +404,321 @@
           <div class="md-item" data-cmd="tool:options"><span class="md-icon"></span><span class="md-label">환경 설정</span></div>
         </div>
       </div>
+        <span id="editor-document-title" hidden></span>
         <button type="button" id="editor-command-search" class="editor-command-search" title="명령 검색 (Ctrl+/)">
           <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
           <span>명령 검색</span><kbd>Ctrl+/</kbd>
         </button>
     </nav>
 
-    <!-- 아이콘 툴바 -->
+    <!-- 리본 아이콘: 1px 선 기준으로 그린다. 강조색은 --ribbon-accent 를 상속받는다 -->
+    <svg class="tb-icon-sprite" aria-hidden="true" focusable="false">
+      <symbol id="ri-lg-char" viewBox="0 0 32 32"><path d="M6.5 8.5h7v3.5c0 5.5-3 9-7.5 11"/><path d="M20.5 6.5v18M20.5 15.5h5"/><path style="stroke:var(--ribbon-accent)" d="M5.5 27.5h21"/></symbol>
+      <symbol id="ri-lg-para" viewBox="0 0 32 32"><path d="M10.5 6.5h16M5.5 11.5h21M5.5 16.5h21M5.5 21.5h11"/><path style="stroke:var(--ribbon-accent)" d="M26.5 20.5h-5.5a2.5 2.5 0 0 0 0 5h1M22.5 20.5v8M25.5 20.5v8"/></symbol>
+      <symbol id="ri-lg-table" viewBox="0 0 32 32"><path style="stroke:none;fill:var(--ribbon-accent-soft)" d="M6 7h20v4.5H6z"/><rect x="5.5" y="6.5" width="21" height="19" rx="1"/><path d="M5.5 11.5h21M5.5 16.5h21M5.5 21.5h21M12.5 11.5v14M19.5 11.5v14"/></symbol>
+      <symbol id="ri-lg-shape" viewBox="0 0 32 32"><rect x="5.5" y="5.5" width="13" height="13" rx="1"/><circle style="stroke:var(--ribbon-accent)" cx="20" cy="20" r="7.5"/></symbol>
+      <symbol id="ri-lg-image" viewBox="0 0 32 32"><rect x="4.5" y="6.5" width="23" height="19" rx="1"/><path d="m4.5 22.5 7-7 5.5 5.5 3-3 7.5 7.5"/><circle style="stroke:var(--ribbon-accent)" cx="21.5" cy="12.5" r="2"/></symbol>
+      <symbol id="ri-lg-find" viewBox="0 0 32 32"><circle cx="13.5" cy="13.5" r="8"/><path d="m19.5 19.5 8 8"/></symbol>
+      <symbol id="ri-lg-compare" viewBox="0 0 32 32"><rect x="5.5" y="6.5" width="9" height="19" rx="1"/><rect x="17.5" y="6.5" width="9" height="19" rx="1"/><path d="M8 11.5h4M8 16h4M20 11.5h4"/><path style="stroke:var(--ribbon-accent)" d="M20 16h4M20 20.5h4"/></symbol>
+      <symbol id="ri-lg-more" viewBox="0 0 32 32"><circle style="stroke:none;fill:currentColor" cx="9" cy="16" r="1.5"/><circle style="stroke:none;fill:currentColor" cx="16" cy="16" r="1.5"/><circle style="stroke:none;fill:currentColor" cx="23" cy="16" r="1.5"/></symbol>
+      <symbol id="ri-lg-props" viewBox="0 0 32 32"><rect x="5.5" y="5.5" width="21" height="21" rx="1"/><path d="M9.5 11.5h13M9.5 16.5h13M9.5 21.5h13"/><circle style="stroke:var(--ribbon-accent);fill:var(--ui-surface)" cx="13" cy="11.5" r="2"/><circle style="stroke:var(--ribbon-accent);fill:var(--ui-surface)" cx="19" cy="16.5" r="2"/><circle style="stroke:var(--ribbon-accent);fill:var(--ui-surface)" cx="15" cy="21.5" r="2"/></symbol>
+      <symbol id="ri-lg-cell-props" viewBox="0 0 32 32"><path style="stroke:none;fill:var(--ribbon-accent-soft)" d="M6 7h20v4.5H6z"/><rect x="5.5" y="6.5" width="21" height="19" rx="1"/><path d="M5.5 11.5h21M5.5 18.5h21M15.5 11.5v14"/><path style="stroke:var(--ribbon-accent)" d="M17.5 20.5h7v3h-7z"/></symbol>
+      <symbol id="ri-lg-row-add" viewBox="0 0 32 32"><rect x="5.5" y="6.5" width="21" height="19" rx="1"/><path d="M5.5 12.5h21M5.5 18.5h21M12.5 6.5v19M19.5 6.5v19"/><path style="stroke:var(--ribbon-accent)" d="M23 19.5v5M20.5 22h5"/></symbol>
+      <symbol id="ri-lg-row-del" viewBox="0 0 32 32"><rect x="5.5" y="6.5" width="21" height="19" rx="1"/><path d="M5.5 12.5h21M5.5 18.5h21M12.5 6.5v19M19.5 6.5v19"/><path d="M20.5 22h5"/></symbol>
+      <symbol id="ri-lg-footnote" viewBox="0 0 32 32"><path d="M7.5 3.5h13l4 4v21h-17z"/><path d="M10.5 9.5h11M10.5 13.5h11M10.5 17.5h7M10.5 21.5h4"/><path style="stroke:var(--ribbon-accent)" d="M10.5 24.5h11"/></symbol>
+      <symbol id="ri-lg-endnote" viewBox="0 0 32 32"><path d="M10.5 3.5h15v21"/><path d="M6.5 7.5h15v21h-15z"/><path d="M9.5 12.5h9M9.5 16.5h9M9.5 20.5h4"/><path style="stroke:var(--ribbon-accent)" d="M9.5 24.5h9"/></symbol>
+      <symbol id="ri-lg-close" viewBox="0 0 32 32"><circle cx="16" cy="16" r="11.5"/><path style="stroke:var(--ribbon-accent)" d="m11.5 11.5 9 9M20.5 11.5l-9 9"/></symbol>
+      <symbol id="ri-undo" viewBox="0 0 16 16"><path d="M5.5 3 2.5 6l3 3"/><path d="M2.5 6h7a3.5 3.5 0 0 1 0 7h-3"/></symbol>
+      <symbol id="ri-redo" viewBox="0 0 16 16"><path d="M10.5 3l3 3-3 3"/><path d="M13.5 6h-7a3.5 3.5 0 0 0 0 7h3"/></symbol>
+      <symbol id="ri-cut" viewBox="0 0 16 16"><circle cx="4.5" cy="12" r="2.5"/><circle cx="11.5" cy="12" r="2.5"/><path d="M6.2 10.2 12 2M9.8 10.2 4 2"/></symbol>
+      <symbol id="ri-format-copy" viewBox="0 0 16 16"><rect x="2.5" y="1.5" width="9" height="4" rx=".5"/><path d="M11.5 3.5h2v4h-6v2"/><path d="M6.5 9.5h2v5h-2z"/></symbol>
+      <symbol id="ri-numbering" viewBox="0 0 16 16"><path d="M6.5 3.5h8M6.5 8h8M6.5 12.5h8"/><path style="stroke:var(--ribbon-accent)" d="M2 2.8 3 2v3M2 7c.3-.6 1.8-.6 1.8.3 0 .7-1.8 1.3-1.8 2h2M2 11.5h1.8l-1 1c.9 0 1.2.4 1.2.9 0 .8-1.4 1-2 .4"/></symbol>
+      <symbol id="ri-bullet" viewBox="0 0 16 16"><path d="M6.5 3.5h8M6.5 8h8M6.5 12.5h8"/><circle style="stroke:none;fill:var(--ribbon-accent)" cx="3" cy="3.5" r="1.1"/><circle style="stroke:none;fill:var(--ribbon-accent)" cx="3" cy="8" r="1.1"/><circle style="stroke:none;fill:var(--ribbon-accent)" cx="3" cy="12.5" r="1.1"/></symbol>
+      <symbol id="ri-level-up" viewBox="0 0 16 16"><path d="M7.5 3.5h7M7.5 8h7M7.5 12.5h7"/><path d="M5 5.5 2.5 8 5 10.5"/></symbol>
+      <symbol id="ri-level-down" viewBox="0 0 16 16"><path d="M7.5 3.5h7M7.5 8h7M7.5 12.5h7"/><path d="M2.5 5.5 5 8l-2.5 2.5"/></symbol>
+      <symbol id="ri-props" viewBox="0 0 16 16"><path d="M1.5 4.5h13M1.5 8h13M1.5 11.5h13"/><circle style="fill:var(--ui-surface)" cx="5" cy="4.5" r="1.5"/><circle style="fill:var(--ui-surface)" cx="10.5" cy="8" r="1.5"/><circle style="fill:var(--ui-surface)" cx="7" cy="11.5" r="1.5"/></symbol>
+      <symbol id="ri-symbols" viewBox="0 0 16 16"><path d="M2.5 13.5h3.5v-1.7a5 5 0 1 1 4 0v1.7h3.5"/></symbol>
+      <symbol id="ri-link" viewBox="0 0 16 16"><path d="M6.5 9.5l3-3"/><path d="M7.5 4.2 9 2.7a2.8 2.8 0 0 1 4 4l-1.5 1.5M8.5 11.8 7 13.3a2.8 2.8 0 0 1-4-4l1.5-1.5"/></symbol>
+      <symbol id="ri-header" viewBox="0 0 16 16"><rect x="3.5" y="1.5" width="9" height="13" rx="1"/><path d="M5.5 4.5h5"/></symbol>
+      <symbol id="ri-footer" viewBox="0 0 16 16"><rect x="3.5" y="1.5" width="9" height="13" rx="1"/><path d="M5.5 11.5h5"/></symbol>
+      <symbol id="ri-footnote" viewBox="0 0 16 16"><rect x="3.5" y="1.5" width="9" height="13" rx="1"/><path d="M5.5 9.5h2M5.5 11.5h5"/></symbol>
+      <symbol id="ri-endnote" viewBox="0 0 16 16"><path d="M5.5 1.5h7a1 1 0 0 1 1 1v9"/><rect x="2.5" y="3.5" width="9" height="11" rx="1"/><path d="M4.5 11.5h5"/></symbol>
+      <symbol id="ri-ctrl-mark" viewBox="0 0 16 16"><path d="M4.5 2.5h-2v11h2M11.5 2.5h2v11h-2"/><path d="M6 6.5h4v3H6z"/></symbol>
+      <symbol id="ri-para-mark" viewBox="0 0 16 16"><path d="M13.5 2.5v6.5h-10"/><path d="M6 6.5 3.5 9 6 11.5"/></symbol>
+      <symbol id="ri-grid" viewBox="0 0 16 16"><rect x="1.5" y="1.5" width="13" height="13" rx=".5"/><path d="M5.8 1.5v13M10.2 1.5v13M1.5 5.8h13M1.5 10.2h13" stroke-dasharray="1 1"/></symbol>
+      <symbol id="ri-caption" viewBox="0 0 16 16"><rect x="2.5" y="1.5" width="11" height="8" rx=".5"/><path style="stroke:var(--ribbon-accent)" d="M2.5 12.5h8M2.5 14.5h5"/></symbol>
+      <symbol id="ri-front" viewBox="0 0 16 16"><path d="M2.5 1.5h11"/><path style="stroke:var(--ribbon-accent)" d="M8 14.5V5M4.5 8.5 8 5l3.5 3.5"/></symbol>
+      <symbol id="ri-forward" viewBox="0 0 16 16"><rect x="1.5" y="6.5" width="7" height="7" rx=".5"/><path style="stroke:var(--ribbon-accent)" d="M11.5 13.5v-11M9 5l2.5-2.5L14 5"/></symbol>
+      <symbol id="ri-backward" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="7" height="7" rx=".5"/><path style="stroke:var(--ribbon-accent)" d="M11.5 2.5v11M9 11l2.5 2.5L14 11"/></symbol>
+      <symbol id="ri-back" viewBox="0 0 16 16"><path d="M2.5 14.5h11"/><path style="stroke:var(--ribbon-accent)" d="M8 1.5V11M4.5 7.5 8 11l3.5-3.5"/></symbol>
+      <symbol id="ri-rotate-ccw" viewBox="0 0 16 16"><path d="M3.3 5.5A5.5 5.5 0 1 1 2.5 9"/><path style="stroke:var(--ribbon-accent)" d="M3 1.5v4h4"/></symbol>
+      <symbol id="ri-rotate-cw" viewBox="0 0 16 16"><path d="M12.7 5.5A5.5 5.5 0 1 0 13.5 9"/><path style="stroke:var(--ribbon-accent)" d="M13 1.5v4H9"/></symbol>
+      <symbol id="ri-flip-h" viewBox="0 0 16 16"><path d="M8 1.5v13" stroke-dasharray="1.5 1.5"/><path d="M5.5 4v8l-4-4z"/><path style="stroke:var(--ribbon-accent);fill:var(--ribbon-accent-soft)" d="M10.5 4v8l4-4z"/></symbol>
+      <symbol id="ri-flip-v" viewBox="0 0 16 16"><path d="M1.5 8h13" stroke-dasharray="1.5 1.5"/><path d="M4 5.5h8l-4-4z"/><path style="stroke:var(--ribbon-accent);fill:var(--ribbon-accent-soft)" d="M4 10.5h8l-4 4z"/></symbol>
+      <symbol id="ri-group" viewBox="0 0 16 16"><path d="M1.5 1.5h13v13h-13z" stroke-dasharray="1.5 1.5"/><rect x="3.5" y="3.5" width="5" height="5" rx=".5"/><rect style="stroke:var(--ribbon-accent)" x="7.5" y="7.5" width="5" height="5" rx=".5"/></symbol>
+      <symbol id="ri-ungroup" viewBox="0 0 16 16"><rect x="1.5" y="1.5" width="6" height="6" rx=".5"/><rect style="stroke:var(--ribbon-accent)" x="8.5" y="8.5" width="6" height="6" rx=".5"/></symbol>
+      <symbol id="ri-delete" viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5v-2h3v2M4.5 4.5l.7 9.5h5.6l.7-9.5"/></symbol>
+      <symbol id="ri-close" viewBox="0 0 16 16"><path d="m3.5 3.5 9 9M12.5 3.5l-9 9"/></symbol>
+      <symbol id="ri-row-add" viewBox="0 0 16 16"><path d="M1.5 1.5h9v9h-9zM1.5 6h9M6 1.5v9"/><path style="stroke:var(--ribbon-accent)" d="M12.5 9.5v5M10 12h5"/></symbol>
+      <symbol id="ri-row-del" viewBox="0 0 16 16"><path d="M1.5 1.5h9v9h-9zM1.5 6h9M6 1.5v9"/><path d="M10 12h5"/></symbol>
+      <symbol id="ri-table-del" viewBox="0 0 16 16"><path d="M1.5 1.5h9v9h-9zM1.5 6h9M6 1.5v9"/><path style="stroke:var(--ribbon-accent)" d="m10.5 10.5 4 4M14.5 10.5l-4 4"/></symbol>
+      <symbol id="ri-merge" viewBox="0 0 16 16"><rect x="1.5" y="3.5" width="13" height="9" rx=".5"/><path d="M8 3.5v2M8 10.5v2"/><path style="stroke:var(--ribbon-accent)" d="M3.5 8H7M5.5 6.5 7 8 5.5 9.5M12.5 8H9M10.5 6.5 9 8l1.5 1.5"/></symbol>
+      <symbol id="ri-split" viewBox="0 0 16 16"><rect x="1.5" y="3.5" width="13" height="9" rx=".5"/><path d="M8 3.5v9"/><path style="stroke:var(--ribbon-accent)" d="M3.5 8h3M5 6.5 3.5 8 5 9.5M12.5 8h-3M11 6.5l1.5 1.5-1.5 1.5"/></symbol>
+      <symbol id="ri-width-eq" viewBox="0 0 16 16"><path d="M1.5 3.5v9M8 3.5v9M14.5 3.5v9"/><path d="M3.5 8h3M9.5 8h3"/></symbol>
+      <symbol id="ri-height-eq" viewBox="0 0 16 16"><path d="M3.5 1.5h9M3.5 8h9M3.5 14.5h9"/><path d="M8 3.5v3M8 9.5v3"/></symbol>
+      <symbol id="ri-prev" viewBox="0 0 16 16"><path d="M10 3.5 5.5 8l4.5 4.5"/></symbol>
+      <symbol id="ri-next" viewBox="0 0 16 16"><path d="M6 3.5l4.5 4.5L6 12.5"/></symbol>
+      <symbol id="ri-page-num" viewBox="0 0 16 16"><path d="M6.5 2 5 14M11 2 9.5 14M2.5 5.5h11M2 10.5h11"/></symbol>
+      <symbol id="ri-page-total" viewBox="0 0 16 16"><path d="M5.5 1.5h8v10"/><path d="M2.5 4.5h8v10h-8z"/><path style="stroke:var(--ribbon-accent)" d="M4.5 8.5h4M4.5 11h4"/></symbol>
+      <symbol id="ri-file-name" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/><path style="stroke:var(--ribbon-accent)" d="M5.5 9.5h5M5.5 12h3"/></symbol>
+      <symbol id="ri-note-shape" viewBox="0 0 16 16"><path d="M2.5 1.5h8l3 3v10h-11z"/><path d="M4.5 12.5h7"/><path style="stroke:var(--ribbon-accent)" d="M4.5 6h7M4.5 9h7"/><circle style="stroke:var(--ribbon-accent);fill:var(--ui-surface)" cx="6.5" cy="6" r="1.2"/><circle style="stroke:var(--ribbon-accent);fill:var(--ui-surface)" cx="9.5" cy="9" r="1.2"/></symbol>
+      <symbol id="ri-chev" viewBox="0 0 8 8"><path d="M1.5 3 4 5.5 6.5 3"/></symbol>
+    </svg>
+
+    <!-- 리본 도구 모음: 그룹 = 명령 영역 + 아래쪽 이름 -->
     <div id="icon-toolbar">
       <div class="tb-group">
-        <button class="tb-btn" data-cmd="edit:undo" title="되돌리기 (Ctrl+Z)" aria-label="되돌리기"><span class="tb-sprite icon-undo" aria-hidden="true"></span></button>
-        <button class="tb-btn" data-cmd="edit:redo" title="다시 실행 (Ctrl+Shift+Z)" aria-label="다시 실행"><span class="tb-sprite icon-redo" aria-hidden="true"></span></button>
-      </div>
-      <span class="tb-sep"></span>
-      <div class="tb-group">
-        <button class="tb-btn" data-cmd="edit:cut" title="오려두기 (Ctrl+X)"><span class="tb-sprite icon-cut"></span><span class="tb-label">오려<br/>두기</span></button>
-        <button class="tb-btn tb-paste" data-cmd="edit:paste" title="붙이기 (Ctrl+V)">
-          <span class="tb-sprite icon-paste"></span><span class="tb-label">붙이기</span>
-        </button>
-        <button class="tb-btn" data-cmd="edit:format-copy" title="모양 복사 (Alt+C)"><span class="tb-sprite icon-format-copy"></span><span class="tb-label">모양<br/>복사</span></button>
-      </div>
-      <span class="tb-sep"></span>
-      <div class="tb-group">
-        <button class="tb-btn" id="tb-char-format" data-cmd="format:char-shape" title="글자 모양"><span class="tb-sprite icon-char-shape"></span><span class="tb-label">글자<br/>모양</span></button>
-        <button class="tb-btn" data-cmd="format:para-shape" title="문단 모양"><span class="tb-sprite icon-para-shape"></span><span class="tb-label">문단<br/>모양</span></button>
-      </div>
-      <span class="tb-sep"></span>
-      <div class="tb-group">
-        <button class="tb-btn" id="tb-numbering" data-cmd="format:toggle-numbering" title="문단 번호"><span class="tb-icon-text">1.</span><span class="tb-label">문단<br/>번호</span></button>
-        <button class="tb-btn" id="tb-bullet" title="글머리표"><span class="tb-icon-text">●</span><span class="tb-label">글머리<br/>표</span></button>
-        <button class="tb-btn" id="tb-level-up" data-cmd="format:level-increase" title="한 수준 증가"><span class="tb-icon-text">⇤</span><span class="tb-label">수준▲</span></button>
-        <button class="tb-btn" id="tb-level-down" data-cmd="format:level-decrease" title="한 수준 감소"><span class="tb-icon-text">⇥</span><span class="tb-label">수준▼</span></button>
-      </div>
-      <span class="tb-sep"></span>
-      <div class="tb-group">
-        <button class="tb-btn" data-cmd="table:create" title="표"><span class="tb-sprite icon-table"></span><span class="tb-label">표 ▾</span></button>
-        <button class="tb-btn" id="tb-shape" data-cmd="insert:shape" title="도형"><span class="tb-sprite icon-shape"></span><span class="tb-label">도형 ▾</span></button>
-        <button class="tb-btn" data-cmd="insert:image" title="그림"><span class="tb-sprite icon-image"></span><span class="tb-label">그림</span></button>
-      </div>
-      <span class="tb-sep"></span>
-      <div class="tb-group">
-        <button class="tb-btn" title="개체 속성 (P)" data-cmd="format:object-properties"><span class="tb-sprite icon-obj-props"></span><span class="tb-label">개체<br/>속성</span></button>
-        <button class="tb-btn" title="문자표 (Alt+F10)" data-cmd="insert:symbols"><span class="tb-sprite icon-symbols"></span><span class="tb-label">문자표</span></button>
-        <button class="tb-btn" data-cmd="insert:hyperlink" title="하이퍼링크"><span class="tb-sprite icon-hyperlink"></span><span class="tb-label">하이퍼<br/>링크</span></button>
-      </div>
-      <span class="tb-sep"></span>
-      <div class="tb-group tb-mode-group tb-object-context-group tb-rotate-group" data-toolbar-mode="object" style="display:none">
-        <span class="tb-mode-label">개체</span>
-        <span class="tb-sep"></span>
-        <button class="tb-btn" data-cmd="insert:picture-props" title="개체 속성"><span class="tb-sprite icon-obj-props"></span><span class="tb-label">개체<br/>속성</span></button>
-        <button class="tb-btn" data-cmd="insert:caption-toggle" title="캡션 넣기"><span class="tb-icon-text">C</span><span class="tb-label">캡션</span></button>
-        <span class="tb-sep"></span>
-        <button class="tb-btn" data-cmd="insert:arrange-front" title="맨 앞으로"><span class="tb-icon-text">⇈</span><span class="tb-label">맨<br/>앞으로</span></button>
-        <button class="tb-btn" data-cmd="insert:arrange-forward" title="앞으로"><span class="tb-icon-text">↑</span><span class="tb-label">앞으로</span></button>
-        <button class="tb-btn" data-cmd="insert:arrange-backward" title="뒤로"><span class="tb-icon-text">↓</span><span class="tb-label">뒤로</span></button>
-        <button class="tb-btn" data-cmd="insert:arrange-back" title="맨 뒤로"><span class="tb-icon-text">⇊</span><span class="tb-label">맨<br/>뒤로</span></button>
-        <span class="tb-sep"></span>
-        <button class="tb-btn" data-cmd="insert:rotate-ccw" title="왼쪽 90° 회전"><span class="tb-icon-text">&#x21B6;</span><span class="tb-label">왼쪽<br/>회전</span></button>
-        <button class="tb-btn" data-cmd="insert:rotate-cw" title="오른쪽 90° 회전"><span class="tb-icon-text">&#x21B7;</span><span class="tb-label">오른쪽<br/>회전</span></button>
-        <button class="tb-btn" data-cmd="insert:flip-horz" title="좌우 대칭"><span class="tb-icon-text">&#x21C4;</span><span class="tb-label">좌우<br/>대칭</span></button>
-        <button class="tb-btn" data-cmd="insert:flip-vert" title="상하 대칭"><span class="tb-icon-text">&#x21C5;</span><span class="tb-label">상하<br/>대칭</span></button>
-        <span class="tb-sep"></span>
-        <button class="tb-btn" data-cmd="insert:group-shapes" title="개체 묶기"><span class="tb-icon-text">⊞</span><span class="tb-label">묶기</span></button>
-        <button class="tb-btn" data-cmd="insert:ungroup-shapes" title="개체 풀기"><span class="tb-icon-text">⊟</span><span class="tb-label">풀기</span></button>
-        <button class="tb-btn tb-context-danger" data-cmd="insert:picture-delete" title="개체 지우기"><span class="tb-icon-text">×</span><span class="tb-label">지우기</span></button>
-      </div>
-      <div class="tb-group tb-mode-group tb-table-context-group" data-toolbar-mode="table" style="display:none">
-        <span class="tb-mode-label">표</span>
-        <span class="tb-sep"></span>
-        <button class="tb-btn" data-cmd="table:cell-props" title="표/셀 속성"><span class="tb-sprite icon-table"></span><span class="tb-label">표/셀<br/>속성</span></button>
-        <button class="tb-btn" data-cmd="table:insert-row-col" title="줄/칸 추가"><span class="tb-icon-text">＋</span><span class="tb-label">줄/칸<br/>추가</span></button>
-        <button class="tb-btn" data-cmd="table:delete-row-col" title="줄/칸 지우기"><span class="tb-icon-text">−</span><span class="tb-label">줄/칸<br/>지우기</span></button>
-        <span class="tb-sep"></span>
-        <button class="tb-btn" data-cmd="table:cell-merge" title="셀 합치기"><span class="tb-icon-text">⊕</span><span class="tb-label">셀<br/>합치기</span></button>
-        <button class="tb-btn" data-cmd="table:cell-split" title="셀 나누기"><span class="tb-icon-text">⊞</span><span class="tb-label">셀<br/>나누기</span></button>
-        <button class="tb-btn" data-cmd="table:cell-width-equal" title="셀 너비를 같게"><span class="tb-icon-text">↔</span><span class="tb-label">너비<br/>같게</span></button>
-        <button class="tb-btn" data-cmd="table:cell-height-equal" title="셀 높이를 같게"><span class="tb-icon-text">↕</span><span class="tb-label">높이<br/>같게</span></button>
-        <span class="tb-sep"></span>
-        <button class="tb-btn" data-cmd="table:caption-toggle" title="캡션 넣기"><span class="tb-icon-text">C</span><span class="tb-label">캡션</span></button>
-        <button class="tb-btn tb-context-danger" data-cmd="table:delete" title="표 지우기"><span class="tb-icon-text">×</span><span class="tb-label">표<br/>지우기</span></button>
-      </div>
-      <span class="tb-sep"></span>
-      <div class="tb-group">
-        <button class="tb-btn" data-cmd="page:header-create" title="머리말"><span class="tb-sprite icon-header"></span><span class="tb-label">머리말</span></button>
-        <button class="tb-btn" data-cmd="page:footer-create" title="꼬리말"><span class="tb-sprite icon-footer"></span><span class="tb-label">꼬리말</span></button>
-        <button class="tb-btn" data-cmd="insert:footnote" title="각주"><span class="tb-sprite icon-footnote"></span><span class="tb-label">각주</span></button>
-        <button class="tb-btn" data-cmd="insert:endnote" title="미주"><span class="tb-sprite icon-endnote"></span><span class="tb-label">미주</span></button>
-        <div class="tb-split">
-          <button class="tb-btn tb-split-main" title="찾기 (Ctrl+F)" data-cmd="edit:find"><span class="tb-sprite icon-find"></span><span class="tb-label">찾기</span></button>
-          <button class="tb-btn tb-split-arrow" title="찾기 메뉴"><span class="tb-arrow-icon">▾</span></button>
-          <div class="tb-split-menu">
-            <div class="tb-split-item" data-cmd="edit:find">찾기(F) <span class="tb-split-shortcut">Ctrl+F</span></div>
-            <div class="tb-split-item" data-cmd="edit:compare-documents">문서 비교 <span class="tb-split-shortcut">Alt+Shift+V</span></div>
-            <div class="tb-split-item" data-cmd="edit:document-history">버전 <span class="tb-split-shortcut">Ctrl+Shift+H</span></div>
-            <div class="tb-split-item" data-cmd="edit:find-replace">찾아 바꾸기(E) <span class="tb-split-shortcut">Ctrl+F2</span></div>
-            <div class="tb-split-item" data-cmd="edit:find-again">다시 찾기(X) <span class="tb-split-shortcut">Ctrl+L</span></div>
-            <div class="tb-split-sep"></div>
-            <div class="tb-split-item" data-cmd="edit:goto">찾아가기(G) <span class="tb-split-shortcut">Alt+G</span></div>
+        <div class="tb-group-body">
+          <div class="tb-stack">
+            <button class="tb-btn tb-sm" data-cmd="edit:undo" title="되돌리기 (Ctrl+Z)"><svg class="tb-ico" aria-hidden="true"><use href="#ri-undo"/></svg><span class="tb-label">되돌리기</span></button>
+            <button class="tb-btn tb-sm" data-cmd="edit:redo" title="다시 실행 (Ctrl+Shift+Z)"><svg class="tb-ico" aria-hidden="true"><use href="#ri-redo"/></svg><span class="tb-label">다시 실행</span></button>
+          </div>
+          <div class="tb-stack">
+            <button class="tb-btn tb-sm" data-cmd="edit:cut" title="오려두기 (Ctrl+X)"><svg class="tb-ico" aria-hidden="true"><use href="#ri-cut"/></svg><span class="tb-label">오려두기</span></button>
+            <button class="tb-btn tb-sm" data-cmd="edit:format-copy" title="모양 복사 (Alt+C)"><svg class="tb-ico" aria-hidden="true"><use href="#ri-format-copy"/></svg><span class="tb-label">모양 복사</span></button>
           </div>
         </div>
-        <button class="tb-btn" data-cmd="edit:document-history" title="버전 (Ctrl+Shift+H)"><span class="tb-icon-text">⧉</span><span class="tb-label">버전</span></button>
-        <button class="tb-btn" data-cmd="edit:compare-documents" title="문서 비교 (Alt+Shift+V)"><span class="tb-icon-text">≍</span><span class="tb-label">문서<br/>비교</span></button>
+        <span class="tb-caption">편집</span>
       </div>
+      <span class="tb-sep"></span>
       <div class="tb-group">
-        <button class="tb-btn" data-cmd="view:ctrl-mark" title="조판 부호"><span class="tb-sprite icon-ctrl-mark"></span><span class="tb-label">조판<br/>부호</span></button>
-        <button class="tb-btn" data-cmd="view:para-mark" title="문단 부호"><span class="tb-sprite icon-para-mark"></span><span class="tb-label">문단<br/>부호</span></button>
-        <button class="tb-btn" data-cmd="view:toggle-grid" title="격자 보기"><span class="tb-sprite icon-grid"></span><span class="tb-label">격자<br/>보기</span></button>
+        <div class="tb-group-body">
+          <button class="tb-btn tb-lg" id="tb-char-format" data-cmd="format:char-shape" title="글자 모양"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-char"/></svg><span class="tb-label">글자<br/>모양</span></button>
+          <button class="tb-btn tb-lg" data-cmd="format:para-shape" title="문단 모양"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-para"/></svg><span class="tb-label">문단<br/>모양</span></button>
+        </div>
+        <span class="tb-caption">서식</span>
+      </div>
+      <span class="tb-sep"></span>
+      <div class="tb-group">
+        <div class="tb-group-body">
+          <div class="tb-stack">
+            <button class="tb-btn tb-sm" id="tb-numbering" data-cmd="format:toggle-numbering" title="문단 번호"><svg class="tb-ico" aria-hidden="true"><use href="#ri-numbering"/></svg><span class="tb-label">문단 번호</span></button>
+            <button class="tb-btn tb-sm" id="tb-bullet" title="글머리표"><svg class="tb-ico" aria-hidden="true"><use href="#ri-bullet"/></svg><span class="tb-label">글머리표</span></button>
+          </div>
+          <div class="tb-stack">
+            <button class="tb-btn tb-sm" id="tb-level-up" data-cmd="format:level-increase" title="한 수준 증가"><svg class="tb-ico" aria-hidden="true"><use href="#ri-level-up"/></svg><span class="tb-label">수준 증가</span></button>
+            <button class="tb-btn tb-sm" id="tb-level-down" data-cmd="format:level-decrease" title="한 수준 감소"><svg class="tb-ico" aria-hidden="true"><use href="#ri-level-down"/></svg><span class="tb-label">수준 감소</span></button>
+          </div>
+        </div>
+        <span class="tb-caption">목록</span>
+      </div>
+      <span class="tb-sep"></span>
+      <div class="tb-group">
+        <div class="tb-group-body">
+          <button class="tb-btn tb-lg" data-cmd="table:create" title="표"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-table"/></svg><span class="tb-label">표<svg class="tb-chev" aria-hidden="true"><use href="#ri-chev"/></svg></span></button>
+          <button class="tb-btn tb-lg" id="tb-shape" data-cmd="insert:shape" title="도형"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-shape"/></svg><span class="tb-label">도형<svg class="tb-chev" aria-hidden="true"><use href="#ri-chev"/></svg></span></button>
+          <button class="tb-btn tb-lg" data-cmd="insert:image" title="그림"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-image"/></svg><span class="tb-label">그림</span></button>
+          <div class="tb-stack">
+            <button class="tb-btn tb-sm" title="개체 속성 (P)" data-cmd="format:object-properties"><svg class="tb-ico" aria-hidden="true"><use href="#ri-props"/></svg><span class="tb-label">개체 속성</span></button>
+            <button class="tb-btn tb-sm" title="문자표 (Alt+F10)" data-cmd="insert:symbols"><svg class="tb-ico" aria-hidden="true"><use href="#ri-symbols"/></svg><span class="tb-label">문자표</span></button>
+            <button class="tb-btn tb-sm" data-cmd="insert:hyperlink" title="하이퍼링크"><svg class="tb-ico" aria-hidden="true"><use href="#ri-link"/></svg><span class="tb-label">하이퍼링크</span></button>
+          </div>
+        </div>
+        <span class="tb-caption">삽입</span>
+      </div>
+      <div class="tb-group tb-mode-group tb-object-context-group tb-rotate-group" data-toolbar-mode="object" style="display:none">
+        <div class="tb-section">
+          <div class="tb-group-body">
+            <button class="tb-btn tb-lg" data-cmd="insert:picture-props" title="개체 속성"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-props"/></svg><span class="tb-label">개체<br/>속성</span></button>
+            <div class="tb-stack">
+              <button class="tb-btn tb-sm" data-cmd="insert:caption-toggle" title="캡션 넣기"><svg class="tb-ico" aria-hidden="true"><use href="#ri-caption"/></svg><span class="tb-label">캡션</span></button>
+              <button class="tb-btn tb-sm tb-context-danger" data-cmd="insert:picture-delete" title="개체 지우기"><svg class="tb-ico" aria-hidden="true"><use href="#ri-delete"/></svg><span class="tb-label">지우기</span></button>
+            </div>
+          </div>
+          <span class="tb-caption tb-mode-label">개체</span>
+        </div>
+        <span class="tb-sep"></span>
+        <div class="tb-section">
+          <div class="tb-group-body">
+            <div class="tb-stack">
+              <button class="tb-btn tb-sm" data-cmd="insert:arrange-front" title="맨 앞으로"><svg class="tb-ico" aria-hidden="true"><use href="#ri-front"/></svg><span class="tb-label">맨 앞으로</span></button>
+              <button class="tb-btn tb-sm" data-cmd="insert:arrange-forward" title="앞으로"><svg class="tb-ico" aria-hidden="true"><use href="#ri-forward"/></svg><span class="tb-label">앞으로</span></button>
+            </div>
+            <div class="tb-stack">
+              <button class="tb-btn tb-sm" data-cmd="insert:arrange-backward" title="뒤로"><svg class="tb-ico" aria-hidden="true"><use href="#ri-backward"/></svg><span class="tb-label">뒤로</span></button>
+              <button class="tb-btn tb-sm" data-cmd="insert:arrange-back" title="맨 뒤로"><svg class="tb-ico" aria-hidden="true"><use href="#ri-back"/></svg><span class="tb-label">맨 뒤로</span></button>
+            </div>
+          </div>
+          <span class="tb-caption">순서</span>
+        </div>
+        <span class="tb-sep"></span>
+        <div class="tb-section">
+          <div class="tb-group-body">
+            <div class="tb-stack">
+              <button class="tb-btn tb-sm" data-cmd="insert:rotate-ccw" title="왼쪽 90° 회전"><svg class="tb-ico" aria-hidden="true"><use href="#ri-rotate-ccw"/></svg><span class="tb-label">왼쪽 회전</span></button>
+              <button class="tb-btn tb-sm" data-cmd="insert:rotate-cw" title="오른쪽 90° 회전"><svg class="tb-ico" aria-hidden="true"><use href="#ri-rotate-cw"/></svg><span class="tb-label">오른쪽 회전</span></button>
+            </div>
+            <div class="tb-stack">
+              <button class="tb-btn tb-sm" data-cmd="insert:flip-horz" title="좌우 대칭"><svg class="tb-ico" aria-hidden="true"><use href="#ri-flip-h"/></svg><span class="tb-label">좌우 대칭</span></button>
+              <button class="tb-btn tb-sm" data-cmd="insert:flip-vert" title="상하 대칭"><svg class="tb-ico" aria-hidden="true"><use href="#ri-flip-v"/></svg><span class="tb-label">상하 대칭</span></button>
+            </div>
+          </div>
+          <span class="tb-caption">회전</span>
+        </div>
+        <span class="tb-sep"></span>
+        <div class="tb-section">
+          <div class="tb-group-body">
+            <div class="tb-stack">
+              <button class="tb-btn tb-sm" data-cmd="insert:group-shapes" title="개체 묶기"><svg class="tb-ico" aria-hidden="true"><use href="#ri-group"/></svg><span class="tb-label">묶기</span></button>
+              <button class="tb-btn tb-sm" data-cmd="insert:ungroup-shapes" title="개체 풀기"><svg class="tb-ico" aria-hidden="true"><use href="#ri-ungroup"/></svg><span class="tb-label">풀기</span></button>
+            </div>
+          </div>
+          <span class="tb-caption">묶기</span>
+        </div>
+      </div>
+      <div class="tb-group tb-mode-group tb-table-context-group tb-table-tile-table" data-toolbar-mode="table" style="display:none">
+        <div class="tb-group-body" data-table-ribbon-menu>
+          <button type="button" class="tb-btn tb-lg tb-table-menu-trigger" title="표 메뉴" aria-label="표 메뉴" aria-haspopup="menu" aria-expanded="false" aria-controls="table-ribbon-table-menu"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-table"/></svg><svg class="tb-chev" aria-hidden="true"><use href="#ri-chev"/></svg><span class="tb-label">표</span></button>
+          <div id="table-ribbon-table-menu" class="tb-table-menu-panel" role="menu" aria-label="표" hidden>
+            <button type="button" class="tb-table-menu-item" role="menuitem" data-cmd="table:cell-props"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-cell-props"/></svg><span>표/셀 속성</span></button>
+            <button type="button" class="tb-table-menu-item" role="menuitem" data-cmd="table:caption-toggle"><svg class="tb-ico" aria-hidden="true"><use href="#ri-caption"/></svg><span>캡션 넣기</span></button>
+          </div>
+        </div>
+      </div>
+      <div class="tb-group tb-mode-group tb-table-context-group tb-table-tile-insert" data-toolbar-mode="table" style="display:none">
+        <div class="tb-group-body" data-table-ribbon-menu>
+          <button type="button" class="tb-btn tb-lg tb-table-menu-trigger" title="줄/칸 추가 메뉴" aria-label="줄/칸 추가 메뉴" aria-haspopup="menu" aria-expanded="false" aria-controls="table-ribbon-insert-menu"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-row-add"/></svg><svg class="tb-chev" aria-hidden="true"><use href="#ri-chev"/></svg><span class="tb-label">줄/칸 추가</span></button>
+          <div id="table-ribbon-insert-menu" class="tb-table-menu-panel" role="menu" aria-label="줄/칸 추가" hidden>
+            <button type="button" class="tb-table-menu-item" role="menuitem" data-cmd="table:insert-row-col"><svg class="tb-ico" aria-hidden="true"><use href="#ri-row-add"/></svg><span>줄/칸 추가하기…</span><span class="tb-table-menu-shortcut" aria-hidden="true">Alt+Enter</span></button>
+            <button type="button" class="tb-table-menu-item" role="menuitem" data-cmd="table:insert-row-above"><svg class="tb-ico" aria-hidden="true"><use href="#ri-row-add"/></svg><span>위쪽에 줄 추가</span></button>
+            <button type="button" class="tb-table-menu-item" role="menuitem" data-cmd="table:insert-row-below"><svg class="tb-ico" aria-hidden="true"><use href="#ri-row-add"/></svg><span>아래쪽에 줄 추가</span></button>
+            <button type="button" class="tb-table-menu-item" role="menuitem" data-cmd="table:insert-col-left"><svg class="tb-ico" aria-hidden="true"><use href="#ri-row-add"/></svg><span>왼쪽에 칸 추가</span></button>
+            <button type="button" class="tb-table-menu-item" role="menuitem" data-cmd="table:insert-col-right"><svg class="tb-ico" aria-hidden="true"><use href="#ri-row-add"/></svg><span>오른쪽에 칸 추가</span></button>
+          </div>
+        </div>
+      </div>
+      <div class="tb-group tb-mode-group tb-table-context-group tb-table-tile-delete" data-toolbar-mode="table" style="display:none">
+        <div class="tb-group-body" data-table-ribbon-menu>
+          <button type="button" class="tb-btn tb-lg tb-table-menu-trigger" title="줄/칸 지우기 메뉴" aria-label="줄/칸 지우기 메뉴" aria-haspopup="menu" aria-expanded="false" aria-controls="table-ribbon-delete-menu"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-row-del"/></svg><svg class="tb-chev" aria-hidden="true"><use href="#ri-chev"/></svg><span class="tb-label">줄/칸 지우기</span></button>
+          <div id="table-ribbon-delete-menu" class="tb-table-menu-panel" role="menu" aria-label="줄/칸 지우기" hidden>
+            <button type="button" class="tb-table-menu-item" role="menuitem" data-cmd="table:delete-row-col"><svg class="tb-ico" aria-hidden="true"><use href="#ri-row-del"/></svg><span>줄/칸 지우기…</span><span class="tb-table-menu-shortcut" aria-hidden="true">Alt+Delete</span></button>
+            <button type="button" class="tb-table-menu-item" role="menuitem" data-cmd="table:delete-row"><svg class="tb-ico" aria-hidden="true"><use href="#ri-row-del"/></svg><span>줄 지우기</span></button>
+            <button type="button" class="tb-table-menu-item" role="menuitem" data-cmd="table:delete-col"><svg class="tb-ico" aria-hidden="true"><use href="#ri-row-del"/></svg><span>칸 지우기</span></button>
+            <button type="button" class="tb-table-menu-item tb-context-danger" role="menuitem" data-cmd="table:delete"><svg class="tb-ico" aria-hidden="true"><use href="#ri-table-del"/></svg><span>표 지우기</span></button>
+          </div>
+        </div>
+      </div>
+      <div class="tb-group tb-mode-group tb-table-context-group tb-table-tile-equal" data-toolbar-mode="table" style="display:none">
+        <div class="tb-group-body">
+          <div class="tb-stack">
+            <button type="button" class="tb-btn tb-sm" data-cmd="table:cell-height-equal" title="셀 높이를 같게"><svg class="tb-ico" aria-hidden="true"><use href="#ri-height-eq"/></svg><span class="tb-label">셀 높이를 같게</span></button>
+            <button type="button" class="tb-btn tb-sm" data-cmd="table:cell-width-equal" title="셀 너비를 같게"><svg class="tb-ico" aria-hidden="true"><use href="#ri-width-eq"/></svg><span class="tb-label">셀 너비를 같게</span></button>
+          </div>
+        </div>
+      </div>
+      <div class="tb-group tb-mode-group tb-table-context-group tb-table-tile-cell" data-toolbar-mode="table" style="display:none">
+        <div class="tb-group-body" data-table-ribbon-menu>
+          <button type="button" class="tb-btn tb-lg tb-table-menu-trigger" title="셀 편집 메뉴" aria-label="셀 편집 메뉴" aria-haspopup="menu" aria-expanded="false" aria-controls="table-ribbon-cell-menu"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-cell-props"/></svg><svg class="tb-chev" aria-hidden="true"><use href="#ri-chev"/></svg><span class="tb-label">셀 편집</span></button>
+          <div id="table-ribbon-cell-menu" class="tb-table-menu-panel" role="menu" aria-label="셀 편집" hidden>
+            <button type="button" class="tb-table-menu-item" role="menuitem" data-cmd="table:cell-merge"><svg class="tb-ico" aria-hidden="true"><use href="#ri-merge"/></svg><span>셀 합치기</span><span class="tb-table-menu-shortcut" aria-hidden="true">M</span></button>
+            <button type="button" class="tb-table-menu-item" role="menuitem" data-cmd="table:cell-split"><svg class="tb-ico" aria-hidden="true"><use href="#ri-split"/></svg><span>셀 나누기</span><span class="tb-table-menu-shortcut" aria-hidden="true">S</span></button>
+          </div>
+        </div>
+      </div>
+      <span class="tb-sep"></span>
+      <div class="tb-group">
+        <div class="tb-group-body">
+          <div class="tb-stack">
+            <button class="tb-btn tb-sm" data-cmd="page:header-create" title="머리말"><svg class="tb-ico" aria-hidden="true"><use href="#ri-header"/></svg><span class="tb-label">머리말</span></button>
+            <button class="tb-btn tb-sm" data-cmd="page:footer-create" title="꼬리말"><svg class="tb-ico" aria-hidden="true"><use href="#ri-footer"/></svg><span class="tb-label">꼬리말</span></button>
+          </div>
+          <div class="tb-stack">
+            <button class="tb-btn tb-sm" data-cmd="insert:footnote" title="각주"><svg class="tb-ico" aria-hidden="true"><use href="#ri-footnote"/></svg><span class="tb-label">각주</span></button>
+            <button class="tb-btn tb-sm" data-cmd="insert:endnote" title="미주"><svg class="tb-ico" aria-hidden="true"><use href="#ri-endnote"/></svg><span class="tb-label">미주</span></button>
+          </div>
+        </div>
+        <span class="tb-caption">쪽</span>
+      </div>
+      <span class="tb-sep"></span>
+      <div class="tb-group">
+        <div class="tb-group-body">
+          <div class="tb-split">
+            <button class="tb-btn tb-lg tb-split-main" title="찾기 (Ctrl+F)" data-cmd="edit:find"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-find"/></svg><span class="tb-label">찾기</span></button>
+            <button class="tb-btn tb-split-arrow" title="찾기 메뉴" aria-label="찾기 메뉴"><svg class="tb-chev" aria-hidden="true"><use href="#ri-chev"/></svg></button>
+            <div class="tb-split-menu">
+              <div class="tb-split-item" data-cmd="edit:find">찾기(F) <span class="tb-split-shortcut">Ctrl+F</span></div>
+              <div class="tb-split-item" data-cmd="edit:compare-documents">문서 비교 <span class="tb-split-shortcut">Alt+Shift+V</span></div>
+              <div class="tb-split-item" data-cmd="edit:document-history">버전 <span class="tb-split-shortcut">Ctrl+Shift+H</span></div>
+              <div class="tb-split-item" data-cmd="edit:find-replace">찾아 바꾸기(E) <span class="tb-split-shortcut">Ctrl+F2</span></div>
+              <div class="tb-split-item" data-cmd="edit:find-again">다시 찾기(X) <span class="tb-split-shortcut">Ctrl+L</span></div>
+              <div class="tb-split-sep"></div>
+              <div class="tb-split-item" data-cmd="edit:goto">찾아가기(G) <span class="tb-split-shortcut">Alt+G</span></div>
+            </div>
+          </div>
+          <button class="tb-btn tb-lg" data-cmd="edit:compare-documents" title="문서 비교 (Alt+Shift+V)"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-compare"/></svg><span class="tb-label">문서 비교</span></button>
+        </div>
+        <span class="tb-caption">찾기</span>
+      </div>
+      <span class="tb-sep"></span>
+      <div class="tb-group">
+        <div class="tb-group-body">
+          <div class="tb-stack">
+            <button class="tb-btn tb-sm" data-cmd="view:ctrl-mark" title="조판 부호"><svg class="tb-ico" aria-hidden="true"><use href="#ri-ctrl-mark"/></svg><span class="tb-label">조판 부호</span></button>
+            <button class="tb-btn tb-sm" data-cmd="view:para-mark" title="문단 부호"><svg class="tb-ico" aria-hidden="true"><use href="#ri-para-mark"/></svg><span class="tb-label">문단 부호</span></button>
+            <button class="tb-btn tb-sm" data-cmd="view:toggle-grid" title="격자 보기"><svg class="tb-ico" aria-hidden="true"><use href="#ri-grid"/></svg><span class="tb-label">격자 보기</span></button>
+          </div>
+        </div>
+        <span class="tb-caption">보기</span>
       </div>
       <span class="tb-sep"></span>
       <span id="hf-edit-status-live" class="visually-hidden" aria-live="polite"></span>
       <!-- 머리말/꼬리말 편집 모드 전용 도구상자 (숨김) -->
       <div class="tb-group tb-mode-group tb-headerfooter-group" data-toolbar-mode="header-footer" style="display:none">
-        <span class="tb-hf-label">머리말</span>
+        <div class="tb-section">
+          <div class="tb-group-body">
+            <span class="tb-hf-label">머리말</span>
+            <div class="tb-stack">
+              <button class="tb-btn tb-sm" data-cmd="page:headerfooter-prev" title="이전"><svg class="tb-ico" aria-hidden="true"><use href="#ri-prev"/></svg><span class="tb-label">이전</span></button>
+              <button class="tb-btn tb-sm" data-cmd="page:headerfooter-next" title="다음"><svg class="tb-ico" aria-hidden="true"><use href="#ri-next"/></svg><span class="tb-label">다음</span></button>
+            </div>
+            <div class="tb-stack">
+              <button class="tb-btn tb-sm" data-cmd="page:headerfooter-close" title="닫기"><svg class="tb-ico" aria-hidden="true"><use href="#ri-close"/></svg><span class="tb-label">닫기</span></button>
+              <button class="tb-btn tb-sm tb-hf-delete" data-cmd="page:headerfooter-delete" title="지우기"><svg class="tb-ico" aria-hidden="true"><use href="#ri-delete"/></svg><span class="tb-label">지우기</span></button>
+            </div>
+          </div>
+          <span class="tb-caption">머리말/꼬리말</span>
+        </div>
         <span class="tb-sep"></span>
-        <button class="tb-btn" data-cmd="page:headerfooter-prev" title="이전"><span class="tb-icon-text">◀</span><span class="tb-label">이전</span></button>
-        <button class="tb-btn" data-cmd="page:headerfooter-next" title="다음"><span class="tb-icon-text">▶</span><span class="tb-label">다음</span></button>
-        <span class="tb-sep"></span>
-        <button class="tb-btn" data-cmd="page:headerfooter-close" title="닫기"><span class="tb-icon-text">✕</span><span class="tb-label">닫기</span></button>
-        <button class="tb-btn tb-hf-delete" data-cmd="page:headerfooter-delete" title="지우기"><span class="tb-icon-text">🗑</span><span class="tb-label">지우기</span></button>
-        <span class="tb-sep"></span>
-        <button class="tb-btn" data-cmd="page:insert-field-pagenum" title="쪽 번호 삽입"><span class="tb-icon-text">#</span><span class="tb-label">쪽번호</span></button>
-        <button class="tb-btn" data-cmd="page:insert-field-totalpage" title="총 쪽수 삽입"><span class="tb-icon-text">##</span><span class="tb-label">총쪽수</span></button>
-        <button class="tb-btn" data-cmd="page:insert-field-filename" title="파일 이름 삽입"><span class="tb-icon-text">F</span><span class="tb-label">파일명</span></button>
+        <div class="tb-section">
+          <div class="tb-group-body">
+            <div class="tb-stack">
+              <button class="tb-btn tb-sm" data-cmd="page:insert-field-pagenum" title="쪽 번호 삽입"><svg class="tb-ico" aria-hidden="true"><use href="#ri-page-num"/></svg><span class="tb-label">쪽 번호</span></button>
+              <button class="tb-btn tb-sm" data-cmd="page:insert-field-totalpage" title="총 쪽수 삽입"><svg class="tb-ico" aria-hidden="true"><use href="#ri-page-total"/></svg><span class="tb-label">총 쪽수</span></button>
+              <button class="tb-btn tb-sm" data-cmd="page:insert-field-filename" title="파일 이름 삽입"><svg class="tb-ico" aria-hidden="true"><use href="#ri-file-name"/></svg><span class="tb-label">파일 이름</span></button>
+            </div>
+          </div>
+          <span class="tb-caption">필드</span>
+        </div>
       </div>
       <!-- 주석 편집 모드 전용 도구상자 (숨김) -->
       <div class="tb-group tb-mode-group tb-note-group" data-toolbar-mode="note" style="display:none">
-        <span class="tb-note-label">주석</span>
+        <div class="tb-section">
+          <div class="tb-group-body">
+            <button class="tb-btn tb-lg" data-cmd="insert:footnote" title="각주"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-footnote"/></svg><span class="tb-label">각주</span></button>
+            <button class="tb-btn tb-lg" data-cmd="insert:endnote" title="미주"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-endnote"/></svg><span class="tb-label">미주</span></button>
+            <div class="tb-stack">
+              <button class="tb-btn tb-sm" data-cmd="insert:endnote-shape" title="각주/미주 모양"><svg class="tb-ico" aria-hidden="true"><use href="#ri-note-shape"/></svg><span class="tb-label">각주/미주 모양</span></button>
+            </div>
+          </div>
+          <span class="tb-caption tb-note-label">주석</span>
+        </div>
         <span class="tb-sep"></span>
-        <button class="tb-btn" data-cmd="insert:footnote" title="각주"><span class="tb-sprite icon-footnote"></span><span class="tb-label">각주</span></button>
-        <button class="tb-btn" data-cmd="insert:endnote" title="미주"><span class="tb-sprite icon-endnote"></span><span class="tb-label">미주</span></button>
-        <button class="tb-btn" data-cmd="insert:endnote-shape" title="각주/미주 모양"><span class="tb-sprite icon-endnote"></span><span class="tb-label">각주/미주<br/>모양</span></button>
-        <span class="tb-sep"></span>
-        <button class="tb-btn tb-note-close" data-cmd="insert:note-close" title="닫기 (Shift+Esc)"><span class="tb-icon-text">×</span><span class="tb-label">닫기</span></button>
+        <div class="tb-section">
+          <div class="tb-group-body">
+            <button class="tb-btn tb-lg tb-note-close" data-cmd="insert:note-close" title="닫기 (Shift+Esc)"><svg class="tb-ico" aria-hidden="true"><use href="#ri-lg-close"/></svg><span class="tb-label">닫기</span></button>
+          </div>
+          <span class="tb-caption">닫기</span>
+        </div>
       </div>
       <!-- 파일 열기 (숨김) -->
       <input type="file" id="file-input" accept=".hwp,.hwpx,.hml,.rhwpx,application/xml,text/xml,application/vnd.rauhwpx.history" style="display:none" />
@@ -697,22 +880,26 @@
     </main>
 
     <!-- 하단 상태 바 -->
-    <footer id="status-bar">
-      <span id="sb-page" class="stb-item">1 / 1 쪽</span>
-      <span class="stb-divider"></span>
-      <span id="sb-section" class="stb-item">구역: 1 / 1</span>
-      <span class="stb-divider"></span>
-      <span id="sb-mode" class="stb-item">삽입</span>
-      <span id="sb-field" class="stb-item" style="display:none"></span>
-      <span id="sb-message" class="stb-message"></span>
-      <span class="stb-right">
-        <button id="sb-zoom-fit-width" class="stb-icon-btn" title="폭 맞춤"><span class="tb-sprite icon-zoom-fit-width"></span></button>
-        <button id="sb-zoom-fit" class="stb-icon-btn" title="쪽 맞춤"><span class="tb-sprite icon-zoom-fit"></span></button>
-        <span class="stb-divider"></span>
-        <span id="sb-zoom-val" class="stb-zoom-val">100%</span>
-        <button id="sb-zoom-out" class="stb-icon-btn" title="축소"><span class="tb-sprite icon-zoom-out"></span></button>
-        <button id="sb-zoom-in" class="stb-icon-btn" title="확대"><span class="tb-sprite icon-zoom-in"></span></button>
-      </span>
+    <footer id="status-bar" aria-label="문서 상태">
+      <div class="stb-document">
+        <span id="sb-page" class="stb-item" title="현재 쪽 / 전체 쪽">1 / 1 쪽</span>
+        <span id="sb-paper" class="stb-item" title="용지 크기">—</span>
+        <span id="sb-count" class="stb-item stb-count" title="문서 글자 수">0글자</span>
+        <span id="sb-section" class="stb-item stb-secondary">구역: 1 / 1</span>
+        <span id="sb-mode" class="stb-item stb-secondary">삽입</span>
+        <span id="sb-field" class="stb-item" style="display:none"></span>
+      </div>
+      <span id="sb-message" class="stb-message" role="status"></span>
+      <div class="stb-right" role="group" aria-label="문서 확대 및 축소">
+        <div class="stb-fit-controls">
+          <button type="button" id="sb-zoom-fit-width" class="stb-icon-btn" title="폭 맞춤" aria-label="폭 맞춤"><span class="tb-sprite icon-zoom-fit-width" aria-hidden="true"></span></button>
+          <button type="button" id="sb-zoom-fit" class="stb-icon-btn" title="쪽 맞춤" aria-label="쪽 맞춤"><span class="tb-sprite icon-zoom-fit" aria-hidden="true"></span></button>
+        </div>
+        <button type="button" id="sb-zoom-out" class="stb-icon-btn" title="축소" aria-label="축소"><span class="tb-sprite icon-zoom-out" aria-hidden="true"></span></button>
+        <input id="sb-zoom-range" type="range" min="10" max="500" step="1" value="100" aria-label="확대 비율" aria-valuetext="100%" />
+        <button type="button" id="sb-zoom-in" class="stb-icon-btn" title="확대" aria-label="확대"><span class="tb-sprite icon-zoom-in" aria-hidden="true"></span></button>
+        <button type="button" id="sb-zoom-val" class="stb-zoom-val" title="100% / 쪽 맞춤 전환" aria-label="확대 비율 100%, 100% 또는 쪽 맞춤으로 전환">100%</button>
+      </div>
     </footer>
   </div>
   <script type="module" src="/src/main.ts"></script>

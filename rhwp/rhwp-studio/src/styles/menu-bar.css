@@ -2,6 +2,7 @@
    1행: 메뉴바
    ================================================================ */
 #menu-bar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 0;
@@ -37,6 +38,35 @@ html.desktop-mac #menu-bar::after {
   min-width: 36px;
   flex: 1 1 auto;
   -webkit-app-region: drag;
+}
+
+/* The filename sits directly before search; search remains the last control. */
+#menu-bar #editor-command-search {
+  order: 2;
+  margin-left: 8px;
+  flex: 0 0 auto;
+}
+
+#editor-document-title {
+  order: 1;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(42vw, 600px);
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--ui-text-secondary);
+  font: 600 13px/1 var(--font-family-ui);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+#editor-document-title[hidden] { display: none; }
+#editor-document-title[hidden] + #editor-command-search { margin-left: auto; }
+@media (max-width: 767px) {
+  #editor-document-title { display: none; }
+  #menu-bar #editor-command-search { margin-left: auto; }
 }
 
 /* Focus mode paints its own bar over this row. Electron still includes
@@ -129,6 +159,16 @@ html.desktop-mac #menu-bar .menu-title {
   height: 16px;
   background-image: var(--ui-icon-sprite-url);
   background-repeat: no-repeat;
+}
+
+/* Text and shortcuts give the expanded menus a consistent reading edge. */
+#menu-bar .menu-dropdown .md-icon {
+  display: none;
+}
+
+#menu-bar .menu-dropdown .md-item,
+#menu-bar .menu-dropdown .md-sub {
+  padding-left: 12px;
 }
 
 /* 텍스트 기반 아이콘은 메뉴에서도 absolute 유지 */

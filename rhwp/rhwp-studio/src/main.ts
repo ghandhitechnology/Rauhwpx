@@ -24,6 +24,11 @@ import {
 import { InputHandler } from '@/engine/input-handler';
 import { Toolbar } from '@/ui/toolbar';
 import { EditorToolbarOverflow } from '@/ui/editor-toolbar-overflow';
+import { setupTableRibbonMenus, type TableRibbonMenusController } from '@/ui/table-ribbon-menu';
+import { EditorStyleOverflow } from '@/ui/editor-style-overflow';
+import { setupStatusZoomSlider } from '@/ui/status-zoom';
+import { describePaperSize } from '@/ui/status-paper-size';
+import { StatusCharacterCounter } from '@/ui/status-character-count';
 import { MenuBar } from '@/ui/menu-bar';
 import { loadWebFonts, resolveCanvasKitFontPlan } from '@/core/font-loader';
 import { withCanvasKitSurfaceBlockers } from '@/core/canvaskit-document-preflight';
@@ -284,6 +289,8 @@ let inputHandler: InputHandler | null = null;
 let commandPalette: CommandPalette | null = null;
 let toolbar: Toolbar | null = null;
 let editorToolbarOverflow: EditorToolbarOverflow | null = null;
+let tableRibbonMenus: TableRibbonMenusController | null = null;
+let editorStyleOverflow: EditorStyleOverflow | null = null;
 let ruler: Ruler | null = null;
 let rendererSession: RendererSession | null = null;
 let editMode: EditorEditMode = 'normal';
@@ -890,6 +897,68 @@ const sbMessage = () => document.getElementById('sb-message')!;
 const sbPage = () => document.getElementById('sb-page')!;
 const sbSection = () => document.getElementById('sb-section')!;
 const sbZoomVal = () => document.getElementById('sb-zoom-val')!;
+const sbPaper = () => document.getElementById('sb-paper')!;
+const sbCount = () => document.getElementById('sb-count')!;
+let statusSectionIndex = 0;
+let paperStatusFrame = 0;
+let characterStatusFrame = 0;
+const statusCharacterCounter = new StatusCharacterCounter();
+const statusNumber = new Intl.NumberFormat('ko-KR');
+
+function updatePaperStatus(): void {
+  paperStatusFrame = 0;
+  const paper = sbPaper();
+  try {
+    if (wasm.getSectionCount() === 0) {
+      paper.textContent = '—';
+      paper.title = '용지 크기';
+      return;
+    }
+    const size = describePaperSize(wasm.getPageDef(statusSectionIndex));
+    paper.textContent = size.label;
+    paper.title = size.title;
+  } catch {
+    paper.textContent = '—';
+    paper.title = '용지 크기';
+  }
+}
+
+function schedulePaperStatus(): void {
+  if (!paperStatusFrame) paperStatusFrame = requestAnimationFrame(updatePaperStatus);
+}
+
+function updateCharacterStatus(): void {
+  characterStatusFrame = 0;
+  const indicator = sbCount();
+  if (!inputHandler) {
+    indicator.textContent = '0글자';
+    indicator.title = '문서 글자 수';
+    return;
+  }
+  try {
+    if (wasm.getSectionCount() === 0) {
+      indicator.textContent = '0글자';
+      indicator.title = '문서 글자 수';
+      return;
+    }
+    const { current, total, scope } = statusCharacterCounter.read(wasm, inputHandler);
+    indicator.textContent = scope === 'document'
+      ? `${statusNumber.format(total)}글자`
+      : `${statusNumber.format(current)}/${statusNumber.format(total)}글자`;
+    indicator.title = scope === 'selection'
+      ? '선택한 글자 / 전체 글자'
+      : scope === 'cell' ? '현재 셀 글자 / 전체 글자' : '문서 글자 수';
+  } catch (error) {
+    console.warn('[status] 글자 수를 읽지 못했습니다:', error);
+    indicator.textContent = '—';
+    indicator.title = '글자 수를 읽지 못했습니다';
+  }
+}
+
+function scheduleCharacterStatus(invalidate = false): void {
+  if (invalidate) statusCharacterCounter.invalidate();
+  if (!characterStatusFrame) characterStatusFrame = requestAnimationFrame(updateCharacterStatus);
+}
 let autosaveStatusRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 let autosavePreviousMessage: string | null = null;
 
@@ -989,6 +1058,7 @@ function prepareCanvasKitLocalFonts(fontNames: readonly string[] | undefined): v
 async function initialize(): Promise<void> {
   installWebAppShell();
   installDesktopWindowChrome();
+  editorStyleOverflow = new EditorStyleOverflow(document.getElementById('style-bar')!);
   const msg = sbMessage();
   try {
     extensionViewerSettings = await loadExtensionViewerSettings();
@@ -1197,7 +1267,17 @@ async function initialize(): Promise<void> {
     setupFileInput();
     setupZoomControls();
     setupEventListeners();
+    tableRibbonMenus = setupTableRibbonMenus(
+      document.getElementById('icon-toolbar')!,
+      (command, anchor) => {
+        const fromOverflow = Boolean(anchor.closest('#editor-toolbar-overflow'));
+        dispatcher.dispatch(command, { anchorEl: anchor });
+        if (fromOverflow) editorToolbarOverflow?.closePopover();
+      },
+      (command) => dispatcher.isEnabled(command),
+    );
     editorToolbarOverflow = new EditorToolbarOverflow(document.getElementById('icon-toolbar')!);
+    editorStyleOverflow?.refresh();
     setupGlobalShortcuts();
     installDesktopFileHandling((handles) => {
       const handle = handles[0];
@@ -1542,6 +1622,7 @@ function setupFileInput(): void {
 function setupZoomControls(): void {
   if (!canvasView) return;
   const vm = canvasView.getViewportManager();
+  setupStatusZoomSlider(document.getElementById('sb-zoom-range') as HTMLInputElement, sbZoomVal(), vm, eventBus);
 
   document.getElementById('sb-zoom-in')!.addEventListener('click', () => {
     vm.smoothZoomBy(0.1);
@@ -1608,7 +1689,9 @@ function setupEventListeners(): void {
     if (wasm.pageCount > 0) {
       try {
         const pageInfo = wasm.getPageInfo(pageIdx);
+        statusSectionIndex = pageInfo.sectionIndex;
         sbSection().textContent = `구역: ${pageInfo.sectionIndex + 1} / ${totalSections}`;
+        schedulePaperStatus();
       } catch { /* 무시 */ }
     }
   });
@@ -1617,6 +1700,19 @@ function setupEventListeners(): void {
     sbZoomVal().textContent = `${Math.round((zoom as number) * 100)}%`;
   });
 
+  eventBus.on('cursor-rect-updated', () => {
+    if (inputHandler) {
+      const section = inputHandler.getCursorPosition().sectionIndex;
+      if (section !== statusSectionIndex) {
+        statusSectionIndex = section;
+        schedulePaperStatus();
+      }
+    }
+    scheduleCharacterStatus();
+  });
+
+  eventBus.on('cell-selection-changed', () => scheduleCharacterStatus());
+
   // 삽입/수정 모드 토글
   eventBus.on('insert-mode-changed', (insertMode) => {
     document.getElementById('sb-mode')!.textContent = (insertMode as boolean) ? '삽입' : '수정';
@@ -1624,11 +1720,15 @@ function setupEventListeners(): void {
 
   eventBus.on('document-mutated', (reason) => {
     documentState.markDirty(typeof reason === 'string' ? reason : 'document-mutated');
+    schedulePaperStatus();
+    scheduleCharacterStatus(true);
   });
 
   eventBus.on('document-changed', (reason) => {
     documentState.markDirty(typeof reason === 'string' ? reason : 'document-changed');
     scheduleCloudEditDraftSave();
+    schedulePaperStatus();
+    scheduleCharacterStatus(true);
   });
 
   eventBus.on('renderer-selection-changed', (payload) => {
@@ -1717,6 +1817,7 @@ function setupEventListeners(): void {
       headerFooterActive,
       noteActive: noteToolbarActive,
     });
+    if (mode !== 'table') tableRibbonMenus?.closeAll();
     defaultTbGroups.forEach((element) => {
       element.style.display = mode === 'default' ? '' : 'none';
     });
@@ -1758,6 +1859,7 @@ function setupEventListeners(): void {
         });
       }
     });
+    tableRibbonMenus?.refresh();
     document.getElementById('icon-toolbar')?.setAttribute('data-context-mode', mode);
     return mode;
   };
@@ -1779,6 +1881,7 @@ function setupEventListeners(): void {
     applyContextualToolbarMode();
   });
   eventBus.on('cursor-format-changed', applyContextualToolbarMode);
+  eventBus.on('cell-selection-changed', applyContextualToolbarMode);
   eventBus.on('command-state-changed', applyContextualToolbarMode);
 
   // 머리말/꼬리말 편집 모드 시 도구상자 전환 + 본문 dimming
@@ -1853,7 +1956,6 @@ function applySavedTextMarkSettings(): void {
 
 async function initializeDocument(
   docInfo: DocumentInfo,
-  displayName: string,
   options: { suppressDialogs?: boolean } = {},
 ): Promise<void> {
   const msg = sbMessage();
@@ -1867,7 +1969,9 @@ async function initializeDocument(
     }
     await updateLoadProgress(75, '문서 상태 적용 중...');
     totalSections = docInfo.sectionCount ?? 1;
+    statusSectionIndex = 0;
     sbSection().textContent = `구역: 1 / ${totalSections}`;
+    schedulePaperStatus();
     applySavedTextMarkSettings();
     await updateLoadProgress(82, '페이지 렌더 준비 중...');
     await canvasView?.loadDocument();
@@ -1902,17 +2006,16 @@ async function initializeDocument(
     }
 
     if (!options.suppressDialogs) {
-      await promptLocalFontsIfNeeded(docInfo, displayName);
+      await promptLocalFontsIfNeeded(docInfo);
     }
 
     // 로컬 글꼴 감지 결과가 뷰를 갱신한 뒤에 캐럿을 연결해야 입력 포커스가 재설정과 경합하지 않는다.
     await updateLoadProgress(96, '편집 상태 초기화 중...');
     inputHandler?.activateWithCaretPosition();
     eventBus.emit('document-context-changed');
+    scheduleCharacterStatus(true);
     // 최종 단계 뒤에는 비동기 작업이 없으므로 100% progress paint를 기다리지 않는다.
-    msg.textContent = documentReadOnly
-      ? `${displayName} · 템플릿 미리보기 (읽기 전용)`
-      : displayName;
+    msg.textContent = documentReadOnly ? '읽기 전용' : '';
 
     // #2527: 자동 보정을 하지 않으므로 로드 직후 문서는 항상 clean.
     documentState.markClean('document-initialized');
@@ -1928,7 +2031,7 @@ async function initializeDocument(
   }
 }
 
-async function promptLocalFontsIfNeeded(docInfo: DocumentInfo, displayName: string): Promise<void> {
+async function promptLocalFontsIfNeeded(docInfo: DocumentInfo): Promise<void> {
   if (!docInfo.fontsUsed?.length) return;
 
   const msg = sbMessage();
@@ -1970,14 +2073,14 @@ async function promptLocalFontsIfNeeded(docInfo: DocumentInfo, displayName: stri
     prepareCanvasKitLocalFonts(docInfo.fontsUsed);
     const state = getLocalFontState();
     const resultLabel = state.source === 'font-presence-probe' ? '확인됨' : '감지됨';
-    msg.textContent = `${displayName} (로컬 글꼴 ${fonts.length}개 ${resultLabel})`;
+    msg.textContent = `로컬 글꼴 ${fonts.length}개 ${resultLabel}`;
     showToast({
       message: `로컬 글꼴 ${fonts.length}개를 ${resultLabel.replace('됨', '')}하고 저장했습니다.\n다음 문서 로드부터 감지 결과를 재사용합니다.`,
       durationMs: 5000,
     });
   } catch (error) {
     console.warn('[local-fonts] 감지 안내/실행 실패 (치명적이지 않음):', error);
-    msg.textContent = displayName;
+    msg.textContent = '';
     showToast({
       message: '로컬 글꼴 감지에 실패했습니다.\n웹 대체 글꼴로 계속 표시합니다.',
       durationMs: 8000,
@@ -2186,7 +2289,8 @@ async function loadBytes(
   );
   await updateLoadProgress(50, '문서 초기화 중...');
   const elapsed = performance.now() - startTime;
-  await initializeDocument(docInfo, `${fileName} — ${docInfo.pageCount}페이지 (${elapsed.toFixed(1)}ms)`, {
+  console.debug(`[load] ${fileName}: ${docInfo.pageCount} pages in ${elapsed.toFixed(1)}ms`);
+  await initializeDocument(docInfo, {
     suppressDialogs: options.suppressDialogs,
   });
 }
@@ -2325,7 +2429,7 @@ async function createNewDocument(): Promise<void> {
       { fileName: wasm.fileName, sourceFormat: wasm.getSourceFormat() },
       { discardPreviousDraft: true },
     );
-    await initializeDocument(docInfo, `${wasm.fileName} — ${docInfo.pageCount}페이지`);
+    await initializeDocument(docInfo);
   } catch (error) {
     await cancelDesktopDocument(reservationId).catch(() => {});
     activeDocumentId = null;

@@ -106,7 +106,9 @@ try {
     await page.setViewport({ width, height: 960 });
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `${width}px has horizontal document overflow`);
-    assert(await page.$eval('#icon-toolbar', el => el.getBoundingClientRect().height <= 44), `${width}px toolbar wraps`);
+    assert(await page.$eval('#icon-toolbar', el => el.getBoundingClientRect().height <= (innerWidth >= 1024 ? 96 : 44)), `${width}px toolbar wraps`);
+    assert(await page.$eval('#style-bar', el => el.getBoundingClientRect().height <= (el.clientWidth < 700 ? 80 : 40)), `${width}px format bar wastes a row`);
+    assert.equal(await page.$eval('#style-bar', el => getComputedStyle(el).visibility), 'visible');
     assert.equal(await page.$eval('#icon-toolbar', el => getComputedStyle(el).visibility), 'visible');
     if (width === 500) {
       assert.equal(await page.$eval('#editor-toolbar-more', el => el.hidden), false);
@@ -146,6 +148,17 @@ try {
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     }
   }
+  await page.setViewport({ width: 390, height: 960 });
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.$eval('#style-bar', el => el.hasAttribute('data-style-compact')), true);
+  assert.equal(await page.$eval('#style-bar-more', el => el.hidden), false);
+  await page.focus('#style-bar-more');
+  await page.keyboard.press('Enter');
+  assert.equal(await page.$eval('#style-bar-overflow', el => el.hidden), false);
+  assert.equal(await page.$eval('#style-bar-overflow', el => el.querySelectorAll('.sb-btn').length), 13);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.$eval('#style-bar-overflow', el => el.hidden), true);
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'style-bar-more');
   await page.click('.menu-item[data-menu="view"] .menu-title');
   await page.hover('.menu-item[data-menu="view"] .md-sub');
   const submenu = await page.$eval('.menu-item[data-menu="view"] .md-sub-panel', el => {
@@ -153,6 +166,16 @@ try {
     return { left: rect.left, right: rect.right, width: innerWidth };
   });
   assert(submenu.left >= 0 && submenu.right <= submenu.width, `390px submenu leaves viewport: ${JSON.stringify(submenu)}`);
+  // The 597px screenshot is a narrow viewport, not just a narrow bar in a wide page.
+  await page.setViewport({ width: 597, height: 960 });
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.$eval('#style-bar', bar => bar.hasAttribute('data-style-compact')), false);
+  assert(await page.$eval('#style-bar', bar => bar.getBoundingClientRect().height <= 40));
+  assert.equal(await page.$eval('#style-bar-more', button => button.hidden), false);
+  await page.click('#style-bar-more');
+  assert.equal(await page.$eval('#style-bar-overflow', popover => popover.hidden), false);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.$eval('#style-bar-overflow', popover => popover.hidden), true);
   assert.deepEqual(errors, []);
   console.log('PASS Editor shell layout, sidebar colors, menu keyboard flow, and command palette');
 } finally {
