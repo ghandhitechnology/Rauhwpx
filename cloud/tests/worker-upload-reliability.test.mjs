@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -6,6 +7,38 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { WorkerClient } from '../worker/client.mjs';
+
+test('worker attachment download retries a truncated response and verifies the complete blob', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-worker-attachment-'));
+  const destination = path.join(root, 'reference.png');
+  const bytes = Buffer.from('complete attachment bytes');
+  const blobId = createHash('sha256').update(bytes).digest('hex');
+  let calls = 0;
+  const server = http.createServer((_request, response) => {
+    calls += 1;
+    if (calls === 1) {
+      response.writeHead(200, { 'content-length': bytes.length });
+      response.write(bytes.subarray(0, 5));
+      response.destroy();
+      return;
+    }
+    response.writeHead(200, { 'content-length': bytes.length });
+    response.end(bytes);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const client = new WorkerClient({
+    baseUrl: `http://127.0.0.1:${server.address().port}`,
+    token: 'worker-token', sessionId: 'session-attachment',
+  });
+  await client.download(blobId, destination);
+  assert.deepEqual(await fs.readFile(destination), bytes);
+  assert.equal(calls, 2);
+});
 
 test('worker frame control supports the Unix socket transport', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-worker-frame-socket-'));

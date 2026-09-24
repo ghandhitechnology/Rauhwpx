@@ -336,10 +336,11 @@ export async function uploadRequiredReferences({
   onEvent,
   timeoutMs = 60_000,
 }) {
+  const indexed = [];
   for (let index = 0; index < references.length; index += 1) {
     const reference = references[index];
     try {
-      await withTimeout(
+      const file = await withTimeout(
         page.evaluate(async (secret, input) => window.rauhwpxCloudRuntime.uploadReference(secret, input), bootstrap, {
           url: resourceUrl(origin, bootstrap, reference.resourceId ?? `reference-${index}`),
           name: reference.name,
@@ -350,12 +351,19 @@ export async function uploadRequiredReferences({
         'REFERENCE_INDEX_TIMEOUT',
         `Required cloud reference indexing timed out: ${reference.name}`,
       );
+      if (file?.status !== 'ready' || typeof file.id !== 'string' || !file.id) {
+        throw runtimeError('REFERENCE_INDEX_INVALID', `Cloud reference indexing returned no ready file: ${reference.name}`);
+      }
+      const resolved = { ...reference, fileId: file.id, kind: file.kind };
+      references[index] = resolved;
+      indexed.push(resolved);
     } catch (error) {
       const message = String(error?.message ?? error).slice(0, 1_000);
       await onEvent({ type: 'reference.index-failed', name: reference.name, message });
       throw runtimeError('REFERENCE_INDEX_FAILED', `Required cloud reference could not be indexed: ${reference.name}`, error);
     }
   }
+  return indexed;
 }
 
 const CHROMIUM_ARGS = Object.freeze([
@@ -621,6 +629,7 @@ export async function createStudioHarness({
       HOME: path.join(workspace, 'home'),
       USERPROFILE: path.join(workspace, 'home'),
       RHWP_AGENT_MODE: 'production',
+      RAUHWpx_CLOUD_RUNTIME: '1',
       RHWP_AGENT_PORT: String(hubPort),
       RHWP_AGENT_TOKEN: hubToken,
       RHWP_LAUNCH_ID: launchId,
@@ -878,10 +887,11 @@ export async function createStudioHarness({
           additions.push({ ...reference, resourceId });
         }
         if (additions.length) {
-          await uploadRequiredReferences({
+          return uploadRequiredReferences({
             page, bootstrap, origin, references: additions, scopeId: thread.id, onEvent,
           });
         }
+        return [];
       },
       async documentRevision() {
         assertBrowserHealthy();

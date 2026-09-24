@@ -950,6 +950,87 @@ test('follow-up attachment versions are immutable and delivered with their exact
   assert.equal(typeof versions[1].supersedes, 'string');
 });
 
+test('cloud rejects reference types and sizes that its agent hub cannot index', async (t) => {
+  const { blobs, auth, sessions, database } = await fixture(t);
+  const origin = await pairedDevice(auth);
+  sessions.setProviderStatus('codex', { available: true, version: '1' });
+  const document = await upload(blobs, origin.device.id, Buffer.from('document'));
+  const image = await upload(blobs, origin.device.id, Buffer.from('image bytes'), {
+    name: 'photo.png', kind: 'reference', sessionId: 'session_attachment_validation',
+  });
+  const base = {
+    sessionId: 'session_attachment_validation', provider: 'codex', goal: 'Use references', persistent: true,
+    clientContext: { threadId: 'thread-validation', documentId: 'document-validation' },
+    originDocument: { blobId: document.id, name: 'document.hwpx', size: document.size },
+  };
+  assert.throws(() => parseSessionCreate({ ...base, resources: [{
+    blobId: image.id, name: 'photo.png', size: 21 * 1024 * 1024, kind: 'reference',
+  }] }), { code: 'REFERENCE_FILE_TOO_LARGE' });
+  const created = sessions.createSession(origin.device, parseSessionCreate(base));
+  sessions.executeCommand(origin.device, base.sessionId, parseCommand({
+    commandId: 'activate_validation', type: 'session.activate',
+    payload: { expectedVersion: created.stateVersion },
+  }));
+  assert.throws(() => sessions.executeCommand(origin.device, base.sessionId, parseCommand({
+    commandId: 'queue_unsupported_attachment', type: 'message.queue', payload: {
+      messageId: 'unsupported-message', content: 'Use this file', attachments: [{
+        attachmentId: 'unsupported', blobId: image.id, size: image.size,
+        name: 'data.bin', mimeType: 'application/octet-stream',
+      }],
+    },
+  })), { code: 'REFERENCE_TYPE_UNSUPPORTED' });
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM session_messages').get().count, 0);
+});
+
+test('cloud admits only reference bytes the chat index can retain across follow-ups', async (t) => {
+  const { blobs, auth, sessions, database } = await fixture(t);
+  const origin = await pairedDevice(auth);
+  sessions.setProviderStatus('codex', { available: true, version: '1' });
+  const document = await upload(blobs, origin.device.id, Buffer.from('document'));
+  const imageSize = 20 * 1024 * 1024;
+  const imageIds = Array.from({ length: 6 }, (_, index) => String(index + 1).repeat(64));
+  for (const blobId of imageIds) {
+    database.prepare(`INSERT INTO blobs(sha256, size, storage_path, created_at)
+      VALUES (?, ?, ?, ?)`).run(blobId, imageSize, `/unused/${blobId}`, Date.now());
+  }
+  const base = {
+    sessionId: 'session_reference_budget', provider: 'codex', goal: 'Use references', persistent: true,
+    clientContext: { threadId: 'thread-budget', documentId: 'document-budget' },
+    originDocument: { blobId: document.id, name: 'document.hwpx', size: document.size },
+  };
+  const references = imageIds.map((blobId, index) => ({
+    blobId, size: imageSize, name: `photo-${index}.png`, kind: 'reference',
+  }));
+  assert.throws(() => parseSessionCreate({ ...base, resources: references }), {
+    code: 'REFERENCE_SCOPE_SIZE_LIMIT',
+  });
+  const created = sessions.createSession(origin.device, parseSessionCreate({
+    ...base, resources: references.slice(0, 5),
+  }));
+  sessions.executeCommand(origin.device, base.sessionId, parseCommand({
+    commandId: 'activate_reference_budget', type: 'session.activate',
+    payload: { expectedVersion: created.stateVersion },
+  }));
+  assert.throws(() => sessions.executeCommand(origin.device, base.sessionId, parseCommand({
+    commandId: 'over_budget_message', type: 'message.queue', payload: {
+      messageId: 'over-budget', content: 'Use one more image', attachments: [{
+        attachmentId: 'extra', blobId: imageIds[5], size: imageSize,
+        name: 'extra.png', mimeType: 'image/png',
+      }],
+    },
+  })), { code: 'REFERENCE_SCOPE_SIZE_LIMIT' });
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM session_messages').get().count, 0);
+  sessions.executeCommand(origin.device, base.sessionId, parseCommand({
+    commandId: 'same_bytes_message', type: 'message.queue', payload: {
+      messageId: 'same-bytes', content: 'Use the first image again', attachments: [{
+        attachmentId: 'reused', blobId: imageIds[0], size: imageSize,
+        name: 'reused.png', mimeType: 'image/png',
+      }],
+    },
+  }));
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM session_messages').get().count, 1);
+});
+
 test('an idle persistent room sleeps thirty minutes after the last presence and wakes on reconnect', async (t) => {
   let clock = 1_800_000_000_000;
   const { blobs, auth, sessions } = await fixture(t, { now: () => clock });

@@ -135,8 +135,11 @@ import {
 } from '../../cloud/cloud-start.ts';
 import {
   deleteCloudComposerDraft,
+  deleteCloudStartAttachments,
   loadCloudComposerDraft,
+  loadCloudStartAttachments,
   saveCloudComposerDraft,
+  saveCloudStartAttachments,
 } from '../../agent/cloud-chat-drafts.ts';
 import type {
   CloudDocumentPayload,
@@ -2372,6 +2375,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       throw new Error('Cloud 대화를 전송된 작업에 연결하지 못했습니다.');
     }
     pendingCloudRestartDocuments.delete(startId);
+    pendingCloudStartAttachments.delete(startId);
+    void deleteCloudStartAttachments(startId).catch(() => undefined);
     delete currentThread.cloudRestartSourceSessionId;
     delete currentThread.cloudRestartSourceStartId;
     persistCurrentThread();
@@ -2483,11 +2488,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         scopeId: currentThread.id,
         bytes: file.bytes,
       }));
+      await saveCloudStartAttachments(startId, fresh);
       pendingCloudStartAttachments.set(startId, refs);
       return refs;
     }
     const cached = pendingCloudStartAttachments.get(startId);
     if (cached) return cached;
+    const stored = await loadCloudStartAttachments(startId);
+    if (stored) {
+      const refs = stored.map((file) => ({
+        ...file, scope: 'chat' as const, scopeId: currentThread.id,
+      }));
+      pendingCloudStartAttachments.set(startId, refs);
+      return refs;
+    }
     if (!currentDocumentId || ids.length === 0) return [];
     const draft = await loadCloudComposerDraft(currentDocumentId);
     if (!draft?.attachments.length) return [];
@@ -3241,6 +3255,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       }
     },
   });
+  referenceLibrary.setDraftMode(workspace.mode());
   composerUtilityActions.insertBefore(referenceLibrary.trigger, permissionBtn);
   composerField.insertBefore(referenceLibrary.quickAddButton, sendHint);
   composer.insertBefore(referenceLibrary.quickUploads, composerField);
@@ -5077,7 +5092,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       for (const attachment of message.attachments) {
         const pill = el('button', `ag-msg-attachment ag-${attachment.status}`);
         pill.type = 'button';
-        pill.disabled = attachment.status !== 'ready' || !attachment.fileId;
+        pill.disabled = attachment.status !== 'ready' || !attachment.fileId || Boolean(message.delivery);
         pill.append(
           createIcon(attachment.mimeType.startsWith('image/') ? 'image' : 'document'),
           el('span', 'ag-msg-attachment-name', attachment.name),
@@ -5090,7 +5105,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
                 : formatAttachmentBytes(attachment.size)),
         );
         pill.title = attachment.error || attachment.name;
-        if (attachment.fileId && attachment.status === 'ready') {
+        if (attachment.fileId && attachment.status === 'ready' && !message.delivery) {
           pill.addEventListener('click', () => { void referenceLibrary.openFile(attachment.fileId!); });
         }
         row.appendChild(pill);
@@ -8209,6 +8224,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       cloudTimelineGuard = new CloudLiveTimelineGuard();
       cloudTimelineGuardKey = '';
     }
+    referenceLibrary.setDraftMode(mode);
     syncWorkspaceMode(mode, target);
     const transitionLocked = target.kind === 'workspace-blocked';
     syncWorkspaceModeAvailability(target);

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { realpath } from 'node:fs/promises';
+import { lstat, realpath } from 'node:fs/promises';
 
 /**
  * insert_image imagePath 허용 범위 정책.
@@ -33,7 +33,11 @@ export async function assertImagePathInsideRoots(imagePath, allowedRoots, deps =
   } catch (e) {
     throw policyError(e?.code === 'ENOENT' ? 'FILE_NOT_FOUND' : 'INVALID_ARGS', `cannot read image file: ${e?.message ?? e}`);
   }
-  const roots = await Promise.all(allowedRoots.map((root) => resolveReal(root).catch(() => null)));
+  const roots = await Promise.all(allowedRoots.map(async (root) => {
+    const stat = await lstat(root).catch(() => null);
+    if (!stat?.isDirectory() || stat.isSymbolicLink()) return null;
+    return resolveReal(root).catch(() => null);
+  }));
   const inside = roots.some((root) => root && (real === root || real.startsWith(root + path.sep)));
   if (!inside) {
     throw policyError('INVALID_ARGS', 'imagePath must be inside the session workspace or its downloads directory');

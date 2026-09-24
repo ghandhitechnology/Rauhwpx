@@ -7,8 +7,9 @@ import {
 } from '../core/idb-open.ts';
 
 const DB_NAME = 'rhwpCloudChatDrafts';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE = 'drafts';
+const START_ATTACHMENTS_STORE = 'startAttachments';
 
 export interface CloudComposerDraftAttachment {
   name: string;
@@ -16,6 +17,15 @@ export interface CloudComposerDraftAttachment {
   size: number;
   bytes: Uint8Array;
 }
+
+export interface CloudStartAttachment extends CloudComposerDraftAttachment {
+  id: string;
+}
+
+type StoredStartAttachments = {
+  startId: string;
+  attachments: Array<Omit<CloudStartAttachment, 'bytes'> & { bytes: ArrayBuffer }>;
+};
 
 export interface CloudComposerDraft {
   documentId: string;
@@ -39,6 +49,9 @@ function openDb() {
   return openIndexedDatabase(DB_NAME, DB_VERSION, (db) => {
     if (!db.objectStoreNames.contains(STORE)) {
       db.createObjectStore(STORE, { keyPath: 'documentId' });
+    }
+    if (!db.objectStoreNames.contains(START_ATTACHMENTS_STORE)) {
+      db.createObjectStore(START_ATTACHMENTS_STORE, { keyPath: 'startId' });
     }
   });
 }
@@ -121,6 +134,39 @@ export async function deleteCloudComposerDraft(documentId: string): Promise<void
   await runWithDb(async (db) => {
     const tx = db.transaction(STORE, 'readwrite');
     tx.objectStore(STORE).delete(key);
+    await transactionDone(tx);
+  });
+}
+
+export async function saveCloudStartAttachments(startId: string, attachments: CloudStartAttachment[]): Promise<void> {
+  await runWithDb(async (db) => {
+    const tx = db.transaction(START_ATTACHMENTS_STORE, 'readwrite');
+    tx.objectStore(START_ATTACHMENTS_STORE).put({
+      startId,
+      attachments: attachments.map((attachment) => ({
+        ...attachment,
+        bytes: attachment.bytes.slice().buffer,
+      })),
+    } satisfies StoredStartAttachments);
+    await transactionDone(tx);
+  });
+}
+
+export async function loadCloudStartAttachments(startId: string): Promise<CloudStartAttachment[] | null> {
+  const row = await runWithDb((db) => {
+    const tx = db.transaction(START_ATTACHMENTS_STORE, 'readonly');
+    return requestResult(tx.objectStore(START_ATTACHMENTS_STORE).get(startId) as IDBRequest<StoredStartAttachments | undefined>);
+  });
+  return row?.attachments.map((attachment) => ({
+    ...attachment,
+    bytes: new Uint8Array(attachment.bytes),
+  })) ?? null;
+}
+
+export async function deleteCloudStartAttachments(startId: string): Promise<void> {
+  await runWithDb(async (db) => {
+    const tx = db.transaction(START_ATTACHMENTS_STORE, 'readwrite');
+    tx.objectStore(START_ATTACHMENTS_STORE).delete(startId);
     await transactionDone(tx);
   });
 }

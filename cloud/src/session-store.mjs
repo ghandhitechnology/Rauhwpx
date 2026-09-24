@@ -3,7 +3,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { transaction } from './database.mjs';
-import { CloudError, DEFAULT_LIMITS, ROOM_PROTOCOL_VERSION, TRANSFER_LIMITS, publicSession, parseProviderSelection, providerConfigurationEditable } from './protocol.mjs';
+import { CloudError, DEFAULT_LIMITS, ROOM_PROTOCOL_VERSION, TRANSFER_LIMITS, publicSession, parseProviderSelection, providerConfigurationEditable, validateCloudReference, validateCloudReferenceBudget } from './protocol.mjs';
 
 const COMPLETED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const SUSPENDED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -112,6 +112,13 @@ export class SessionStore {
     if (!Array.isArray(attachments) || attachments.length > 10) {
       throw new CloudError('INVALID_REQUEST', 'payload.attachments is invalid');
     }
+    const referenceBudget = this.database.prepare(`
+      SELECT sha256 AS blobId, size FROM session_resources
+      WHERE session_id = ? AND kind = 'reference'
+      UNION ALL
+      SELECT blob_sha256 AS blobId, size FROM session_attachment_versions
+      WHERE session_id = ?
+    `).all(sessionId, sessionId);
     const created = [];
     for (let ordinal = 0; ordinal < attachments.length; ordinal += 1) {
       const attachment = attachments[ordinal];
@@ -123,6 +130,9 @@ export class SessionStore {
         || typeof attachment.mimeType !== 'string' || attachment.mimeType.length < 1 || attachment.mimeType.length > 255) {
         throw new CloudError('INVALID_REQUEST', `payload.attachments[${ordinal}] is invalid`);
       }
+      validateCloudReference(attachment.name, attachment.size);
+      referenceBudget.push(attachment);
+      validateCloudReferenceBudget(referenceBudget);
       this.#requireBlob({ blobId: attachment.blobId, size: attachment.size }, `Attachment ${attachment.name}`);
       const previous = this.database.prepare(`
         SELECT id, version_number FROM session_attachment_versions

@@ -292,6 +292,12 @@
   padding: 0 1px 5px;
 }
 
+.ag-reference-quick-error {
+  flex-basis: 100%;
+  color: var(--ag-err);
+  font-size: var(--font-size-sm, 11px);
+}
+
 .ag-reference-upload-chip {
   display: inline-flex;
   align-items: center;
