@@ -1,1 +1,1 @@
-PLACEHOLDER_TOO_BIG_DO_NOT_COMMIT
+//! 도형/글상자/그룹 개체 레이아웃
