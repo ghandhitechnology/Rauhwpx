@@ -33,25 +33,12 @@
   --ag-pending-ink: 127, 124, 164;
 }
 
-/* Direct children of #scroll-content blend against the page canvas. Keeping
-   these outside .ag-pending-layer avoids the opaque color bars produced by an
-   isolated stacking context. */
-.ag-pending-ink {
-  z-index: 6;
-  background: rgb(var(--ag-pending-ink));
-  mix-blend-mode: screen;
-}
-
-@supports not (mix-blend-mode: screen) {
-  .ag-pending-ink { display: none; }
-}
-
 .ag-pending-marker.ag-insert {
   box-shadow: inset 0 -1px 0 rgba(var(--ag-pending-ink), 0.58);
 }
 
 .ag-pending-marker.ag-delete {
-  background: rgba(var(--ag-pending-ink), 0.06);
+  background: none;
 }
 
 .ag-pending-marker.ag-delete::after {
@@ -69,9 +56,47 @@
   box-shadow: inset 0 -1px 0 rgba(var(--ag-pending-ink), 0.28);
 }
 
+/* Keep object pixels and nearby table borders untouched. The corner mark
+   shows an insertion; the perimeter identifies its rendered bounds. */
+.ag-pending-object {
+  border-radius: 3px;
+  outline: 2px solid rgb(var(--ag-pending-ink));
+  outline-offset: 1px;
+  box-shadow: 0 0 0 3px rgba(var(--ag-pending-ink), 0.13);
+}
+
+.ag-pending-object::after {
+  content: '+';
+  position: absolute;
+  right: -7px;
+  top: -7px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: rgb(var(--ag-pending-ink));
+  color: #fff;
+  font: 700 12px/13px var(--font-family-ui, sans-serif);
+  text-align: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+}
+
+.ag-pending-structure {
+  border-radius: 2px;
+  outline: 2px solid rgba(var(--ag-pending-ink), 0.8);
+  outline-offset: -2px;
+}
+
+.ag-pending-structure.ag-delete {
+  outline-style: dashed;
+  background: none;
+}
+
+.ag-pending-structure.ag-delete::after {
+  display: none;
+}
+
 /* 교체는 삽입 밑줄 + 위쪽 실선으로 구분한다 (원본이 대체된 자리) */
 .ag-pending-marker.ag-replace {
-  background: rgba(var(--ag-pending-ink), 0.06);
   box-shadow:
     inset 0 -1px 0 rgba(var(--ag-pending-ink), 0.58),
     inset 0 1px 0 rgba(var(--ag-pending-ink), 0.58);
@@ -112,13 +137,7 @@
   height: 100%;
 }
 
-/* replace_range exact diff: 의미 색상은 에이전트 provenance 와 분리한다. */
-.ag-exact-ink {
-  --ag-pending-ink: 35, 122, 75;
-}
-
 .ag-pending-marker.ag-exact-change {
-  background: rgba(35, 122, 75, 0.07);
   box-shadow: inset 0 -2px 0 rgba(35, 122, 75, 0.82);
 }
 
@@ -228,15 +247,6 @@
     filter: blur(0);
     opacity: 1;
   }
-}
-
-/* 타자기 공개: 아직 공개되지 않은 텍스트(+틴트/마커)를 용지색으로 덮는다.
-   z9 — 잉크(z6)·마커(z7)·앵커(z8) 위, 에이전트 캐럿(z10) 아래. */
-.ag-reveal-cover {
-  position: absolute;
-  z-index: 9;
-  pointer-events: none;
-  background: var(--doc-paper, #ffffff);
 }
 
 /* 공개 지점에 붙어 움직이는 에이전트 캐럿. 위치는 rAF 루프가 transform 으로

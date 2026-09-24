@@ -170,8 +170,8 @@ export async function checkCloudRecovery(page, origin, artifacts) {
     && !document.querySelector('[aria-label="프로바이더 선택"]').disabled);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind), 'suspended');
   await page.click('[aria-label="모델 선택"]');
-  await page.$eval('.ag-llm-item[data-model="gpt-6-astra"]', (button) => button.click());
-  await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.selection.model === 'gpt-6-astra'
+  await page.$eval('.ag-llm-item[data-model="astra"]', (button) => button.click());
+  await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.selection.model === 'astra'
     && !document.querySelector('[aria-label="모델 선택"]').disabled);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 1);
   await page.evaluate(() => window.sidebarPreview.cloud.setConversationPhase('waiting'));

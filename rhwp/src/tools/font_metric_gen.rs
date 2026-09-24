@@ -619,8 +619,10 @@ fn extract_latin_ranges(char_widths: &HashMap<u32, u16>) -> Vec<LatinRange> {
     let ranges: Vec<(u32, u32)> = vec![
         (0x0020, 0x007E), // Basic Latin (space ~ tilde)
         (0x00A0, 0x00FF), // Latin-1 Supplement
+        (0x0370, 0x03FF), // Greek and Coptic
         (0x2000, 0x206F), // General Punctuation
         (0x2200, 0x22FF), // Mathematical Operators
+        (0x25A0, 0x25FF), // Geometric Shapes, including white bullet
         (0x3000, 0x303F), // CJK Symbols and Punctuation
         (0x3130, 0x318F), // Hangul Compatibility Jamo
         (0xFF00, 0xFF5E), // Fullwidth Latin

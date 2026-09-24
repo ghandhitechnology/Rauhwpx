@@ -1306,6 +1306,21 @@ impl DocumentCore {
             )
         };
         let cell_flow_changed = flow_advance_before != flow_advance_after;
+        // Persist the edited cell's stale geometry in HWPX. The table's transient dirty bit
+        // disappears on reopen, while the cell's dirty attribute survives serialization.
+        // A same-height replacement must not change the saved row split.
+        if flow_advance_after.unwrap_or(0) > flow_advance_before.unwrap_or(0)
+            && (flow_advance_before.is_some() || new_chars_count > deleted_count)
+        {
+            if let Control::Table(table) = &mut self.document.sections[section_idx].paragraphs
+                [parent_para_idx]
+                .controls[control_idx]
+            {
+                if let Some(cell) = table.cells.get_mut(cell_idx) {
+                    cell.dirty_flag = true;
+                }
+            }
+        }
 
         // Table의 일반 cell만 pointer-key layout cache의 owner다. 표 캡션 sentinel과
         // Shape/Picture 텍스트 경로에는 cell_units cache가 없으므로 적용하지 않는다.

@@ -1038,8 +1038,49 @@ export function cleanupPictureResizeDrag(this: any): void {
   this.pictureObjectRenderer?.clearDragPreview();
 }
 
+/** 같은 pointer press에서 개체 선택과 이동을 시작한다. */
+export function startPictureMoveDrag(
+  this: any, e: MouseEvent, ref: PictureObjectRef,
+  bbox: { x: number; y: number; w: number; h: number },
+  pageIndex: number, pageX: number, pageY: number,
+): boolean {
+  if (e.button !== 0 || e.shiftKey) return false;
+  try {
+    const props = this.getObjectProperties(ref);
+    const inlineTac = !!props.treatAsChar && ref.type === 'image' && !ref.headerFooter;
+    if (props.treatAsChar && !inlineTac) return false;
+    let originCharOffset: number | undefined;
+    if (inlineTac && !hasCellPath(ref)) {
+      const hit = this.wasm.hitTest(pageIndex, bbox.x + Math.min(2, bbox.w * 0.25), bbox.y + bbox.h / 2);
+      if (hit.sectionIndex !== ref.sec || hit.paragraphIndex !== ref.ppi
+        || !Number.isFinite(hit.charOffset)) return false;
+      originCharOffset = hit.charOffset;
+    }
+    e.preventDefault();
+    this.isPictureMoveDragging = true;
+    this.pictureMoveState = {
+      ref: { ...ref }, origHorzOffset: props.horzOffset, origVertOffset: props.vertOffset,
+      inlineTac: inlineTac || undefined, originCharOffset,
+      startPageX: pageX, startPageY: pageY, lastPageX: pageX, lastPageY: pageY,
+      startClientX: e.clientX, startClientY: e.clientY, passedDragThreshold: false,
+      totalDeltaH: 0, totalDeltaV: 0, pageIndex, lastPageIndex: pageIndex,
+      bbox: { ...bbox }, rotationAngle: props.rotationAngle ?? 0,
+    };
+    this.container.style.cursor = 'move';
+    document.addEventListener('mousemove', this.onMouseMoveBound);
+    document.addEventListener('mouseup', this.onMouseUpBound, { once: true });
+    this.textarea.focus();
+    return true;
+  } catch { return false; }
+}
+
 export function updatePictureMoveDrag(this: any, e: MouseEvent): void {
   if (!this.pictureMoveState) return;
+  const initial = this.pictureMoveState;
+  if (initial.startClientX !== undefined && !initial.passedDragThreshold) {
+    if (Math.hypot(e.clientX - initial.startClientX, e.clientY - initial.startClientY) < 3) return;
+    initial.passedDragThreshold = true;
+  }
   const zoom = this.viewportManager.getZoom();
   const sc = this.container.querySelector('#scroll-content');
   if (!sc) return;
@@ -1058,16 +1099,17 @@ export function updatePictureMoveDrag(this: any, e: MouseEvent): void {
   const deltaH = Math.round(deltaXpx * 75); // 1 page px = 75 HWPUNIT
   const deltaV = Math.round(deltaYpx * 75);
 
-  if (deltaH === 0 && deltaV === 0) return;
+  if (deltaH === 0 && deltaV === 0 && pi === this.pictureMoveState.lastPageIndex) return;
 
   const state = this.pictureMoveState;
   state.lastPageX = px;
   state.lastPageY = py;
+  state.lastPageIndex = pi;
   state.totalDeltaH += deltaH;
   state.totalDeltaV += deltaV;
   this.pictureObjectRenderer?.renderDragPreview(
     {
-      pageIndex: state.pageIndex,
+      pageIndex: state.inlineTac ? pi : state.pageIndex,
       x: state.bbox.x + state.totalDeltaH / PX_TO_HWP,
       y: state.bbox.y + state.totalDeltaV / PX_TO_HWP,
       width: state.bbox.w,
@@ -1108,27 +1150,58 @@ export function finishPictureMoveDrag(this: any, e: MouseEvent): void {
 function finishInlinePictureMoveDrag(this: any, state: NonNullable<any>): void {
   const { totalDeltaH, totalDeltaV } = state;
   // 드래그 정이동 없으면 기록하지 않는다 (커서만 복구).
-  if (totalDeltaH === 0 && totalDeltaV === 0) return;
+  if (totalDeltaH === 0 && totalDeltaV === 0 && state.lastPageIndex === state.pageIndex) return;
 
   let hit: import('@/core/types').HitTestResult;
   try {
-    hit = this.wasm.hitTest(state.pageIndex, state.lastPageX, state.lastPageY);
+    hit = this.wasm.hitTest(state.lastPageIndex ?? state.pageIndex, state.lastPageX, state.lastPageY);
   } catch (err) {
     console.warn('[InputHandler] 인라인 그림 드롭 지점 판정 실패:', err);
     return;
   }
-  // 드롭 대상 가드: 같은 구역 본문 문단의 유효 캐럿 위치만 받는다 (셀/글상자·머리글·바닥글 제외).
+  // 같은 구역의 본문 또는 표 셀만 받는다. 글상자·머리글·바닥글은 제외한다.
   const valid = hit
     && hit.sectionIndex === state.ref.sec
     && typeof hit.paragraphIndex === 'number'
     && hit.paragraphIndex >= 0
     && hit.paragraphIndex < 0xFFFFFF00
-    && hit.parentParaIndex === undefined
-    && !hit.cellPath
     && !hit.isTextBox
     && Number.isFinite(hit.charOffset);
   if (!valid) {
-    console.warn('[InputHandler] 인라인 그림 드롭 지점이 본문이 아니어서 이동하지 않았습니다');
+    console.warn('[InputHandler] 인라인 그림 드롭 지점이 유효하지 않아 이동하지 않았습니다');
+    return;
+  }
+  const targetPath = hit.cellPath?.length ? hit.cellPath
+    : hit.parentParaIndex !== undefined && hit.controlIndex !== undefined && hit.cellIndex !== undefined
+      ? [{ controlIndex: hit.controlIndex, cellIndex: hit.cellIndex, cellParaIndex: hit.paragraphIndex }]
+      : [];
+  if (hasCellPath(state.ref) || targetPath.length) {
+    let moved: ReturnType<import('@/core/wasm-bridge').WasmBridge['movePictureControlByPath']> | undefined;
+    try {
+      this.executeOperation({
+        kind: 'snapshot', operationType: 'moveInlinePicture',
+        operation: (wasm: import('@/core/wasm-bridge').WasmBridge) => {
+          moved = wasm.movePictureControlByPath(
+            state.ref.sec, state.ref.ppi, state.ref.cellPath ?? [], state.ref.ci,
+            hit.parentParaIndex ?? hit.paragraphIndex, targetPath, hit.charOffset,
+          );
+          if (!moved.ok) throw new Error('표 셀 그림 이동 실패');
+          const path = moved.cellPath;
+          return path.length ? {
+            sectionIndex: state.ref.sec, parentParaIndex: moved.paraIdx,
+            paragraphIndex: path.at(-1)!.cellParaIndex, charOffset: moved.charOffset,
+            controlIndex: path[0].controlIndex, cellIndex: path[0].cellIndex, cellPath: path,
+          } : { sectionIndex: state.ref.sec, paragraphIndex: moved.paraIdx, charOffset: moved.charOffset };
+        },
+        meta: { domain: 'object', refresh: 'full', dirtyScope: 'object' },
+      });
+      if (moved) this.cursor.enterPictureObjectSelectionRef({
+        sec: state.ref.sec, ppi: moved.paraIdx, ci: moved.controlIdx, type: 'image',
+        ...(moved.cellPath.length ? { cellPath: moved.cellPath } : {}),
+      });
+    } catch (error) {
+      console.warn('[InputHandler] 표 셀 그림 이동 확정 실패:', error);
+    }
     return;
   }
   // 같은 문단 + 같은 논리 위치로의 드롭은 이동이 아니다 (wasm moved:false 와 동일 의미).

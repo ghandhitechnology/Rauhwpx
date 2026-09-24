@@ -3,6 +3,51 @@ use crate::model::control::Control;
 use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph};
 use crate::model::shape::{HorzAlign, HorzRelTo, TextFlow, TextWrap, VertAlign, VertRelTo};
 
+#[test]
+fn inline_picture_slot_includes_outer_margins_without_changing_saved_widths() {
+    let mut picture = crate::model::image::Picture::default();
+    picture.common.treat_as_char = true;
+    picture.common.width = 3_000;
+    picture.common.height = 3_000;
+    picture.common.margin.left = 375;
+    picture.common.margin.right = 375;
+    let source = Paragraph {
+        controls: vec![
+            Control::Picture(Box::new(picture.clone())),
+            Control::Picture(Box::new(picture)),
+        ],
+        line_segs: vec![LineSeg {
+            segment_width: 6_750,
+            line_height: 3_000,
+            baseline_distance: 2_550,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let composed = compose_paragraph(&source);
+    assert_eq!(composed.tac_controls.len(), 2);
+    assert!(composed
+        .tac_controls
+        .iter()
+        .all(|(_, width, _)| *width == 3_750));
+    assert_eq!(source.line_segs[0].segment_width, 6_750);
+    assert!(source.controls.iter().all(|control| matches!(
+        control,
+        Control::Picture(pic) if pic.common.width == 3_000
+    )));
+
+    let mut edited = source.clone();
+    reflow_line_segs(
+        &mut edited,
+        90.0,
+        &crate::renderer::style_resolver::ResolvedStyleSet::default(),
+        96.0,
+    );
+    assert_eq!(edited.line_segs.len(), 2, "two 50 px slots need two lines");
+    assert_eq!(source.line_segs[0].segment_width, 6_750);
+}
+
 /// [#2632] `recompose_for_body_width` 는 `recompose_for_cell_width` 의 superset
 /// (`restyle_fallback_runs_by_char_shapes` 를 추가로 적용)이다. line_segs 가
 /// 없는(NO_LS) 본문 문단에서 글자모양이 섞여 있으면, compose_lines fallback 이

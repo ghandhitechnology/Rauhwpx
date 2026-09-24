@@ -36,7 +36,7 @@ export async function assertImagePathInsideRoots(imagePath, allowedRoots, deps =
   const roots = await Promise.all(allowedRoots.map((root) => resolveReal(root).catch(() => null)));
   const inside = roots.some((root) => root && (real === root || real.startsWith(root + path.sep)));
   if (!inside) {
-    throw policyError('INVALID_ARGS', 'imagePath must be inside the session workspace or its downloads directory');
+    throw policyError('INVALID_ARGS', 'imagePath must be inside an approved readable root');
   }
   return real;
 }

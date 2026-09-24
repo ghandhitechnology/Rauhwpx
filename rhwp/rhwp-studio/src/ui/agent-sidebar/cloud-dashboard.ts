@@ -100,7 +100,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
       if (!disposed) snapshot = next;
     } catch {
       failed = true;
-      if (!disposed) error('연결을 확인해 주세요. 마지막으로 저장된 작업입니다.');
+      if (!disposed) error('연결 확인 필요 · 마지막 저장 기준');
     } finally {
       pending = false;
       if (kind === 'reconnect') reconnectProgress.settle(failed ? 'failed' : 'done');
@@ -118,7 +118,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
       if (disposed) return;
       if (!result?.authUrl) throw new Error('로그인을 시작하지 못했습니다.');
       window.open(result.authUrl, '_blank', 'noopener,noreferrer');
-      feedback.textContent = '브라우저에서 로그인을 마쳐 주세요.';
+      feedback.textContent = '브라우저에서 로그인 진행 중';
       delete feedback.dataset.kind;
       feedback.hidden = false;
     } catch (cause) {
@@ -137,7 +137,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
         const empty = el('li', 'ag-cd-empty');
         const icon = createIcon('cloud');
         icon.setAttribute('aria-hidden', 'true');
-        empty.append(icon, el('p', '', '채팅에서 Cloud로 작업을 맡겨 보세요.'));
+        empty.append(icon, el('p', '', 'Cloud 작업 없음'));
         chatList.append(empty);
       }
       for (const task of tasks) {

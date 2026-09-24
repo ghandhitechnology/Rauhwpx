@@ -39,7 +39,6 @@
   .ag-permission-btn,
   .ag-skills-btn,
   .ag-takeover-btn,
-  .ag-conn-banner-retry,
   .ag-hub-retry-btn,
   .ag-settings-btn,
   .ag-references-btn,
@@ -100,6 +99,6 @@
 @media (prefers-reduced-motion: no-preference) {
   .ag-root button,
   .ag-root [role='button'] {
-    transition-duration: 120ms;
+    transition-duration: var(--ag-dur-fast);
   }
 }

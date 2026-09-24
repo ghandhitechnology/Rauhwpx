@@ -85,6 +85,8 @@ await runTest('인라인 tac 그림 마우스 드래그 이동 + undo/redo', asy
   const center = await toClient(page, { x: before.x + before.w / 2, y: before.y + before.h / 2, pageIndex: before.page });
   await page.mouse.click(center.clientX, center.clientY);
   await wait(page, 300);
+  assert(JSON.stringify(await collectImage(page)) === JSON.stringify(before),
+    '선택 클릭만으로 그림의 위치나 소속 문단이 바뀌면 안 됨');
   assert(
     await page.evaluate(() => window.__inputHandler.isInPictureObjectSelection()),
     '그림 클릭 후 개체 선택 상태여야 함',

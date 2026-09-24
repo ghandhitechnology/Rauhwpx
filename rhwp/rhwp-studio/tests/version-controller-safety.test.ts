@@ -46,7 +46,7 @@ test('workspace tokens bind async content reads and compares to one document rev
   assert.match(token, /editorRevision: this\.#editorRevision/);
   assert.match(token, /repositoryRevision: this\.#repository\?\.revision/);
 
-  const compare = method('async compare(id: string)', 'async amendTitle(');
+  const compare = method('async compare(id: string)', 'async diffWorkingTree(');
   assert.match(compare, /await this\.#enqueue\(async \(\) => \{/);
   assert.match(compare, /const workspace = this\.#captureWorkspaceToken\(\)/);
   assert.ok(compare.indexOf('#assertWorkspaceToken(workspace)') > compare.indexOf('Promise.all'));
@@ -61,7 +61,7 @@ test('versioning cannot adopt an unsaved document as its disk baseline', () => {
 });
 
 test('legacy and graph comparisons serialize through the localized controller queue', () => {
-  const graph = method('async compare(id: string)', 'async amendTitle(');
+  const graph = method('async compare(id: string)', 'async diffWorkingTree(');
   const legacy = method('async compareLegacy(id: string)', 'setAiTitlesEnabled(');
   assert.match(graph, /await this\.#enqueue\(/);
   assert.match(legacy, /await this\.#enqueue\(/);

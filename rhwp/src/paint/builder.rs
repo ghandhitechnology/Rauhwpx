@@ -1179,12 +1179,14 @@ mod tests {
             color: 0x00000000,
             font_size: 12.0,
             font_name: "serif".to_string(),
+            version_info: "Equation Version 60".to_string(),
             section_index: None,
             para_index: None,
             control_index: None,
             inner_control_index: None,
             cell_index: None,
             cell_para_index: None,
+            cell_context: None,
             note_ref: None,
         }
     }

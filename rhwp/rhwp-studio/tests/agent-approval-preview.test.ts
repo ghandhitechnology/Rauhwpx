@@ -93,19 +93,15 @@ test('template transfers capture a lossless baseline, lock direct edits, and joi
     'approval continues to create one snapshot-backed undo command for the change set');
 });
 
-test('pending additions and formatting recolor glyphs with model-specific ink', () => {
+test('pending additions and formatting mark edits without recoloring document fills', () => {
   assert.match(overlayCss, /\.ag-pending-rect\.ag-claude[\s\S]*--ag-pending-ink:/);
   assert.match(overlayCss, /\.ag-pending-rect\.ag-codex[\s\S]*--ag-pending-ink:/);
-  assert.match(overlayCss, /\.ag-pending-ink[\s\S]*mix-blend-mode:\s*screen/,
-    'canvas glyphs are recolored without tinting the white page');
-  assert.match(overlayCss, /@supports not \(mix-blend-mode: screen\)[\s\S]*\.ag-pending-ink\s*\{\s*display:\s*none/,
-    'unsupported blending hides the ink instead of obscuring the document');
+  assert.doesNotMatch(overlaySrc, /'ag-pending-rect ag-pending-ink/,
+    'document fills and image pixels must never be recolored by a selection rectangle');
   assert.match(overlayCss, /\.ag-pending-marker\.ag-insert[\s\S]*box-shadow:/,
     'inserted whitespace remains visibly marked');
   assert.match(overlayCss, /\.ag-pending-marker\.ag-format[\s\S]*box-shadow:/,
-    'format-only edits remain identifiable even when glyph color is unchanged');
-  assert.match(overlaySrc, /scrollContent\.appendChild\(node\.ink\)/,
-    'ink rectangles must blend as direct canvas siblings, outside the marker stacking context');
+    'format-only edits remain identifiable');
   assert.match(overlaySrc, /markerLayer\.appendChild\(node\.marker\)/,
-    'review markers render separately from the blended ink');
+    'review markers render over the document');
 });

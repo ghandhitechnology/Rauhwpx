@@ -28,6 +28,7 @@ const CATALOG_LINE_BUDGET = 8_000;
 const DESCRIPTION_LINE_LIMIT = 1_000;
 const RESERVED_NAMES = new Set(['skills', 'skill-create', 'skill-edit', 'skill-delete']);
 const SEALED_NAME = 'present-plan';
+const CODEX_IMAGE_SKILL_NAME = 'document-image-generation';
 const APP_ORIGIN_FILE = '.rhwp-origin.json';
 const SKILL_ICONS = new Set([
   'pencil', 'bot', 'system', 'sparkles', 'book', 'target', 'chart', 'lightbulb',
@@ -591,6 +592,17 @@ export class SkillRegistry {
       const markdown = await this._bundledMarkdown(SEALED_NAME);
       if (markdown) {
         activated += `\n\n<activated_product_skill name="${SEALED_NAME}">\n${markdown}\n</activated_product_skill>`;
+      }
+    }
+    // Codex native image generation is available in both exec and app-server.
+    // Load Rau's document insertion instructions without requiring a slash command.
+    if (agent === 'codex' && explicitName !== CODEX_IMAGE_SKILL_NAME) {
+      const imageSkill = enabled.find((row) => row.name === CODEX_IMAGE_SKILL_NAME && row.kind === 'skill');
+      if (imageSkill) {
+        const markdown = await this._visibleMarkdown(imageSkill);
+        if (markdown) {
+          activated += `\n\n<activated_product_skill name="${CODEX_IMAGE_SKILL_NAME}">\n${markdown}\n</activated_product_skill>`;
+        }
       }
     }
     const requested = typeof explicitName === 'string' ? explicitName : '';

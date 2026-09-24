@@ -6,6 +6,7 @@
 
 use crate::model::control::Control;
 use crate::model::document::Document;
+use crate::model::shape::SizeCriterion;
 use crate::model::table::Table;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -143,9 +144,11 @@ impl RenderNormalizationOverlay {
                     nested_path.target_control_index = Some(control_index);
 
                     let source_width = nested.common.width;
-                    // noAdjust 표는 저장된 열 너비를 유지한다. 부모 셀로 늘리면
-                    // inner-table-01의 고정 폭 요구사항 표가 오른쪽 테두리를 넘는다.
+                    // An absolute width is already in HWPUNIT and must remain the saved width.
+                    // Relative widths may be projected to their containing cell unless noAdjust
+                    // asks us to preserve the saved column ladder.
                     if !nested.common.treat_as_char
+                        && !matches!(nested.common.width_criterion, SizeCriterion::Absolute)
                         && (nested.attr | nested.raw_table_record_attr) & 0x08 == 0
                         && source_width > 0
                         && u64::from(source_width) < u64::from(cell.width)
@@ -209,6 +212,7 @@ mod tests {
     use super::*;
     use crate::model::document::Section;
     use crate::model::paragraph::Paragraph;
+    use crate::model::shape::SizeCriterion;
     use crate::model::table::Cell;
 
     fn document_with_nested_table(source_width: u32, parent_width: u32) -> Document {
@@ -216,6 +220,7 @@ mod tests {
         nested.row_count = 1;
         nested.col_count = 1;
         nested.common.width = source_width;
+        nested.common.width_criterion = SizeCriterion::Para;
         nested.cells.push(Cell {
             col_span: 1,
             row_span: 1,
@@ -291,6 +296,45 @@ mod tests {
         assert_eq!(nested.common.width, 36_382);
         assert_eq!(owner.cells[13].width, 38_811);
         assert_eq!(overlay.nested_table_width_scale(nested), 1.0);
+    }
+
+    #[test]
+    fn absolute_nested_table_keeps_its_authored_width_without_no_adjust() {
+        // The saved width fits its containing cell and is explicitly absolute.
+        // A cleared noAdjust bit does not make it a relative-width table.
+        let mut document = document_with_nested_table(46_805, 47_930);
+        let Control::Table(owner) = &mut document.sections[0].paragraphs[0].controls[0] else {
+            panic!("owner table");
+        };
+        let Control::Table(nested) = &mut owner.cells[0].paragraphs[0].controls[0] else {
+            panic!("nested table");
+        };
+        nested.common.width_criterion = SizeCriterion::Absolute;
+        nested.outer_margin_left = 141;
+        nested.outer_margin_right = 141;
+        let overlay = RenderNormalizationOverlay::from_document(&document);
+        assert_eq!(
+            overlay.nested_table_width_scale(nested_table(&document)),
+            1.0
+        );
+    }
+
+    #[test]
+    fn relative_nested_table_with_no_adjust_keeps_its_authored_width() {
+        let mut document = document_with_nested_table(1_000, 2_000);
+        let Control::Table(owner) = &mut document.sections[0].paragraphs[0].controls[0] else {
+            panic!("owner table");
+        };
+        let Control::Table(nested) = &mut owner.cells[0].paragraphs[0].controls[0] else {
+            panic!("nested table");
+        };
+        nested.raw_table_record_attr |= 0x08;
+
+        let overlay = RenderNormalizationOverlay::from_document(&document);
+        assert_eq!(
+            overlay.nested_table_width_scale(nested_table(&document)),
+            1.0
+        );
     }
 
     #[test]

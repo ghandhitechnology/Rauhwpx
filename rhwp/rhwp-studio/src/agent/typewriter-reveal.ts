@@ -8,7 +8,6 @@ import {
   pointAtNewScalarOffset,
   rangeForNewScalarOffsets,
 } from './exact-text-diff.ts';
-import { measureInkRange } from './selection-ink.ts';
 
 /** insertText/replaceText 가 emit 하는 이벤트 페이로드. range 는 op.range 의
  * 라이브 참조다 — 이후 op 들의 좌표 shift 가 그대로 반영된다. */
@@ -16,7 +15,7 @@ export interface AgentTextInsertedEvent {
   agent: AgentName;
   range: DocRange;
   text: string;
-  /** 교체 원문. 있으면 공통 접두/접미는 덮지 않고 추가분만 타자기 공개한다. */
+  /** 교체 원문. 있으면 공통 접두/접미는 건너뛰고 추가분으로만 캐럿을 움직인다. */
   oldText?: string;
 }
 
@@ -28,7 +27,7 @@ export interface RevealChunk {
 }
 
 /**
- * 타자기가 덮을 구간. oldText 가 없으면 삽입 전체, 있으면 exact diff 의
+ * 캐럿이 이동할 구간. oldText 가 없으면 삽입 전체, 있으면 exact diff 의
  * 추가/교체 훙크만. 삭제만 있는 훙크는 새 글자가 없으므로 빠진다.
  */
 export function revealChunksForInsertedText(text: string, oldText?: string): RevealChunk[] {
@@ -46,13 +45,13 @@ const REVEAL_PER_CHAR_MS = 14;
 /** 청크 하나의 공개 시간 범위. 큰 편집도 이 안에서 끝나 지연으로 읽히지 않는다. */
 const REVEAL_MIN_MS = 160;
 const REVEAL_MAX_MS = 900;
-/** 커밋 직후 canvas repaint 가 자리잡을 여유. 커버는 즉시 덮이므로 팝은 없다. */
+/** 커밋 직후 canvas repaint 가 자리잡을 여유. */
 const REVEAL_START_DELAY_MS = 50;
 /** 연속 op 사이의 숨 고르기. */
 const REVEAL_GAP_MS = 70;
-/** 공개가 끝난 뒤 에이전트 캐럿이 머무는 시간. */
+/** 이동이 끝난 뒤 에이전트 캐럿이 머무는 시간. */
 const CARET_LINGER_MS = 260;
-/** 대량 편집에서는 오래된 공개를 완료하고 최근 항목만 애니메이션한다. */
+/** 대량 편집에서는 오래된 캐럿 이동을 완료하고 최근 항목만 애니메이션한다. */
 const MAX_REVEAL_ITEMS = 8;
 const MAX_REVEAL_AGE_MS = 2000;
 /** 카메라 추적: 캐럿을 뷰포트의 이 밴드 안에 유지한다. */
@@ -73,11 +72,6 @@ interface RevealItem {
   enqueuedAt: number;
   revealStart: number | null;
   durationMs: number;
-  /**
-   * 페이지 좌표 rect 캐시. 페이지 좌표는 줌/스크롤과 무관하므로 문서 변이
-   * 이벤트에서만 무효화한다 — 큐가 길어도 프레임마다 wasm 프로브를 반복하지 않는다.
-   */
-  cachedRects: SelectionRect[] | null;
 }
 
 function scalarLen(s: string): number {
@@ -95,18 +89,15 @@ function cellPathAt(cell: CellAddr, paraIdx: number): string {
  * 에이전트 텍스트의 타자기 공개(typewriter reveal).
  *
  * 편집은 이미 문서에 한 번에 커밋·레이아웃된 상태다(재레이아웃 없음). 이 컨트롤러는
- * 추가된 텍스트 영역을 용지색 커버로 즉시 덮고, 하나의 rAF 루프에서 글자 단위로 커버를
- * 걷어내며 에이전트 캐럿을 공개 지점에 붙여 움직인다. 교체에서 원문과 같은 접두/접미는
- * 덮지 않는다. 커버는 z-index 9 로 틴트 잉크(z6)·마커(z7)까지 함께 덮으므로 추가분은
- * '틴트된 채로' 타이핑되어 나타난다.
+ * 하나의 rAF 루프에서 에이전트 캐럿을 새 글자 위로 이동한다. 텍스트는 이미 문서에
+ * 반영되어 있으므로 그대로 보여준다. 용지색 커버는 셀 배경·그림·수식을 지울 수 있어
+ * 사용하지 않는다. 교체에서 원문과 같은 접두/접미는 건너뛴다.
  *
- * 좌표는 매 프레임 wasm 프로브로 다시 구한다 — 공개 중의 줌/스크롤/후속 편집 shift 에
+ * 좌표는 매 프레임 wasm 프로브로 다시 구한다 — 이동 중의 줌/스크롤/후속 편집 shift 에
  * 자동으로 따라간다. 프로브 실패(주소 드리프트)는 해당 공개를 즉시 완료 처리한다.
  */
 export class AgentTypewriterReveal {
   private queue: RevealItem[] = [];
-  private covers: HTMLDivElement[] = [];
-  private coversInUse = 0;
   private caretEl: HTMLDivElement;
   private caretAgent: AgentName | null = null;
   private rafId: number | null = null;
@@ -132,15 +123,9 @@ export class AgentTypewriterReveal {
     this.unsubs.push(deps.eventBus.on('agent-text-inserted', (payload) => {
       this.enqueue(payload as AgentTextInsertedEvent);
     }));
-    // 문서 변이는 라이브 range 를 shift 시키고 조판도 바꾼다 — rect 캐시를 비운다.
-    for (const name of ['document-changed', 'document-page-invalidated', 'document-view-changed']) {
-      this.unsubs.push(deps.eventBus.on(name, () => {
-        for (const item of this.queue) item.cachedRects = null;
-      }));
-    }
   }
 
-  /** 사용자가 직접 스크롤하면 이번 공개 큐가 끝날 때까지 카메라 추적을 멈춘다. */
+  /** 사용자가 직접 스크롤하면 이번 이동 큐가 끝날 때까지 카메라 추적을 멈춘다. */
   private onUserScrollIntent = (): void => {
     if (this.queue.length > 0) this.followBroken = true;
   };
@@ -187,14 +172,12 @@ export class AgentTypewriterReveal {
         enqueuedAt: now,
         revealStart: null,
         durationMs: Math.max(REVEAL_MIN_MS, Math.min(REVEAL_MAX_MS, len * REVEAL_PER_CHAR_MS)),
-        cachedRects: null,
       });
     }
     if (this.queue.length > MAX_REVEAL_ITEMS) {
       this.queue.splice(0, this.queue.length - MAX_REVEAL_ITEMS);
     }
-    // 배치의 최종 조판 이후, 브라우저 paint 이전에 한 번만 커버를 배치한다.
-    // 항목마다 전체 큐를 프로브하면 N개 편집이 N²번 geometry 조회를 만든다.
+    // 배치의 최종 조판 이후, 브라우저 paint 이전에 캐럿을 배치한다.
     if (this.enqueueScheduled) return;
     this.enqueueScheduled = true;
     const generation = this.enqueueGeneration;
@@ -209,12 +192,11 @@ export class AgentTypewriterReveal {
     });
   }
 
-  /** 모든 공개를 즉시 완료한다 (approve/reject/무효화/문서 교체). */
+  /** 모든 캐럿 이동을 즉시 완료한다 (approve/reject/무효화/문서 교체). */
   finishAll(): void {
     this.enqueueGeneration++;
     this.enqueueScheduled = false;
     this.queue = [];
-    this.hideCovers();
     this.hideCaretSoon(0);
     this.stopLoop();
     this.followBroken = false;
@@ -226,8 +208,6 @@ export class AgentTypewriterReveal {
     this.finishAll();
     if (this.caretHideTimer !== null) clearTimeout(this.caretHideTimer);
     this.detachScrollHost();
-    for (const cover of this.covers) cover.remove();
-    this.covers = [];
     this.caretEl.remove();
   }
 
@@ -242,7 +222,6 @@ export class AgentTypewriterReveal {
       this.rafId = requestAnimationFrame(this.onFrame);
     } else {
       this.lastFrameTs = null;
-      this.hideCovers();
       this.hideCaretSoon(CARET_LINGER_MS);
       this.followBroken = false;
     }
@@ -263,7 +242,7 @@ export class AgentTypewriterReveal {
       return;
     }
 
-    // 백그라운드 탭 복귀 시 이미 오래된 편집을 다시 가리지 않는다.
+    // 백그라운드 탭 복귀 시 오래된 캐럿 이동을 다시 재생하지 않는다.
     while (this.queue.length > 0 && now - this.queue[0].enqueuedAt >= MAX_REVEAL_AGE_MS) {
       this.queue.shift();
     }
@@ -288,7 +267,6 @@ export class AgentTypewriterReveal {
     }
 
     if (!current) {
-      this.hideCovers();
       return;
     }
 
@@ -297,23 +275,15 @@ export class AgentTypewriterReveal {
     const progress = Math.max(0, (now - (current.revealStart ?? now)) / current.durationMs);
     const revealedChars = Math.min(current.textLen, Math.floor(current.textLen * progress));
 
-    this.coversInUse = 0;
     let caretPos: { left: number; top: number; height: number } | null = null;
 
     try {
-      caretPos = this.coverItem(current, revealedChars, scrollContent, contentWidth, zoom);
-      // 뒤에 대기 중인 항목들은 전부 덮는다.
-      for (let i = 1; i < this.queue.length; i++) {
-        this.coverItem(this.queue[i], 0, scrollContent, contentWidth, zoom);
-      }
+      caretPos = this.caretPosition(current, revealedChars, contentWidth, zoom);
     } catch {
       // 주소 드리프트(사용자 편집/승인 경합) — 이 항목은 즉시 공개 완료 처리한다.
       this.queue.shift();
-      this.trimCovers();
       return;
     }
-
-    this.trimCovers();
 
     if (caretPos) {
       this.showCaret(current.agent, caretPos);
@@ -321,68 +291,18 @@ export class AgentTypewriterReveal {
     }
   }
 
-  /**
-   * 한 항목의 미공개 영역을 커버로 덮는다. revealedChars 위치의 캐럿 화면 좌표를
-   * 반환한다 (항목이 화면 계산 불가면 null 이 아니라 throw — 호출부가 완료 처리).
-   */
-  private coverItem(
+  /** 현재 글자 위치의 캐럿 화면 좌표. 주소가 무효면 throw 해 항목을 완료 처리한다. */
+  private caretPosition(
     item: RevealItem,
     revealedChars: number,
-    scrollContent: HTMLElement,
     contentWidth: number,
     zoom: number,
   ): { left: number; top: number; height: number } | null {
     const caretRect = this.probeCaret(item, revealedChars);
     const caretPos = this.pagePosition(caretRect, contentWidth, zoom);
-    const caretBottom = caretPos ? caretPos.top + Math.max(caretPos.height, 1) : null;
-
-    for (const rect of this.probeRects(item)) {
-      const pos = this.pagePosition(rect, contentWidth, zoom);
-      if (!pos) continue;
-      const bottom = pos.top + pos.height;
-      // 캐럿 배치 불가(새 페이지 미확정) 동안은 항목 전체를 덮는다.
-      if (caretPos !== null && caretBottom !== null) {
-        // 캐럿 줄보다 위에서 끝나는 줄은 이미 공개됐다.
-        if (bottom <= caretPos.top + 0.5) continue;
-        const onCaretLine = pos.top < caretBottom - 0.5 && bottom > caretPos.top + 0.5;
-        const coverLeft = onCaretLine ? Math.max(pos.left, caretPos.left) : pos.left;
-        const coverWidth = pos.left + pos.width - coverLeft;
-        if (coverWidth <= 0.5) continue;
-        this.placeCover(scrollContent, coverLeft, pos.top, coverWidth + 1, pos.height);
-      } else {
-        this.placeCover(scrollContent, pos.left, pos.top, pos.width + 1, pos.height);
-      }
-    }
     return caretPos
       ? { left: caretPos.left, top: caretPos.top, height: Math.max(caretPos.height, 12) }
       : null;
-  }
-
-  private placeCover(scrollContent: HTMLElement, left: number, top: number, width: number, height: number): void {
-    let cover = this.covers[this.coversInUse];
-    if (!cover) {
-      cover = document.createElement('div');
-      cover.className = 'ag-reveal-cover';
-      this.covers.push(cover);
-    }
-    if (cover.parentElement !== scrollContent) scrollContent.appendChild(cover);
-    cover.style.left = `${left.toFixed(2)}px`;
-    cover.style.top = `${top.toFixed(2)}px`;
-    cover.style.width = `${width.toFixed(2)}px`;
-    cover.style.height = `${height.toFixed(2)}px`;
-    cover.style.display = 'block';
-    this.coversInUse++;
-  }
-
-  private trimCovers(): void {
-    for (let i = this.coversInUse; i < this.covers.length; i++) {
-      this.covers[i].style.display = 'none';
-    }
-  }
-
-  private hideCovers(): void {
-    this.coversInUse = 0;
-    this.trimCovers();
   }
 
   private showCaret(agent: AgentName, pos: { left: number; top: number; height: number }): void {
@@ -450,59 +370,6 @@ export class AgentTypewriterReveal {
   }
 
   // ─── wasm 프로브 / 좌표 ─────────────────────────────────
-
-  private probeRects(item: RevealItem): SelectionRect[] {
-    if (item.cachedRects) return item.cachedRects;
-    const r = rangeForNewScalarOffsets(
-      item.range, item.text, item.hunkStart, item.hunkStart + item.textLen,
-    );
-    const cell = r.cell;
-    const wasm = this.deps.wasm;
-    item.cachedRects = measureInkRange(r, {
-      rects: () => cell?.path
-        ? wasm.getSelectionRectsByPath(
-          r.sectionIdx, cell.paraIdx, cell.path,
-          r.startParaIdx, r.startCharOffset, r.endParaIdx, r.endCharOffset,
-        )
-        : cell
-        ? wasm.getSelectionRectsInCell(
-          r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
-          r.startParaIdx, r.startCharOffset, r.endParaIdx, r.endCharOffset,
-        )
-        : wasm.getSelectionRects(
-          r.sectionIdx, r.startParaIdx, r.startCharOffset, r.endParaIdx, r.endCharOffset,
-        ),
-      paragraphLength: (paraIdx) => cell?.path
-        ? wasm.getCellParagraphLengthByPath(r.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx))
-        : cell
-        ? wasm.getCellParagraphLength(
-          r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx,
-        )
-        : wasm.getParagraphLength(r.sectionIdx, paraIdx),
-      text: (paraIdx, start, count) => {
-        if (count <= 0) return '';
-        return cell?.path
-          ? wasm.getTextInCellByPath(r.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), start, count)
-          : cell
-          ? wasm.getTextInCell(
-            r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
-            paraIdx, start, count,
-          )
-          : wasm.getTextRange(r.sectionIdx, paraIdx, start, count);
-      },
-      caret: (paraIdx, offset) => {
-        const rect = cell?.path
-          ? wasm.getCursorRectByPath(r.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), offset)
-          : cell
-          ? wasm.getCursorRectInCell(
-            r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, offset,
-          )
-          : wasm.getCursorRect(r.sectionIdx, paraIdx, offset);
-        return { pageIndex: rect.pageIndex, x: rect.x, y: rect.y, width: 0, height: rect.height };
-      },
-    }).rects;
-    return item.cachedRects;
-  }
 
   private probeCaret(item: RevealItem, scalarOffset: number): SelectionRect {
     const r = item.range;

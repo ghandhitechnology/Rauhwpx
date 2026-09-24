@@ -732,21 +732,32 @@ impl LayoutEngine {
                         Control::Picture(pic) => {
                             let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
                             let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
+                            let (margin_left, margin_right, margin_top) =
+                                if pic.common.treat_as_char {
+                                    (
+                                        hwpunit_to_px(pic.common.margin.left as i32, self.dpi),
+                                        hwpunit_to_px(pic.common.margin.right as i32, self.dpi),
+                                        hwpunit_to_px(pic.common.margin.top as i32, self.dpi),
+                                    )
+                                } else {
+                                    (0.0, 0.0, 0.0)
+                                };
                             // 셀 내부에 맞추어 크기 제한
-                            let fit_w = pic_w.min(inner_width);
+                            let fit_w =
+                                pic_w.min((inner_width - margin_left - margin_right).max(0.0));
                             let fit_h = if pic_w > 0.0 {
                                 pic_h * (fit_w / pic_w)
                             } else {
                                 pic_h
                             };
                             // TAC: 문단 시작 위치 (표의 왼쪽 상단)
-                            let pic_x = inner_x;
+                            let pic_x = inner_x + margin_left;
                             // vpos 기반 y 위치: LINE_SEG의 vertical_pos 사용
                             let pic_y = if let Some(first_ls) = para.line_segs.first() {
                                 cell_y + pad_top + hwpunit_to_px(first_ls.vertical_pos, self.dpi)
                             } else {
                                 para_y - fit_h
-                            };
+                            } + margin_top;
 
                             let bin_id = pic.image_attr.bin_data_id;
                             let img_data = find_bin_data(bin_data_content, bin_id)

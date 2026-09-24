@@ -138,22 +138,20 @@ try {
     await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
     await page.waitForSelector('#agent-sidebar .ag-conn');
 
-    // a. 허브 없음 → 배너 + 재시도 버튼 -------------------------------------
-    setTestCase('a. 허브 부재 시 연결 배너');
+    // a. 허브 없음 → 빨간 점 + 팝오버 재시도 ------------------------------
+    setTestCase('a. 허브 부재 시 연결 상태 점');
     await page.waitForFunction(
-      () => {
-        const banner = document.querySelector('#agent-sidebar .ag-conn-banner');
-        return banner && !banner.hidden;
-      },
+      () => document.querySelector('#agent-sidebar .ag-conn-dot')?.getAttribute('data-state') === 'disconnected',
       { timeout: 15000 },
     );
-    const bannerText = await page.evaluate(
-      () => document.querySelector('.ag-conn-banner-text')?.textContent ?? '',
+    await page.click('#agent-sidebar .ag-conn-dot');
+    const popoverText = await page.evaluate(
+      () => document.querySelector('.ag-conn-popover-text')?.textContent ?? '',
     );
-    assert(bannerText.includes('연결하는 중'), `배너 문구: ${bannerText}`);
+    assert(popoverText.includes('연결'), `팝오버 문구: ${popoverText}`);
     const retryVisible = await page.evaluate(() => {
-      const btn = document.querySelector('.ag-conn-banner-retry');
-      return !!btn && btn.offsetParent !== null && btn.textContent === '지금 다시 연결';
+      const btn = document.querySelector('.ag-conn-retry');
+      return !!btn && btn.offsetParent !== null && btn.textContent === '다시 연결';
     });
     assert(retryVisible, '재시도 버튼이 보여야 한다');
     await screenshot(page, 'reconnect-banner-no-hub');
@@ -165,10 +163,11 @@ try {
       () => document.querySelector('#agent-sidebar .ag-conn')?.textContent === '연결됨',
       { timeout: 20000 },
     );
-    const bannerHidden = await page.evaluate(
-      () => document.querySelector('#agent-sidebar .ag-conn-banner')?.hidden === true,
+    const dotHidden = await page.evaluate(
+      () => document.querySelector('#agent-sidebar .ag-conn-dot')?.hidden === true
+        && document.querySelector('#agent-sidebar .ag-conn-popover')?.hidden === true,
     );
-    assert(bannerHidden, '연결되면 배너가 사라져야 한다');
+    assert(dotHidden, '연결되면 점과 팝오버가 사라져야 한다');
     await screenshot(page, 'reconnect-recovered');
 
     // c. 설정 페이지 ---------------------------------------------------------
@@ -218,8 +217,8 @@ try {
     await stopServer(hub);
     await page.waitForFunction(
       () => {
-        const banner = document.querySelector('#agent-sidebar .ag-conn-banner');
-        return banner && !banner.hidden;
+        const dot = document.querySelector('#agent-sidebar .ag-conn-dot');
+        return dot && !dot.hidden;
       },
       { timeout: 15000 },
     );
@@ -230,15 +229,13 @@ try {
     assert(hubDetailDown !== '연결됨', `끊김이 설정에도 반영돼야 한다: ${hubDetailDown}`);
     // 수동 재시도 — 허브가 죽어 있으니 즉시 실패하고 카운트다운으로 되돌아온다.
     // (즉시 시도 자체는 단위 테스트가 reconnectNow 호출로 보증한다.)
-    await page.click('.ag-conn-banner-retry');
+    await page.evaluate(() => document.querySelector('#agent-sidebar .ag-conn-dot')?.click());
+    await page.click('.ag-conn-retry');
     await delay(1200);
     const retryText = await page.evaluate(
-      () => document.querySelector('.ag-conn-banner-text')?.textContent ?? '',
+      () => document.querySelector('.ag-conn-popover-text')?.textContent ?? '',
     );
-    assert(
-      retryText.includes('연결하는 중') || retryText.includes('다시 시도'),
-      `수동 재시도 후 배너 문구: ${retryText}`,
-    );
+    assert(retryText.includes('연결'), `수동 재시도 후 팝오버 문구: ${retryText}`);
     await screenshot(page, 'reconnect-banner-after-kill');
 
     // e. 허브 재기동 → 다시 자동 복구 ----------------------------------------

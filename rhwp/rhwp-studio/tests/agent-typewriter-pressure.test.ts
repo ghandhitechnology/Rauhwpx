@@ -78,15 +78,15 @@ function setup(t: TestContext) {
   };
 }
 
-test('100 parallel inserts probe only the recent eight after the final synchronous mutation', async (t) => {
+test('100 parallel inserts move one caret after the final synchronous mutation', async (t) => {
   const h = setup(t);
   for (let index = 0; index < 100; index++) h.insert(index);
   assert.equal(h.selectionProbes.length, 0, 'no probes during the mutation batch');
   await Promise.resolve();
-  assert.deepEqual(h.selectionProbes, [92, 93, 94, 95, 96, 97, 98, 99]);
-  assert.equal(h.caretProbes.length, 16, 'one reveal caret and one range-end caret per retained item');
+  assert.deepEqual(h.selectionProbes, [], 'caret animation never probes selection covers');
+  assert.deepEqual(h.caretProbes, [92], 'the bounded queue starts at the oldest retained edit');
   assert.equal(h.frames.size, 1);
-  assert.equal(h.content.children.size, 9, 'one caret and eight covers');
+  assert.equal(h.content.children.size, 1, 'one caret and no paper-colored covers');
 });
 
 test('finish cancels queued geometry work and a later edit still starts its own reveal', async (t) => {
@@ -95,7 +95,8 @@ test('finish cancels queued geometry work and a later edit still starts its own 
   h.reveal.finishAll();
   h.insert(1);
   await Promise.resolve();
-  assert.deepEqual(h.selectionProbes, [1]);
+  assert.deepEqual(h.selectionProbes, []);
+  assert.deepEqual(h.caretProbes, [1]);
   assert.equal(h.frames.size, 1);
 });
 
@@ -121,7 +122,5 @@ test('returning from a background tab completes old reveals without probing them
   assert.equal(h.selectionProbes.length, 0);
   assert.equal(h.caretProbes.length, 0);
   assert.equal(h.frames.size, 0);
-  for (const child of h.content.children) {
-    if (child.className === 'ag-reveal-cover') assert.equal(child.style.display, 'none');
-  }
+  assert.equal(h.content.children.size, 1, 'only the reusable caret remains attached');
 });

@@ -16,7 +16,7 @@ concurrency:
 jobs:
   engine:
     name: Rust engine and WASM build
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 90
 
     steps:
@@ -61,12 +61,12 @@ jobs:
       - name: Test Rust workspace in parallel
         working-directory: rhwp
         run: |
-          cargo nextest run --locked --workspace --test-threads 4
+          cargo nextest run --locked --workspace --test-threads 8
           cargo test --locked --workspace --doc
 
-      - name: Build WASM engine
-        working-directory: rhwp
-        run: wasm-pack build --target web
+      - uses: ./.github/actions/build-wasm
+        with:
+          setup-rust: 'false'
       - name: Share tested WASM build
         uses: actions/upload-artifact@v4
         with:
@@ -81,7 +81,7 @@ jobs:
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
     name: Desktop, agent, and Studio checks
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 90
 
     steps:
@@ -150,7 +150,7 @@ jobs:
     name: Prepare nightly identity
     needs: [engine, app]
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     outputs:
       version: ${{ steps.identity.outputs.version }}
@@ -231,7 +231,7 @@ jobs:
   macos:
     name: Build macOS installers
     needs: prepare
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 120
     environment: macos-release
     steps:
@@ -254,7 +254,7 @@ jobs:
   windows:
     name: Build Windows installers
     needs: prepare
-    runs-on: windows-latest
+    runs-on: blacksmith-4vcpu-windows-2025
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
@@ -271,7 +271,7 @@ jobs:
     name: Publish nightly GitHub Release
     if: github.ref == 'refs/heads/main'
     needs: [macos, windows]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
       contents: write

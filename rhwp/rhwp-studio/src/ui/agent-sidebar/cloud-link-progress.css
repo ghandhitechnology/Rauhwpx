@@ -28,7 +28,7 @@
 
 .ag-cloud-link-progress[data-state='done'] .ag-cloud-link-progress-fill {
   animation: none;
-  transition: width 320ms ease-out;
+  transition: width var(--ag-dur-slow) var(--ag-ease-out);
 }
 
 .ag-cloud-link-progress-eta {

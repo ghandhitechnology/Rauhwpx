@@ -1047,6 +1047,9 @@ fn compute_control_mask(para: &Paragraph) -> u32 {
     if para.text.contains('\u{00A0}') {
         mask |= 1u32 << 0x001E;
     }
+    if para.text.contains('\u{00AD}') {
+        mask |= 1u32 << tags::CHAR_HYPHEN;
+    }
     // FIXED_WIDTH_SPACE (0x001F): HWPX에서 들어온 일부 문맥은 U+2007을
     // literal code point가 아니라 HWP5 fixed blank control로 저장해야 한다.
     if should_serialize_figure_space_as_hwp_fixed_blank(para) {
@@ -1376,9 +1379,15 @@ fn serialize_para_text_limited(para: &Paragraph, max_bytes: usize) -> Result<Vec
                     .ok_or_else(|| "HWP paragraph character offset overflow".to_string())?;
             }
             '\u{00A0}' => {
-                // 묶음 빈칸 (HWP 5.0 표 7: 코드 30). 코드 24(0x18)는 하이픈으로
-                // 재파싱 시 '-' 가 되므로 쓰면 안 된다 (#1793).
+                // 묶음 빈칸 (HWP 5.0 표 7: 코드 30).
                 push_code_unit(&mut bytes, 0x001E);
+                prev_end = offset
+                    .checked_add(1)
+                    .ok_or_else(|| "HWP paragraph character offset overflow".to_string())?;
+            }
+            '\u{00AD}' => {
+                // HWP hyphen control (code 24), distinct from a literal '-'.
+                push_code_unit(&mut bytes, tags::CHAR_HYPHEN);
                 prev_end = offset
                     .checked_add(1)
                     .ok_or_else(|| "HWP paragraph character offset overflow".to_string())?;
@@ -2401,7 +2410,7 @@ mod tests {
     }
 
     /// [#1793] 묶음 빈칸(NBSP, U+00A0)은 코드 30(0x1E)으로 직렬화되어야 한다.
-    /// 코드 24(0x18)는 하이픈이라 재파싱 시 '-' 로 손상된다.
+    /// 코드 24(0x18)는 선택적 하이픈이므로 NBSP에 쓰면 안 된다.
     #[test]
     fn test_nbsp_serializes_as_code_30() {
         let para = Paragraph {
@@ -2414,6 +2423,25 @@ mod tests {
         let bytes = test_serialize_para_text(&para);
 
         assert_eq!(&bytes[2..4], &0x001E_u16.to_le_bytes());
+    }
+
+    #[test]
+    fn discretionary_and_literal_hyphens_serialize_to_distinct_codes() {
+        let para = Paragraph {
+            char_count: 4,
+            text: "\u{00AD}-_".to_string(),
+            char_offsets: vec![0, 1, 2],
+            ..Default::default()
+        };
+        let bytes = test_serialize_para_text(&para);
+        assert_eq!(
+            &bytes[..6],
+            &[0x0018u16, 0x002D, 0x005F]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        assert_ne!(compute_control_mask(&para) & (1u32 << 0x0018), 0);
     }
 
     /// [NBSP mask] U+00A0 은 PARA_TEXT 에 코드 0x1E 로 방출되므로 PARA_HEADER control_mask

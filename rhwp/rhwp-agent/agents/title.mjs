@@ -21,11 +21,11 @@ export function openRouterReady({ useOpenRouter, piManager, openRouter } = {}) {
 
 /**
  * 짧은 채팅 제목을 만든다 (문서 MCP 세션과 분리).
- * 기본은 gpt-5.6-luna CLI, pi 사용자는 OpenRouter 의 가장 싼 모델을 쓴다.
+ * 기본은 Codex Luna CLI, pi 사용자는 OpenRouter 의 가장 싼 모델을 쓴다.
  *
  * @param {string} preview
  * @param {{ useOpenRouter?: boolean, piManager?: any, openRouter?: any, isolatedHome?: string,
- *   sessionId?: string, cwd?: string, spawnProcess?: typeof spawn,
+ *   sessionId?: string, cwd?: string, model?: string, spawnProcess?: typeof spawn,
  *   terminateProcess?: typeof terminateProcessTree,
  *   cleanupProcessOutcome?: (child: any) => Promise<'proven'|'failed'|'unavailable'> }} [deps]
  * @returns {Promise<string | null>}
@@ -92,7 +92,7 @@ export function generateChatTitle(preview, deps = {}) {
           '--disable', 'image_generation', '--disable', 'multi_agent', '--disable', 'plugins',
           '--disable', 'skill_search',
           '--sandbox', 'read-only',
-          '-m', 'gpt-5.6-luna',
+          '-m', deps.model ?? 'gpt-6-luna',
           '-c', 'model_reasoning_effort="low"',
           '-',
         ],

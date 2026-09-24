@@ -2,7 +2,8 @@ import type { CloudCheckpointPayload } from '../cloud/types.ts';
 import type { AgentBridge } from '../agent/bridge.ts';
 import type { CheckpointTitleSummary } from '../agent/types.ts';
 import { CompareSessionStore } from '../compare/session.ts';
-import { compareDocuments, compareSnapshots } from '../compare/diff-engine.ts';
+import { buildSnapshotFromWasm, compareDocuments, compareSnapshots } from '../compare/diff-engine.ts';
+import type { DiffItem } from '../compare/types.ts';
 import type { EventBus } from '../core/event-bus.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 import { INSERTED_IMAGE_MAX_BYTES, readBlobBytesWithLimit } from '../core/document-input-limits.ts';
@@ -535,9 +536,30 @@ export class DocumentVersionController implements VersionManagerController {
   }
 
   async checkpoint(message?: string): Promise<void> {
+    const requestedDocumentId = this.#getDocumentId();
+    const requestedEditorRevision = this.#editorRevision;
+    const requestedRepositoryId = this.#repository?.id;
+    const requestedRepositoryRevision = this.#repository?.revision;
+    const requestedBranch = this.#activeBranch;
+    const requestIsCurrent = () => (
+      this.#getDocumentId() === requestedDocumentId
+      && this.#editorRevision === requestedEditorRevision
+      && this.#repository?.id === requestedRepositoryId
+      && this.#repository?.revision === requestedRepositoryRevision
+      && this.#activeBranch === requestedBranch
+    );
     await this.#enqueue(async () => {
+      if (!requestIsCurrent()) {
+        throw new VersionError('STALE_WORKSPACE', 'The workspace changed before checkpoint started');
+      }
       await this.#refreshData(false);
+      if (!requestIsCurrent()) {
+        throw new VersionError('STALE_WORKSPACE', 'The workspace changed before checkpoint started');
+      }
       await this.#guardMutation();
+      if (!requestIsCurrent()) {
+        throw new VersionError('STALE_WORKSPACE', 'The workspace changed before checkpoint started');
+      }
       await this.#createCheckpoint({ reason: 'manual', message });
     });
   }
@@ -659,7 +681,11 @@ export class DocumentVersionController implements VersionManagerController {
   }
 
   async compare(id: string): Promise<void> {
+    const requestedDocumentId = this.#getDocumentId();
     await this.#enqueue(async () => {
+      if (this.#getDocumentId() !== requestedDocumentId) {
+        throw new VersionError('STALE_WORKSPACE', 'The document changed before comparison started');
+      }
       const workspace = this.#captureWorkspaceToken();
       const target = await this.#requireCommit(id);
       const [stored, blob] = await Promise.all([
@@ -676,6 +702,153 @@ export class DocumentVersionController implements VersionManagerController {
         left: { bytes: blob.bytes, fileName: `${target.title}.hwp` },
         right: { bytes: current.bytes, fileName: this.#wasm.fileName },
       });
+    });
+  }
+
+  async diffWorkingTree(): Promise<DiffItem[]> {
+    const requestedDocumentId = this.#getDocumentId();
+    return this.#enqueue(async () => {
+      if (this.#getDocumentId() !== requestedDocumentId) {
+        throw new VersionError('STALE_WORKSPACE', 'The document changed before comparison started');
+      }
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      const branch = this.#requireActiveBranch();
+      const freshBranch = await this.#store.getBranch(repository.id, branch.name);
+      this.#assertWorkspaceToken(workspace);
+      if (!freshBranch) throw new VersionError('STALE_WORKSPACE', 'The active branch was removed');
+      const head = await this.#requireCommit(freshBranch.target);
+      const stored = await this.#store.getCompareSnapshot(head.compareSnapshotId);
+      this.#assertWorkspaceToken(workspace);
+      if (!stored) throw new VersionError('CORRUPT_BLOB', 'HEAD comparison data is missing');
+      const current = buildSnapshotFromWasm(this.#wasm, this.#wasm.fileName, VERSION_COMPARE_OPTIONS);
+      const diffs = compareSnapshots(stored.snapshot, current, VERSION_COMPARE_OPTIONS).diffItems;
+      const latestBranch = await this.#store.getBranch(repository.id, branch.name);
+      this.#assertWorkspaceToken(workspace);
+      if (!latestBranch || latestBranch.revision !== freshBranch.revision || latestBranch.target !== freshBranch.target) {
+        throw new VersionError('STALE_WORKSPACE', 'HEAD changed during comparison');
+      }
+      return diffs;
+    });
+  }
+
+  async diffCommit(id: string): Promise<DiffItem[]> {
+    const requestedDocumentId = this.#getDocumentId();
+    return this.#enqueue(async () => {
+      if (this.#getDocumentId() !== requestedDocumentId) {
+        throw new VersionError('STALE_WORKSPACE', 'The document changed before comparison started');
+      }
+      const workspace = this.#captureWorkspaceToken();
+      const commit = await this.#requireCommit(id);
+      if (commit.parents.length === 0) {
+        const after = await this.#store.getCompareSnapshot(commit.compareSnapshotId);
+        this.#assertWorkspaceToken(workspace);
+        if (!after) throw new VersionError('CORRUPT_BLOB', 'Commit comparison data is missing');
+        const empty = {
+          meta: { name: '', sectionCount: 0, pageCount: 0 },
+          paragraphs: [],
+          controls: [],
+        };
+        return compareSnapshots(empty, after.snapshot, VERSION_COMPARE_OPTIONS).diffItems;
+      }
+      const parent = await this.#requireCommit(commit.parents[0]);
+      const [before, after] = await Promise.all([
+        this.#store.getCompareSnapshot(parent.compareSnapshotId),
+        this.#store.getCompareSnapshot(commit.compareSnapshotId),
+      ]);
+      this.#assertWorkspaceToken(workspace);
+      if (!before || !after) throw new VersionError('CORRUPT_BLOB', 'Commit comparison data is missing');
+      const diffs = compareSnapshots(before.snapshot, after.snapshot, VERSION_COMPARE_OPTIONS).diffItems;
+      this.#assertWorkspaceToken(workspace);
+      return diffs;
+    });
+  }
+
+  async discardUncommitted(): Promise<void> {
+    const requestedDocumentId = this.#getDocumentId();
+    const requestedEditorRevision = this.#editorRevision;
+    const requestedRepositoryId = this.#repository?.id;
+    const requestedRepositoryRevision = this.#repository?.revision;
+    const requestedBranch = this.#activeBranch;
+    const requestIsCurrent = () => (
+      this.#getDocumentId() === requestedDocumentId
+      && this.#editorRevision === requestedEditorRevision
+      && this.#repository?.id === requestedRepositoryId
+      && this.#repository?.revision === requestedRepositoryRevision
+      && this.#activeBranch === requestedBranch
+    );
+    await this.#enqueue(async () => {
+      if (!requestIsCurrent()) {
+        throw new VersionError('STALE_WORKSPACE', 'The workspace changed before discard started');
+      }
+      if (this.#agentBridge.getEditingLease().active) {
+        throw new VersionError('ACTIVE_AGENT_TURN', 'An agent holds the editor');
+      }
+      await this.#refreshData(false);
+      if (!requestIsCurrent()) {
+        throw new VersionError('STALE_WORKSPACE', 'The workspace changed before discard started');
+      }
+      await this.#guardMutation(true);
+      if (!requestIsCurrent()) {
+        throw new VersionError('STALE_WORKSPACE', 'The workspace changed before discard started');
+      }
+      if (this.#agentBridge.getEditingLease().active) {
+        throw new VersionError('ACTIVE_AGENT_TURN', 'An agent holds the editor');
+      }
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      const branch = this.#requireActiveBranch();
+      const head = await this.#requireCommit(branch.target);
+      const blob = await this.#store.getBlob(head.blobId);
+      this.#assertWorkspaceToken(workspace);
+      if (!blob) throw new VersionError('CORRUPT_BLOB', 'HEAD bytes are missing');
+      const [freshRepository, freshBranch] = await Promise.all([
+        this.#store.getRepository(repository.id),
+        this.#store.getBranch(repository.id, branch.name),
+      ]);
+      this.#assertWorkspaceToken(workspace);
+      if (
+        !freshRepository || freshRepository.revision !== repository.revision
+        || !freshBranch || freshBranch.revision !== branch.revision
+        || freshBranch.target !== branch.target
+      ) {
+        throw new VersionError('STALE_WORKSPACE', 'HEAD changed before the working tree could be discarded');
+      }
+      await this.#guardMutation();
+      this.#assertWorkspaceToken(workspace);
+      if (this.#agentBridge.isTurnRunning() || this.#agentBridge.getEditingLease().active) {
+        throw new VersionError('ACTIVE_AGENT_TURN', 'An agent holds the editor');
+      }
+      const original = captureVersionSnapshot(this.#wasm);
+      this.#assertWorkspaceToken(workspace);
+      if (original.fingerprint === head.contentFingerprint) {
+        this.#setDirtyForFingerprint(head.contentFingerprint, 'version-head-match', head.contentFingerprint);
+        return;
+      }
+      const handler = this.#requireInputHandler();
+      const wasDirty = this.#documentState.isDirty();
+      handler.prepareSnapshotCapacity(4);
+      this.#assertWorkspaceToken(workspace);
+      try {
+        handler.replaceContentFromBytes(blob.bytes);
+      } catch (error) {
+        throw new VersionError('RESTORE_PARSE_FAILED', 'HEAD bytes could not be restored', {
+          cause: error instanceof Error ? error : undefined,
+        });
+      }
+      const replacementWorkspace = this.#captureWorkspaceToken();
+      try {
+        this.#setDirtyForFingerprint(head.contentFingerprint, 'version-discard', head.contentFingerprint);
+        await this.#refreshData(true);
+      } catch (error) {
+        this.#rollbackReplacement(handler, original, wasDirty, replacementWorkspace);
+        throw error;
+      }
+      try {
+        this.#eventBus.emit('document-context-changed');
+      } catch (error) {
+        console.warn('[Versions] Discarded changes, but a document context listener failed:', error);
+      }
     });
   }
 

@@ -74,7 +74,9 @@ export function buildCodexAppServerArgv(opts, { enableDefaultModeUserInput = fal
     '--disable', 'apps',
     '--disable', 'browser_use',
     '--disable', 'computer_use',
-    '--disable', 'image_generation',
+    ...(opts.toolProfile === 'copy-layout-worker'
+      ? ['--disable', 'image_generation']
+      : ['--enable', 'image_generation']),
     ...(opts.toolProfile === 'copy-layout-worker'
       ? [
         '--disable', 'multi_agent', '--disable', 'shell_tool', '--disable', 'unified_exec',

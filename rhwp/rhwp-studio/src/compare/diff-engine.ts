@@ -547,7 +547,7 @@ function kindLabel(kind: DiffKind): string {
 }
 
 /**
- * 표 셀 텍스트·속성을 요약한 짧은 문자열 — 컨트롤 diff에서 "같은 표인지" 판별용.
+ * 표 셀 텍스트·속성의 매칭 요약과 셀 원문을 함께 수집한다.
  * WASM에 `getTableSignature`가 있으면 그걸 우선(정확·빠름), 없으면 셀 순회 폴백.
  */
 function buildTableSummary(
@@ -556,7 +556,7 @@ function buildTableSummary(
   sec: number,
   para: number,
   ci: number,
-): string {
+): { summary: string; tableCellTexts: string[] } {
   let sigDigest = 'nosig';
   try {
     const sigJson = wasm.getTableSignature(sec, para, ci);
@@ -630,7 +630,10 @@ function buildTableSummary(
   }
   const cellPreview = cellPreviewPairs.join('&');
   const cellHash = cellHashPairs.join('&');
-  return `table r=${dim.rowCount} c=${dim.colCount} tprev="${textPreview || '(없음)'}" cprev="${cellPreview || '(없음)'}" csha="${cellHash || '(없음)'}" txt=${textDigest} props=${propsDigest} box=${bboxDigest} sig=${sigDigest}`;
+  return {
+    summary: `table r=${dim.rowCount} c=${dim.colCount} tprev="${textPreview || '(없음)'}" cprev="${cellPreview || '(없음)'}" csha="${cellHash || '(없음)'}" txt=${textDigest} props=${propsDigest} box=${bboxDigest} sig=${sigDigest}`,
+    tableCellTexts: cellSnippets,
+  };
 }
 
 // ─── 표 요약 파싱·셀 단위 변경 집계 (buildGranularControlDiffs에서 사용) ───────
@@ -742,9 +745,27 @@ function buildGranularControlDiffs(
     push('size', `${tableLabel} 크기 변경`, `box=${lk.box ?? '(없음)'}`, `box=${rk.box ?? '(없음)'}`);
     // UI의 행/열별 셀 비교는 cprev(r1c1=...&r1c2=...) 포맷을 기준으로 동작한다.
     // cprev가 없을 때만 tprev로 폴백한다.
-    const lText = `cprev="${lk.cprev ?? lk.tprev ?? '(없음)'}"`;
-    const rText = `cprev="${rk.cprev ?? rk.tprev ?? '(없음)'}"`;
+    let lText = `cprev="${lk.cprev ?? lk.tprev ?? '(없음)'}"`;
+    let rText = `cprev="${rk.cprev ?? rk.tprev ?? '(없음)'}"`;
     const tableTextChanged = (lk.txt ?? '') !== (rk.txt ?? '') || lText !== rText;
+    if (!rowsColsChanged && l.tableCellTexts && r.tableCellTexts) {
+      const columns = Number(rk.c);
+      if (Number.isSafeInteger(columns) && columns > 0) {
+        const changed = Array.from(
+          { length: Math.max(l.tableCellTexts.length, r.tableCellTexts.length) },
+          (_, index) => index,
+        ).filter((index) => l.tableCellTexts![index] !== r.tableCellTexts![index]);
+        if (changed.length > 0) {
+          const preview = (cells: string[]) => changed.map((index) => {
+            const row = Math.floor(index / columns) + 1;
+            const col = (index % columns) + 1;
+            return `r${row}c${col}: ${cells[index] || '(없음)'}`;
+          }).join('\n');
+          lText = preview(l.tableCellTexts);
+          rText = preview(r.tableCellTexts);
+        }
+      }
+    }
     const changedCells = countChangedCellsByHash(lk.csha ?? '', rk.csha ?? '');
     const textTitle = rowsColsChanged
       ? `${tableLabel} 텍스트 변경(구조변경 동반${changedCells > 0 ? `, ${changedCells}셀` : ''})`
@@ -936,6 +957,14 @@ function fillSnapshotFromWasm(
   wasm.refreshLayout();
 
   const displayedPageByGlobalPage = new Map<number, number>();
+  const pageDefinitions: unknown[] = [];
+  for (let sec = 0; sec < info.sectionCount; sec += 1) {
+    try {
+      pageDefinitions.push(wasm.getPageDef(sec));
+    } catch {
+      pageDefinitions.push(null);
+    }
+  }
   for (let page = 0; page < info.pageCount; page += 1) {
     try {
       const pi = wasm.getPageInfo(page);
@@ -970,6 +999,23 @@ function fillSnapshotFromWasm(
       const signature = simpleHash(
         `${normalizedText}|cc:${controls.length}${shapeDigest ? `|ps:${shapeDigest}` : ''}`,
       );
+      let formatSignature: string | undefined;
+      if (options.strategy === 'identity') {
+        let charShapeDigest = '';
+        if (length > 0) {
+          try {
+            const runs = wasm.getCharShapeRuns(sec, para, 0, length).map((run) => {
+              const { charShapeId: _shapeId, fontId: _fontId, fontIds: _fontIds,
+                borderFillId: _borderFillId, ...properties } = wasm.getCharPropertiesAt(sec, para, run.startOffset);
+              return [run.endOffset - run.startOffset, properties];
+            });
+            charShapeDigest = simpleHash(JSON.stringify(runs));
+          } catch {
+            // Older WASM builds may not expose run-level formatting.
+          }
+        }
+        formatSignature = simpleHash(`${shapeDigest}|cs:${charShapeDigest}`);
+      }
       const stableId = wasm.getParagraphStableId(sec, para);
       const anchor = tryResolveCompareParaAnchorFromCursor(wasm, sec, para, length);
       const sectionPage = (() => {
@@ -986,6 +1032,7 @@ function fillSnapshotFromWasm(
         normalizedText,
         controlCount: controls.length,
         signature,
+        formatSignature,
         isAnchorCandidate: false,
         anchor,
       });
@@ -1052,10 +1099,11 @@ function fillSnapshotFromWasm(
         ? `sid:${paraStableId}:${ci}:${item.type}`
         : `loc:${sec}:${para}:${ci}:${item.type}`;
       let summary = `${item.type} ${Math.round(item.w)}x${Math.round(item.h)}`;
+      let tableCellTexts: string[] | undefined;
 
       try {
         if (item.type === 'table' && sec >= 0 && para >= 0 && ci >= 0) {
-          summary = buildTableSummary(wasm, options, sec, para, ci);
+          ({ summary, tableCellTexts } = buildTableSummary(wasm, options, sec, para, ci));
         } else if (item.type === 'image' && sec >= 0 && para >= 0 && ci >= 0) {
           const pic = wasm.getPictureProperties(sec, para, ci);
           const w = Math.round(pic.width);
@@ -1121,6 +1169,7 @@ function fillSnapshotFromWasm(
         section: sec,
         paragraph: para,
         summary,
+        ...(tableCellTexts ? { tableCellTexts } : {}),
         kind: mapControlKind(item.type, summary),
         anchor: {
           pageIndex: page,
@@ -1140,7 +1189,7 @@ function fillSnapshotFromWasm(
     const controlCount = wasm.getControlTextPositions(p.section, p.paragraph).length;
     for (let ci = 0; ci < controlCount; ci += 1) {
       try {
-        const summary = buildTableSummary(wasm, options, p.section, p.paragraph, ci);
+        const { summary, tableCellTexts } = buildTableSummary(wasm, options, p.section, p.paragraph, ci);
         const key = p.stableId
           ? `sid:${p.stableId}:${ci}:table`
           : `loc:${p.section}:${p.paragraph}:${ci}:table`;
@@ -1163,6 +1212,7 @@ function fillSnapshotFromWasm(
           section: p.section,
           paragraph: p.paragraph,
           summary,
+          tableCellTexts,
           kind: 'table',
           anchor,
         });
@@ -1240,6 +1290,7 @@ function fillSnapshotFromWasm(
   }
 
   return {
+    layoutSignature: simpleHash(JSON.stringify(pageDefinitions)),
     meta: {
       name: displayName,
       sectionCount: info.sectionCount,
@@ -1324,6 +1375,14 @@ function formatParaLocTitle(p: { section: number; paragraph: number }): string {
   return `구역 ${p.section}, 문단 ${p.paragraph}`;
 }
 
+function hasParagraphFormatChange(left: CompareParaSnapshot, right: CompareParaSnapshot): boolean {
+  if (left.normalizedText !== right.normalizedText || left.controlCount !== right.controlCount) return false;
+  if (left.formatSignature && right.formatSignature) {
+    return left.formatSignature !== right.formatSignature;
+  }
+  return left.signature !== right.signature;
+}
+
 // ─── identity 경로: 이력(동일 혈통)에서 stable_id 기준 O(N) 근사 텍스트 diff ───
 
 /**
@@ -1406,6 +1465,25 @@ function buildIdentityTextDiffs(left: CompareDocumentSnapshot, right: CompareDoc
         leftAnchor: l.anchor,
         rightAnchor: r.anchor,
         inlineTextDiff: myersCharDiffSummary(l.text, r.text),
+      });
+    }
+
+    // The signature also includes paragraph shape. With the text and control
+    // count unchanged, a different signature is a formatting-only edit.
+    if (
+      kinds.includes('paragraphMeta')
+      && hasParagraphFormatChange(l, r)
+    ) {
+      diffs.push({
+        id: mkDiffId('paragraphMeta', `id-format:${id}`),
+        kind: 'paragraphMeta',
+        severity: 'modified',
+        path: preferRightPath(l, r),
+        title: '문단 서식 변경',
+        leftPreview: l.text,
+        rightPreview: r.text,
+        leftAnchor: l.anchor,
+        rightAnchor: r.anchor,
       });
     }
 
@@ -2265,6 +2343,7 @@ function cleanupParagraphAlignStepsToDiffItems(
   steps: ParagraphAlignStep[],
   lps: CompareParaSnapshot[],
   rps: CompareParaSnapshot[],
+  compareFormatting: boolean,
 ): DiffItem[] {
   const diffs: DiffItem[] = [];
   let i = 0;
@@ -2436,6 +2515,20 @@ function cleanupParagraphAlignStepsToDiffItems(
       });
     }
 
+    if (compareFormatting && hasParagraphFormatChange(l, r)) {
+      diffs.push({
+        id: mkDiffId('paragraphMeta', `format:${l.section}:${l.paragraph}`),
+        kind: 'paragraphMeta',
+        severity: 'modified',
+        path: preferRightPath(l, r),
+        title: `문단 서식 변경 (${formatParaLocTitle(r)})`,
+        leftPreview: l.text,
+        rightPreview: r.text,
+        leftAnchor: l.anchor,
+        rightAnchor: r.anchor,
+      });
+    }
+
     if (l.signature === r.signature && Math.abs(l.globalIndex - r.globalIndex) > MOVE_DISTANCE_THRESHOLD) {
       diffs.push({
         id: mkDiffId('paragraphMeta', `moved:${l.section}:${l.paragraph}`),
@@ -2480,7 +2573,7 @@ function cleanupParagraphAlignStepsToDiffItems(
  * 반환의 `rightToLeftPara`는 cleanup 이전 `aligned`와 일치한다. 컨트롤 단계는 이 맵으로
  * 물리 `paragraph`가 달라도 같은 논리 문단의 개체를 다시 붙인다(`buildControlDiffs`).
  */
-function buildTextDiffs(left: CompareDocumentSnapshot, right: CompareDocumentSnapshot): {
+function buildTextDiffs(left: CompareDocumentSnapshot, right: CompareDocumentSnapshot, compareFormatting = false): {
   diffs: DiffItem[];
   rightToLeftPara: Map<string, CompareParaSnapshot>;
 } {
@@ -2528,7 +2621,7 @@ function buildTextDiffs(left: CompareDocumentSnapshot, right: CompareDocumentSna
 
   const rightToLeftPara = buildRightToLeftParaMapFromAligned(aligned);
   const steps = stripNoiseOnlyParagraphAlignSteps(buildParagraphAlignStepsFromAligned(aligned));
-  const diffs = cleanupParagraphAlignStepsToDiffItems(steps, lps, rps);
+  const diffs = cleanupParagraphAlignStepsToDiffItems(steps, lps, rps, compareFormatting);
   return { diffs, rightToLeftPara };
 }
 
@@ -3046,11 +3139,23 @@ export function compareSnapshots(
   const textBundle =
     textMode === 'identity'
       ? { diffs: buildIdentityTextDiffs(left, right, options.kinds), rightToLeftPara: new Map<string, CompareParaSnapshot>() }
-      : buildTextDiffs(left, right);
+      : buildTextDiffs(left, right, strategy === 'identity');
   const textDiffs = textBundle.diffs;
 
   // 2) 개체(표/도형 등) 병합 — 문단 정렬 맵으로 밀린 문단 좌표의 표·그림을 같은 슬롯에서 재짝짓기
-  const all = [...textDiffs, ...buildControlDiffs(left, right, textBundle.rightToLeftPara)];
+  const layoutDiffs: DiffItem[] = left.layoutSignature && right.layoutSignature
+    && left.layoutSignature !== right.layoutSignature
+    ? [{
+      id: mkDiffId('paragraphMeta', 'page-layout'),
+      kind: 'paragraphMeta',
+      severity: 'modified',
+      path: { section: 0 },
+      title: '페이지 설정 변경',
+      leftPreview: '이전 페이지 설정',
+      rightPreview: '변경된 페이지 설정',
+    }]
+    : [];
+  const all = [...textDiffs, ...buildControlDiffs(left, right, textBundle.rightToLeftPara), ...layoutDiffs];
 
   // 3) kinds 필터 + 순수 리플로우 이동 노이즈 제거 후, UI용 쪽번호 주석
   const filtered = suppressPureReflowMoves(

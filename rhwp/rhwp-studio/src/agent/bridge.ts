@@ -26,7 +26,10 @@ import { PendingRequestRegistry } from './pending-requests.ts';
 import { AgentTypewriterReveal } from './typewriter-reveal.ts';
 import { deriveAgentEditingLease, planModeAllowsUserEditing } from './editing-lease.ts';
 import {
+  setModelCatalog,
   setPiModels as setPiModelRegistry,
+  type CatalogAgent,
+  type ModelCatalogEntry,
 } from './models.ts';
 import {
   AGENT_PROTOCOL_VERSION,
@@ -88,6 +91,7 @@ import type {
   StagedReference,
   MessageReferenceStatus,
   StructuredPlan,
+  PendingEditsChangeEvent,
   UsageModelBreakdown,
   UsageSource,
   UsageSummary,
@@ -237,6 +241,8 @@ export interface AgentBridge {
   reconnectNow(): Promise<void>;
   /** 로컬 CLI 설치 상태. refresh=true 면 허브가 새로 프로브한다. */
   requestProviderStatus(refresh?: boolean): Promise<ProviderStatusMap | null>;
+  /** Available concrete models from the local provider. */
+  requestModelCatalog(agent: CatalogAgent, refresh?: boolean): Promise<ModelCatalogEntry[] | null>;
   requestAgentSetupStatus(refresh?: boolean): Promise<AgentSetupStatusMap | null>;
   requestAccountStatus(): Promise<AccountSessionStatus | null>;
   loginAccount(): Promise<AccountLoginStart | null>;
@@ -1165,6 +1171,27 @@ function readPiCatalog(value: unknown): PiCatalogModel[] {
   return out;
 }
 
+function readModelCatalog(value: unknown): ModelCatalogEntry[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const models: ModelCatalogEntry[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const model = raw as Record<string, unknown>;
+    if (typeof model.id !== 'string' || !model.id.trim() || seen.has(model.id)) continue;
+    seen.add(model.id);
+    models.push({
+      id: model.id,
+      label: typeof model.label === 'string' && model.label.trim() ? model.label : model.id,
+      ...(typeof model.description === 'string' ? { description: model.description } : {}),
+      ...(Array.isArray(model.supportedEfforts)
+        ? { supportedEfforts: model.supportedEfforts.filter((effort): effort is string => typeof effort === 'string') }
+        : {}),
+    });
+  }
+  return models;
+}
+
 function readCheckpointTitleResult(value: unknown): CheckpointTitleResult | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const src = value as Record<string, unknown>;
@@ -1242,6 +1269,20 @@ export class AgentBridgeImpl implements AgentBridge {
   private phase: AgentPhase = 'direct';
   private capabilityEpoch: number | null = null;
   private latestPlan: StructuredPlan | null = null;
+  private planExecutionTurn: {
+    planId: string;
+    turnId: string;
+    existingSetIds: Set<string>;
+    invalidated: boolean;
+  } | null = null;
+  private planReview: { planId: string; turnId: string; setIds: Set<string>; rejected: boolean } | null = null;
+  private pendingPlanExecutionResult: {
+    v: number;
+    type: 'chat-plan-execution-result';
+    planId: string;
+    turnId: string;
+    status: 'awaiting-review' | 'completed' | 'blocked' | 'interrupted';
+  } | null = null;
   private activeAgent: AgentName | null = null;
   private turnRunning = false;
   /** Hub-issued identity for the one root provider turn allowed to mutate. */
@@ -1323,6 +1364,7 @@ export class AgentBridgeImpl implements AgentBridge {
       if (e.type === 'set-finalized' || e.type === 'approved' || e.type === 'rejected' || e.type === 'invalidated') {
         this.reveal.finishAll();
       }
+      this.handlePlanEditChange(e);
     });
     this.executor = new AgentToolExecutor({
       wasm: deps.wasm,
@@ -1850,6 +1892,53 @@ export class AgentBridgeImpl implements AgentBridge {
     }
   }
 
+  private beginPlanExecutionTurn(): void {
+    if (this.phase !== 'implementing' || !this.latestPlan?.execution
+      || this.latestPlan.execution.status === 'completed' || !this.activeProviderTurnId) {
+      this.planExecutionTurn = null;
+      return;
+    }
+    if (this.planExecutionTurn?.turnId === this.activeProviderTurnId
+      && this.planExecutionTurn.planId === this.latestPlan.planId) return;
+    this.planExecutionTurn = {
+      planId: this.latestPlan.planId,
+      turnId: this.activeProviderTurnId,
+      existingSetIds: new Set(this.pendingEdits.getChangeSets().map((set) => set.id)),
+      invalidated: false,
+    };
+  }
+
+  private handlePlanEditChange(e: PendingEditsChangeEvent): void {
+    if (e.type === 'invalidated' && this.planExecutionTurn) this.planExecutionTurn.invalidated = true;
+    const review = this.planReview;
+    if (!review || this.latestPlan?.planId !== review.planId) return;
+    if (e.type === 'invalidated' && (!e.changeSetId || review.setIds.has(e.changeSetId))) {
+      review.rejected = true;
+      this.reportPlanExecution(review, 'blocked');
+      if (!this.pendingEdits.getChangeSets().some((set) => review.setIds.has(set.id))) this.planReview = null;
+    }
+    if ((e.type === 'approved' || e.type === 'rejected') && review.setIds.delete(e.changeSetId)) {
+      review.rejected ||= e.type === 'rejected';
+      if (review.setIds.size === 0) {
+        const complete = !review.rejected && this.latestPlan.execution?.steps.every((step) => step.status === 'completed');
+        this.reportPlanExecution(review, complete ? 'completed' : 'blocked');
+        this.planReview = null;
+      }
+    }
+  }
+
+  private reportPlanExecution(
+    turn: { planId: string; turnId: string },
+    status: 'awaiting-review' | 'completed' | 'blocked' | 'interrupted',
+  ): void {
+    if (this.latestPlan?.planId !== turn.planId) return;
+    this.pendingPlanExecutionResult = {
+      v: AGENT_PROTOCOL_VERSION, type: 'chat-plan-execution-result',
+      planId: turn.planId, turnId: turn.turnId, status,
+    };
+    this.sendJson(this.pendingPlanExecutionResult);
+  }
+
   // ─── incoming frames ──────────────────────────────────────
 
   private handleFrame(data: unknown): void {
@@ -1957,6 +2046,7 @@ export class AgentBridgeImpl implements AgentBridge {
             this.emit({ type: 'user-question-requested', interaction: pendingQuestion, replayed: true });
           }
           if (this.turnRunning) {
+            this.beginPlanExecutionTurn();
             try {
               this.beginPendingTurn(session.agent);
             } catch (e) {
@@ -2004,6 +2094,12 @@ export class AgentBridgeImpl implements AgentBridge {
         }
         this.syncEditingLease();
         this.emit({ type: 'workflow-changed', ...this.workflowState() });
+        if (this.pendingPlanExecutionResult && this.pendingPlanExecutionResult.planId === this.latestPlan?.planId) {
+          this.sendJson(this.pendingPlanExecutionResult);
+        } else {
+          this.pendingPlanExecutionResult = null;
+        }
+        if (this.planReview?.planId !== this.latestPlan?.planId) this.planReview = null;
         this.flushQueuedMessages();
         if (wasRunning && !this.turnRunning) {
           // 연결이 끊긴 사이에 끝난 턴 — 잃어버린 turn-end 를 합성해 UI 를 되돌린다.
@@ -2184,6 +2280,17 @@ export class AgentBridgeImpl implements AgentBridge {
         this.emit({ type: 'implementation-started', planId, ...this.workflowState() });
         break;
       }
+      case 'plan-progress': {
+        if (!isStructuredPlan(msg.latestPlan) || !msg.latestPlan.execution
+          || msg.planId !== msg.latestPlan.planId || msg.planId !== this.latestPlan?.planId) break;
+        this.syncWorkflowState(msg, 'plan', 'implementing', true);
+        if (this.pendingPlanExecutionResult && this.pendingPlanExecutionResult.planId === msg.planId
+          && this.pendingPlanExecutionResult.status === msg.latestPlan.execution.status) {
+          this.pendingPlanExecutionResult = null;
+        }
+        this.emit({ type: 'plan-progress', planId: msg.planId, ...this.workflowState() });
+        break;
+      }
       case 'skills-catalog': {
         this.emit({ type: 'skills-catalog', catalog: readSkillCatalog(msg.catalog) });
         break;
@@ -2307,6 +2414,25 @@ export class AgentBridgeImpl implements AgentBridge {
         const providers = readProviderStatus(msg.providers);
         if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, providers);
         this.emit({ type: 'provider-status', providers });
+        break;
+      }
+      case 'model-catalog': {
+        if (msg.agent !== 'claude' && msg.agent !== 'codex') break;
+        const models = readModelCatalog(msg.models);
+        setModelCatalog(msg.agent, models);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, models);
+        this.emit({ type: 'model-catalog', agent: msg.agent,
+          requestId: typeof msg.requestId === 'string' ? msg.requestId : '', models });
+        break;
+      }
+      case 'model-catalog-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        if (msg.agent === 'claude' || msg.agent === 'codex') {
+          this.emit({ type: 'model-catalog-error', agent: msg.agent,
+            requestId: typeof msg.requestId === 'string' ? msg.requestId : '',
+            code: typeof msg.code === 'string' ? msg.code : 'CATALOG_FAILED',
+            message: typeof msg.message === 'string' ? msg.message : 'Could not load models' });
+        }
         break;
       }
       case 'agent-setup-status': {
@@ -2615,9 +2741,11 @@ export class AgentBridgeImpl implements AgentBridge {
         this.activeProviderTurnId = typeof event.turnId === 'string' ? event.turnId : null;
         this.editingAgent = event.agent;
         this.turnHadError = false;
+        this.beginPlanExecutionTurn();
         try {
           this.beginPendingTurn(event.agent);
         } catch (e) {
+          this.turnHadError = true;
           console.warn('[AgentBridge] beginTurn 실패:', e);
         }
         break;
@@ -2627,7 +2755,7 @@ export class AgentBridgeImpl implements AgentBridge {
         this.turnRunning = false;
         this.activeProviderTurnId = null;
         this.abortProviderToolRequests(eventTurnId ?? undefined);
-        const succeeded = !this.turnHadError
+        let succeeded = !this.turnHadError
           && !event.errorMessage
           && (event.stopReason === 'end_turn'
             || event.stopReason === 'completed'
@@ -2637,8 +2765,24 @@ export class AgentBridgeImpl implements AgentBridge {
           try {
             this.endPendingTurn(succeeded ? this.successfulTurnOutcome() : 'reject');
           } catch (e) {
+            succeeded = false;
             console.warn('[AgentBridge] endTurn 실패:', e);
           }
+        }
+        const planTurn = this.planExecutionTurn;
+        this.planExecutionTurn = null;
+        if (planTurn?.turnId === eventTurnId && this.latestPlan?.planId === planTurn.planId) {
+          const priorReview = this.planReview?.planId === planTurn.planId ? this.planReview : null;
+          const setIds = new Set(this.pendingEdits.getChangeSets()
+            .filter((set) => !planTurn.existingSetIds.has(set.id) || priorReview?.setIds.has(set.id))
+            .filter((set) => set.ops.length > 0).map((set) => set.id));
+          this.planReview = setIds.size > 0
+            ? { planId: planTurn.planId, turnId: planTurn.turnId, setIds, rejected: planTurn.invalidated || priorReview?.rejected === true }
+            : null;
+          const complete = this.latestPlan.execution?.steps.every((step) => step.status === 'completed') === true;
+          this.reportPlanExecution(planTurn, !succeeded ? 'interrupted'
+            : planTurn.invalidated || priorReview?.rejected || !complete ? 'blocked'
+              : setIds.size > 0 ? 'awaiting-review' : 'completed');
         }
         break;
       }
@@ -2986,6 +3130,7 @@ export class AgentBridgeImpl implements AgentBridge {
       v: AGENT_PROTOCOL_VERSION,
       type: 'chat-user-message',
       text: message.text,
+      documentRevision: this.revision.revision,
       threadId: message.context.threadId,
       documentId: message.context.documentId,
       activeTemplateId: this.activeTemplateId,
@@ -3303,7 +3448,10 @@ export class AgentBridgeImpl implements AgentBridge {
   }
 
   approvePlan(planId: string): boolean {
-    return this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-plan-approve', planId });
+    return this.sendJson({
+      v: AGENT_PROTOCOL_VERSION, type: 'chat-plan-approve', planId,
+      documentRevision: this.revision.revision,
+    });
   }
 
   requestPlanChanges(planId: string, feedback?: string): boolean {
@@ -3493,6 +3641,14 @@ export class AgentBridgeImpl implements AgentBridge {
     return this.request<ProviderStatusMap>(
       { type: 'provider-status-request', ...(refresh ? { refresh: true } : {}) },
       'provider-status',
+    );
+  }
+
+  requestModelCatalog(agent: CatalogAgent, refresh = false): Promise<ModelCatalogEntry[] | null> {
+    return this.request<ModelCatalogEntry[]>(
+      { type: 'model-catalog-request', agent, ...(refresh ? { refresh: true } : {}) },
+      'model-catalog',
+      30_000,
     );
   }
 

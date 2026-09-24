@@ -1,0 +1,30 @@
+{
+  "description": "Twenty existing table documents selected by live WASM control and cell inventory. Counts were measured in the studio browser; inputs remain in rhwp/samples.",
+  "samples": [
+    { "path": "table-complex.hwp", "tables": 4, "cells": 352, "requiredTypes": ["shape", "table"] },
+    { "path": "multi-table-001.hwp", "tables": 6, "cells": 1129, "requiredTypes": ["table"] },
+    { "path": "multi-table-002.hwp", "tables": 6, "cells": 1129, "requiredTypes": ["table"] },
+    { "path": "hwp_table_test.hwp", "tables": 10, "cells": 110, "requiredTypes": ["table"] },
+    { "path": "hwp_table_test-m.hwp", "tables": 10, "cells": 109, "requiredTypes": ["table"] },
+    { "path": "table-001.hwp", "tables": 1, "cells": 131, "requiredTypes": ["table"] },
+    { "path": "table-004.hwp", "tables": 1, "cells": 86, "requiredTypes": ["table"] },
+    { "path": "inner-table-01.hwp", "tables": 1, "cells": 14, "requiredTypes": ["shape", "table"] },
+    { "path": "issue-986-receipt.hwp", "tables": 7, "cells": 323, "requiredTypes": ["table"] },
+    { "path": "pic-in-table-01.hwp", "tables": 47, "cells": 269, "requiredTypes": ["image", "table"] },
+    { "path": "issue2004_cell_image_stack.hwp", "tables": 7, "cells": 121, "requiredTypes": ["image", "table"] },
+    { "path": "exam_math.hwp", "tables": 16, "cells": 25, "requiredTypes": ["equation", "image", "line", "shape", "table"] },
+    { "path": "task2146/21761835_jeonjik_exemption_table.hwp", "tables": 1, "cells": 296, "requiredTypes": ["table"] },
+    { "path": "task2319/20544835_jinan_apt_form.hwp", "tables": 5, "cells": 105, "requiredTypes": ["group", "table"] },
+    { "path": "task2322/20862337_cheongyang_voucher_form.hwp", "tables": 2, "cells": 69, "requiredTypes": ["table"] },
+    { "path": "task2322/19439117_gokseong_voucher_form.hwp", "tables": 2, "cells": 69, "requiredTypes": ["table"] },
+    { "path": "issue2439/issue2439_repeat_table_overlap.hwp", "tables": 24, "cells": 3156, "requiredTypes": ["line", "table"] },
+    { "path": "hwpx/form-002.hwpx", "tables": 5, "cells": 430, "requiredTypes": ["table"] },
+    { "path": "table-ipc.hwp", "tables": 11, "cells": 1739, "requiredTypes": ["shape", "table"] },
+    { "path": "21868765_별표2_보건소_분장사무.hwp", "tables": 1, "cells": 441, "requiredTypes": ["table"] }
+  ],
+  "targetedSamples": [
+    { "path": "hwpx/basic-table-01.hwpx", "tables": 1, "cells": 12, "requiredTypes": ["table"] },
+    { "path": "rendering-fidelity/02-table-merged-padding-valign.hwpx", "tables": 1, "cells": 4, "requiredTypes": ["table"] },
+    { "path": "rendering-fidelity/03-table-nested.hwpx", "tables": 1, "cells": 2, "requiredTypes": ["table"] }
+  ]
+}

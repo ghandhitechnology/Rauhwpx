@@ -442,6 +442,9 @@ export class InputHandler {
     inlineTac?: boolean;
     /** 드래그 시작 시 소스 그림의 논리(캐럿) 위치 — undo 의 원본 자리. */
     originCharOffset?: number;
+    startClientX?: number;
+    startClientY?: number;
+    passedDragThreshold?: boolean;
     startPageX: number;
     startPageY: number;
     lastPageX: number;
@@ -449,6 +452,7 @@ export class InputHandler {
     totalDeltaH: number;
     totalDeltaV: number;
     pageIndex: number;
+    lastPageIndex?: number;
     bbox: { x: number; y: number; w: number; h: number };
     rotationAngle: number;
     /** 다중 선택 이동 시 각 개체의 원래 offset 기록 */
@@ -2001,8 +2005,8 @@ export class InputHandler {
   // ─── 클립보드 이벤트 처리 ─────────────────────────────
 
   /** 복사 이벤트 처리 */
-  private onCopy(e: ClipboardEvent): void {
-    _keyboard.onCopy.call(this, e);
+  private onCopy(e: ClipboardEvent): boolean {
+    return _keyboard.onCopy.call(this, e);
   }
 
   /** 잘라내기 이벤트 처리 */
@@ -4952,7 +4956,11 @@ export class InputHandler {
   moveCursorTo(pos: DocumentPosition): boolean {
     // 이동 전 위치가 유효한지 사전 검증 (경고 로그 방지)
     try {
-      const testRect = this.wasm.getCursorRect(pos.sectionIndex, pos.paragraphIndex, pos.charOffset);
+      const testRect = pos.cellPath?.length && pos.parentParaIndex !== undefined
+        ? this.wasm.getCursorRectByPath(pos.sectionIndex, pos.parentParaIndex, JSON.stringify(pos.cellPath), pos.charOffset)
+        : pos.parentParaIndex !== undefined && pos.controlIndex !== undefined && pos.cellIndex !== undefined
+          ? this.wasm.getCursorRectInCell(pos.sectionIndex, pos.parentParaIndex, pos.controlIndex, pos.cellIndex, pos.cellParaIndex ?? pos.paragraphIndex, pos.charOffset)
+          : this.wasm.getCursorRect(pos.sectionIndex, pos.paragraphIndex, pos.charOffset);
       if (!testRect || testRect.pageIndex === undefined) return false;
     } catch {
       return false;
@@ -5505,6 +5513,18 @@ export class InputHandler {
   /** Redo 가능한가? */
   canRedo(): boolean { return !this.readOnly && this.history.canRedo(); }
 
+  /** 최신 에이전트 적용 명령의 정체성. 다른 편집이 쌓이면 일치하지 않는다. */
+  getAgentUndoEntry(): object | null {
+    const top = this.history.peekUndoTop();
+    return top?.type === 'snapshot:agentApplyChangeSet' ? top : null;
+  }
+
+  undoAgentTurn(entry: object): boolean {
+    if (this.readOnly || this.getAgentUndoEntry() !== entry) return false;
+    this.performUndo();
+    return this.getAgentUndoEntry() !== entry;
+  }
+
   /** Undo 실행 (커맨드 시스템용) */
   performUndo(ignoreReadOnly = false): void {
     if (this.readOnly && !ignoreReadOnly) return;
@@ -5524,7 +5544,7 @@ export class InputHandler {
   discardLatestUndoHistory(): void { this.history.discardUndoTop(this.wasm); }
 
   /** 복사 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */
-  performCopy(): void {
+  performCopy(): boolean {
     // 개체 선택 모드 → 직접 클립보드 기록 (textarea 포커스 불필요)
     if (this.cursor.isInPictureObjectSelection()) {
       const ref = this.cursor.getSelectedPictureRef();
@@ -5543,32 +5563,35 @@ export class InputHandler {
             _keyboard.writeTextHtmlToClipboard(text, markedHtml)
               .catch(() => navigator.clipboard.writeText(text).catch(() => {}));
           }
+          return true;
         } catch (err) {
           console.warn('[InputHandler] 개체 복사 실패:', err);
         }
       }
-      return;
+      return false;
     }
     if (this.cursor.isInTableObjectSelection()) {
       const ref = this.cursor.getSelectedTableRef();
       if (ref) {
         try {
-          this.wasm.copyControl(ref.sec, ref.ppi, ref.ci);
+          const { controlIndex, cellPathJson } = _keyboard.tableControlCopyAddress(ref);
+          this.wasm.copyControl(ref.sec, ref.ppi, controlIndex, cellPathJson);
           const text = this.wasm.getClipboardText() || '[표]';
           let html = '';
-          try { html = this.wasm.exportControlHtml(ref.sec, ref.ppi, ref.ci) || ''; } catch { /* 무시 */ }
+          try { html = this.wasm.exportControlHtml(ref.sec, ref.ppi, controlIndex, cellPathJson) || ''; } catch { /* 무시 */ }
           const markedHtml = _keyboard.prepareRhwpInternalClipboardHtml(this, html, text);
           _keyboard.writeTextHtmlToClipboard(text, markedHtml)
             .catch(() => navigator.clipboard.writeText(text).catch(() => {}));
+          return true;
         } catch (err) {
           console.warn('[InputHandler] 표 복사 실패:', err);
         }
       }
-      return;
+      return false;
     }
     // 텍스트 선택 → textarea 포커스 후 execCommand
     this.focusTextarea();
-    document.execCommand('copy');
+    return document.execCommand('copy');
   }
 
   /** 붙이기 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */
@@ -5609,7 +5632,7 @@ export class InputHandler {
       const ref = this.cursor.getSelectedPictureRef();
       if (ref && _picture.canDeleteObjectControl(ref)) {
         // 클립보드에 복사
-        this.performCopy();
+        if (!this.performCopy()) return;
         // 삭제
         this.cursor.moveOutOfSelectedPicture();
         this.pictureObjectRenderer?.clear();
@@ -5623,8 +5646,8 @@ export class InputHandler {
     }
     if (this.cursor.isInTableObjectSelection()) {
       const ref = this.cursor.getSelectedTableRef();
-      if (ref) {
-        this.performCopy();
+      if (ref && !(ref.cellPath && ref.cellPath.length > 1)) {
+        if (!this.performCopy()) return;
         this.cursor.moveOutOfSelectedTable();
         this.eventBus.emit('table-object-selection-changed', false);
         this.executeOperation({ kind: 'snapshot', operationType: 'cutTable', operation: (wasm: WasmBridge) => {

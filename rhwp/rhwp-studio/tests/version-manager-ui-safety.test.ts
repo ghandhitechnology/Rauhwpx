@@ -63,7 +63,7 @@ test('문서 변경 알림은 완료된 비교를 무효화한다', () => {
 
 test('저장·활성화·선행 비교·dirty 상태가 작업 버튼을 닫는다', () => {
   assert.match(source, /const savedDocument = Boolean\(current\.documentId && current\.saved\)/);
-  assert.match(source, /: !current\.enabled\s*\? '이 문서에서 버전 기록을 먼저 켜세요\.'/);
+  assert.match(source, /: !current\.enabled\s*\? '버전 기록 꺼짐'/);
   assert.match(source, /shelf\.dataset\.versionPrerequisiteDisabled = String\(!current\.dirty\)/);
   assert.match(source, /restore\.dataset\.versionPrerequisiteDisabled = String\(!comparedCommits\.has\(selected\.id\)\)/);
   assert.match(source, /adopt\.dataset\.versionPrerequisiteDisabled = String\(!comparedCommits\.has\(selected\.id\)\)/);

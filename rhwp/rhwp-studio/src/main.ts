@@ -78,7 +78,9 @@ import {
   syncThemeMenu,
 } from '@/core/theme';
 import { analyzeDocumentFonts } from '@/core/document-font-status';
-import { detectLocalFonts, getLocalFontState, loadStoredLocalFonts } from '@/core/local-fonts';
+import {
+  detectLocalFonts, getLocalFontState, getLocalFonts, importLocalFontFiles, localFontImportMessage, loadStoredLocalFonts,
+} from '@/core/local-fonts';
 import { userSettings, type EditorScalarSettings } from '@/core/user-settings';
 import { AutosaveManager, type AutosaveScheduleSettings, type AutosaveStatus } from '@/recovery/autosave-manager';
 import {
@@ -1277,6 +1279,15 @@ async function initialize(): Promise<void> {
             committed: commitEditorSettingsRuntime,
           },
           versionController,
+          getAgentUndoEntry: () => inputHandler?.getAgentUndoEntry() ?? null,
+          undoAgentTurn: (entry) => inputHandler?.undoAgentTurn(entry) ?? false,
+          navigateToChange: (position, anchor) => {
+            if (!inputHandler) return;
+            if (anchor && position.cellIndex === undefined) {
+              position = { ...position, cursorRect: { ...anchor } };
+            }
+            inputHandler.moveCursorTo(position);
+          },
           openClassicVersionControl: () => openClassicDocumentHistory(commandServices),
           getDocumentContext: () => {
             const documentName = wasm.pageCount > 0 ? wasm.fileName : null;
@@ -1550,6 +1561,15 @@ function setupZoomControls(): void {
 let totalSections = 1;
 
 function setupEventListeners(): void {
+  eventBus.on('font-files-imported', () => {
+    try {
+      wasm.refreshLayout();
+      eventBus.emit('document-view-changed');
+      prepareCanvasKitLocalFonts(wasm.getDocumentInfo().fontsUsed);
+    } catch (error) {
+      console.warn('[LocalFonts] 글꼴 가져오기 뒤 문서 갱신 실패:', error);
+    }
+  });
   eventBus.on('current-page-changed', (page, _total) => {
     const pageIdx = page as number;
     sbPage().textContent = `${pageIdx + 1} / ${_total} 쪽`;
@@ -1885,6 +1905,23 @@ async function promptLocalFontsIfNeeded(docInfo: DocumentInfo, displayName: stri
     const choice = await showLocalFontsModalIfNeeded(report, {
       disableExternalWebFonts: extensionViewerSettings.disableExternalWebFonts,
     });
+    if (typeof choice === 'object' && choice.type === 'import') {
+      try {
+        const result = await importLocalFontFiles(choice.files);
+        if (result.imported.length > 0) {
+          const fonts = getLocalFonts({ includeRegistered: true });
+          eventBus.emit('local-fonts-changed', { fonts, report: analyzeDocumentFonts(docInfo.fontsUsed) });
+          eventBus.emit('font-files-imported');
+        }
+        showToast({ message: localFontImportMessage(result), durationMs: result.rejected.length ? 8000 : 5000 });
+      } catch (error) {
+        showToast({
+          message: error instanceof Error ? error.message : '글꼴 파일을 불러오지 못했습니다.',
+          durationMs: 6000,
+        });
+      }
+      return;
+    }
     if (choice !== 'detect') return;
 
     msg.textContent = '로컬 글꼴 감지 중...';

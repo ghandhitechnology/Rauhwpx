@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   agentSupportsFast,
+  availableModelsForAgent,
   defaultEffortForAgent,
   defaultModelForAgent,
   effortsForAgent,
@@ -16,36 +17,34 @@ import {
   resolveModelForAgent,
   resolveServiceTier,
   setPiModels,
+  setModelCatalog,
+  setSelectedModels,
 } from '../src/agent/models.ts';
 import type { PiModelConfig } from '../src/agent/types.ts';
 
 test('claude and codex expose distinct model catalogs', () => {
   const claude = modelsForAgent('claude').map((m) => m.id);
   const codex = modelsForAgent('codex').map((m) => m.id);
-  assert.deepEqual(claude, ['claude-fable-5-1', 'fable', 'claude-opus-5-5', 'opus', 'sonnet', 'haiku']);
-  assert.deepEqual(codex, ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
+  assert.deepEqual(claude, ['fable', 'opus', 'sonnet', 'haiku']);
+  assert.deepEqual(codex, ['astra', 'sol', 'luna', 'terra']);
 });
 
 test('resolveModelForAgent falls back to provider default when model does not fit', () => {
   assert.equal(resolveModelForAgent('claude', 'gpt-5.6-sol'), defaultModelForAgent('claude'));
   assert.equal(resolveModelForAgent('codex', 'sonnet'), defaultModelForAgent('codex'));
   assert.equal(resolveModelForAgent('claude', 'fable'), 'fable');
-  assert.equal(resolveModelForAgent('codex', 'gpt-5.6-luna'), 'gpt-5.6-luna');
-  assert.equal(resolveModelForAgent('codex', 'gpt-6-astra'), 'gpt-6-astra');
-  assert.equal(resolveModelForAgent('codex', 'gpt-6-sol'), 'gpt-6-sol');
-  assert.equal(resolveModelForAgent('codex', 'gpt-6-luna'), 'gpt-6-luna');
-  assert.equal(resolveModelForAgent('claude', 'claude-opus-5-5'), 'claude-opus-5-5');
-  assert.equal(resolveModelForAgent('claude', 'claude-fable-5-1'), 'claude-fable-5-1');
+  assert.equal(resolveModelForAgent('codex', 'gpt-5.6-luna'), 'sol');
+  assert.equal(resolveModelForAgent('codex', 'gpt-6-sol'), 'sol');
 });
 
 test('isModelForAgent and labels stay provider-scoped', () => {
   assert.equal(isModelForAgent('claude', 'opus'), true);
   assert.equal(isModelForAgent('claude', 'gpt-5.6-sol'), false);
-  assert.equal(labelForModel('claude', 'haiku'), 'Haiku 4.5');
-  assert.equal(labelForModel('codex', 'gpt-5.6-terra'), 'Terra');
-  assert.equal(labelForModel('codex', 'gpt-6-astra'), 'Astra');
-  assert.equal(labelForModel('claude', 'claude-opus-5-5'), 'Opus 5.5');
-  assert.equal(labelForModel('claude', 'claude-fable-5-1'), 'Fable 5.1');
+  assert.equal(labelForModel('claude', 'haiku'), 'Haiku');
+  assert.equal(labelForModel('codex', 'terra'), 'Terra');
+  assert.equal(labelForModel('codex', 'astra'), 'Astra');
+  assert.equal(labelForModel('claude', 'opus'), 'Opus');
+  assert.equal(labelForModel('claude', 'fable'), 'Fable');
 });
 
 test('effort catalogs follow provider capabilities', () => {
@@ -172,10 +171,33 @@ test('claude and codex model groups stay a single unlabeled list', () => {
   );
 });
 
+test('live catalogs expose all models while the sidebar shows only saved selections', () => {
+  setModelCatalog('codex', [
+    { id: 'gpt-6-sol', label: 'GPT-6 Sol', supportedEfforts: ['low', 'medium', 'high'] },
+    { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', supportedEfforts: ['medium', 'high', 'xhigh'] },
+    { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', supportedEfforts: [] },
+  ]);
+  setSelectedModels({ claude: ['sonnet'], codex: ['sol', 'gpt-5.3-codex'] });
+  try {
+    assert.equal(availableModelsForAgent('codex').length, 3);
+    assert.deepEqual(modelsForAgent('codex').map((model) => model.id), ['gpt-6.1-sol', 'gpt-5.3-codex']);
+    assert.deepEqual(effortsForAgent('codex', 'gpt-6.1-sol').map((effort) => effort.id), ['xhigh', 'high', 'medium']);
+    assert.deepEqual(effortsForAgent('codex', 'gpt-5.3-codex'), []);
+    assert.equal(resolveModelForAgent('codex', 'gpt-5.3-codex'), 'gpt-5.3-codex');
+    assert.equal(resolveModelForAgent('codex', 'gpt-6-sol'), 'gpt-6.1-sol');
+    setSelectedModels({ claude: ['sonnet'], codex: ['astra', 'terra'] });
+    setModelCatalog('codex', availableModelsForAgent('codex'));
+    assert.deepEqual(modelsForAgent('codex').map((model) => model.id), ['gpt-6.1-sol']);
+  } finally {
+    setModelCatalog('codex', []);
+    setSelectedModels({ claude: ['fable', 'opus', 'sonnet', 'haiku'], codex: ['astra', 'sol', 'luna', 'terra'] });
+  }
+});
+
 test('pi 레지스트리 유예는 다른 프로바이더 id 검사와 무관하게 유지된다', () => {
   setPiModels([]);
   assert.equal(resolveModelForAgent('pi', 'sonnet'), 'sonnet');
   assert.equal(resolveModelForAgent('pi', null), '');
   assert.equal(resolveModelForAgent('claude', 'composer-1'), 'sonnet');
-  assert.equal(resolveModelForAgent('codex', 'composer-1'), 'gpt-5.6-sol');
+  assert.equal(resolveModelForAgent('codex', 'composer-1'), 'sol');
 });

@@ -62,6 +62,8 @@ import { createRauCreditsClient } from './rau-credits-client.mjs';
 import { createAccountSession } from './account-session.mjs';
 import { AuthRunRegistry } from './auth-run-registry.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
+import { createClaudeModelCatalog } from './claude-model-catalog.mjs';
+import { createCodexModelCatalog, createCodexModelResolver } from './codex-model-routing.mjs';
 import { createOpenRouter, creditBalanceEmpty } from './openrouter.mjs';
 import { createIpcSecretStore } from './secret-store.mjs';
 import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
@@ -587,15 +589,18 @@ const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi']);
 const OPENROUTER_AGENTS = new Set(['pi']);
 const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
 
-const CLAUDE_MODELS = new Set(['claude-fable-5-1', 'claude-opus-5-5', 'opus', 'fable', 'sonnet', 'haiku']);
-const CODEX_MODELS = new Set(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
+const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
+const CODEX_LINEUPS = new Set(['astra', 'sol', 'luna', 'terra']);
 const DEFAULT_MODEL = {
   claude: 'sonnet',
-  codex: 'gpt-5.6-sol',
+  codex: 'sol',
 };
+const resolveCodexModel = createCodexModelResolver();
+const claudeModelCatalog = createClaudeModelCatalog();
+const codexModelCatalog = createCodexModelCatalog();
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const CLAUDE_EFFORTS_HAIKU = new Set(['low', 'medium', 'high']);
-const CODEX_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const CODEX_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const DEFAULT_EFFORT = { claude: 'high', codex: 'medium' };
 
 /** 알 수 없는 에이전트가 코덱스/클로드로 조용히 넘어가지 않도록 명시 테이블로 찾는다. */
@@ -1019,27 +1024,75 @@ function beginAccountLogin(record, sock, requestId) {
   );
 }
 
-function resolveModel(agent, requested) {
+function isModelIdentifier(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128
+    && /^[a-zA-Z0-9][a-zA-Z0-9._:/\[\]-]*$/.test(value)
+    && !value.split('/').some((segment) => segment === '.' || segment === '..');
+}
+
+async function modelCatalog(agent, record, { refresh = false } = {}) {
+  let models;
+  if (agent === 'claude') models = await claudeModelCatalog({
+    bin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
+    env: claudeRuntimeEnv(record.isolatedHome),
+    cwd: record.workDir ?? ROOT,
+  }, { refresh });
+  else if (agent === 'codex') models = await codexModelCatalog({
+    bin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
+    env: cliSetup.envFor('codex'),
+    isolatedHome: record.isolatedHome,
+    codexHome: record.codexHome,
+    cwd: record.workDir ?? ROOT,
+  }, { refresh });
+  else throw unknownAgentError(agent);
+  record.modelCatalogs ??= {};
+  record.modelCatalogs[agent] = models;
+  return models;
+}
+
+function resolveModel(agent, requested, record = null) {
   if (OPENROUTER_AGENTS.has(agent)) {
     const status = openRouterStatus(agent);
     if (typeof requested === 'string' && piModelConfig(requested, agent)) return requested;
     if (status.defaultModelId && piModelConfig(status.defaultModelId, agent)) return status.defaultModelId;
     return status.models[0]?.id ?? null;
   }
-  const tables = { claude: CLAUDE_MODELS, codex: CODEX_MODELS };
-  const allowed = tables[agent];
-  if (!allowed) throw unknownAgentError(agent);
-  if (typeof requested === 'string' && allowed.has(requested)) return requested;
   const envDefaults = {
     claude: process.env.RHWP_CLAUDE_MODEL,
     codex: process.env.RHWP_CODEX_MODEL,
   };
-  const envDefault = envDefaults[agent];
-  if (typeof envDefault === 'string' && allowed.has(envDefault)) return envDefault;
-  return DEFAULT_MODEL[agent];
+  if (typeof requested === 'string' && requested && !isModelIdentifier(requested)) {
+    throw Object.assign(new Error(`Invalid model identifier: ${requested}`), { code: 'MODEL_UNAVAILABLE' });
+  }
+  if (agent === 'claude') {
+    if (CLAUDE_MODELS.has(requested)) return requested;
+    if (isModelIdentifier(requested) && requested.startsWith('claude-')) return requested;
+    if (isModelIdentifier(requested)) throw Object.assign(new Error(`Unknown Claude model: ${requested}`), {
+      code: 'MODEL_UNAVAILABLE',
+    });
+    if (CLAUDE_MODELS.has(envDefaults.claude)) return envDefaults.claude;
+    if (isModelIdentifier(envDefaults.claude) && envDefaults.claude.startsWith('claude-')) return envDefaults.claude;
+    return DEFAULT_MODEL.claude;
+  }
+  if (agent === 'codex') {
+    if (isModelIdentifier(requested) && !CODEX_LINEUPS.has(requested)) return requested;
+    const lineup = CODEX_LINEUPS.has(requested) ? requested
+      : CODEX_LINEUPS.has(envDefaults.codex) ? envDefaults.codex : DEFAULT_MODEL.codex;
+    if (!requested && isModelIdentifier(envDefaults.codex) && !CODEX_LINEUPS.has(envDefaults.codex)) {
+      return envDefaults.codex;
+    }
+    return resolveCodexModel(lineup, {
+      bin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
+      env: cliSetup.envFor('codex'),
+      isolatedHome: record?.isolatedHome,
+      codexHome: record?.codexHome,
+      cwd: record?.workDir ?? ROOT,
+    });
+  }
+  throw unknownAgentError(agent);
 }
 
-function resolveEffort(agent, model, requested) {
+function resolveEffort(agent, model, requested, record = null) {
   if (OPENROUTER_AGENTS.has(agent)) {
     // 추론을 지원하지 않는 모델은 effort 자체가 없다 — 붙이면 요청이 거부된다.
     const efforts = piModelConfig(model, agent)?.efforts ?? [];
@@ -1050,10 +1103,16 @@ function resolveEffort(agent, model, requested) {
   }
   const tables = {
     codex: CODEX_EFFORTS,
-    claude: model === 'haiku' ? CLAUDE_EFFORTS_HAIKU : CLAUDE_EFFORTS,
+    claude: model === 'haiku' || model.startsWith('claude-haiku-')
+      ? CLAUDE_EFFORTS_HAIKU : CLAUDE_EFFORTS,
   };
-  const allowed = tables[agent];
+  const catalogEntry = record?.modelCatalogs?.[agent]?.find((entry) => entry.id === model);
+  const supported = catalogEntry?.supportedEfforts;
+  const allowed = Array.isArray(supported)
+    ? new Set(supported.filter((effort) => tables[agent]?.has(effort)))
+    : tables[agent];
   if (!allowed) throw unknownAgentError(agent);
+  if (allowed.size === 0) return null;
   if (typeof requested === 'string' && allowed.has(requested)) return requested;
   const preferred = DEFAULT_EFFORT[agent];
   return allowed.has(preferred) ? preferred : [...allowed][0];
@@ -1163,6 +1222,10 @@ function beginAgentTurn(record, activeSession) {
   // must remain unable to borrow that window.
   activeSession.providerTurnStarted = false;
   activeSession.status = 'running';
+  if (activeSession.planning.phase === 'implementing' && activeSession.planning.execution?.status !== 'completed') {
+    activeSession.planExecutionTurnId = activeSession.turnId;
+    activeSession.planExecutionTurnSucceeded = false;
+  }
 }
 
 function providerTurnIsCurrent(record, binding) {
@@ -1284,6 +1347,12 @@ function currentPiSubagentForSocket(record, sock) {
 
 function settleAgentTurn(record, activeSession, event) {
   const settledTurnId = activeSession.turnId;
+  if (activeSession.planning.phase === 'implementing' && activeSession.planExecutionTurnId === settledTurnId) {
+    activeSession.planExecutionTurnSucceeded = ['completed', 'end_turn', 'success'].includes(event.stopReason) && !event.errorMessage;
+    activeSession.planning.settleExecution(event.stopReason === 'interrupted' ? 'interrupted'
+      : activeSession.planExecutionTurnSucceeded ? 'awaiting-review' : 'blocked');
+    sendJson(record.studioSocket, { v: 1, type: 'plan-progress', ...activeSession.planning.snapshot() });
+  }
   settleUserQuestion(record, userQuestionOutcomeForTurnEnd(event));
   failPendingProviderCallsForTurn(record, activeSession, settledTurnId);
   retireProviderSockets(record, activeSession, { turnId: settledTurnId });
@@ -1471,6 +1540,8 @@ function writingStyleCatalog(record) {
   return buildWritingStyleCatalog({
     health: providerHealth.cached(),
     piStatus,
+    codexModels: record.modelCatalogs?.codex,
+    claudeModels: record.modelCatalogs?.claude,
     currentSelection: activeSession ? { agent: activeSession.agent, model: activeSession.model, effort: activeSession.effort } : null,
   });
 }
@@ -1659,7 +1730,7 @@ function checkpointTitleDeps(record, health, signal) {
         ),
         model: deepSeek?.id ?? '',
       },
-      codex: { ready: codex.ready, model: 'gpt-5.6-luna' },
+      codex: { ready: codex.ready, model: 'luna' },
       claude: { ready: claude.ready, model: 'haiku' },
     },
     piManager,
@@ -1675,6 +1746,7 @@ function checkpointTitleDeps(record, health, signal) {
       codex: { ...cliSetup.envFor('codex'), CODEX_HOME: record.codexHome },
       claude: claudeRuntimeEnv(record.isolatedHome),
     },
+    resolveCodexTitleModel: () => resolveModel('codex', 'luna', record),
     spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
     terminateProcess: terminateProcessTree,
     cleanupProcessOutcome: (child) => beginAuxiliaryProcessCleanupOutcome(record, child),
@@ -2488,8 +2560,8 @@ function addTemplateContext(record, activeSession, prompt) {
   }
 }
 
-function dispatchUserMessage(record, sock, msg, activeSession, messageAttachments = []) {
-  if (activeSession.planning.phase === 'awaiting-approval') {
+function dispatchUserMessage(record, sock, msg, activeSession, messageAttachments = [], discussionReady = false) {
+  if (activeSession.planning.phase === 'awaiting-approval' && !discussionReady) {
     const planId = activeSession.planning.latestPlan?.planId;
     if (!planId) {
       sendJson(sock, { v: 1, type: 'chat-error', code: 'PLAN_NOT_FOUND', message: 'The latest plan is unavailable; return to planning and present it again.' });
@@ -2498,14 +2570,18 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
     const hasAttachments = messageAttachments.length > 0
       || (Array.isArray(msg.stagedReferenceIds) && msg.stagedReferenceIds.length > 0);
     if (!hasAttachments && isExplicitImplementationApproval(msg.text)) {
-      void enqueueWorkflowTransition(record, activeSession, () => approveImplementationPlan(record, sock, { planId }))
+      void enqueueWorkflowTransition(record, activeSession, () => approveImplementationPlan(record, sock, { planId, documentRevision: msg.documentRevision }))
         .catch((error) => sendChatError(sock, error));
       return;
     }
     void enqueueWorkflowTransition(
       record,
       activeSession,
-      () => requestImplementationPlanChanges(record, sock, { planId, feedback: msg.text }),
+      async () => {
+        requireWorkflowSwitchBackend(activeSession);
+        await activeSession.backend.setExecutionMode(providerModeRequest(activeSession, 'awaiting-approval'));
+        if (record.agentSession === activeSession) dispatchUserMessage(record, sock, msg, activeSession, messageAttachments, true);
+      },
     )
       .catch((error) => sendChatError(sock, error));
     return;
@@ -2529,6 +2605,9 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
       // turn and a later message can start another turn on the same session
       // before the read completes, so session identity alone is insufficient.
       if (!providerTurnIsCurrent(record, providerTurn)) return;
+      if (activeSession.planning.phase === 'awaiting-approval') {
+        prompt = `The current plan remains open for review. Answer questions and research normally. If this message requests concrete changes to the plan, revise it directly with present_implementation_plan; do not ask the user to request a draft again. Never treat discussion as approval to edit the document.\n\nCurrent plan:\n${JSON.stringify(activeSession.planning.latestPlan.plan)}\n\n${prompt}`;
+      }
       activeSession.backend.sendUserMessage(addAgentInstructionsContext(addReopenedChatHistory(
         activeSession,
         addActiveDocumentContext(
@@ -2616,8 +2695,8 @@ async function startSession(
   requestedServiceTier,
 ) {
   if (record.processCleanupUncertain === true) throw agentProcessCleanupUncertain();
-  const model = resolveModel(agent, requestedModel);
-  const effort = resolveEffort(agent, model, requestedEffort);
+  const model = await resolveModel(agent, requestedModel, record);
+  const effort = resolveEffort(agent, model, requestedEffort, record);
   const permissionProfile = resolvePermissionProfile(requestedPermission);
   const serviceTier = resolveServiceTier(agent, requestedServiceTier);
   const workflow = resolveWorkflow(requestedWorkflow);
@@ -2661,6 +2740,7 @@ async function startSession(
   if (continuing && currentSession.planning.workflow === workflow) {
     planning.phase = currentSession.planning.phase;
     planning.latestPlan = currentSession.planning.latestPlan;
+    planning.execution = currentSession.planning.execution ? structuredClone(currentSession.planning.execution) : null;
   }
   const generation = ++record.sessionGeneration;
   const providerRole = 'chat';
@@ -2735,6 +2815,10 @@ async function startSession(
     chatId: threadId,
     activeTemplateId: continuing ? currentSession.activeTemplateId : null,
     lastDocumentInfo: continuing ? currentSession.lastDocumentInfo : null,
+    lastObservedDocumentRevision: continuing ? currentSession.lastObservedDocumentRevision : undefined,
+    planExecutionTurnId: continuing ? currentSession.planExecutionTurnId : null,
+    planExecutionTurnSucceeded: continuing ? currentSession.planExecutionTurnSucceeded : false,
+    planReviewTurnId: continuing && currentSession.planning.workflow === workflow ? currentSession.planReviewTurnId : null,
     bootstrapHistory: normalizeChatHistory(requestedHistory),
     planning,
     workflowTransition: Promise.resolve(),
@@ -2865,6 +2949,7 @@ async function approveImplementationPlan(record, sock, msg) {
   const transition = activeSession.planning.beginApproval({
     planId: String(msg.planId ?? ''),
     sessionStatus: activeSession.status,
+    documentRevision: msg.documentRevision,
   });
   sendJson(sock, { v: 1, type: 'plan-approved', ...activeSession.planning.snapshot() });
   try {
@@ -2892,6 +2977,8 @@ async function approveImplementationPlan(record, sock, msg) {
     if (record.agentSession === activeSession) {
       if (activeSession.planning.phase === 'switching') {
         activeSession.planning.failSwitch(transition.approvedPlan.planId);
+      } else if (activeSession.planning.phase === 'implementing') {
+        activeSession.planning.settleExecution('blocked');
       }
       failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
       activeSession.status = 'idle';
@@ -2933,7 +3020,6 @@ async function requestImplementationPlanChanges(record, sock, msg, {
       planId,
       reason: bounded.reason || feedback || 'changes-requested',
       ...activeSession.planning.snapshot(),
-      latestPlan: null,
     });
     if (promptOverride) {
       beginAgentTurn(record, activeSession);
@@ -2948,7 +3034,8 @@ async function requestImplementationPlanChanges(record, sock, msg, {
       beginAgentTurn(record, activeSession);
       const revisionPrompt = [
         'The user requested changes, so the previous implementation plan is no longer authoritative.',
-        'Return to discovery: inspect the affected current state and evaluate the feedback. If it is ambiguous or changes an assumption, discuss it with the user and ask one focused question in normal chat instead of immediately presenting a replacement. If it is already concrete, do not invent a question; follow the planning checkpoint and presentation rules before presenting a complete replacement.',
+        'Re-read the affected document state and revise the plan directly from this feedback. Ask a focused question only if a missing answer blocks the revision. Present a complete replacement with present_implementation_plan and a concise changeSummary. The user does not need to ask you to draft it again.',
+        `Previous plan: ${JSON.stringify(activeSession.planning.latestPlan.plan)}`,
         `Feedback: ${feedback}`,
       ].join('\n\n');
       activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
@@ -3021,6 +3108,7 @@ async function setChatWorkflow(record, sock, msg) {
     throw error;
   }
   if (record.agentSession !== activeSession) return;
+  activeSession.planReviewTurnId = null;
   if (msg.workflow === 'direct') {
     const browserbaseCleaned = await record.browserbaseSession.cleanup('workflow changed to direct')
       .catch(() => false);
@@ -3115,7 +3203,14 @@ async function handleStudioMessage(record, sock, msg) {
         return;
       }
       const preview = typeof msg.preview === 'string' ? msg.preview : '';
-      generateChatTitle(preview, auxDeps(record, msg.agent, 'codex'))
+      void Promise.resolve().then(async () => {
+        const deps = auxDeps(record, msg.agent, 'codex');
+        if (!deps.useOpenRouter) {
+          deps.model = await resolveModel('codex', 'luna', record).catch(() => null);
+          if (!deps.model) return null;
+        }
+        return generateChatTitle(preview, deps);
+      })
         .then((title) => {
           sendJson(sock, {
             v: 1,
@@ -3444,6 +3539,29 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'chat-document-saved': {
       queuePlanningDocumentSaved(record, msg);
+      return;
+    }
+    case 'chat-plan-execution-result': {
+      const activeSession = record.agentSession;
+      try {
+        const rejectsPendingReview = msg.status === 'blocked'
+          && typeof msg.turnId === 'string' && msg.turnId === activeSession?.planReviewTurnId;
+        if (!activeSession || activeSession.planning.phase !== 'implementing'
+          || typeof msg.turnId !== 'string'
+          || (!rejectsPendingReview && (msg.turnId !== activeSession.planExecutionTurnId
+            || (activeSession.status !== 'idle' && activeSession.planning.execution?.status !== 'completed')))) {
+          throw workflowError('STALE_PLAN_EXECUTION', 'The execution result does not match the settled plan turn');
+        }
+        activeSession.planning.assertLatest(msg.planId);
+        if (['completed', 'awaiting-review'].includes(msg.status) && !activeSession.planExecutionTurnSucceeded) {
+          throw workflowError('PLAN_EXECUTION_FAILED', 'An unsuccessful provider turn cannot complete the plan');
+        }
+        activeSession.planning.acknowledgeExecution(msg.status);
+        activeSession.planReviewTurnId = msg.status === 'awaiting-review' ? msg.turnId : null;
+        sendJson(sock, { v: 1, type: 'plan-progress', ...activeSession.planning.snapshot() });
+      } catch (error) {
+        sendChatError(sock, error);
+      }
       return;
     }
     case 'skills-list': {
@@ -3944,6 +4062,19 @@ async function handleStudioMessage(record, sock, msg) {
         .catch((e) => sendPiError(record, sock, requestId, e, 'OPENROUTER_UNREACHABLE'));
       return;
     }
+    case 'model-catalog-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      const agent = msg.agent;
+      void modelCatalog(agent, record, { refresh: msg.refresh === true })
+        .then((models) => replyToStudio(record, sock, {
+          v: 1, type: 'model-catalog', requestId, agent, models,
+        }))
+        .catch((error) => replyToStudio(record, sock, {
+          v: 1, type: 'model-catalog-error', requestId, agent,
+          code: error?.code ?? 'MODEL_CATALOG_FAILED', message: String(error?.message ?? error),
+        }));
+      return;
+    }
     case 'pi-set-models': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void piManager.setModels(Array.isArray(msg.models) ? msg.models : [])
@@ -3989,6 +4120,8 @@ async function handleStudioMessage(record, sock, msg) {
           {
             health: providerHealth.cached(),
             piStatus,
+            codexModels: record.modelCatalogs?.codex,
+            claudeModels: record.modelCatalogs?.claude,
             currentSelection: record.agentSession ? { agent: record.agentSession.agent, model: record.agentSession.model, effort: record.agentSession.effort } : null,
           },
         );
@@ -4027,7 +4160,7 @@ async function handleStudioMessage(record, sock, msg) {
               language: msg.language,
               files: calibrationSources,
               agent: selection.agent,
-              model: selection.model,
+              model: await resolveModel(selection.agent, selection.model, record),
               effort: selection.effort,
             },
             {
@@ -4108,6 +4241,11 @@ async function handleStudioMessage(record, sock, msg) {
         interruptedSession.status = 'idle';
         interruptedSession.turnId = null;
         interruptedSession.providerTurnStarted = false;
+        if (interruptedSession.planning.phase === 'implementing' && interruptedSession.planning.execution?.status !== 'completed') {
+          interruptedSession.planExecutionTurnSucceeded = false;
+          interruptedSession.planning.settleExecution('interrupted');
+          sendJson(sock, { v: 1, type: 'plan-progress', ...interruptedSession.planning.snapshot() });
+        }
         record.userQuestionResponseReceipts.clear();
       }
       return;
@@ -4183,6 +4321,11 @@ async function handleStudioMessage(record, sock, msg) {
               result = msg.result;
             }
             assertProviderTurn();
+            if (!entry.copyLayoutJobId && record.agentSession?.generation === entry.sessionGeneration
+              && toolDefinitionsByName.get(entry.tool)?.category === 'document-read'
+              && Number.isSafeInteger(result?.revision)) {
+              record.agentSession.lastObservedDocumentRevision = result.revision;
+            }
             if (entry.tool === 'get_document_info' && !entry.copyLayoutJobId
               && record.agentSession?.generation === entry.sessionGeneration) {
               record.agentSession.lastDocumentInfo = Object.freeze({
@@ -4360,6 +4503,10 @@ function handleMcpMessage(record, sock, msg) {
       try {
         args = toolArgSchema(tool, definition).parse(msg.args ?? {});
         definition.validate?.(args);
+        if ((tool === 'present_implementation_plan' || tool === 'update_plan_progress')
+          && (workerJob || sock.piSubagentId || sock.agentRole !== 'chat' || msg.parentTaskId)) {
+          throw workflowError('ROOT_INTERACTION_REQUIRED', 'Only the root conversation may manage the plan');
+        }
         if (!record.agentSession && !workerJob && tool !== 'read_product_skill') {
           throw workflowError('AGENT_NOT_STARTED', 'No active chat session');
         }
@@ -4808,7 +4955,8 @@ function handleMcpMessage(record, sock, msg) {
           return;
         }
         try {
-          const planRecord = record.agentSession.planning.present(args);
+          const planRecord = record.agentSession.planning.present(args, record.agentSession.lastObservedDocumentRevision);
+          record.agentSession.planReviewTurnId = null;
           sendJson(record.studioSocket, {
             v: 1,
             type: 'plan-ready',
@@ -4819,6 +4967,16 @@ function handleMcpMessage(record, sock, msg) {
           emitWorkflowState(record, { reason: 'plan-presented' });
           const { workflow, phase, capabilityEpoch } = record.agentSession.planning.snapshot();
           sendResult({ planId: planRecord.planId, workflow, phase, capabilityEpoch });
+        } catch (error) {
+          sendError(error);
+        }
+        return;
+      }
+      if (tool === 'update_plan_progress') {
+        try {
+          const snapshot = record.agentSession.planning.updateProgress(args);
+          sendJson(record.studioSocket, { v: 1, type: 'plan-progress', ...snapshot });
+          sendResult(snapshot);
         } catch (error) {
           sendError(error);
         }
@@ -5790,6 +5948,11 @@ httpServer.on('upgrade', (req, socket, head) => {
       });
       // welcome이 유휴 세션 fallback을 만들기 전에 권위 있는 최종 결과를 먼저 보낸다.
       // 전송 실패 시 다음 재연결에서 다시 시도할 수 있도록 결과를 보존한다.
+      if (record.agentSession?.planning.execution) {
+        // Checklist updates may have happened while Studio was disconnected.
+        // Its terminal handler must see that state before settling document edits.
+        sendJson(ws, { v: 1, type: 'plan-progress', ...record.agentSession.planning.snapshot() });
+      }
       replayMissedTurnEnd(record, ws, sendJson);
       sendJson(ws, {
         v: 1,

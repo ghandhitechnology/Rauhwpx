@@ -1,0 +1,186 @@
+/* ─── 확인 시트 (ag-sheet) ─────────────────────────────
+   사이드바 안: 아래에서 올라오는 시트. 사이드바 밖·전체 화면: 가운데 카드.
+   색은 기존 중성 램프와 사이드바 강조색만 쓴다. */
+
+.ag-sheet-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 400;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  pointer-events: auto;
+  font-family: var(--font-family-ui, -apple-system, BlinkMacSystemFont, sans-serif);
+}
+
+.ag-sheet-layer[data-host='body'] {
+  position: fixed;
+  z-index: 10000;
+}
+
+.ag-sheet-layer[data-placement='center'] {
+  align-items: center;
+  padding: 24px;
+}
+
+.ag-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.28);
+  opacity: 0;
+  transition: opacity var(--ag-dur-base) var(--ag-ease-out);
+}
+
+:root[data-theme-effective='dark'] .ag-sheet-backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.ag-sheet {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 440px;
+  margin: 0 8px 8px;
+  padding: 8px 20px 16px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--n-surface, #fff) 86%, transparent);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
+  backdrop-filter: saturate(180%) blur(24px);
+  border: 0.5px solid var(--n-hairline-strong, rgba(0, 0, 0, 0.14));
+  box-shadow: var(--n-elev-3, 0 12px 32px rgba(0, 0, 0, 0.14));
+  color: var(--n-text, #1d1d1f);
+  outline: none;
+  transform: translateY(calc(100% + 16px));
+  transition: transform var(--ag-dur-slow) var(--ag-spring);
+  touch-action: none;
+}
+
+/* 스프링이 살짝 넘칠 때 아래 틈이 보이지 않도록 면을 늘린다. */
+.ag-sheet::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 24px;
+}
+
+.ag-sheet-layer[data-placement='center'] .ag-sheet {
+  max-width: 360px;
+  margin: 0;
+  padding-top: 20px;
+  transform: translateY(8px) scale(0.97);
+  opacity: 0;
+  transition:
+    transform var(--ag-dur-base) var(--ag-spring),
+    opacity var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-sheet-layer.ag-sheet-open .ag-sheet-backdrop {
+  opacity: 1;
+}
+
+.ag-sheet-layer.ag-sheet-open .ag-sheet {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+.ag-sheet-layer.ag-sheet-closing {
+  pointer-events: none;
+}
+
+.ag-sheet-layer.ag-sheet-closing .ag-sheet {
+  transition:
+    transform var(--ag-dur-base) var(--ag-ease-out),
+    opacity var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-sheet.ag-sheet-dragging {
+  transition: none;
+}
+
+.ag-sheet-grabber {
+  width: 36px;
+  height: 5px;
+  margin: 0 auto 12px;
+  border-radius: 3px;
+  background: var(--n-hairline-strong, rgba(0, 0, 0, 0.14));
+  cursor: grab;
+}
+
+.ag-sheet-layer[data-placement='center'] .ag-sheet-grabber {
+  display: none;
+}
+
+.ag-sheet-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+}
+
+.ag-sheet-message {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--n-text-secondary, #545458);
+  white-space: pre-line;
+}
+
+.ag-sheet-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.ag-sheet-btn {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 10px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color var(--ag-dur-fast) var(--ag-ease-out),
+    transform var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-sheet-btn:active {
+  transform: scale(0.98);
+}
+
+.ag-sheet-btn:focus-visible {
+  outline: 2px solid var(--ag-accent, var(--accent-primary, #6182d6));
+  outline-offset: 2px;
+}
+
+.ag-sheet-cancel {
+  background: var(--n-fill-hover, rgba(0, 0, 0, 0.055));
+  color: var(--n-text, #1d1d1f);
+}
+
+.ag-sheet-cancel:hover {
+  background: var(--n-fill-active, rgba(0, 0, 0, 0.1));
+}
+
+.ag-sheet-confirm {
+  background: var(--n-text, #1d1d1f);
+  color: var(--n-surface, #fff);
+}
+
+.ag-sheet-confirm:hover {
+  background: color-mix(in srgb, var(--n-text, #1d1d1f) 86%, var(--n-surface, #fff));
+}
+
+.ag-sheet-confirm[data-tone='destructive'] {
+  background: var(--ag-err, #c8372d);
+  color: #fff;
+}
+
+.ag-sheet-confirm[data-tone='destructive']:hover {
+  background: color-mix(in srgb, var(--ag-err, #c8372d) 88%, #000);
+}
