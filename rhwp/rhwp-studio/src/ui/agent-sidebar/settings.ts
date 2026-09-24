@@ -363,7 +363,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let prefs: AgentPrefs = loadAgentPrefs();
   let prefsBaseline: AgentPrefs = clonePrefs(prefs);
   let prefsDraft: AgentPrefs = clonePrefs(prefs);
-  let modelCatalogAgent: PlanAgent = 'claude';
+  let modelCatalogAgent: PlanAgent | 'pi' = 'claude';
   const modelCatalogLoading = new Set<PlanAgent>();
   const modelCatalogErrors = new Set<PlanAgent>();
   let connectionState: ConnectionState = bridge.getConnectionState();
@@ -402,6 +402,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let setupStatuses: AgentSetupStatusMap | null = null;
   let setupAgent: AgentName | null = null;
   let setupBusy = false;
+  let setupCloseTimer: ReturnType<typeof setTimeout> | null = null;
   let setupMessage = '';
   let setupReauth = false;
   let setupCodePending = false;
@@ -632,6 +633,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   // ── 1-1. 원격 브라우저 (Browserbase) ──────────────────
   // 여기 넣은 키는 허브 메모리에만 머물고, 이 탭을 쓰는 동안만 환경 변수를 덮는다.
   const browserbaseSection = createSection('원격 브라우저');
+  browserbaseSection.root.classList.add('ag-settings-browserbase-section');
   const browserbaseStatusLine = el('p', 'ag-settings-status', '허브 연결 대기');
   const browserbaseKey = createTextField('Browserbase 키', {
     type: 'password',
@@ -736,19 +738,20 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // 3단계 — 카탈로그에서 모델 고르기
   const piCatalogStep = el('div', 'ag-pi-step');
-  const piSearch = createTextField('모델 검색', { placeholder: '이름 · 제공자 · 모델 id' });
+  const piCatalogOpen = el('button', 'ag-settings-primary', '모델 선택');
+  piCatalogOpen.type = 'button';
+  piCatalogOpen.addEventListener('click', () => openPiModelCatalog());
+  piCatalogStep.append(piCatalogOpen);
   const piChips = el('div', 'ag-pi-chips');
-  const piList = el('div', 'ag-pi-catalog');
-  const piCatalogNote = el('p', 'ag-settings-note');
-  const piCatalogActions = el('div', 'ag-settings-actions');
+  const piCatalogActions = el('div', 'ag-settings-actions ag-settings-pi-actions');
   const piCatalogNext = el('button', 'ag-settings-primary', '다음');
   piCatalogNext.type = 'button';
-  const piCatalogRefresh = el('button', 'ag-settings-btn', '목록 새로고침');
-  piCatalogRefresh.type = 'button';
-  const piCatalogCancel = el('button', 'ag-settings-btn', '취소');
+  const piCatalogCancel = el('button', 'ag-settings-btn', '선택 취소');
   piCatalogCancel.type = 'button';
-  piCatalogActions.append(piCatalogNext, piCatalogRefresh, piCatalogCancel);
-  piCatalogStep.append(piSearch.field, piChips, piList, piCatalogNote, piCatalogActions);
+  const piCatalogConnect = el('button', 'ag-settings-primary', 'Pi 연결');
+  piCatalogConnect.type = 'button';
+  piCatalogConnect.addEventListener('click', () => openAgentSetup('pi'));
+  piCatalogActions.append(piCatalogNext, piCatalogCancel, piCatalogConnect);
 
   // 4단계 — 이름 짓기 + 기본 강도
   const piNamingStep = el('div', 'ag-pi-step');
@@ -1044,37 +1047,23 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     piMessage = '';
     renderPi();
   });
-  piSearch.input.addEventListener('input', () => renderPiCatalogList());
-  piCatalogRefresh.addEventListener('click', () => void loadPiCatalog(true));
   piCatalogNext.addEventListener('click', () => {
     if (piDraft.length === 0) return;
     piStepOverride = 'naming';
     piMessage = '';
-    renderPi();
+    openAgentSetup('pi');
   });
   piCatalogCancel.addEventListener('click', () => {
     piStepOverride = null;
     piMessage = '';
+    resetPiDraft();
     renderPi();
   });
   piNamingBack.addEventListener('click', () => {
-    piStepOverride = 'catalog';
-    renderPi();
+    openPiModelCatalog();
   });
   piNamingSave.addEventListener('click', () => void savePiModels());
-  piRepick.addEventListener('click', () => {
-    piDraft = (piStatus?.models ?? []).map((model) => ({
-      id: model.id,
-      name: model.name,
-      reasoning: model.reasoning,
-      effort: model.defaultEffort,
-    }));
-    piSearch.input.value = '';
-    piStepOverride = 'catalog';
-    piMessage = '';
-    renderPi();
-    void loadPiCatalog(false);
-  });
+  piRepick.addEventListener('click', () => openPiModelCatalog());
   piRekey.addEventListener('click', () => {
     piKeyInput.input.value = '';
     piStepOverride = 'key';
@@ -1089,6 +1078,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const agentField = createSelect('제공자', selectableAgents().map(
     (agent) => ({ id: agent, label: AGENT_LABEL[agent] }),
   ));
+  agentField.field.classList.add('ag-settings-provider-field');
+  const providerMark = el('span', 'ag-settings-provider-mark');
+  providerMark.setAttribute('aria-hidden', 'true');
+  agentField.field.insertBefore(providerMark, agentField.select);
   const modelField = createSelect('모델', []);
   const effortField = createSelect('추론 강도', []);
   const permissionField = createSelect('권한', PERMISSION_OPTIONS.map(option => ({
@@ -1128,8 +1121,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const modelCatalogTabs = el('div', 'ag-settings-model-tabs');
   modelCatalogTabs.setAttribute('role', 'tablist');
   modelCatalogTabs.setAttribute('aria-label', '모델 제공자');
-  const catalogTabs = new Map<PlanAgent, HTMLButtonElement>();
-  for (const agent of PLAN_AGENTS) {
+  const catalogAgents = [...PLAN_AGENTS, 'pi'] as const;
+  const catalogTabs = new Map<PlanAgent | 'pi', HTMLButtonElement>();
+  for (const agent of catalogAgents) {
     const tab = el('button', 'ag-settings-model-tab');
     tab.type = 'button';
     tab.id = `ag-settings-model-tab-${agent}`;
@@ -1138,6 +1132,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     tab.dataset.agent = agent;
     tab.append(createProviderIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
     tab.addEventListener('click', () => {
+      if (agent === 'pi') {
+        openPiModelCatalog();
+        return;
+      }
       modelCatalogAgent = agent;
       modelCatalogSearch.value = '';
       renderModelCatalog();
@@ -1146,9 +1144,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     tab.addEventListener('keydown', (event) => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
       event.preventDefault();
-      const target = event.key === 'Home' ? PLAN_AGENTS[0]
-        : event.key === 'End' ? PLAN_AGENTS[PLAN_AGENTS.length - 1]
-        : PLAN_AGENTS[(PLAN_AGENTS.indexOf(agent) + (event.key === 'ArrowRight' ? 1 : -1) + PLAN_AGENTS.length) % PLAN_AGENTS.length];
+      const target = event.key === 'Home' ? catalogAgents[0]
+        : event.key === 'End' ? catalogAgents[catalogAgents.length - 1]
+        : catalogAgents[(catalogAgents.indexOf(agent) + (event.key === 'ArrowRight' ? 1 : -1) + catalogAgents.length) % catalogAgents.length];
       const next = target && catalogTabs.get(target);
       next?.click();
       next?.focus();
@@ -1174,7 +1172,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   modelCatalogRefresh.title = '모델 목록 새로고침';
   modelCatalogRefresh.setAttribute('aria-label', '모델 목록 새로고침');
   modelCatalogRefresh.append(createIcon('refresh'));
-  modelCatalogRefresh.addEventListener('click', () => void loadModelCatalog(modelCatalogAgent, true));
+  modelCatalogRefresh.addEventListener('click', () => {
+    if (modelCatalogAgent === 'pi') void loadPiCatalog(true);
+    else void loadModelCatalog(modelCatalogAgent, true);
+  });
   modelCatalogTools.append(modelCatalogSearchWrap, modelCatalogRefresh);
   const modelCatalogList = el('div', 'ag-settings-model-list');
   modelCatalogList.id = 'ag-settings-model-list';
@@ -1193,11 +1194,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   });
   const modelCatalogStatus = el('div', 'ag-settings-model-status');
   modelCatalogStatus.setAttribute('role', 'status');
-  modelCatalogCard.append(modelCatalogTop, modelCatalogTools, modelCatalogList, modelCatalogStatus);
+  modelCatalogCard.append(modelCatalogTop, modelCatalogTools, piChips, modelCatalogList, modelCatalogStatus, piCatalogActions);
   modelCatalogSection.body.append(modelCatalogCard);
 
   // ── 4. 지시 ──────────────────────────────────────────
   const instructionsSection = createSection('지시');
+  instructionsSection.root.classList.add('ag-settings-instructions-section');
   const instructionsEditor = document.createElement('textarea');
   instructionsEditor.className = 'ag-settings-instructions-editor';
   instructionsEditor.rows = 11;
@@ -1262,6 +1264,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // ── 5. 글쓰기 보정 ────────────────────────────────────
   const calibration = createSection('글쓰기 보정');
+  calibration.root.classList.add('ag-settings-calibration-section');
   const calibrationStatus = el('p', 'ag-settings-status', '보정 전');
   const calibrationSummary = el('p', 'ag-settings-note');
   calibrationSummary.hidden = true;
@@ -1272,6 +1275,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // ── 6. 템플릿 ─────────────────────────────────────────
   const templatesSection = createSection('템플릿');
+  templatesSection.root.classList.add('ag-settings-templates-section');
   const templatesNote = el('p', 'ag-settings-note', '채팅에서 /templates로 선택');
   const templatesList = el('div', 'ag-template-list');
   const templatesStatus = el('p', 'ag-settings-cliproxy-error');
@@ -1432,7 +1436,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   aiContent.append(defaults.root, modelCatalogSection.root, calibration.root, instructionsSection.root, templatesSection.root, aiFooter);
   panes.get('ai')?.appendChild(aiContent);
 
-  const connectionContent = el('div', 'ag-settings-destination-content');
+  const connectionContent = el('div', 'ag-settings-destination-content ag-settings-connection-content');
   connectionContent.append(accountSection.root, connection.root, quotaSection.root, browserbaseSection.root, usageSection.root);
   aiContent.prepend(connectionContent);
   if (skillsSettings) {
@@ -1535,7 +1539,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     effortField.select.disabled = aiPrefsSaving;
     permissionField.select.disabled = aiPrefsSaving;
     modelCatalogList.inert = aiPrefsSaving;
-    modelCatalogRefresh.disabled = aiPrefsSaving || modelCatalogLoading.has(modelCatalogAgent);
+    modelCatalogRefresh.disabled = aiPrefsSaving || connectionState !== 'connected'
+      || (modelCatalogAgent === 'pi'
+        ? !piStatus?.installed || !piStatus.keyConfigured || piBusy || setupBusy || piCatalogLoading
+        : modelCatalogLoading.has(modelCatalogAgent));
   }
 
   function selectDestination(destination: SettingsDestination): void {
@@ -1883,7 +1890,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       tab.setAttribute('aria-selected', String(active));
       tab.tabIndex = active ? 0 : -1;
     }
+    modelCatalogSearch.disabled = false;
     const agent = modelCatalogAgent;
+    piCatalogActions.hidden = agent !== 'pi';
+    piChips.hidden = agent !== 'pi' || piDraft.length === 0;
+    if (agent === 'pi') {
+      renderSharedPiCatalog();
+      return;
+    }
     const selected = new Set(prefsDraft.selectedModels[agent]);
     const entries = availableModelsForAgent(agent);
     const terms = modelCatalogSearch.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
@@ -1906,12 +1920,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       row.classList.toggle('ag-active', active);
       row.setAttribute('aria-pressed', String(active));
       row.setAttribute('aria-label', `${entry.label}, ${active ? '선택됨' : '선택 안 됨'}`);
+      row.title = entry.description ? `${entry.id}\n${entry.description}` : entry.id;
       row.disabled = aiPrefsSaving;
       const text = el('span', 'ag-settings-model-row-text');
       const name = el('span', 'ag-settings-model-row-name', entry.label);
-      const id = el('span', 'ag-settings-model-row-id', entry.id);
-      text.append(name, id);
-      if (entry.description) text.append(el('span', 'ag-settings-model-row-description', entry.description));
+      text.append(name);
       const trailing = el('span', 'ag-settings-model-row-trailing');
       if (prefsDraft.defaultAgent === agent && prefsDraft.defaultModel === entry.id) {
         trailing.append(el('span', 'ag-settings-model-default', '기본값'));
@@ -1970,6 +1983,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       selectableAgents().map((agent) => ({ id: agent, label: AGENT_LABEL[agent] })),
     );
     agentField.select.value = prefsDraft.defaultAgent;
+    providerMark.replaceChildren(createProviderIcon(prefsDraft.defaultAgent));
     if (prefsDraft.defaultAgent === 'claude' || prefsDraft.defaultAgent === 'codex') {
       const selected = new Set(prefsDraft.selectedModels[prefsDraft.defaultAgent]);
       fillSelect(modelField.select, availableModelsForAgent(prefsDraft.defaultAgent)
@@ -2421,6 +2435,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   }
 
   function openAgentSetup(agent: AgentName): void {
+    if (setupCloseTimer) {
+      clearTimeout(setupCloseTimer);
+      setupCloseTimer = null;
+    }
     setupAgent = agent;
     setupMessage = '';
     setupBusy = false;
@@ -2456,7 +2474,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupOverlay.classList.remove('ag-open');
     setupOverlay.setAttribute('aria-hidden', 'true');
     resetSetupInstallProgress();
-    window.setTimeout(() => setupOverlay.remove(), 180);
+    if (setupCloseTimer) clearTimeout(setupCloseTimer);
+    setupCloseTimer = setTimeout(() => {
+      setupOverlay.remove();
+      setupCloseTimer = null;
+    }, 180);
     if (dismissingRau) {
       onAgentSetupAbandoned?.({
         agent: 'rau',
@@ -2547,7 +2569,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupTitle.textContent = `${AGENT_LABEL[agent]} 설정`;
     setupBody.replaceChildren(agent === 'pi' ? piCard : setupGeneric);
     if (agent === 'pi') {
-      piBusy = setupBusy;
       if (setupMessage) piMessage = setupMessage;
       renderPi();
       restoreSetupFocus();
@@ -2893,6 +2914,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   }
 
   function togglePiModel(model: PiCatalogModel): void {
+    piStepOverride = 'catalog';
     if (piDraft.some((draft) => draft.id === model.id)) {
       piDraft = piDraft.filter((draft) => draft.id !== model.id);
     } else if (piDraft.length >= PI_MODEL_MAX) {
@@ -2915,23 +2937,23 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   }
 
   function buildPiCatalogRow(model: PiCatalogModel): HTMLElement {
-    const row = el('button', 'ag-pi-model-row');
+    const row = el('button', 'ag-settings-model-row');
     row.type = 'button';
+    row.dataset.modelId = model.id;
+    row.disabled = piBusy || connectionState !== 'connected';
     const picked = piDraft.some((draft) => draft.id === model.id);
     row.classList.toggle('ag-active', picked);
-    row.setAttribute('aria-pressed', picked ? 'true' : 'false');
-    const main = el('div', 'ag-pi-model-main');
-    main.append(
-      el('span', 'ag-pi-model-name', model.name),
-      el('span', 'ag-pi-model-id', model.id),
-    );
-    const meta = [
-      `${formatTokens(model.contextLength)} 컨텍스트`,
-      `입력 ${formatUsd(pricePerMillion(model.pricing.prompt))}`,
-      `출력 ${formatUsd(pricePerMillion(model.pricing.completion))}`,
-    ];
-    if (model.reasoning) meta.push('추론');
-    row.append(main, el('span', 'ag-pi-model-meta', meta.join(' · ')));
+    row.setAttribute('aria-pressed', String(picked));
+    row.setAttribute('aria-label', `${model.name}, ${picked ? '선택됨' : '선택 안 됨'}`);
+    row.title = `${model.id} · ${model.provider}\n${formatTokens(model.contextLength)} 컨텍스트 · 입력 ${formatUsd(pricePerMillion(model.pricing.prompt))} · 출력 ${formatUsd(pricePerMillion(model.pricing.completion))}${model.reasoning ? ' · 추론' : ''}`;
+    const text = el('span', 'ag-settings-model-row-text');
+    text.append(el('span', 'ag-settings-model-row-name', model.name));
+    const trailing = el('span', 'ag-settings-model-row-trailing');
+    const check = el('span', 'ag-settings-model-check');
+    check.append(createIcon('check'));
+    check.setAttribute('aria-hidden', 'true');
+    trailing.append(check);
+    row.append(text, trailing);
     row.addEventListener('click', () => togglePiModel(model));
     return row;
   }
@@ -2948,6 +2970,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         el('span', 'ag-pi-chip-x', '×'),
       );
       chip.addEventListener('click', () => {
+        piStepOverride = 'catalog';
         piDraft = piDraft.filter((item) => item.id !== draft.id);
         renderPi();
       });
@@ -2956,24 +2979,57 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     piChips.hidden = piDraft.length === 0;
   }
 
-  function renderPiCatalogList(): void {
-    if (piCatalogLoading) {
-      piList.replaceChildren(el('p', 'ag-settings-note', '목록을 불러오는 중…'));
-      piCatalogNote.textContent = '';
-      return;
-    }
-    const matches = filterPiCatalog(piSearch.input.value);
+  function resetPiDraft(): void {
+    piDraft = (piStatus?.models ?? []).map((model) => ({
+      id: model.id, name: model.name, reasoning: model.reasoning, effort: model.defaultEffort,
+    }));
+  }
+
+  function openPiModelCatalog(): void {
+    if (piStepOverride !== 'catalog' && piStepOverride !== 'naming') resetPiDraft();
+    piStepOverride = piStatus?.installed && piStatus.keyConfigured ? 'catalog' : null;
+    piMessage = '';
+    modelCatalogAgent = 'pi';
+    modelCatalogSearch.value = '';
+    closeAgentSetup();
+    selectDestination('ai');
+    renderPi();
+    modelCatalogSection.root.scrollIntoView({ block: 'nearest' });
+    modelCatalogSearch.focus({ preventScroll: true });
+    if (piStatus?.keyConfigured && !piCatalogTried) void loadPiCatalog(false);
+  }
+
+  function renderSharedPiCatalog(): void {
+    const ready = piStatus?.installed === true && piStatus.keyConfigured;
+    const online = connectionState === 'connected';
+    const focusedId = modelCatalogList.contains(document.activeElement)
+      ? (document.activeElement as HTMLElement).dataset.modelId : null;
+    const scrollTop = modelCatalogList.scrollTop;
+    const matches = filterPiCatalog(modelCatalogSearch.value);
     const visible = matches.slice(0, PI_CATALOG_VISIBLE_MAX);
-    piList.replaceChildren(...visible.map(buildPiCatalogRow));
-    if (piCatalog.length === 0) {
-      piCatalogNote.textContent = '목록 불러오기 실패';
-    } else if (matches.length === 0) {
-      piCatalogNote.textContent = '결과 없음';
-    } else if (matches.length > visible.length) {
-      piCatalogNote.textContent = `${matches.length}개 중 ${visible.length}개`;
+    modelCatalogList.replaceChildren();
+    if (!ready || piCatalogLoading || visible.length === 0) {
+      modelCatalogList.append(el('div', 'ag-settings-model-empty', !ready ? 'Pi 연결 후 모델을 선택하세요.'
+        : piCatalogLoading ? '모델을 불러오는 중…' : '검색 결과가 없습니다.'));
     } else {
-      piCatalogNote.textContent = `${matches.length}개 · 최대 ${PI_MODEL_MAX}개`;
+      modelCatalogList.append(...visible.map(buildPiCatalogRow));
     }
+    modelCatalogList.scrollTop = scrollTop;
+    if (focusedId) [...modelCatalogList.querySelectorAll<HTMLButtonElement>('button')]
+      .find((row) => row.dataset.modelId === focusedId)?.focus({ preventScroll: true });
+    renderPiChips();
+    modelCatalogCount.textContent = `${piDraft.length}/${PI_MODEL_MAX} 선택`;
+    modelCatalogStatus.textContent = piMessage || (ready
+      ? matches.length > visible.length ? `${matches.length}개 중 ${visible.length}개 · 검색으로 찾기` : `${matches.length}개 모델`
+      : 'OpenRouter');
+    modelCatalogRefresh.disabled = !ready || !online || piBusy || setupBusy || piCatalogLoading;
+    modelCatalogSearch.disabled = !ready;
+    piCatalogNext.hidden = !ready;
+    piCatalogNext.disabled = piBusy || setupBusy || !online || piDraft.length === 0;
+    piCatalogCancel.hidden = !ready;
+    piCatalogCancel.disabled = piBusy || setupBusy;
+    piCatalogConnect.hidden = ready;
+    piCatalogConnect.disabled = !online;
   }
 
   /** 이름 칸은 입력 중인 값을 지키려고 구성이 바뀔 때만 다시 세운다. */
@@ -3031,32 +3087,28 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     piMessageLine.textContent = piMessage;
     piMessageLine.hidden = !piMessage;
 
-    piInstallBtn.disabled = piBusy || !online;
+    piInstallBtn.disabled = piBusy || setupBusy || !online;
     piProgressLine.textContent = piProgress;
     piProgressLine.hidden = !piProgress;
 
     piKeyNote.textContent = piStatus?.keyConfigured
       ? '새 키를 넣으면 이전 키를 대체합니다.'
       : 'openrouter.ai/keys 에서 만든 키';
-    piKeySubmit.disabled = piBusy || !online;
+    piKeySubmit.disabled = piBusy || setupBusy || !online;
+    piOauth.disabled = piBusy || setupBusy || !online;
     piKeyCancel.hidden = piStepOverride !== 'key';
 
-    if (step === 'catalog') {
-      // 목록은 이 단계에 처음 들어올 때 한 번 부른다.
-      if (!piCatalogTried && !piCatalogLoading && online) void loadPiCatalog(false);
-      renderPiChips();
-      renderPiCatalogList();
+    renderModelCatalog();
+    if (modelCatalogAgent === 'pi' && piStatus?.keyConfigured && online && !piCatalogTried) {
+      void loadPiCatalog(false);
     }
-    piCatalogNext.disabled = piBusy || piDraft.length === 0;
-    piCatalogRefresh.disabled = piBusy || piCatalogLoading || !online;
-    piCatalogCancel.hidden = (piStatus?.models.length ?? 0) === 0;
 
     if (step === 'naming') renderPiNaming();
-    piNamingSave.disabled = piBusy || !online || piDraft.length === 0;
+    piNamingSave.disabled = piBusy || setupBusy || !online || piDraft.length === 0;
 
     if (step === 'summary') renderPiSummary();
-    piRepick.disabled = piBusy || !online;
-    piRekey.disabled = piBusy || !online;
+    piRepick.disabled = piBusy || setupBusy || !online;
+    piRekey.disabled = piBusy || setupBusy || !online;
   }
 
   function formatMb(bytes: number): string {
@@ -3171,7 +3223,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       piStatus = status;
       // 새 키로 목록을 다시 받아 본다.
       piCatalogTried = false;
-      piStepOverride = status.models.length === 0 ? 'catalog' : null;
+      piStepOverride = null;
+      openPiModelCatalog();
     } else if (!piMessage) {
       piMessage = '키 확인 실패';
     }
@@ -3677,12 +3730,19 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           templatesMessage = '';
           renderTemplates();
           break;
-        case 'pi-status':
+        case 'pi-status': {
+          const authenticated = ev.status.keyConfigured && (!piStatus?.keyConfigured || setupBusy);
           piStatus = ev.status;
+          if (authenticated && setupAgent === 'pi' && setupOverlay.getAttribute('aria-hidden') === 'false') {
+            setupBusy = false;
+            piBusy = false;
+            openPiModelCatalog();
+          }
           renderPi();
           syncPrefsInputs();
           renderUsage();
           break;
+        }
         case 'pi-setup-progress':
           piProgress = PI_PROGRESS_LABEL[ev.state] ?? '';
           if (ev.state === 'done') {
@@ -3727,6 +3787,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     },
     dispose(): void {
       if (supportsTerminalSetup(setupAgent) && setupAuthRunId) bridge.cancelAgentSetup(setupAgent, setupAuthRunId);
+      if (setupCloseTimer) clearTimeout(setupCloseTimer);
       setupTerminal.dispose();
       disposed = true;
       settingsOpen = false;

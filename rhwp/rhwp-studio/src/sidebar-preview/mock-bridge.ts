@@ -495,18 +495,19 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
       data.pi.keyTail = 'demo';
       return data.pi;
     },
-    requestPiCatalog: async () =>
-      data.writingCatalog.providers.flatMap((provider) =>
-        provider.models.map((model) => ({
-          id: model.id,
-          name: model.name,
-          provider: provider.id,
-          contextLength: 200000,
-          pricing: { prompt: 0.000003, completion: 0.000015 },
-          reasoning: true,
-          supportsImages: true,
-        })),
-      ),
+    requestPiCatalog: async () => [
+      { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6', provider: 'anthropic' },
+      { id: 'anthropic/claude-opus-4.6', name: 'Claude Opus 4.6', provider: 'anthropic' },
+      { id: 'openai/gpt-5.2', name: 'GPT-5.2', provider: 'openai' },
+      { id: 'google/gemini-3-pro-preview', name: 'Gemini 3 Pro', provider: 'google' },
+      { id: 'deepseek/deepseek-v3.2', name: 'DeepSeek V3.2', provider: 'deepseek' },
+    ].map((model) => ({
+      ...model,
+      contextLength: 200000,
+      pricing: { prompt: 0.000003, completion: 0.000015 },
+      reasoning: true,
+      supportsImages: true,
+    })),
     setPiModels: async (models) => {
       data.pi.models = models.map((model) => ({
         ...model,

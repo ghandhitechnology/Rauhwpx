@@ -2,8 +2,8 @@
 .ag-settings-page .ag-settings-destination-content > .ag-settings-section.ag-settings-defaults {
   --ag-text: var(--n-text);
   --ag-text-muted: var(--n-text-secondary);
-  gap: 6px;
-  padding: 0 0 24px;
+  gap: 2px;
+  padding: 0 0 14px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -20,23 +20,32 @@
 .ag-settings-page .ag-settings-defaults .ag-settings-section-body {
   display: block;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--ag-set-sep) 72%, transparent);
-  border-radius: 14px;
+  border: 1px solid var(--ag-set-sep);
+  border-radius: 12px;
   background: var(--ag-set-card);
-  box-shadow: 0 2px 12px color-mix(in srgb, var(--ag-text) 5%, transparent);
 }
 
 .ag-settings-page .ag-settings-defaults .ag-settings-field {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(68px, 28%) minmax(0, 1fr);
+  grid-template-columns: clamp(60px, 18%, 80px) minmax(0, 1fr);
   align-items: center;
   min-width: 0;
-  min-height: 46px;
+  min-height: 31px;
   gap: 8px;
   padding: 0 14px;
   background: transparent;
   transition: background-color 150ms ease;
+}
+
+.ag-settings-page .ag-settings-defaults .ag-settings-provider-field {
+  grid-template-columns: clamp(60px, 18%, 80px) 14px minmax(0, 1fr);
+}
+
+.ag-settings-page .ag-settings-defaults .ag-settings-provider-mark,
+.ag-settings-page .ag-settings-defaults .ag-settings-provider-mark .ag-provider-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .ag-settings-page .ag-settings-defaults .ag-settings-field:hover,
@@ -66,7 +75,7 @@
   width: 100%;
   max-width: none;
   min-width: 0;
-  height: 44px;
+  height: 30px;
   padding: 0 24px 0 0;
   border: 0;
   border-radius: 0;

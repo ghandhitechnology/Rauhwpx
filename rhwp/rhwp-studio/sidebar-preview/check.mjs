@@ -1,3 +1,4 @@
+import { checkPiModels } from './pi-models.check.mjs';
 import { checkCloudMergeRecovery } from './cloud-merge-recovery.check.mjs';
 import { checkCloudSetup } from './cloud-setup.check.mjs';
 import { checkCliTerminalDefaults } from './cli-terminal-defaults.check.mjs';
@@ -490,6 +491,7 @@ try {
     );
   });
   await step('New CLI installs default to terminal login', () => checkCliTerminalDefaults(page, origin));
+  await step('Shared Pi model selection', () => checkPiModels(page, origin));
   await step('Embedded CLI login terminal', () => checkSetupTerminal(page, origin));
   await step('Provider picker only lists connected providers', async () => {
     await open();
