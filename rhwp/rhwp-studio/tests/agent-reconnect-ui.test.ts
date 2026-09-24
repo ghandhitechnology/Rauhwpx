@@ -53,7 +53,7 @@ test('reconnectNow 는 허브가 뜬 뒤에 붙는다', () => {
 test('허브 연결은 헤더의 점 하나로 보이고 연결되면 사라진다', () => {
   assert.match(source, /const connDot = el\('button', 'ag-conn-dot'\)/);
   assert.match(source, /headerActions\.append\(connDot, takeoverBtn, versionsBtn, threadsBtn, settingsBtn\)/);
-  assert.match(source, /chatPage\.append\(header, messages, review, planSurface, questionController\.root, calibrationChip, composer\)/);
+  assert.match(source, /chatPage\.append\(header, messages, review, planSurface, calibrationChip, questionController\.root, composer\)/);
   assert.doesNotMatch(source, /ag-conn-banner/);
   assert.doesNotMatch(source, /번째 시도/);
   assert.match(source, /connDot\.hidden = visual === 'connected'/);

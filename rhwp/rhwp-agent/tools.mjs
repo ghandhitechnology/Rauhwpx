@@ -156,6 +156,7 @@ export const TOOL_CATEGORIES = Object.freeze([
   'artifact-write',
   'user-interaction',
   'planning-control',
+  'plan-progress',
   'background-control',
   'background-worker',
   'browser',
@@ -169,7 +170,7 @@ export const TOOL_CATEGORIES = Object.freeze([
  * destructive 로 표시하지 않는다. 그렇게 표시하면 Codex 안전 모드
  * (`workspace-write` + `approval_policy=never`)가 문서 편집 도구를 거절한다.
  *
- * @param {'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'background-control'|'background-worker'|'browser'|'environment'} category
+ * @param {'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'plan-progress'|'background-control'|'background-worker'|'browser'|'environment'} category
  */
 export function toolAnnotations(category) {
   return {
@@ -186,14 +187,25 @@ export const IMPLEMENTATION_PLAN_SHAPE = Object.freeze({
   assumptions: z.array(z.string().min(1).max(1_000)).max(50),
   decisions: z.array(z.string().min(1).max(2_000)).min(1).max(100),
   steps: z.array(z.object({
+    id: z.string().min(1).max(100).optional(),
     title: z.string().min(1).max(300),
     details: z.string().min(1).max(3_000),
+    target: z.string().min(1).max(1_000).optional().describe('Document section, paragraph, table, or page affected'),
+    preview: z.string().min(1).max(3_000).optional().describe('Concrete proposed text or a concise description of the visible result'),
     files: z.array(z.string().min(1).max(1_000)).max(100).optional(),
   }).strict()).min(1).max(100),
   files: z.array(z.string().min(1).max(1_000)).max(200),
   validation: z.array(z.string().min(1).max(1_000)).min(1).max(100),
   risks: z.array(z.string().min(1).max(2_000)).max(100),
   exclusions: z.array(z.string().min(1).max(1_000)).max(100),
+  sources: z.array(z.object({
+    title: z.string().min(1).max(500),
+    url: z.string().url().max(8_000).refine((value) => /^https?:\/\//i.test(value), 'url must use http or https').optional(),
+    fileId: z.string().min(1).max(256).optional(),
+    chunkId: z.string().min(1).max(256).optional(),
+    note: z.string().min(1).max(2_000).optional(),
+  }).strict()).max(100).optional(),
+  changeSummary: z.string().min(1).max(2_000).optional().describe('What changed from the previous version'),
 });
 
 /**
@@ -790,13 +802,13 @@ const BASE_TOOL_DEFINITIONS = [
     // insert_image 만 특별 — 파일은 mcp-stdio 프로세스가 읽어 base64 로 허브에 전달하므로
     // mcp-stdio.mjs 가 이 정의의 description/shape 로 커스텀 핸들러를 등록한다.
     name: 'insert_image',
-    description: `Insert an image into the document at (sectionIdx, paraIdx, charOffset), inline with the text. Preferred input is imagePath — an absolute local file path; this MCP server reads the file, detects its pixel size, and streams the bytes itself (the model never emits image data). png/jpg/gif/bmp, max 5MB. Default size is the natural pixel size at 96dpi, shrunk to the page body width only if wider; pass widthMm/heightMm to force a size (giving just one scales proportionally). ${UNIT_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    description: `Insert an image into the document at (sectionIdx, paraIdx, charOffset), inline with the text. Use imagePath for a local PNG/JPEG/GIF/BMP file; this MCP server reads the bytes and pixel size. For a Codex-generated image, copy the selected file into the session workspace first and pass its absolute path. The file must be inside an approved readable root and at most 5MB. Default size is the natural pixel size at 96dpi, shrunk to the page body width only if wider; pass widthMm/heightMm to force a size (giving just one scales proportionally). ${UNIT_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
       paraIdx: z.number().int().min(0),
       charOffset: z.number().int().min(0),
-      imagePath: z.string().optional().describe('Absolute path to a local png/jpg/gif/bmp file (preferred)'),
+      imagePath: z.string().optional().describe('Absolute path to a local PNG/JPEG/GIF/BMP file inside the session workspace or another approved readable root (preferred)'),
       imageBase64: z.string().optional().describe('Raw base64 image data — only when the bytes are not on disk; requires extension'),
       extension: z.enum(['png', 'jpg', 'jpeg', 'gif', 'bmp']).optional().describe('Required with imageBase64; ignored with imagePath'),
       widthMm: z.number().positive().max(500).optional(),
@@ -998,8 +1010,18 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'present_implementation_plan',
-    description: 'Present a complete implementation plan for user review. Call only after the user asked for a plan. Do not say the plan is ready before this tool returns. The hub assigns planId, stores the plan, emits plan-ready, and moves to awaiting-approval.',
+    description: 'Present a complete document editing plan for user review, or revise an existing plan in response to concrete feedback. Include document targets, proposed changes, and actual sources. Do not say the plan is ready before this tool returns. The hub assigns planId and version, stores the plan, emits plan-ready, and moves to awaiting-approval.',
     shape: IMPLEMENTATION_PLAN_SHAPE,
+  },
+  {
+    name: 'update_plan_progress',
+    description: 'Update one step of the approved plan. Mark in-progress before working, completed only after the work and its validation succeed, or blocked with a reason. This updates the user-visible checklist; it does not approve or commit document changes.',
+    shape: {
+      planId: z.string().min(1).max(256),
+      stepId: z.string().min(1).max(100),
+      status: z.enum(['pending', 'in-progress', 'completed', 'blocked']),
+      note: z.string().min(1).max(2_000).optional(),
+    },
   },
   {
     name: 'download_file',
@@ -1162,7 +1184,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
 ];
 
-/** @type {Readonly<Record<string, 'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'background-control'|'background-worker'|'browser'|'environment'>>} */
+/** @type {Readonly<Record<string, 'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'plan-progress'|'background-control'|'background-worker'|'browser'|'environment'>>} */
 export const TOOL_CLASSIFICATIONS = Object.freeze({
   read_agent_instructions: 'instruction-read',
   update_agent_instructions: 'instruction-write',
@@ -1232,6 +1254,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   verify_changes: 'document-read',
   ask_user_question: 'user-interaction',
   present_implementation_plan: 'planning-control',
+  update_plan_progress: 'plan-progress',
   download_file: 'download-write',
   publish_artifact: 'artifact-write',
   delegate_copy_layout: 'background-control',
@@ -1257,8 +1280,8 @@ export const TOOL_PROFILES = Object.freeze({
   direct: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'user-interaction', 'background-control', 'environment']),
   planning: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'planning-control', 'browser', 'environment']),
   question: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'browser', 'environment']),
-  'awaiting-approval': Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser', 'environment']),
-  implementing: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'user-interaction', 'browser', 'background-control', 'environment']),
+  'awaiting-approval': Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'planning-control', 'browser', 'environment']),
+  implementing: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'user-interaction', 'plan-progress', 'browser', 'background-control', 'environment']),
   'copy-layout-worker': Object.freeze([
     'read_product_skill',
     'get_document_info',

@@ -2,7 +2,8 @@ import type { WasmBridge } from '../core/wasm-bridge.ts';
 import type { EventBus } from '../core/event-bus.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
-import type { DocumentPosition, CharProperties } from '../core/types.ts';
+import type { DocumentPosition, CharProperties, CharShapeRun } from '../core/types.ts';
+import { replacementCharShapes } from './replacement-format.ts';
 import { PreparedSnapshotCommand } from '../engine/prepared-snapshot-command.ts';
 import type {
   AgentName, CellAddr, CharFormatProps, DocPoint, DocRange,
@@ -107,6 +108,8 @@ export class PendingEditManager {
    * 전체 복원 대신 범위-국소 역연산 폴백으로만 되돌린다.
    */
   private userEditSeq = 0;
+  /** A settled set may change state captured by another set's document snapshot. */
+  private settledSetSeq = 0;
   /** 매니저 자신의 변이(approve/reject/무효화) 중 카운터 증가 억제 — 재진입 가드 */
   private selfMutating = 0;
   /**
@@ -255,6 +258,10 @@ export class PendingEditManager {
     const wasm = this.deps.wasm;
     // 원본 텍스트/서식 캡처 (captureRangeText 가 범위 검증을 겸한다)
     const deletedText = this.captureRangeText(range);
+    if (deletedText === text) {
+      return { changeSetId: this.ensureOpenSet(agent).id, insertedRange: { ...range }, deletedText };
+    }
+    const charShapeRuns = this.captureCharShapeRuns(range);
     let charShapeId: number | null = null;
     try {
       const props = range.cell?.path
@@ -317,7 +324,9 @@ export class PendingEditManager {
           addedParas: 0,
         };
       // 캡처한 글자 모양을 삽입 텍스트 전체에 적용 (범위 끝 서식 상속 방지)
-      if (charShapeId !== null && text.length > 0) this.applyCharShapeToRange(ins.range, charShapeId);
+      if (charShapeRuns && text.length > 0) {
+        this.applyCharShapeRuns(ins.range, text, replacementCharShapes(deletedText, text, charShapeRuns));
+      } else if (charShapeId !== null && text.length > 0) this.applyCharShapeToRange(ins.range, charShapeId);
       const set = this.ensureOpenSet(agent);
       if (!retainSnapshot && snapshotId !== null) {
         // 벌크 경로: 에러 롤백용 스냅샷은 성공 즉시 반환한다 — 되돌림은 역연산 폴백.
@@ -326,9 +335,10 @@ export class PendingEditManager {
       }
       const op: PendingOp = {
         kind: 'replace', id: this.nextId('op'), agent: set.agent,
-        range: ins.range, text, deletedText, charShapeId, paraShapeIds,
+        range: ins.range, text, deletedText, charShapeId, charShapeRuns, paraShapeIds,
         snapshotId: retainSnapshot ? snapshotId : null,
         userEditSeqAtSnapshot: this.userEditSeq,
+        settledSetSeqAtSnapshot: this.settledSetSeq,
       };
       this.pushOp(set, op);
       if (text.length > 0) {
@@ -445,11 +455,36 @@ export class PendingEditManager {
    * mark-only 유형은 approve 시 실행된다.
    */
   addObjectOp(agent: AgentName, obj: ObjectOp): { changeSetId: string; obj: ObjectOp } {
-    if (isObjectOpApplied(obj)) {
-      this.applyObjectOp(obj);
+    const wasm = this.deps.wasm;
+    let snapshotId: number | null = null;
+    // Deleting an inserted object cannot recover the host's saved line metrics.
+    // Keep its original layout for reject and the approved change's undo entry.
+    if (obj.type === 'insertImage' || obj.type === 'insertEquation') {
+      this.deps.inputHandler.prepareSnapshotCapacity?.(1);
+      snapshotId = wasm.saveSnapshot();
+      this.deps.inputHandler.retainExternalSnapshot?.();
+    }
+    try {
+      if (isObjectOpApplied(obj)) this.applyObjectOp(obj);
+    } catch (error) {
+      if (snapshotId !== null) {
+        try { wasm.restoreSnapshot(snapshotId); } finally {
+          wasm.discardSnapshot(snapshotId);
+          this.deps.inputHandler.releaseExternalSnapshot?.();
+        }
+      }
+      throw error;
+    }
+    if (obj.type === 'insertEquation') {
+      try {
+        const preview = JSON.parse(wasm.renderEquationPreview(obj.script, obj.fontSizeHu, obj.colorRef));
+        if (typeof preview.svg === 'string') obj.previewSvg = preview.svg;
+      } catch { /* The document preview remains available if a thumbnail cannot render. */ }
     }
     const set = this.ensureOpenSet(agent);
-    const op: PendingOp = { kind: 'object', id: this.nextId('op'), agent: set.agent, obj };
+    const op: PendingOp = { kind: 'object', id: this.nextId('op'), agent: set.agent, obj,
+      snapshotId, userEditSeqAtSnapshot: this.userEditSeq,
+      settledSetSeqAtSnapshot: this.settledSetSeq };
     this.pushOp(set, op);
     if (isObjectOpApplied(obj)) {
       this.reconcilePreviewLayout();
@@ -601,7 +636,7 @@ export class PendingEditManager {
       // 사라지기 전에 해제한다 (예산 누수 방지).
       const opIdsBefore = new Set(pendingState.flatMap((s) => s.ops.map((op) => op.id)));
       for (const set of this.sets) {
-        this.discardReplaceSnapshots(set.ops.filter((op) => !opIdsBefore.has(op.id)));
+        this.discardOpSnapshots(set.ops.filter((op) => !opIdsBefore.has(op.id)));
       }
       // 배치가 만든 set 은 통째로 제거하고, 기존 set 들의 op 은 배치 이전 좌표로 복원한다.
       this.sets = this.sets.filter((s) => setIdsBefore.has(s.id));
@@ -812,6 +847,7 @@ export class PendingEditManager {
     if (kept.length === 0 && dropped.length === 0) {
       this.removeSet(set);
       this.syncOverlay();
+      this.settledSetSeq++;
       this.emitChange({ type: 'approved', changeSetId });
       return true;
     }
@@ -876,6 +912,7 @@ export class PendingEditManager {
       );
       beforeId = null; // command가 소유권을 인수했다.
       command.execute(wasm);
+      this.settledSetSeq++;
       wasm.discardSnapshot(previewId);
       previewId = null;
       this.deps.inputHandler.executeOperation({
@@ -896,7 +933,7 @@ export class PendingEditManager {
       command?.discard(wasm);
       releaseExternal(heldExternal);
       this.restorePendingState(previewState);
-      this.discardReplaceSnapshots(dropped);
+      this.discardOpSnapshots(dropped);
       set.status = 'awaiting-review';
       this.emitDocEvents('agent-pending-edit');
       this.syncOverlay();
@@ -905,7 +942,7 @@ export class PendingEditManager {
       return false;
     }
 
-    this.discardReplaceSnapshots([...kept, ...dropped]);
+    this.discardOpSnapshots([...kept, ...dropped]);
     this.removeSet(set);
     this.syncOverlay();
     if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)`, changeSetId, droppedOpIds: dropped.map((op) => op.id) });
@@ -926,9 +963,10 @@ export class PendingEditManager {
       const skipped = dropped.length;
       set.ops = kept;
       this.revertAppliedOps(kept, dropped, userEditSeqNow);
+      this.settledSetSeq++;
       this.reconcilePreviewLayout();
       this.emitDocEvents('agent-reject');
-      this.discardReplaceSnapshots([...kept, ...dropped]);
+      this.discardOpSnapshots([...kept, ...dropped]);
       this.removeSet(set);
       this.syncOverlay();
       if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)`, changeSetId, droppedOpIds: dropped.map((op) => op.id) });
@@ -947,6 +985,7 @@ export class PendingEditManager {
     for (const un of this.unsubs) un();
     this.unsubs = [];
     this.listeners.clear();
+    for (const set of this.sets) this.discardOpSnapshots(set.ops);
     this.sets = [];
     this.open = null;
     this.syncTemplateLock();
@@ -1005,7 +1044,7 @@ export class PendingEditManager {
   }
 
   private discardAll(reason: string): void {
-    for (const set of this.sets) this.discardReplaceSnapshots(set.ops);
+    for (const set of this.sets) this.discardOpSnapshots(set.ops);
     this.sets = [];
     this.open = null;
     this.syncTemplateLock();
@@ -1027,7 +1066,7 @@ export class PendingEditManager {
       set.ops = kept;
       if (set.ops.some((op) => op.kind !== 'delete')) reverted = true;
       this.revertAppliedOps(kept, dropped);
-      this.discardReplaceSnapshots([...kept, ...dropped]);
+      this.discardOpSnapshots([...kept, ...dropped]);
     }
     if (reverted) this.reconcilePreviewLayout();
     this.sets = [];
@@ -1044,10 +1083,10 @@ export class PendingEditManager {
     set.ops.push(op);
   }
 
-  /** set 제거/폐기 시점에 replace op 들이 잡고 있는 wasm 스냅샷을 해제한다 */
-  private discardReplaceSnapshots(ops: PendingOp[]): void {
+  /** set 제거/폐기 시점에 pending op 들이 잡고 있는 wasm 스냅샷을 해제한다 */
+  private discardOpSnapshots(ops: PendingOp[]): void {
     for (const op of ops) {
-      if ((op.kind !== 'replace' && op.kind !== 'template') || op.snapshotId === null) continue;
+      if ((op.kind !== 'replace' && op.kind !== 'template' && op.kind !== 'object') || op.snapshotId == null) continue;
       try { this.deps.wasm.discardSnapshot(op.snapshotId); } catch { /* best effort */ }
       op.snapshotId = null;
       this.deps.inputHandler.releaseExternalSnapshot?.();
@@ -1145,15 +1184,20 @@ export class PendingEditManager {
           : null;
       case 'insertImage':
         return obj.anchor
-          ? { sort: 'control', sectionIdx: obj.sectionIdx, paraIdx: obj.anchor.paraIdx, controlIdx: obj.anchor.controlIdx }
+          ? { sort: 'agentObject', kind: 'image', sectionIdx: obj.sectionIdx, paraIdx: obj.anchor.paraIdx, controlIdx: obj.anchor.controlIdx }
           : null;
       case 'insertEquation':
         if (obj.cell) {
-          // 셀 수식: 셀 전체를 틴트 (셀 문단 내 컨트롤 bbox 는 별도 API 가 없다)
-          return { sort: 'cells', sectionIdx: obj.sectionIdx, paraIdx: obj.cell.paraIdx, controlIdx: obj.cell.controlIdx, cellIdx: obj.cell.cellIdx };
+          return obj.anchor ? {
+            sort: 'agentObject', kind: 'equation', sectionIdx: obj.sectionIdx,
+            paraIdx: obj.cell.paraIdx, controlIdx: obj.cell.controlIdx,
+            cellIdx: obj.cell.cellIdx, cellParaIdx: obj.paraIdx,
+            innerControlIdx: obj.anchor.controlIdx,
+            cellPath: obj.cell.path ? this.cellPathEntriesAt(obj.cell, obj.paraIdx) : undefined,
+          } : null;
         }
         return obj.anchor
-          ? { sort: 'control', sectionIdx: obj.sectionIdx, paraIdx: obj.anchor.paraIdx, controlIdx: obj.anchor.controlIdx }
+          ? { sort: 'agentObject', kind: 'equation', sectionIdx: obj.sectionIdx, paraIdx: obj.anchor.paraIdx, controlIdx: obj.anchor.controlIdx }
           : null;
       case 'tableStructure':
       case 'setTableProps':
@@ -1259,9 +1303,13 @@ export class PendingEditManager {
   // ─── 컨테이너(본문/셀) 추상 접근자 ─────────────────────
 
   private cellPathAt(cell: CellAddr, para: number): string {
-    return JSON.stringify(cell.path?.map((entry, index) => index === cell.path!.length - 1
+    return JSON.stringify(this.cellPathEntriesAt(cell, para));
+  }
+
+  private cellPathEntriesAt(cell: CellAddr, para: number): NonNullable<CellAddr['path']> {
+    return cell.path!.map((entry, index) => index === cell.path!.length - 1
       ? { ...entry, cellParaIndex: para }
-      : entry));
+      : entry);
   }
 
   private containerParaCount(sec: number, cell?: CellAddr): number {
@@ -1393,10 +1441,16 @@ export class PendingEditManager {
       }
       case 'insertEquation': {
         if (obj.cell) {
-          const res = wasm.insertEquationInCell(
-            obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx,
-            obj.paraIdx, obj.charOffset, obj.script, obj.fontSizeHu, obj.colorRef,
-          );
+          const res = obj.cell.path
+            ? wasm.insertEquationInCellByPath(
+              obj.sectionIdx, obj.cell.paraIdx,
+              this.cellPathEntriesAt(obj.cell, obj.paraIdx),
+              obj.charOffset, obj.script, obj.fontSizeHu, obj.colorRef,
+            )
+            : wasm.insertEquationInCell(
+              obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx,
+              obj.paraIdx, obj.charOffset, obj.script, obj.fontSizeHu, obj.colorRef,
+            );
           if (!res.ok) throw new AgentToolError('RPC_ERROR', 'insertEquationInCell failed');
           // anchor.paraIdx = 부모 문단, controlIdx = 셀 문단 내 수식 인덱스
           obj.anchor = { paraIdx: obj.cell.paraIdx, controlIdx: res.controlIdx, charOffset: obj.charOffset };
@@ -1558,10 +1612,15 @@ export class PendingEditManager {
         case 'insertEquation': {
           if (!obj.anchor) return false;
           if (obj.cell) {
-            const ok = wasm.deleteEquationControlInCell(
-              obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx,
-              obj.paraIdx, obj.anchor.controlIdx,
-            )?.ok === true;
+            const ok = (obj.cell.path
+              ? wasm.deleteEquationControlInCellByPath(
+                obj.sectionIdx, obj.cell.paraIdx,
+                this.cellPathEntriesAt(obj.cell, obj.paraIdx), obj.anchor.controlIdx,
+              )
+              : wasm.deleteEquationControlInCell(
+                obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx,
+                obj.paraIdx, obj.anchor.controlIdx,
+              ))?.ok === true;
             if (ok) this.shiftCellEquationRefs(obj, obj.anchor.controlIdx, -1);
             return ok;
           }
@@ -1843,6 +1902,12 @@ export class PendingEditManager {
         case 'insertEquation': {
           if (!obj.anchor) return false;
           if (obj.cell) {
+            if (obj.cell.path) {
+              return wasm.getEquationPropertiesByPath(
+                obj.sectionIdx, obj.cell.paraIdx,
+                this.cellPathEntriesAt(obj.cell, obj.paraIdx), obj.anchor.controlIdx,
+              )?.script === obj.script;
+            }
             // 인덱스 지정 조회 (신규 wasm API; 구버전/스텁은 첫-수식 조회로 폴백)
             const script = typeof wasm.getEquationScriptInCellAt === 'function'
               ? wasm.getEquationScriptInCellAt(
@@ -2342,7 +2407,27 @@ export class PendingEditManager {
           if (op.snapshotId === null) throw new Error('template snapshot is unavailable');
           wasm.restoreSnapshot(op.snapshotId);
         } else if (op.kind === 'object' && isObjectOpApplied(op.obj)) {
-          if (!this.revertObjectOp(op.obj)) failed.add(op.id);
+          let restored = false;
+          if (op.snapshotId != null && op.userEditSeqAtSnapshot === userEditSeqNow
+            && op.settledSetSeqAtSnapshot === this.settledSetSeq
+            && !this.hasLaterAppliedOpsOutside(op, ops, keepPreviewsOf)) {
+            try {
+              wasm.restoreSnapshot(op.snapshotId);
+              restored = true;
+            } catch (error) {
+              console.warn('[pending-edits] object snapshot restore failed; falling back to inverse ops', error);
+            }
+          }
+          if (restored) {
+            const obj = op.obj;
+            if ((obj.type === 'insertImage' || obj.type === 'insertEquation') && obj.anchor) {
+              if (obj.type === 'insertEquation' && obj.cell) {
+                this.shiftCellEquationRefs(obj, obj.anchor.controlIdx, -1);
+              } else {
+                this.shiftControlIdxRefs(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx, -1, obj);
+              }
+            }
+          } else if (!this.revertObjectOp(op.obj)) failed.add(op.id);
         }
         // delete/mark-only 는 되돌릴 것이 없다
       } catch (err) {
@@ -2372,6 +2457,7 @@ export class PendingEditManager {
     const reinsertShift = this.insertShiftFor(start, op.deletedText);
     const userEditedSinceSnapshot = (op.userEditSeqAtSnapshot ?? -1) !== userEditSeqNow;
     if (op.snapshotId !== null && !userEditedSinceSnapshot
+      && op.settledSetSeqAtSnapshot === this.settledSetSeq
       && !this.hasLaterAppliedOpsOutside(op, revertSet, keepPreviewsOf)) {
       try {
         wasm.restoreSnapshot(op.snapshotId);
@@ -2390,7 +2476,8 @@ export class PendingEditManager {
     this.shiftAllAfterDelete(op.range, op);
     if (op.deletedText.length > 0) {
       const ins = this.performInsert(op.range.sectionIdx, start.paraIdx, start.charOffset, op.deletedText, op.range.cell);
-      if (op.charShapeId !== null) this.applyCharShapeToRange(ins.range, op.charShapeId);
+      if (op.charShapeRuns) this.applyCharShapeRuns(ins.range, op.deletedText, op.charShapeRuns);
+      else if (op.charShapeId !== null) this.applyCharShapeToRange(ins.range, op.charShapeId);
       // 원본 문단 서식 복원 (splitParagraph 는 시작 문단 모양을 물려주므로 줄별로 덮는다)
       for (let i = 0; i < op.paraShapeIds.length; i++) {
         const shapeId = op.paraShapeIds[i];
@@ -2455,6 +2542,64 @@ export class PendingEditManager {
       if (isLaterApplied(cand)) return true;
     }
     return false;
+  }
+
+  private captureCharShapeRuns(range: DocRange): CharShapeRun[] | undefined {
+    const wasm = this.deps.wasm;
+    // Older bridges and test doubles can only capture a single style.
+    if (typeof wasm.getCharShapeRuns !== 'function'
+      || typeof wasm.getCharShapeRunsInCellByPath !== 'function') return undefined;
+    const runs: CharShapeRun[] = [];
+    let offset = 0;
+    for (let p = range.startParaIdx; p <= range.endParaIdx; p++) {
+      const from = p === range.startParaIdx ? range.startCharOffset : 0;
+      const to = p === range.endParaIdx ? range.endCharOffset : this.containerParaLen(range.sectionIdx, p, range.cell);
+      const path = range.cell ? this.charShapeCellPath(range.cell, p) : '';
+      const local = range.cell
+        ? wasm.getCharShapeRunsInCellByPath(range.sectionIdx, range.cell.paraIdx, path, from, to)
+        : wasm.getCharShapeRuns(range.sectionIdx, p, from, to);
+      runs.push(...local.map(run => ({ ...run, startOffset: offset + run.startOffset - from, endOffset: offset + run.endOffset - from })));
+      offset += to - from;
+      if (p < range.endParaIdx) {
+        const props = range.cell
+          ? wasm.getCellCharPropertiesAtByPath(range.sectionIdx, range.cell.paraIdx, path, to)
+          : wasm.getCharPropertiesAt(range.sectionIdx, p, to);
+        if (typeof props.charShapeId !== 'number') throw new AgentToolError('RPC_ERROR', 'Missing paragraph character style');
+        runs.push({ startOffset: offset, endOffset: offset + 1, charShapeId: props.charShapeId });
+        offset++;
+      }
+    }
+    return runs;
+  }
+
+  private charShapeCellPath(cell: CellAddr, para: number): string {
+    return cell.path ? this.cellPathAt(cell, para) : JSON.stringify([
+      { controlIndex: cell.controlIdx, cellIndex: cell.cellIdx, cellParaIndex: para },
+    ]);
+  }
+
+  private applyCharShapeRuns(range: DocRange, text: string, runs: CharShapeRun[]): void {
+    const wasm = this.deps.wasm;
+    let offset = 0;
+    for (const [i, line] of text.split('\n').entries()) {
+      const length = scalarLen(line);
+      const para = range.startParaIdx + i;
+      const from = i === 0 ? range.startCharOffset : 0;
+      if (length > 0) {
+        const local = runs.filter(run => run.endOffset > offset && run.startOffset < offset + length)
+          .map(run => ({
+            startOffset: from + Math.max(run.startOffset, offset) - offset,
+            endOffset: from + Math.min(run.endOffset, offset + length) - offset,
+            charShapeId: run.charShapeId,
+          }));
+        const raw = range.cell
+          ? wasm.setCharShapeRunsInCellByPath(range.sectionIdx, range.cell.paraIdx,
+            this.charShapeCellPath(range.cell, para), from, from + length, local)
+          : wasm.setCharShapeRuns(range.sectionIdx, para, from, from + length, local);
+        this.parseOkLenient(raw, 'setCharShapeRuns');
+      }
+      offset += length + 1;
+    }
   }
 
   /** 캡처한 글자 모양을 범위 전체에 적용한다 (멀티 문단은 문단별로 쪼갠다) */

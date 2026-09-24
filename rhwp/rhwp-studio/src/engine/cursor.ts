@@ -292,9 +292,12 @@ export class CursorState {
         index === cellPath.length - 1 ? { ...entry, cellParaIndex } : entry,
       );
       const lastPath = pathAt(lastParaIndex);
-      const lastParaLength = useCellPath
-        ? this.wasm.getCellParagraphLengthByPath(sec, ppi, JSON.stringify(lastPath))
-        : this.wasm.getCellParagraphLength(sec, ppi, ci, cei, lastParaIndex);
+      const logicalPath = lastPath?.length ? lastPath : [{
+        controlIndex: ci, cellIndex: cei, cellParaIndex: lastParaIndex,
+      }];
+      const lastParaLength = this.wasm.getCellLogicalLengthByPath(
+        sec, ppi, JSON.stringify(logicalPath),
+      );
       const positionAt = (cellParaIndex: number, charOffset: number): DocumentPosition => ({
         ...pos,
         paragraphIndex: cellParaIndex,
@@ -830,7 +833,7 @@ export class CursorState {
       const paraCount = this.wasm.getParagraphCount(lastSec);
       if (paraCount > 0) {
         const lastPara = paraCount - 1;
-        const paraLen = this.wasm.getParagraphLength(lastSec, lastPara);
+        const paraLen = this.wasm.getLogicalLength(lastSec, lastPara);
         this.position = { sectionIndex: lastSec, paragraphIndex: lastPara, charOffset: paraLen };
       } else {
         this.position = { sectionIndex: lastSec, paragraphIndex: 0, charOffset: 0 };

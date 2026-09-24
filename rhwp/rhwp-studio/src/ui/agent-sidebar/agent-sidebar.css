@@ -2450,6 +2450,55 @@ button.ag-skill-copy {
   font-weight: 600;
 }
 
+/* User-selected models form a scrollable list inside the composer settings. */
+.ag-config-panel .ag-llm-menu {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 2px;
+  max-height: min(208px, 29vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 3px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ag-text) 5%, transparent);
+}
+
+.ag-config-panel .ag-llm-menu .ag-llm-group-label { padding: 6px 8px 3px; }
+.ag-config-panel .ag-llm-menu .ag-llm-item {
+  flex: 0 0 auto;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 31px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background 130ms ease-out;
+}
+.ag-config-panel .ag-llm-menu .ag-llm-item.ag-active {
+  background: var(--ag-bg);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--ag-text) 10%, transparent);
+}
+.ag-config-panel .ag-llm-menu .ag-llm-item.ag-active::after {
+  content: '✓';
+  flex: 0 0 auto;
+  margin-left: 6px;
+  color: var(--ag-accent);
+  font-size: 12px;
+}
+.ag-config-panel .ag-llm-menu .ag-llm-item:active { background: var(--ag-selected); }
+.ag-config-panel .ag-llm-menu .ag-llm-item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-config-panel .ag-llm-menu .ag-llm-item { transition: none; }
+}
+
 /* ─── 메시지 목록 ─────────────────────────────────────── */
 
 /* Conversation is prose-first; operational detail is available by disclosure. */
@@ -3221,6 +3270,7 @@ button.ag-skill-copy {
 /* Review cards use the same neutral elevation as other contextual surfaces. */
 .ag-review-card {
   display: flex;
+  flex: 0 0 auto;
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
@@ -3328,6 +3378,34 @@ button.ag-skill-copy {
   min-width: 0;
   padding: 5px 0;
   background: var(--ag-bg);
+}
+
+.ag-object-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 56px;
+  max-height: 160px;
+  margin: 6px 0 2px;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid rgba(127, 127, 127, 0.2);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.ag-image-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 134px;
+  object-fit: contain;
+}
+
+.ag-equation-preview svg {
+  display: block;
+  max-width: 100%;
+  max-height: 134px;
+  flex-shrink: 0;
 }
 
 .ag-diff-line {
@@ -3571,7 +3649,7 @@ button.ag-skill-copy {
   flex: 0 1 auto;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
-  max-height: 46%;
+  max-height: 58%;
   min-height: 0;
   overflow: hidden;
   padding: 12px;
@@ -3709,6 +3787,8 @@ button.ag-skill-copy {
   animation: ag-plan-enter var(--ag-dur-fast) var(--ag-motion-out) both;
 }
 
+.ag-plan-card.ag-plan-update { animation: none; }
+
 @keyframes ag-plan-enter {
   from { opacity: 0; transform: translateY(3px); }
   to { opacity: 1; transform: none; }
@@ -3781,16 +3861,24 @@ button.ag-skill-copy {
 
 .ag-plan-title {
   margin: 7px 0 0;
-  font-size: var(--font-size-md, 13px);
+  font-size: 16px;
   font-weight: 700;
-  line-height: 1.35;
+  line-height: 1.38;
+  letter-spacing: -0.02em;
 }
 
 .ag-plan-goal {
-  margin: 4px 0 0;
+  margin: 7px 0 0;
   color: var(--ag-text-secondary);
-  font-size: var(--font-size-sm, 11px);
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.58;
+}
+
+.ag-plan-revision {
+  margin: 8px 0 0;
+  color: var(--ag-text-muted);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 /* 본문과 동작은 정상 문서 흐름을 따른다. 스크롤은 바깥 .ag-review 하나가 맡아
@@ -3800,11 +3888,153 @@ button.ag-skill-copy {
   min-height: auto;
   padding: 14px 2px 16px;
   color: var(--ag-text);
-  font-size: var(--font-size-base, 12px);
-  line-height: 1.68;
+  font-size: 12px;
+  line-height: 1.6;
   overflow: visible;
   overflow-wrap: anywhere;
 }
+
+.ag-plan-summary {
+  margin: 0 0 18px;
+  color: var(--ag-text-secondary);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.ag-plan-section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.ag-plan-section-heading h4,
+.ag-plan-sources h4,
+.ag-plan-validation h4 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: var(--ag-track);
+}
+
+.ag-plan-step-count {
+  color: var(--ag-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-plan-step-list,
+.ag-plan-source-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ag-plan-step {
+  border-top: 1px solid var(--ag-border);
+}
+
+.ag-plan-step:last-child { border-bottom: 1px solid var(--ag-border); }
+
+.ag-plan-step-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 2px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.ag-plan-step-summary::-webkit-details-marker { display: none; }
+.ag-plan-step-summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+
+.ag-plan-step-number {
+  display: inline-flex;
+  flex: 0 0 18px;
+  min-height: 18px;
+  align-items: center;
+  justify-content: center;
+  color: var(--ag-text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-plan-step-number svg { width: 14px; height: 14px; }
+.ag-plan-step-spinner { width: 11px; height: 11px; border: 1.5px solid var(--ag-border); border-top-color: var(--accent-primary); border-radius: 50%; animation: ag-plan-orbit 0.9s linear infinite; }
+
+.ag-plan-step-main {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ag-plan-step-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ag-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ag-plan-step-preview,
+.ag-plan-step-note {
+  color: var(--ag-text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ag-plan-step-note { color: var(--ag-text); }
+
+.ag-plan-step-status {
+  flex: 0 0 auto;
+  color: var(--ag-text-muted);
+  font-size: 10px;
+}
+
+.ag-plan-step[data-status='in-progress'] .ag-plan-step-status,
+.ag-plan-step[data-status='blocked'] .ag-plan-step-status { color: var(--accent-primary); }
+.ag-plan-step[data-status='completed'] .ag-plan-step-number,
+.ag-plan-step[data-status='completed'] .ag-plan-step-status { color: var(--accent-primary); }
+
+.ag-plan-step-content {
+  padding: 0 2px 10px 30px;
+  color: var(--ag-text-secondary);
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.ag-plan-step-content p { margin: 0 0 5px; }
+.ag-plan-step-content p:last-child { margin-bottom: 0; }
+.ag-plan-step-plain .ag-plan-step-summary { cursor: default; }
+
+.ag-plan-validation { margin-top: 18px; }
+.ag-plan-validation-list { margin: 8px 0 0; padding-left: 18px; color: var(--ag-text-secondary); }
+.ag-plan-validation-list li { margin: 5px 0; }
+
+.ag-plan-secondary { margin-top: 10px; border-top: 1px solid var(--ag-border); }
+.ag-plan-secondary summary { padding: 9px 2px; color: var(--ag-text-secondary); font-size: 11px; cursor: pointer; }
+.ag-plan-secondary summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.ag-plan-secondary ul { margin: 0 0 10px; padding-left: 20px; color: var(--ag-text-secondary); font-size: 11px; }
+.ag-plan-secondary li { margin: 5px 0; overflow-wrap: anywhere; }
+
+.ag-plan-sources { margin-top: 18px; }
+.ag-plan-source-list { margin-top: 8px; }
+.ag-plan-source { display: flex; flex-direction: column; gap: 2px; padding: 7px 0; border-top: 1px solid var(--ag-border); }
+.ag-plan-source a { color: var(--accent-primary); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.ag-plan-source-note { color: var(--ag-text-muted); font-size: 11px; }
+.ag-plan-source-locator { color: var(--ag-text-muted); font-family: var(--ag-mono); font-size: 10px; overflow-wrap: anywhere; }
+
+.ag-plan-draft-card { padding: 12px 2px; }
+.ag-plan-draft-action { padding: 8px 12px; border: 1px solid var(--ag-border); border-radius: 7px; background: var(--ag-bg); color: var(--ag-text); font: inherit; cursor: pointer; }
+.ag-plan-draft-action:hover { background: var(--ag-hover); }
+.ag-plan-draft-action:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.ag-plan-draft-action:disabled { opacity: 0.5; cursor: default; }
 
 .ag-plan-footer {
   position: static;
@@ -4198,7 +4428,8 @@ button.ag-skill-copy {
   }
 
   .ag-plan-orbit,
-  .ag-plan-orbit::before {
+  .ag-plan-orbit::before,
+  .ag-plan-step-spinner {
     animation: none;
   }
 }
@@ -4419,6 +4650,75 @@ button.ag-skill-copy {
 
 .ag-root[data-agent='opencode'] .ag-composer:focus-within {
   box-shadow: var(--n-elev-2), 0 0 0 3px var(--ag-opencode-wash);
+}
+
+/* ─── 쉬는 입력기 ─────────────────────────────────────────
+   대화를 위로 읽는 동안 입력기는 한 줄짜리 알약으로 접힌다. 높이와 안쪽 위치는
+   composer-resting.ts 가 아래 가장자리를 고정한 채 옮기고, 여기서는 도착 모양과
+   모서리·설정 줄의 전환만 정한다. */
+.ag-root .ag-chat-page .ag-composer {
+  box-sizing: border-box;
+  transition:
+    border-color var(--ag-dur-fast) var(--ag-ease-out),
+    box-shadow var(--ag-dur-fast) var(--ag-ease-out),
+    border-radius var(--ag-dur-slow) var(--ag-spring);
+}
+
+.ag-root .ag-composer.ag-resting {
+  padding: 3px 5px 3px 8px;
+  border-radius: 21px;
+}
+
+.ag-root .ag-composer.ag-resting .ag-composer-field {
+  min-height: 34px;
+  padding: 2px 0 2px 2px;
+}
+
+.ag-root .ag-composer.ag-resting .ag-input {
+  height: 30px !important;
+  min-height: 30px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ag-root .ag-composer.ag-resting .ag-send {
+  border-radius: 15px;
+}
+
+/* 전체 화면에서는 iOS Safari 의 작은 주소창처럼 가운데의 짧은 캡슐로 모인다.
+   넓은 대화 폭을 가로지르는 막대 대신, 읽는 동안 떠 있는 작은 손잡이가 된다. */
+.ag-root.ag-fullscreen .ag-composer.ag-resting {
+  width: min(460px, calc(100% - 48px));
+  border-radius: 21px;
+  box-shadow: var(--n-elev-3);
+}
+
+.ag-root.ag-fullscreen .ag-chat-page .ag-composer {
+  transition:
+    border-color var(--ag-dur-fast) var(--ag-ease-out),
+    box-shadow var(--ag-dur-slow) var(--ag-spring),
+    border-radius var(--ag-dur-slow) var(--ag-spring);
+}
+
+/* 설정 줄은 흐름에서 빠져 아래 가장자리에 붙은 채 사라지고, 펼칠 때는
+   높이가 거의 자리 잡은 뒤에 떠오른다. */
+.ag-composer-meta {
+  transition:
+    opacity var(--ag-dur-base) var(--ag-ease-out) calc(var(--ag-dur-slow) / 3),
+    visibility 0s linear 0s;
+}
+
+.ag-root .ag-composer.ag-resting .ag-composer-meta {
+  position: absolute;
+  right: 8px;
+  bottom: 5px;
+  left: 8px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
+    visibility 0s linear var(--ag-dur-fast);
 }
 
 .ag-composer-meta {
@@ -4784,7 +5084,10 @@ button.ag-skill-copy {
   background: var(--accent-primary);
   color: var(--n-on-accent);
   cursor: pointer;
-  transition: background var(--ag-dur-fast) var(--ag-ease-out), opacity var(--ag-dur-fast) var(--ag-ease-out);
+  transition:
+    background var(--ag-dur-fast) var(--ag-ease-out),
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
+    border-radius var(--ag-dur-slow) var(--ag-spring);
 }
 
 .ag-send .ag-icon {
@@ -7490,17 +7793,17 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 .ag-user-question {
   display: flex;
-  flex: 0 0 clamp(180px, 35dvh, 340px);
+  flex: 0 0 auto;
   flex-direction: column;
   min-height: 0;
-  max-height: min(58dvh, 580px);
+  max-height: min(46dvh, 420px);
   margin: 0 12px;
   border: 1px solid var(--ag-question-border);
   border-bottom: 0;
   border-radius: 12px 12px 0 0;
   background: var(--ag-question-surface);
   color: var(--ag-question-text);
-  box-shadow: 0 -10px 24px rgb(0 0 0 / 14%);
+  box-shadow: 0 -8px 20px rgb(0 0 0 / 12%);
   overflow: hidden;
 }
 
@@ -7524,57 +7827,58 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   overflow: visible;
 }
 
+/* 질문은 한눈에 훑는 목록이다. 선택지는 한 줄짜리 행으로 두고, 설명은 같은
+   줄에서 말줄임한다. 고른 행만 설명 전체를 펼친다. */
 .ag-question-body {
   display: grid;
   flex: 1 1 auto;
-  gap: 12px;
-  max-height: min(52dvh, 520px);
+  gap: 6px;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 20px 14px 16px;
-  scrollbar-gutter: stable;
+  padding: 10px 8px 6px;
   background: var(--ag-question-body);
 }
 
 .ag-question-prompt {
   margin: 0;
-  font-size: 14px;
+  padding: 0 4px;
+  font-size: 13px;
   font-weight: 650;
-  line-height: 1.5;
+  line-height: 1.4;
   overflow-wrap: anywhere;
 }
 
 .ag-question-options {
   display: grid;
-  gap: 7px;
+  gap: 1px;
 }
 
 .ag-question-option {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
+  grid-template-columns: 18px minmax(0, 1fr);
   gap: 8px;
-  align-items: start;
+  align-items: center;
   width: 100%;
   min-width: 0;
-  padding: 9px;
-  border: 1px solid var(--ag-question-border-soft);
-  border-radius: 9px;
-  background: var(--ag-question-raised);
+  min-height: 30px;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
   color: inherit;
   text-align: left;
   cursor: pointer;
+  transition: background var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-question-option[data-selected='true'] {
-  border-color: color-mix(in srgb, var(--ag-accent) 64%, var(--ag-question-border));
   background: var(--ag-question-selected);
 }
 
 @media (hover: hover) {
-  .ag-question-option:hover:not(:disabled) {
-    border-color: color-mix(in srgb, var(--ag-accent) 42%, var(--ag-question-border));
-    background: color-mix(in srgb, var(--ag-accent) 5%, var(--ag-question-raised));
+  .ag-question-option:hover:not(:disabled):not([data-selected='true']) {
+    background: color-mix(in srgb, var(--ag-text) 5%, transparent);
   }
 }
 
@@ -7586,12 +7890,17 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-question-option-number {
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
-  border: 1px solid currentcolor;
-  border-radius: 6px;
+  width: 18px;
+  height: 18px;
+  border: 1px solid color-mix(in srgb, currentcolor 55%, transparent);
+  border-radius: 5px;
   color: var(--ag-question-muted);
   font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  transition:
+    background var(--ag-dur-fast) var(--ag-ease-out),
+    border-color var(--ag-dur-fast) var(--ag-ease-out),
+    color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-question-option[data-selected='true'] .ag-question-option-number {
@@ -7601,25 +7910,46 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-question-option-copy {
-  display: grid;
+  display: flex;
+  align-items: baseline;
   min-width: 0;
-  gap: 2px;
+  gap: 7px;
 }
 
 .ag-question-option-label {
+  flex: 0 0 auto;
+  max-width: 100%;
   font-size: 12px;
-  line-height: 1.3;
+  font-weight: 600;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
 
 .ag-question-option-description {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: var(--ag-question-muted);
   font-size: 11px;
-  line-height: 1.4;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-question-option[data-selected='true'] .ag-question-option-copy {
+  flex-wrap: wrap;
+  row-gap: 1px;
+}
+
+.ag-question-option[data-selected='true'] .ag-question-option-description {
+  flex-basis: 100%;
+  overflow: visible;
   overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .ag-question-error {
+  padding: 0 4px;
   color: var(--ag-err);
   font-size: 11px;
   line-height: 1.4;
@@ -7629,47 +7959,77 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-question-navigation {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 10px;
 }
 
 .ag-question-actions {
   flex: 0 0 auto;
   justify-content: space-between;
-  padding: 8px 12px 10px;
-  border-top: 1px solid var(--ag-question-border-soft);
+  padding: 2px 8px 5px;
   background: var(--ag-question-body);
 }
 
+/* 하단 동작은 채움 없는 글자 버튼이다. 색과 굵기만으로 역할을 나눈다. */
 .ag-question-actions button {
-  min-height: 30px;
-  padding: 6px 10px;
-  border: 1px solid var(--ag-question-border-soft);
-  border-radius: 7px;
-  background: var(--ag-question-raised);
-  color: inherit;
+  min-height: 20px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ag-question-muted);
   font-size: 11px;
+  line-height: 1.3;
   cursor: pointer;
+  transition: color var(--ag-dur-fast) var(--ag-ease-out), opacity var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+@media (hover: hover) {
+  .ag-question-actions button:hover:not(:disabled) {
+    color: var(--ag-question-text);
+  }
+}
+
+.ag-question-step {
+  padding: 0 2px;
+  color: var(--ag-question-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .ag-question-actions .ag-question-next {
-  border-color: var(--accent-primary);
-  background: var(--accent-primary);
-  color: var(--n-on-accent);
+  color: var(--accent-primary);
+  font-weight: 650;
+}
+
+@media (hover: hover) {
+  .ag-question-actions .ag-question-next:hover:not(:disabled) {
+    color: var(--accent-strong);
+  }
 }
 
 .ag-question-actions .ag-question-stop {
   color: var(--ag-err);
 }
 
-.ag-question-actions button:disabled {
-  cursor: default;
-  opacity: .5;
+@media (hover: hover) {
+  .ag-question-actions .ag-question-stop:hover:not(:disabled) {
+    color: color-mix(in srgb, var(--ag-err) 80%, var(--ag-question-text));
+  }
 }
 
-.ag-user-question button:focus-visible,
-.ag-user-question h3:focus-visible {
+.ag-question-actions button:disabled {
+  cursor: default;
+  opacity: .45;
+}
+
+.ag-user-question button:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
+}
+
+/* 제목은 스크린 리더 위치를 옮기려고 코드로만 초점을 받는다. */
+.ag-question-prompt:focus {
+  outline: none;
 }
 
 .ag-sr-only {

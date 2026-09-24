@@ -1,3 +1,4 @@
+import { checkPiModels } from './pi-models.check.mjs';
 import { checkCloudMergeRecovery } from './cloud-merge-recovery.check.mjs';
 import { checkCloudSetup } from './cloud-setup.check.mjs';
 import { checkCliTerminalDefaults } from './cli-terminal-defaults.check.mjs';
@@ -13,6 +14,7 @@ import { checkFleetPreview } from './fleet.check.mjs';
 import { checkCloudRecovery } from './cloud-recovery.check.mjs';
 import { checkCloudStream } from './cloud-stream.check.mjs';
 import { checkChangesPreview } from './changes.check.mjs';
+import { checkPlanPreview } from './plan.check.mjs';
 import { browserLaunchArgs } from '../tests/browser-support.ts';
 
 const studio = resolve(import.meta.dirname, '..');
@@ -398,6 +400,7 @@ try {
     await page.mouse.wheel({ deltaY: -350 });
     await page.waitForFunction((top) => document.querySelector('.ag-messages').scrollTop < top - 80, {}, followedTop);
     const pausedTop = await messages.evaluate((node) => node.scrollTop);
+    await page.waitForSelector('.ag-composer.ag-resting');
     await page.waitForFunction(() => document.querySelector('.ag-messages').textContent.includes('필요한 부분을 선택'));
     assert(Math.abs((await messages.evaluate((node) => node.scrollTop)) - pausedTop) < 4);
     await page.mouse.wheel({ deltaY: 1800 });
@@ -405,6 +408,7 @@ try {
       const node = document.querySelector('.ag-messages');
       return node.scrollHeight - node.scrollTop - node.clientHeight < 4;
     });
+    await page.waitForSelector('.ag-composer:not(.ag-resting)');
     const resumedTop = await messages.evaluate((node) => node.scrollTop);
     await page.evaluate(() => {
       const messages = document.querySelector('.ag-messages');
@@ -413,6 +417,11 @@ try {
       messages.insertBefore(more, messages.querySelector('.ag-messages-end'));
     });
     await page.waitForFunction((top) => document.querySelector('.ag-messages').scrollTop > top + 100, {}, resumedTop);
+    // 접힌 입력기는 누르는 순간 설정 줄과 함께 다시 펼쳐진다.
+    await page.mouse.wheel({ deltaY: -120 });
+    await page.waitForSelector('.ag-composer.ag-resting');
+    await page.click('.ag-input');
+    await page.waitForSelector('.ag-composer:not(.ag-resting) .ag-composer-meta', { visible: true });
     await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
   });
   await step('Provider, model and effort changes after the first reply', async () => {
@@ -421,8 +430,8 @@ try {
     await page.click('[aria-label="프로바이더 선택"]');
     await page.waitForSelector('.ag-config-panel.ag-open');
     await page.click('.ag-provider-item[data-agent="codex"]');
-    await page.click('.ag-llm-item[data-model="gpt-5.6-luna"]');
-    await page.click('.ag-llm-item[data-model="gpt-6-astra"]');
+    await page.click('.ag-llm-item[data-model="luna"]');
+    await page.click('.ag-llm-item[data-model="astra"]');
     await page.focus('.ag-eslider');
     await page.keyboard.press('End');
     await page.waitForFunction(() => document.querySelector('.ag-effort-name').textContent === 'Max');
@@ -467,6 +476,8 @@ try {
       );
     },
   );
+  await step('Plan research, revision, execution progress, and review',
+    () => checkPlanPreview(page, origin, artifacts));
   await step('Question submission and resolution', async () => {
     await play('question');
     await screenshot('question');
@@ -480,6 +491,7 @@ try {
     );
   });
   await step('New CLI installs default to terminal login', () => checkCliTerminalDefaults(page, origin));
+  await step('Shared Pi model selection', () => checkPiModels(page, origin));
   await step('Embedded CLI login terminal', () => checkSetupTerminal(page, origin));
   await step('Provider picker only lists connected providers', async () => {
     await open();
@@ -870,6 +882,23 @@ try {
     await screenshot('versions-light-narrow');
     assert(await page.$eval('.ag-versions-page', (el) => el.scrollWidth <= el.clientWidth), 'Narrow panel overflows');
     await open('width=480');
+  });
+  await step('AI model choices stage, cancel, save, and filter the composer', async () => {
+    await open('page=settings&destination=ai&reset=1&width=360');
+    await page.waitForSelector('.ag-settings-model-row[data-model-id="claude-haiku-4-5"]');
+    await page.type('.ag-settings-model-search-input', 'haiku');
+    assert.equal(await page.$$eval('.ag-settings-model-row', (rows) => rows.length), 1);
+    await page.click('.ag-settings-model-row');
+    assert.equal(await page.$eval('.ag-settings-ai-footer .ag-settings-primary', (button) => button.disabled), false);
+    await clickText('.ag-settings-ai-footer button', '취소');
+    assert.equal(await page.$eval('.ag-settings-model-row', (row) => row.getAttribute('aria-pressed')), 'true');
+    await page.click('.ag-settings-model-row');
+    await clickText('.ag-settings-ai-footer button', '적용');
+    assert.equal(await page.$eval('.ag-settings-ai-footer .ag-settings-primary', (button) => button.disabled), true);
+    await page.click('.ag-settings-close');
+    await page.click('.ag-llm-trigger');
+    assert.deepEqual(await page.$$eval('.ag-llm-item', (rows) => rows.map((row) => row.dataset.model)),
+      ['claude-opus-4-6', 'claude-sonnet-4-6']);
   });
   await step(
     'Document context, reset, clean canvas, and backend isolation',

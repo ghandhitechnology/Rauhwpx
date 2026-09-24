@@ -1189,13 +1189,10 @@ fn write_para_pr<W: Write>(
 /// paraPr 의 margin + lineSpacing 을 한컴 원본과 동일하게 `<hp:switch>` 구조로 쓴다.
 ///
 /// `parse_para_shape_switch` 의 정확한 역. 파서는 HwpUnitChar `case` 값을 ×2 하여
-/// IR 에 적재하므로(`stored = case × 2`), 역으로:
+/// IR 에 적재하므로(`stored = case × 2`, `unit="CHAR"` 이면 +1), 역으로:
 ///   - `default` 값 = IR 저장값 (`ps.indent` 등)
-///   - `case`(HwpUnitChar) 값 = 저장값 / 2 (margin), lineSpacing 은 PERCENT=저장값,
-///     그 외(Fixed/SpaceOnly/Minimum)=저장값/2
-///
-/// 파서는 `case` 를 우선 읽으므로 라운드트립 시 `case × 2 = 저장값` 으로 IR 이
-/// 정확히 복원된다(한컴 원본의 저장값은 항상 짝수).
+///   - `case`(HwpUnitChar) 값 = 저장값 / 2 (margin), 홀수면 `unit="CHAR"`
+///     lineSpacing 은 PERCENT=저장값, 그 외(Fixed/SpaceOnly/Minimum)=저장값/2
 fn write_para_margin_switch<W: Write>(
     w: &mut Writer<W>,
     ps: &ParaShape,
@@ -1230,13 +1227,12 @@ fn write_para_margin<W: Write>(
     ps: &ParaShape,
     half: bool,
 ) -> Result<(), SerializeError> {
-    let v = |x: i32| if half { x / 2 } else { x };
     super::utils::start_tag(w, "hh:margin")?;
-    write_margin_child(w, "hc:intent", v(ps.indent))?;
-    write_margin_child(w, "hc:left", v(ps.margin_left))?;
-    write_margin_child(w, "hc:right", v(ps.margin_right))?;
-    write_margin_child(w, "hc:prev", v(ps.spacing_before))?;
-    write_margin_child(w, "hc:next", v(ps.spacing_after))?;
+    write_margin_child(w, "hc:intent", ps.indent, half)?;
+    write_margin_child(w, "hc:left", ps.margin_left, half)?;
+    write_margin_child(w, "hc:right", ps.margin_right, half)?;
+    write_margin_child(w, "hc:prev", ps.spacing_before, half)?;
+    write_margin_child(w, "hc:next", ps.spacing_after, half)?;
     end_tag(w, "hh:margin")?;
     Ok(())
 }
@@ -1266,16 +1262,32 @@ fn write_para_line_spacing<W: Write>(
 
 /// margin 자식(`<hc:intent value="…" unit="HWPUNIT"/>`). 한컴 원본 속성 순서는
 /// value, unit 이며 네임스페이스는 `hc:` 다.
+///
+/// 한컴은 홀수 저장값의 case 절반을 `unit="CHAR"` 로 표시한다. [#6875]
 fn write_margin_child<W: Write>(
     w: &mut Writer<W>,
     name: &str,
-    value: i32,
+    stored: i32,
+    half: bool,
 ) -> Result<(), SerializeError> {
-    empty_tag(
-        w,
-        name,
-        &[("value", &value.to_string()), ("unit", "HWPUNIT")],
-    )
+    if !half {
+        return empty_tag(
+            w,
+            name,
+            &[("value", &stored.to_string()), ("unit", "HWPUNIT")],
+        );
+    }
+    let (value, unit) = hwpunitchar_case_margin(stored);
+    empty_tag(w, name, &[("value", &value.to_string()), ("unit", unit)])
+}
+
+/// HwpUnitChar case 여백. 홀수 저장값은 `unit="CHAR"` 로 최하위 비트를 남긴다.
+fn hwpunitchar_case_margin(stored: i32) -> (i32, &'static str) {
+    if stored % 2 != 0 {
+        ((stored - 1) / 2, "CHAR")
+    } else {
+        (stored / 2, "HWPUNIT")
+    }
 }
 
 fn alignment_str(a: Alignment) -> &'static str {

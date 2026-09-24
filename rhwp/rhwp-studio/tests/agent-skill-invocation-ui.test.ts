@@ -21,7 +21,8 @@ test('a skill token keeps empty history text while sending a valid wire request'
   assert.match(sidebar, /!text && !activeComposerSkill && !referenceLibrary\.hasDrafts\(\)/);
   assert.match(sidebar, /text = invocation\[2\]\?\.trim\(\) \?\? ''/);
   assert.doesNotMatch(sidebar, /이 스킬을 현재 문서에 적용해 주세요/);
-  assert.match(sidebar, /const requestText = requestTextForSkillInvocation\(text, skillNameForMessage\)/);
+  assert.match(sidebar, /const skillRequestText = requestTextForSkillInvocation\(text, skillNameForMessage\)/);
+  assert.match(sidebar, /const requestText = revisionPlanId && referenceLibrary\.hasDrafts\(\) && !skillNameForMessage[\s\S]*: skillRequestText;/);
   assert.match(sidebar, /recordUserMessage\(messageText,[\s\S]*skillNameForMessage,[\s\S]*skillIconForMessage/);
   assert.match(sidebar, /bridge\.sendUserMessage\(requestText, skillNameForMessage/);
 

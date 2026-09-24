@@ -100,8 +100,8 @@ import {
 
 const { autoUpdater } = electronUpdater;
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
-const RELEASES_URL = 'https://github.com/ghandhitechnology/Rauhwpx/releases/latest';
-const RELEASES_API_URL = 'https://api.github.com/repos/ghandhitechnology/Rauhwpx/releases/latest';
+const RELEASES_URL = 'https://github.com/heemangstudio/Rauhwpx/releases/latest';
+const RELEASES_API_URL = 'https://api.github.com/repos/heemangstudio/Rauhwpx/releases/latest';
 const PRELOAD_PATH = join(__dirname, 'preload.cjs');
 const devUrl = resolveDevelopmentUrl({
   packaged: app.isPackaged,

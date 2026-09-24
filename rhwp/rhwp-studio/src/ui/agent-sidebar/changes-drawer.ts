@@ -1,6 +1,7 @@
 import './changes-drawer.css';
 
 import { createIcon } from './icons.ts';
+import { appendSvgMarkup } from '../dom-utils.ts';
 import type { PendingOp } from '../../agent/types.ts';
 import type { DiffItem } from '../../compare/types.ts';
 import type { VersionCommitView, VersionManagerController, VersionManagerState } from './version-manager.ts';
@@ -228,7 +229,7 @@ function pendingObjectDetail(op: PendingOp): string {
 }
 
 /** Full pending operation diff shared by the latest-turn review and drawer. */
-export function renderPendingOpDiff(op: PendingOp): HTMLElement {
+export function renderPendingOpDiff(op: PendingOp, imageUrls?: Map<string, string>): HTMLElement {
   const item = el('article', 'ag-changes-item ag-changes-pending-item');
   // The address is not shown. It labels the jump button instead.
   item.dataset.location = pendingAddress(op);
@@ -242,7 +243,31 @@ export function renderPendingOpDiff(op: PendingOp): HTMLElement {
   } else if (op.kind === 'field') {
     const parts = inlineParts(op.oldValue, op.newValue);
     lines.append(diffLine('−', parts.before, `${op.id}:del`), diffLine('+', parts.after, `${op.id}:add`));
-  } else lines.append(diffLine('·', [{ text: pendingObjectDetail(op), changed: false }], `${op.id}:ctx`));
+  } else {
+    lines.append(diffLine('·', [{ text: pendingObjectDetail(op), changed: false }], `${op.id}:ctx`));
+    if (op.kind === 'object' && op.obj.type === 'insertImage' && imageUrls) {
+      const preview = el('div', 'ag-object-preview ag-image-preview');
+      const image = el('img', '');
+      let url = imageUrls.get(op.id);
+      if (!url) {
+        const extension = op.obj.extension.toLowerCase().replace(/^\./, '');
+        const mime = extension === 'jpg' ? 'image/jpeg'
+          : extension === 'svg' ? 'image/svg+xml' : `image/${extension}`;
+        url = URL.createObjectURL(new Blob([new Uint8Array(op.obj.bytes)], { type: mime }));
+        imageUrls.set(op.id, url);
+      }
+      image.src = url;
+      image.alt = op.obj.description || '삽입할 그림';
+      preview.appendChild(image);
+      lines.appendChild(preview);
+    } else if (op.kind === 'object' && op.obj.type === 'insertEquation' && op.obj.previewSvg) {
+      const preview = el('div', 'ag-object-preview ag-equation-preview');
+      preview.setAttribute('role', 'img');
+      preview.setAttribute('aria-label', op.obj.script);
+      appendSvgMarkup(preview, op.obj.previewSvg);
+      lines.appendChild(preview);
+    }
+  }
   item.append(lines);
   return item;
 }

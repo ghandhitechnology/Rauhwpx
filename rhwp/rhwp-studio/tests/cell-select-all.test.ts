@@ -43,8 +43,8 @@ function pathWasm(count, lastLength) {
       calls.push(['countByPath', sec, ppi, JSON.parse(json)]);
       return count;
     },
-    getCellParagraphLengthByPath(sec, ppi, json) {
-      calls.push(['lengthByPath', sec, ppi, JSON.parse(json)]);
+    getCellLogicalLengthByPath(sec, ppi, json) {
+      calls.push(['logicalByPath', sec, ppi, JSON.parse(json)]);
       return lastLength;
     },
     getCursorRectByPath() { return rect; },
@@ -56,7 +56,10 @@ function flatWasm(count, lastLength) {
   return {
     calls,
     getCellParagraphCount(...args) { calls.push(['count', ...args]); return count; },
-    getCellParagraphLength(...args) { calls.push(['length', ...args]); return lastLength; },
+    getCellLogicalLengthByPath(sec, ppi, json) {
+      calls.push(['logicalByPath', sec, ppi, JSON.parse(json)]);
+      return lastLength;
+    },
     getCursorRectInCell() { return rect; },
   };
 }
@@ -122,14 +125,15 @@ test('depth-one path and flat cell select-all use the matching paragraph APIs', 
     [observed.depthOne.selection.anchor.cellParaIndex, observed.depthOne.selection.focus.cellParaIndex],
     [0, 1],
   );
-  assert.deepEqual(observed.depthOne.calls.map((call) => call[0]), ['countByPath', 'lengthByPath']);
+  assert.deepEqual(observed.depthOne.calls.map((call) => call[0]), ['countByPath', 'logicalByPath']);
 
   assert.equal(observed.flat.selected, true);
   assert.deepEqual(
     [observed.flat.selection.anchor.cellParaIndex, observed.flat.selection.focus.cellParaIndex],
     [0, 1],
   );
-  assert.deepEqual(observed.flat.calls.map((call) => call[0]), ['count', 'length']);
+  assert.deepEqual(observed.flat.calls.map((call) => call[0]), ['count', 'logicalByPath']);
+  assert.deepEqual(observed.flat.calls[1][3], [{ controlIndex: 6, cellIndex: 2, cellParaIndex: 1 }]);
 });
 
 test('select-all leaves the document-wide path untouched outside cells', () => {
