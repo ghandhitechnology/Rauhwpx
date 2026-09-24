@@ -2372,7 +2372,22 @@ impl DocumentCore {
         self.dirty_sections.resize(section_count, true);
         self.mark_all_sections_dirty();
         self.measured_tables.clear();
-        self.measured_sections.clear();
+        // Recompute every measurement, while retaining each table's loaded row
+        // allocation as the reference for edit growth. Dropping that reference
+        // makes a refresh reinterpret saved font/object metric differences as
+        // new content and resize untouched rows.
+        if self.measured_sections.len() != section_count {
+            self.measured_sections.clear();
+        }
+        for section in &mut self.document.sections {
+            for paragraph in &mut section.paragraphs {
+                for control in &mut paragraph.controls {
+                    if let Control::Table(table) = control {
+                        table.dirty = true;
+                    }
+                }
+            }
+        }
         self.dirty_paragraphs.clear();
         self.para_column_map.clear();
         self.para_offset = vec![0; section_count];

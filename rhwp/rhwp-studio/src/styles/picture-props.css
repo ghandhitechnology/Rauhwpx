@@ -326,3 +326,24 @@
   width: 160px;
   margin: 0 8px;
 }
+
+.modal-overlay .dialog-wrap.pp-dialog { width: min(760px, calc(100vw - 24px)); height: min(720px, calc(100dvh - 24px)); max-height: calc(100dvh - 24px); overflow: hidden; }
+.pp-dialog .cs-main-row { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.pp-dialog .cs-left-col { min-height: 0; flex: 1 1 auto; overflow: hidden; }
+.pp-dialog .dialog-tabs { flex: 0 0 auto; }
+.pp-dialog .dialog-body { overflow-y: auto; padding: 12px 18px; }
+.pp-dialog .dialog-tab-panel { height: auto; overflow: visible; }
+.pp-dialog .cs-right-col { flex: 0 0 auto; flex-direction: row-reverse; justify-content: flex-start; gap: 8px; padding: 12px 18px; border-left: 0; border-top: 1px solid var(--ui-border); background: var(--ui-surface); }
+.pp-dialog .cs-right-col .dialog-btn { width: auto; min-width: 76px; height: 34px; }
+.pp-dialog .cs-fieldset { border-color: var(--ui-border); border-radius: 8px; padding: 10px 12px; }
+.pp-wrap-btn, .pp-preset-btn, .pp-sync-arrow-btn, .pp-rot-preview, .pp-desc-textarea { border-color: var(--ui-border); background: var(--ui-surface-raised); color: var(--ui-text); }
+.pp-wrap-btn:hover:not(:disabled), .pp-sync-arrow-btn:hover { border-color: var(--ui-border-strong); background: var(--ui-hover); }
+.pp-wrap-btn.active, .pp-preset-btn.active { border-color: var(--ui-text); background: var(--ui-selected); box-shadow: inset 0 0 0 1px var(--ui-text); }
+.pp-preset-grid { width: 100%; max-width: 400px; border-color: var(--ui-border); background: var(--ui-surface-muted); }
+.pp-dialog :is(button, input, select, textarea):focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+@media (max-width: 560px) {
+  .pp-caption-layout { flex-direction: column; }
+  .pp-dialog .dialog-body { padding: 12px; }
+  .pp-dialog .cs-right-col { padding: 10px 12px; }
+  .pp-desc-dialog { width: min(420px, calc(100vw - 24px)); }
+}

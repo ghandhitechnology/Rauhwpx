@@ -24,7 +24,9 @@ use super::render_tree::{
     REAL_PICTURE_WATERMARK_PAGE_OPACITY, REAL_PICTURE_WATERMARK_SATURATION,
 };
 use super::text_replay_policy::{
-    canvas_uses_native_run_shaping, web_canvas_supports_positioned_glyph_replay,
+    canvas_cluster_fit_scale, canvas_symbol_fit_transform, canvas_uses_native_run_shaping,
+    preserves_symbol_ink_shape, web_canvas_supports_positioned_glyph_replay,
+    CanvasClusterTransform,
 };
 use super::{
     clamp_tab_leader_end_x, GradientFillInfo, LineStyle, PathCommand, PatternFillInfo, Renderer,
@@ -43,26 +45,83 @@ const WEB_IMAGE_CACHE_MAX_ENTRIES: usize = 200;
 const DECODED_CANVAS_CACHE_MAX_PIXELS: usize = 16_777_216;
 const HTML_IMAGE_CACHE_MAX_SOURCE_BYTES: usize = 33_554_432;
 
-/// Canvas 폰트의 실측 폭을 레이아웃 advance에 맞출 때 적용할 배율을 계산한다.
-///
-/// 음수 자간은 다음 글자의 시작 위치만 당기는 속성이다. 이를 글자 자체의 폭 제한으로
-/// 사용하면 한글 glyph가 가로로 눌리므로, 음수 자간에서는 폭 맞춤을 적용하지 않는다.
-fn canvas_cluster_fit_scale(
-    cluster_advance: f64,
-    visual_width: f64,
-    letter_spacing: f64,
-    pin_ascii_advance: bool,
-) -> Option<f64> {
-    if cluster_advance <= 0.0 || visual_width <= 0.0 || letter_spacing < 0.0 {
+/// Native Hangul paints a thin horizontal/vertical rule as one opaque device pixel.
+/// Keep the document coordinates and widths for layout; align only screen paint.
+fn pixel_aligned_hairline(position: f64, width: f64, scale: f64) -> Option<(f64, f64)> {
+    if !position.is_finite()
+        || !width.is_finite()
+        || !scale.is_finite()
+        || width <= 0.0
+        || scale <= 0.0
+        || width * scale > 1.0 + 1e-9
+    {
         return None;
     }
-    if pin_ascii_advance {
-        return Some((cluster_advance / visual_width).clamp(0.1, 2.0));
+    Some((((position * scale).round() + 0.5) / scale, 1.0 / scale))
+}
+
+fn pixel_aligned_hairline_rect(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    stroke_width: f64,
+    scale: f64,
+) -> Option<(f64, f64, f64, f64, f64)> {
+    if width * scale < 2.0 || height * scale < 2.0 {
+        return None;
     }
-    if visual_width > cluster_advance + 0.25 {
-        return Some((cluster_advance / visual_width).clamp(0.1, 1.0));
+    let (left, device_width) = pixel_aligned_hairline(x, stroke_width, scale)?;
+    let (top, _) = pixel_aligned_hairline(y, stroke_width, scale)?;
+    let (right, _) = pixel_aligned_hairline(x + width, stroke_width, scale)?;
+    let (bottom, _) = pixel_aligned_hairline(y + height, stroke_width, scale)?;
+    Some((left, top, right - left, bottom - top, device_width))
+}
+
+/// 일반 글자와 효과 글자가 동일한 폰트 측정/변환 규칙을 사용한다.
+#[cfg(target_arch = "wasm32")]
+fn canvas_cluster_transform(
+    ctx: &CanvasRenderingContext2d,
+    cluster: &str,
+    advance: f64,
+    ratio: f64,
+    letter_spacing: f64,
+) -> CanvasClusterTransform {
+    let authored = CanvasClusterTransform {
+        scale_x: ratio,
+        scale_y: 1.0,
+        offset_x: 0.0,
+        offset_y: 0.0,
+    };
+    let Ok(metrics) = ctx.measure_text(cluster) else {
+        return authored;
+    };
+    if preserves_symbol_ink_shape(cluster) {
+        return canvas_symbol_fit_transform(
+            advance,
+            metrics.width(),
+            (
+                metrics.actual_bounding_box_left(),
+                metrics.actual_bounding_box_right(),
+                metrics.actual_bounding_box_ascent(),
+                metrics.actual_bounding_box_descent(),
+            ),
+            ratio,
+            letter_spacing,
+        )
+        .unwrap_or(authored);
     }
-    None
+    let fit = canvas_cluster_fit_scale(
+        advance,
+        metrics.width() * ratio,
+        letter_spacing,
+        cluster.chars().any(|ch| ch.is_ascii_alphanumeric()),
+    )
+    .unwrap_or(1.0);
+    CanvasClusterTransform {
+        scale_x: ratio * fit,
+        ..authored
+    }
 }
 
 /// Hanyang-PUA 옛한글 코드포인트를 KS X 1026-1:2007 자모 시퀀스로 확장 (Task #528).
@@ -466,6 +525,8 @@ pub struct WebCanvasRenderer {
     /// The current TextRun has a shaped glyph sidecar. Canvas cannot address
     /// its glyph ids, so replay the Unicode fallback as one browser-shaped run.
     native_run_shaping: bool,
+    /// Legacy 자식 노드는 상위 도형의 변환을 상속하므로 전체 깊이를 추적한다.
+    active_shape_transform_depth: usize,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -476,6 +537,14 @@ impl WebCanvasRenderer {
             .get_context("2d")?
             .ok_or_else(|| JsValue::from_str("Failed to get 2d context"))?
             .dyn_into::<CanvasRenderingContext2d>()?;
+        // macOS 기본 font smoothing은 원본 outline보다 획을 두껍게 만든다.
+        // CanvasKit과 같은 outline 기준으로 그리고 저장된 advance는 유지한다.
+        // 이 속성이 없는 브라우저에서는 기존 렌더링으로 동작한다.
+        let _ = js_sys::Reflect::set(
+            ctx.as_ref(),
+            &JsValue::from_str("textRendering"),
+            &JsValue::from_str("geometricPrecision"),
+        );
 
         Ok(Self {
             ctx,
@@ -489,6 +558,7 @@ impl WebCanvasRenderer {
             active_replay_plane: None,
             render_profile: RenderProfile::Screen,
             native_run_shaping: false,
+            active_shape_transform_depth: 0,
         })
     }
 
@@ -840,12 +910,17 @@ impl WebCanvasRenderer {
         } else if run.rotation != 0.0 {
             let cx = bbox.x + bbox.width / 2.0;
             let cy = bbox.y + bbox.height / 2.0;
-            let font_weight = if run.style.bold { "bold " } else { "" };
             let font_style_str = if run.style.italic { "italic " } else { "" };
             let font_size = if run.style.font_size > 0.0 {
                 run.style.font_size
             } else {
                 12.0
+            };
+            let faux_bold_width = super::faux_bold_stroke_width(&run.style, font_size);
+            let font_weight = if run.style.bold && faux_bold_width.is_none() {
+                "bold "
+            } else {
+                ""
             };
             let font_family = super::canvas_font_family_chain(&run.style.font_family);
             let font = format!(
@@ -860,11 +935,10 @@ impl WebCanvasRenderer {
             self.ctx.set_text_align("center");
             self.ctx.set_text_baseline("middle");
             let _ = self.ctx.fill_text(run.display_or_text(), 0.0, 0.0);
-            if run.style.bold {
-                // 합성 굵기 (draw_text 의 synthetic_bold 와 동일 근거)
+            if let Some(stroke_width) = faux_bold_width {
                 self.ctx
                     .set_stroke_style_str(&color_to_css(run.style.color));
-                self.ctx.set_line_width((font_size * 0.04).clamp(0.25, 1.4));
+                self.ctx.set_line_width(stroke_width);
                 self.ctx.set_line_join("round");
                 let _ = self.ctx.stroke_text(run.display_or_text(), 0.0, 0.0);
             }
@@ -1194,16 +1268,10 @@ impl WebCanvasRenderer {
     }
 
     fn render_equation(&mut self, bbox: &BoundingBox, eq: &EquationNode) {
-        let scale_x = if eq.layout_box.width > 0.0 && bbox.width > 0.0 {
-            bbox.width / eq.layout_box.width
-        } else {
-            1.0
-        };
+        // 저장 control 폭은 문단 advance다. 추정 수식 폭에 맞춰 글립을 늘리면
+        // 원본 서체의 숫자/변수 획과 비례가 달라지므로 font_size를 유지한다.
         self.ctx.save();
         let _ = self.ctx.translate(bbox.x, bbox.y);
-        if (scale_x - 1.0).abs() > 0.01 {
-            let _ = self.ctx.scale(scale_x, 1.0);
-        }
         super::equation::canvas_render::render_equation_canvas(
             &self.ctx,
             &eq.layout_box,
@@ -1212,6 +1280,7 @@ impl WebCanvasRenderer {
             &eq.color_str,
             eq.font_size,
             &eq.font_name,
+            &eq.version_info,
         );
         self.ctx.restore();
     }
@@ -1479,13 +1548,14 @@ impl WebCanvasRenderer {
     }
 
     /// 도형 변환(회전/대칭)이 있으면 ctx.save() + translate/rotate/scale을 적용한다.
-    fn open_shape_transform(&self, transform: &ShapeTransform, bbox: &BoundingBox) {
+    fn open_shape_transform(&mut self, transform: &ShapeTransform, bbox: &BoundingBox) {
         if !transform.has_transform() {
             return;
         }
         let cx = bbox.x + bbox.width / 2.0;
         let cy = bbox.y + bbox.height / 2.0;
         self.ctx.save();
+        self.active_shape_transform_depth += 1;
         // [Task #1067] 한컴 정답지 시각 표준 정합 — flip 와 회전 동시 적용 시 회전 부호 반전.
         // svg.rs::open_shape_transform 와 동일 패턴.
         let flip_negate_rotation = transform.horz_flip ^ transform.vert_flip;
@@ -1507,7 +1577,7 @@ impl WebCanvasRenderer {
     }
 
     /// RenderNode 경로에서는 기존처럼 자식 렌더 뒤 transform 을 복원한다.
-    fn close_shape_transform_for_node(&self, node_type: &RenderNodeType) {
+    fn close_shape_transform_for_node(&mut self, node_type: &RenderNodeType) {
         let transform = match node_type {
             RenderNodeType::Rectangle(r) => &r.transform,
             RenderNodeType::Line(l) => &l.transform,
@@ -1520,9 +1590,10 @@ impl WebCanvasRenderer {
     }
 
     /// PaintOp 직접 replay 경로에서는 leaf payload 렌더 직후 transform 을 복원한다.
-    fn close_shape_transform_if_needed(&self, transform: &ShapeTransform) {
+    fn close_shape_transform_if_needed(&mut self, transform: &ShapeTransform) {
         if transform.has_transform() {
             self.ctx.restore();
+            self.active_shape_transform_depth -= 1;
         }
     }
 
@@ -1898,9 +1969,22 @@ impl WebCanvasRenderer {
             self.clear_shadow(style); // stroke 전에 그림자 해제
             if let Some(stroke) = style.stroke_color {
                 self.ctx.set_stroke_style_str(&color_to_css(stroke));
-                self.ctx.set_line_width(style.stroke_width.max(0.5));
+                let stroke_width = style.stroke_width.max(0.5);
+                let aligned = if self.active_shape_transform_depth == 0
+                    && self.render_profile.shows_editor_visuals()
+                {
+                    pixel_aligned_hairline_rect(x, y, w, h, stroke_width, self.scale)
+                } else {
+                    None
+                };
+                self.ctx
+                    .set_line_width(aligned.map_or(stroke_width, |(_, _, _, _, width)| width));
                 self.set_line_dash(&style.stroke_dash);
-                self.ctx.stroke_rect(x, y, w, h);
+                if let Some((left, top, width, height, _)) = aligned {
+                    self.ctx.stroke_rect(left, top, width, height);
+                } else {
+                    self.ctx.stroke_rect(x, y, w, h);
+                }
                 let _ = self.ctx.set_line_dash(&js_sys::Array::new());
             }
         }
@@ -2309,7 +2393,6 @@ impl Renderer for WebCanvasRenderer {
         let text = &expand_pua_old_hangul_canvas(text);
 
         // 글꼴 설정
-        let font_weight = if style.bold { "bold " } else { "" };
         let font_style = if style.italic { "italic " } else { "" };
         let base_font_size = if style.font_size > 0.0 {
             style.font_size
@@ -2324,6 +2407,12 @@ impl Renderer for WebCanvasRenderer {
             (base_font_size * 0.7, y + base_font_size * 0.15)
         } else {
             (base_font_size, y)
+        };
+        let faux_bold_width = super::faux_bold_stroke_width(style, font_size);
+        let font_weight = if style.bold && faux_bold_width.is_none() {
+            "bold "
+        } else {
+            ""
         };
 
         let font_family = super::canvas_font_family_chain(&style.font_family);
@@ -2381,13 +2470,10 @@ impl Renderer for WebCanvasRenderer {
         } else {
             // 기본 렌더링 (효과 없음)
             self.ctx.set_fill_style_str(&color_to_css(style.color));
-            // 합성 굵기: 웹폰트는 regular 웨이트만 등록되고 Canvas2D 는 CSS 와 달리
-            // faux bold 를 합성하지 않으므로, ctx.font 의 "bold" 만으로는 굵게가
-            // 그려지지 않는다. 글리프 fill 위에 동일 색 얇은 stroke 를 덧그려 근사한다.
-            let synthetic_bold = style.bold;
-            if synthetic_bold {
+            let synthetic_bold = faux_bold_width.is_some();
+            if let Some(stroke_width) = faux_bold_width {
                 self.ctx.set_stroke_style_str(&color_to_css(style.color));
-                self.ctx.set_line_width((font_size * 0.04).clamp(0.25, 1.4));
+                self.ctx.set_line_width(stroke_width);
                 self.ctx.set_line_join("round");
             }
             if canvas_uses_native_run_shaping(self.native_run_shaping, text, style) {
@@ -2439,7 +2525,7 @@ impl Renderer for WebCanvasRenderer {
                         let fallback_font = format!(
                             "{}{}{:.3}px 'Malgun Gothic','맑은 고딕',sans-serif",
                             if style.italic { "italic " } else { "" },
-                            if style.bold { "bold " } else { "" },
+                            font_weight,
                             font_size
                         );
                         self.ctx.set_font(&fallback_font);
@@ -2476,29 +2562,19 @@ impl Renderer for WebCanvasRenderer {
                                 0.0
                             }
                         };
-                        let pin_ascii_advance =
-                            cluster_str.chars().any(|ch| ch.is_ascii_alphanumeric());
-                        let fit_scale = if glyph_advance > 0.0 {
-                            self.ctx
-                                .measure_text(cluster_str)
-                                .ok()
-                                .map(|metrics| metrics.width())
-                                .and_then(|actual_w| {
-                                    canvas_cluster_fit_scale(
-                                        glyph_advance,
-                                        actual_w * ratio,
-                                        style.letter_spacing,
-                                        pin_ascii_advance,
-                                    )
-                                })
-                        } else {
-                            None
-                        };
-
+                        let transform = canvas_cluster_transform(
+                            &self.ctx,
+                            cluster_str,
+                            glyph_advance,
+                            ratio,
+                            style.letter_spacing,
+                        );
                         self.ctx.save();
-                        self.ctx.translate(char_x, y).unwrap_or(());
                         self.ctx
-                            .scale(ratio * fit_scale.unwrap_or(1.0), 1.0)
+                            .translate(char_x + transform.offset_x, y + transform.offset_y)
+                            .unwrap_or(());
+                        self.ctx
+                            .scale(transform.scale_x, transform.scale_y)
                             .unwrap_or(());
                         let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
                         if synthetic_bold {
@@ -2670,7 +2746,7 @@ impl Renderer for WebCanvasRenderer {
 
     fn draw_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, style: &LineStyle) {
         let color = color_to_css(style.color);
-        let width = style.width.max(0.5);
+        let mut width = style.width.max(0.5);
         let dx = x2 - x1;
         let dy = y2 - y1;
         let line_len = (dx * dx + dy * dy).sqrt();
@@ -2679,6 +2755,27 @@ impl Renderer for WebCanvasRenderer {
         let mut ly1 = y1;
         let mut lx2 = x2;
         let mut ly2 = y2;
+
+        if self.active_shape_transform_depth == 0
+            && self.render_profile.shows_editor_visuals()
+            && style.line_type == super::LineRenderType::Single
+            && style.start_arrow == super::ArrowStyle::None
+            && style.end_arrow == super::ArrowStyle::None
+        {
+            if x1 == x2 {
+                if let Some((x, device_width)) = pixel_aligned_hairline(x1, width, self.scale) {
+                    lx1 = x;
+                    lx2 = x;
+                    width = device_width;
+                }
+            } else if y1 == y2 {
+                if let Some((y, device_width)) = pixel_aligned_hairline(y1, width, self.scale) {
+                    ly1 = y;
+                    ly2 = y;
+                    width = device_width;
+                }
+            }
+        }
 
         if line_len > 0.0 {
             let ux = dx / line_len;
@@ -2981,24 +3078,19 @@ impl WebCanvasRenderer {
                     .zip(glyph_positions.get(*char_idx))
                     .map(|(end, start)| end - start)
                     .unwrap_or(0.0);
-                let pin_ascii_advance = cs.chars().any(|ch| ch.is_ascii_alphanumeric());
-                let fit_scale = ctx
-                    .measure_text(cs)
-                    .ok()
-                    .and_then(|metrics| {
-                        canvas_cluster_fit_scale(
-                            glyph_advance,
-                            metrics.width() * ratio,
-                            style.letter_spacing,
-                            pin_ascii_advance,
-                        )
-                    })
-                    .unwrap_or(1.0);
-
-                if has_ratio || (fit_scale - 1.0).abs() > 0.001 {
+                let transform =
+                    canvas_cluster_transform(ctx, cs, glyph_advance, ratio, style.letter_spacing);
+                if has_ratio
+                    || (transform.scale_x / ratio - 1.0).abs() > 0.001
+                    || (transform.scale_y - 1.0).abs() > 0.001
+                    || transform.offset_x != 0.0
+                    || transform.offset_y != 0.0
+                {
                     ctx.save();
-                    ctx.translate(char_x, char_y).unwrap_or(());
-                    ctx.scale(ratio * fit_scale, 1.0).unwrap_or(());
+                    ctx.translate(char_x + transform.offset_x, char_y + transform.offset_y)
+                        .unwrap_or(());
+                    ctx.scale(transform.scale_x, transform.scale_y)
+                        .unwrap_or(());
                     let _ = ctx.fill_text(cs, 0.0, 0.0);
                     if stroke {
                         let _ = ctx.stroke_text(cs, 0.0, 0.0);
@@ -3013,10 +3105,10 @@ impl WebCanvasRenderer {
             }
         };
 
-        // 합성 굵기 (draw_text 의 synthetic_bold 와 동일 근거): 효과 pass 도
-        // fill 위에 동일 색 stroke 를 덧그려 굵게를 근사한다.
-        let bold_stroke = style.bold;
-        let bold_w = (font_size * 0.04).clamp(0.25, 1.4);
+        // 효과 글자도 일반 글자와 같은 Bold 서체 선택 규칙을 따른다.
+        let faux_bold_width = super::faux_bold_stroke_width(style, font_size);
+        let bold_stroke = faux_bold_width.is_some();
+        let bold_w = faux_bold_width.unwrap_or(0.0);
         if bold_stroke {
             self.ctx.set_line_join("round");
         }
@@ -3880,15 +3972,19 @@ mod tests {
     }
 
     #[test]
-    fn issue_2809_negative_letter_spacing_does_not_compress_glyph() {
-        assert_eq!(canvas_cluster_fit_scale(7.5, 15.0, -7.5, false), None);
-        assert_eq!(canvas_cluster_fit_scale(7.5, 15.0, -7.5, true), None);
-    }
-
-    #[test]
-    fn non_negative_letter_spacing_keeps_existing_font_fit_policy() {
-        assert_eq!(canvas_cluster_fit_scale(7.5, 15.0, 0.0, false), Some(0.5));
-        assert_eq!(canvas_cluster_fit_scale(7.5, 15.0, 0.0, true), Some(0.5));
-        assert_eq!(canvas_cluster_fit_scale(15.0, 14.9, 0.0, false), None);
+    fn thin_screen_strokes_cover_one_device_pixel_at_common_zooms() {
+        for scale in [1.0, 1.5, 2.0] {
+            let (center, width) = pixel_aligned_hairline(12.34, 0.5, scale).unwrap();
+            assert_eq!(width * scale, 1.0);
+            assert_eq!((center * scale).fract(), 0.5);
+        }
+        assert!(pixel_aligned_hairline(12.34, 1.0, 2.0).is_none());
+        let (x, y, w, h, sw) =
+            pixel_aligned_hairline_rect(5.24, 8.37, 17.73, 13.4, 0.5, 2.0).unwrap();
+        assert_eq!((x * 2.0).fract(), 0.5);
+        assert_eq(((x + w) * 2.0).fract(), 0.5);
+        assert_eq((y * 2.0).fract(), 0.5);
+        assert_eq(((y + h) * 2.0).fract(), 0.5);
+        assert_eq!(sw * 2.0, 1.0);
     }
 }

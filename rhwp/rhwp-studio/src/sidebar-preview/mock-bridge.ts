@@ -3,8 +3,10 @@ import type * as T from '../agent/types.ts';
 import { deriveAgentEditingLease } from '../agent/editing-lease.ts';
 import {
   defaultModelForAgent,
+  setModelCatalog,
   setPiModels,
 } from '../agent/models.ts';
+import type { CatalogAgent, ModelCatalogEntry } from '../agent/models.ts';
 import { loadAgentPrefs } from '../agent/agent-prefs.ts';
 import { createFixtures, samplePlan, timestamp, agents } from './fixtures.ts';
 import { requestLiveUsage, consumeLiveCodexReset } from './live-usage.ts';
@@ -12,6 +14,7 @@ import { createBrowserbaseFixture, type BrowserbaseFixtureState } from './fixtur
 
 export const scenarios = [
   'chat',
+  'tools',
   'rich',
   'plan',
   'question',
@@ -21,8 +24,23 @@ export const scenarios = [
 ] as const;
 export type Scenario = (typeof scenarios)[number];
 
+const sampleModelCatalogs: Record<CatalogAgent, ModelCatalogEntry[]> = {
+  claude: [
+    { id: 'claude-opus-4-6', label: 'Claude Opus 4.6', description: 'Complex reasoning and long-form work', supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', description: 'Balanced speed and depth', supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', description: 'Fast everyday assistance', supportedEfforts: ['low', 'medium', 'high'] },
+  ],
+  codex: [
+    { id: 'gpt-6-astra', label: 'GPT-6 Astra', description: 'Deep reasoning for demanding work', supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'gpt-6-sol', label: 'GPT-6 Sol', description: 'Coding and everyday work', supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'gpt-6-luna', label: 'GPT-6 Luna', description: 'Quick answers and simple tasks', supportedEfforts: ['low', 'medium', 'high', 'xhigh'] },
+    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', description: 'Balanced general reasoning', supportedEfforts: ['low', 'medium', 'high', 'xhigh'] },
+    { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', description: 'Coding model', supportedEfforts: ['low', 'medium', 'high', 'xhigh'] },
+  ],
+};
+
 /** Implements the actual UI contract: new bridge methods produce a type error here. */
-export function createMockBridge(report: (message: string) => void) {
+export function createMockBridge(report: (message: string) => void, onApproved?: () => void) {
   const data = createFixtures();
   const liveUsage = new URLSearchParams(location.search).get('usage') === 'live';
   if (liveUsage) {
@@ -66,6 +84,8 @@ export function createMockBridge(report: (message: string) => void) {
   let question: T.UserQuestionInteraction | null = null;
   let activeTemplate: T.DocumentTemplate | null = null;
   let changes: T.PendingChangeSet[] = [];
+  const changeEvents: T.PendingEditsChangeEvent['type'][] = [];
+  const fullReview = new URLSearchParams(location.search).get('review') === 'full';
   const references: T.ReferenceFile[] = [
     {
       id: 'reference-sample',
@@ -103,6 +123,12 @@ export function createMockBridge(report: (message: string) => void) {
   const finish = (stopReason = 'completed') => {
     setRunning(false);
     stream({ type: 'turn-end', agent, stopReason });
+  };
+  const updatePlanExecution = (execution: NonNullable<T.StructuredPlan['execution']>) => {
+    if (!workflow.latestPlan) return;
+    const latestPlan = { ...workflow.latestPlan, execution };
+    workflow = { ...workflow, latestPlan };
+    emit({ type: 'plan-progress', planId: latestPlan.planId, ...workflow });
   };
   const setupChanged = () =>
     emit({ type: 'agent-setup-status', statuses: data.setups });
@@ -182,6 +208,11 @@ export function createMockBridge(report: (message: string) => void) {
       },
       approve: (id) => {
         changes = changes.filter((change) => change.id !== id);
+        if (workflow.latestPlan?.execution?.status === 'awaiting-review') {
+          updatePlanExecution({ ...workflow.latestPlan.execution, status: 'completed' });
+        }
+        onApproved?.();
+        changeEvents.push('approved');
         pendingListeners.forEach((listener) =>
           listener({ type: 'approved', changeSetId: id }),
         );
@@ -190,6 +221,7 @@ export function createMockBridge(report: (message: string) => void) {
       },
       reject: (id) => {
         changes = changes.filter((change) => change.id !== id);
+        changeEvents.push('rejected');
         pendingListeners.forEach((listener) =>
           listener({ type: 'rejected', changeSetId: id }),
         );
@@ -219,6 +251,12 @@ export function createMockBridge(report: (message: string) => void) {
     takeOverConnection: () => setConnection('connected'),
     reconnectNow: async () => setConnection('connected'),
     requestProviderStatus: async () => data.providers,
+    requestModelCatalog: async (modelAgent) => {
+      const models = sampleModelCatalogs[modelAgent];
+      setModelCatalog(modelAgent, models);
+      emit({ type: 'model-catalog', agent: modelAgent, requestId: crypto.randomUUID(), models });
+      return models;
+    },
     requestAgentSetupStatus: async () => data.setups,
     requestAccountStatus: async () => data.account,
     requestBrowserbaseStatus: async () => {
@@ -457,18 +495,19 @@ export function createMockBridge(report: (message: string) => void) {
       data.pi.keyTail = 'demo';
       return data.pi;
     },
-    requestPiCatalog: async () =>
-      data.writingCatalog.providers.flatMap((provider) =>
-        provider.models.map((model) => ({
-          id: model.id,
-          name: model.name,
-          provider: provider.id,
-          contextLength: 200000,
-          pricing: { prompt: 0.000003, completion: 0.000015 },
-          reasoning: true,
-          supportsImages: true,
-        })),
-      ),
+    requestPiCatalog: async () => [
+      { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6', provider: 'anthropic' },
+      { id: 'anthropic/claude-opus-4.6', name: 'Claude Opus 4.6', provider: 'anthropic' },
+      { id: 'openai/gpt-5.2', name: 'GPT-5.2', provider: 'openai' },
+      { id: 'google/gemini-3-pro-preview', name: 'Gemini 3 Pro', provider: 'google' },
+      { id: 'deepseek/deepseek-v3.2', name: 'DeepSeek V3.2', provider: 'deepseek' },
+    ].map((model) => ({
+      ...model,
+      contextLength: 200000,
+      pricing: { prompt: 0.000003, completion: 0.000015 },
+      reasoning: true,
+      supportsImages: true,
+    })),
     setPiModels: async (models) => {
       data.pi.models = models.map((model) => ({
         ...model,
@@ -616,6 +655,10 @@ export function createMockBridge(report: (message: string) => void) {
           tool: 'read_document',
           argsJson: '{"section":0}',
         });
+        if (reply === 'tools') {
+          stream({ type: 'tool-call', agent, callId: `search-${turnGeneration}`, tool: 'search_document', argsJson: '{"query":"일정"}' });
+          stream({ type: 'tool-call', agent, callId: `edit-${turnGeneration}`, tool: 'edit_document', argsJson: '{"section":0}' });
+        }
         if (reply === 'fleet') {
           stream({
             type: 'task-start',
@@ -651,6 +694,10 @@ export function createMockBridge(report: (message: string) => void) {
             resultPreview:
               '사업 개요, 추진 일정, 기대 효과 — 3개 절을 확인했습니다.',
           });
+          if (reply === 'tools') {
+            stream({ type: 'tool-result', agent, callId: `search-${turnGeneration}`, ok: true, resultPreview: '일정 2건을 찾았습니다.' });
+            stream({ type: 'tool-result', agent, callId: `edit-${turnGeneration}`, ok: true, resultPreview: '첫 문단을 수정했습니다.' });
+          }
           if (reply === 'error') {
             stream({
               type: 'error',
@@ -661,6 +708,11 @@ export function createMockBridge(report: (message: string) => void) {
             return;
           }
           if (reply === 'plan') {
+            if (workflow.latestPlan) {
+              stream({ type: 'text-delta', agent, text: '현재 계획은 개요와 일정을 확인한 뒤 문서를 수정합니다. 바꾸고 싶은 점을 알려주시면 새 계획을 만들겠습니다.' });
+              finish();
+              return;
+            }
             const plan = samplePlan();
             workflow = {
               workflow: 'plan',
@@ -860,9 +912,27 @@ export function createMockBridge(report: (message: string) => void) {
         later(() => {
           if (generation !== planGeneration) return;
           workflow.phase = 'implementing';
+          updatePlanExecution({
+            status: 'running',
+            steps: workflow.latestPlan!.steps.map((step) => ({ stepId: step.id!, status: 'pending' })),
+          });
           emit({ type: 'implementation-started', planId, ...workflow });
           setRunning(true);
           stream({ type: 'turn-start', agent });
+          later(() => {
+            if (generation !== planGeneration) return;
+            updatePlanExecution({ status: 'running', steps: [
+              { stepId: workflow.latestPlan!.steps[0].id!, status: 'in-progress' },
+              ...workflow.latestPlan!.steps.slice(1).map((step) => ({ stepId: step.id!, status: 'pending' as const })),
+            ] });
+            later(() => {
+              if (generation !== planGeneration) return;
+              updatePlanExecution({ status: 'running', steps: [
+                { stepId: workflow.latestPlan!.steps[0].id!, status: 'completed' },
+                ...workflow.latestPlan!.steps.slice(1).map((step) => ({ stepId: step.id!, status: 'in-progress' as const })),
+              ] });
+            }, 350);
+          }, 350);
           later(() => {
             if (generation !== planGeneration) return;
             stream({
@@ -870,19 +940,33 @@ export function createMockBridge(report: (message: string) => void) {
               agent,
               text: '계획에 따라 개요와 추진 일정을 정리했습니다.',
             });
+            updatePlanExecution({ status: 'awaiting-review', steps: workflow.latestPlan!.steps.map((step) => ({ stepId: step.id!, status: 'completed' })) });
             addReview();
             finish();
-          }, 500);
+          }, 1700);
         }, 200);
       });
       return true;
     },
-    requestPlanChanges: (planId) => {
+    requestPlanChanges: (planId, feedback) => {
       if (connection !== 'connected' || workflow.latestPlan?.planId !== planId)
         return false;
+      const previous = workflow.latestPlan;
+      const planGeneration = ++generation;
       later(() => {
+        if (generation !== planGeneration) return;
         workflow.phase = 'planning';
         emit({ type: 'workflow-changed', ...workflow });
+        setRunning(true);
+        stream({ type: 'turn-start', agent, turnId: `revision-${planGeneration}` });
+        stream({ type: 'text-delta', agent, text: `피드백을 확인했습니다: ${feedback?.trim() || '계획을 다시 검토합니다.'}` });
+        later(() => {
+          if (generation !== planGeneration) return;
+          const plan = samplePlan((previous.revision ?? 1) + 1, previous.planId);
+          workflow = { ...workflow, phase: 'awaiting-approval', latestPlan: plan, capabilityEpoch: workflow.capabilityEpoch! + 1 };
+          emit({ type: 'plan-ready', plan, ...workflow });
+          finish();
+        }, 300);
       });
       return true;
     },
@@ -1145,36 +1229,39 @@ export function createMockBridge(report: (message: string) => void) {
     });
   }
   function addReview() {
-    if (permission === 'unrestricted') {
-      report('Sample document changes applied with full access');
-      return;
-    }
+    const range = (paragraph: number): T.DocRange => ({
+      sectionIdx: 0, startParaIdx: paragraph, startCharOffset: 0,
+      endParaIdx: paragraph, endCharOffset: 23,
+    });
+    const ops: T.PendingOp[] = fullReview ? [
+      {
+        kind: 'replace', id: crypto.randomUUID(), agent, range: range(0),
+        deletedText: '이번 사업은 업무 효율을 높이는 것을 목표로 합니다.',
+        text: '이번 사업은 지역 소상공인의 주문과 예약 업무를 줄이는 것을 목표로 합니다.',
+        charShapeId: null, paraShapeIds: [], snapshotId: null,
+      },
+      { kind: 'insert', id: crypto.randomUUID(), agent, range: range(2),
+        text: '현장 인터뷰 결과를 실행 계획에 반영합니다.' },
+      { kind: 'delete', id: crypto.randomUUID(), agent, range: range(4),
+        text: '시범 운영은 3월 첫째 주에 시작합니다.' },
+    ] : [
+      { kind: 'insert', id: crypto.randomUUID(), agent, range: range(0),
+        text: '이번 사업은 업무 효율을 높이는 것을 목표로 합니다.' },
+    ];
     changes = [
       {
         id: crypto.randomUUID(),
         agent,
         status: 'awaiting-review',
         createdAt: Date.now(),
-        ops: [
-          {
-            kind: 'insert',
-            id: crypto.randomUUID(),
-            agent,
-            range: {
-              sectionIdx: 0,
-              startParaIdx: 0,
-              startCharOffset: 0,
-              endParaIdx: 0,
-              endCharOffset: 23,
-            },
-            text: '이번 사업은 업무 효율을 높이는 것을 목표로 합니다.',
-          },
-        ],
+        ops,
       },
     ];
+    changeEvents.push('set-finalized');
     pendingListeners.forEach((listener) =>
       listener({ type: 'set-finalized', changeSetId: changes[0].id }),
     );
+    if (permission === 'unrestricted') bridge.pendingEdits.approve(changes[0].id);
   }
   function setServices(configured: boolean) {
     for (const provider of agents) {
@@ -1226,6 +1313,7 @@ export function createMockBridge(report: (message: string) => void) {
       running,
       workflow,
       pendingChanges: changes.length,
+      changeEvents: [...changeEvents],
       references: references.length,
       account: data.account.state,
       browserbase: browserbaseState,

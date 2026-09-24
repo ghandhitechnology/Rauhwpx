@@ -315,7 +315,7 @@ function editLifecycleFor(profile) {
       lifecycle: `Document edits run autonomously during the turn: higher-level writes are staged as live preview. When the turn ends successfully they are HELD FOR THE USER'S REVIEW — the user approves or rejects them in Studio's review panel; failed, interrupted, and unknown outcomes roll them back. Raw engine writes (prepare_engine_edit_session, apply_engine_edits) are unavailable in this permission profile because they commit immediately and would bypass the review gate; exploring get_engine_edit_capabilities is still fine. Approved edits remain undoable in the editor. After every tool-using turn, always send a separate final user-facing message that states the outcome and asks the user to review and approve the staged changes. Never end a successful tool-using turn on a tool call or progress update alone.`,
       engineBullet: `- Only the staged semantic write tools are available in this profile; if a task truly needs a raw engine capability, tell the user it requires switching the chat to 전체 접근 instead of attempting apply_engine_edits.`,
       verifyBullet: `- After completing staged semantic edits, call verify_changes (includeImage:true when layout matters) to self-check and fix them before ending the turn.`,
-      tableLockBullet: `- After a staged insert_row/insert_col/merge_cells, that table is locked until the user approves the staged changes — plan those structure changes last.`,
+      tableLockBullet: `- For text inside a table, use find_text and pass its cell address to staged text tools; nested matches also need cellPath. If a cell edit fails, re-read its address. Do not delete or recreate the table to change its text. After a staged insert_row/insert_col/merge_cells, that table is locked until the user approves the staged changes — plan those structure changes last.`,
     };
   }
   return {
@@ -425,7 +425,7 @@ The user can keep editing the live document during planning. A save injects a li
 
 When you need a blocking choice, use the provider's native question interaction or ask_user_question. Never turn that answer into a new chat message.
 
-Stay in conversation and research. Call present_implementation_plan only when the user explicitly asks you to write, draft, or present a plan. When they ask, read the bundled present-plan product skill, then call present_implementation_plan as the final action of that turn. Do not tell the user the plan is ready until that tool returns success.`;
+Stay in conversation and research. Call present_implementation_plan when the user explicitly asks you to write, draft, or present a plan, or when concrete feedback revises an existing plan. Questions and research do not invalidate the current plan. Revise directly from concrete feedback without asking the user to request another draft. Read the bundled present-plan product skill, then call present_implementation_plan as the final action of that turn. Do not tell the user the plan is ready until that tool returns success.`;
 
 export const QUESTION_SYSTEM_BRIEF = `You are in question-and-research mode. Inform the user and inspect the live document or workspace. Do not plan an implementation, do not call present_implementation_plan, and do not edit the local filesystem or live document; this overrides every safe or unrestricted permission profile. If the user wants changes, tell them to switch to /plan or /build.
 
@@ -452,6 +452,7 @@ export function implementationSystemBrief(profile = 'unrestricted', agentName = 
   return `You are in implementation mode. Execute only the approved canonical implementation plan supplied by the hub; do not substitute or silently broaden it. Before making changes, re-read the relevant current workspace and live-document state because planning observations may be stale. Execute every canonical step thoroughly and run every validation listed in the plan. Filesystem capabilities follow the selected permission profile. Web tools, subagents, and the rhwp MCP remain available, and every subagent must follow this implementation phase and the same permission boundary. Live-document edits run autonomously and remain undoable.
 
 IMPLEMENTATION WORKFLOW:
+- Update the approved checklist with update_plan_progress: mark each step in-progress before working, completed after its work and validation succeed, or blocked with a concrete reason. Never mark unverified or deferred work completed. Studio tracks pending review and actual application separately.
 - Every document write tool requires expectedRevision: always pass the revision returned by your most recent tool call; on REVISION_MISMATCH, follow the recovery guidance in the error message (it carries the current revision).
 ${commitBullet}
 - When you already know two or more edits, send them as ONE apply_edits call (up to 32 items; they apply sequentially, so order independent edits bottom-of-document first). For single writes, chain each response's revision into the next write's expectedRevision.

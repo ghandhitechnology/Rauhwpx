@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 81개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 81);
+test('도구는 정확히 82개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 82);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -46,6 +46,17 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
   const mcpStdio = readFileSync(fileURLToPath(new URL('../mcp-stdio.mjs', import.meta.url)), 'utf8');
   assert.match(mcpStdio, /annotations: toolAnnotations\(def\.category\)/);
   assert.doesNotMatch(mcpStdio, /destructiveHint:\s*true/);
+});
+
+test('nested table paths are accepted on staged cell text tools', () => {
+  const path = [
+    { controlIndex: 0, cellIndex: 2, cellParaIndex: 0 },
+    { controlIndex: 1, cellIndex: 3, cellParaIndex: 0 },
+  ];
+  for (const name of ['get_text_range', 'get_para_format', 'get_char_format',
+    'insert_text', 'delete_range', 'replace_range', 'apply_char_format']) {
+    assert.deepEqual(byName.get(name).shape.cellPath.parse(path), path, name);
+  }
 });
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
@@ -114,7 +125,11 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(implementing.has('ask_user_question'));
   assert.ok(!implementing.has('present_implementation_plan'));
 
-  assert.ok(!filterToolDefinitions('awaiting-approval').some((definition) => definition.name === 'ask_user_question'));
+  assert.ok(filterToolDefinitions('awaiting-approval').some((definition) => definition.name === 'ask_user_question'));
+  assert.ok(filterToolDefinitions('awaiting-approval').some((definition) => definition.name === 'present_implementation_plan'));
+  assert.ok(implementing.has('update_plan_progress'));
+  assert.ok(!planning.has('update_plan_progress'));
+  assert.ok(!direct.has('update_plan_progress'));
   assert.ok(!filterToolDefinitions('awaiting-approval').some((definition) => definition.name === 'commit_product_skill'));
 
   const worker = filterToolDefinitions('copy-layout-worker').map((definition) => definition.name);
@@ -174,7 +189,7 @@ test('present_implementation_plan 스키마가 완전한 구조를 강제한다'
   const definition = byName.get('present_implementation_plan');
   assert.deepEqual(Object.keys(definition.shape), [
     'goal', 'title', 'summary', 'assumptions', 'decisions', 'steps',
-    'files', 'validation', 'risks', 'exclusions',
+    'files', 'validation', 'risks', 'exclusions', 'sources', 'changeSummary',
   ]);
   assert.equal(definition.shape, IMPLEMENTATION_PLAN_SHAPE);
   const valid = {

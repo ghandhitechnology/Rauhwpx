@@ -5,7 +5,7 @@
   "description": "HWP/HWPX editor with a local AI agent sidebar.",
   "author": "Hataewook",
   "license": "MIT",
-  "homepage": "https://github.com/ghandhitechnology/Rauhwpx",
+  "homepage": "https://github.com/heemangstudio/Rauhwpx",
   "desktopName": "rauhwpx.desktop",
   "private": true,
   "engines": {
@@ -127,7 +127,7 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "ghandhitechnology",
+      "owner": "heemangstudio",
       "repo": "Rauhwpx"
     },
     "electronLanguages": [

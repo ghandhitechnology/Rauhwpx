@@ -17,6 +17,7 @@ import { normalizeSettingsDestination } from '../ui/agent-sidebar/settings-contr
 import { mountAuditNavigator } from './audit-scenarios.ts';
 import { mountAuditDialogs } from './audit-dialogs.ts';
 import { applyAuditState } from './audit-state.ts';
+import { mountEditorShell } from './editor-shell.ts';
 
 const params = new URLSearchParams(location.search);
 if (params.get('usage') === 'live') {
@@ -29,7 +30,9 @@ const report = (message: string) => {
   status.value = message;
   showToast({ message, durationMs: 2500 });
 };
-const mock = createMockBridge(report);
+const undoState = { entry: null as object | null, calls: 0 };
+const navigation = { calls: [] as Array<{ sectionIndex: number; paragraphIndex: number; charOffset: number }> };
+const mock = createMockBridge(report, () => { undoState.entry = {}; });
 if (params.get('services') === 'setup') mock.setServices(false);
 const eventBus = new EventBus();
 const versions = createMockVersions(report, params.get('history') === 'branches');
@@ -55,6 +58,7 @@ if (!localStorage.getItem('sidebar-preview-seeded')) {
   localStorage.setItem('sidebar-preview-seeded', '1');
 }
 applyTheme();
+if (params.get('editor') === '1') mountEditorShell(report, eventBus);
 const cloud = params.get('cloud') === '1' ? createMockCloud({ dashboard: params.get('dashboard') === '1' }) : null;
 mock.bridge.onEvent((event) => {
   if (event.type === 'account-status' && !event.status.authenticating)
@@ -101,6 +105,16 @@ const sidebar = initAgentSidebar({
     void versions.refresh();
   },
   versionController: versions,
+  getAgentUndoEntry: () => undoState.entry,
+  undoAgentTurn: (entry) => {
+    if (entry !== undoState.entry) return false;
+    undoState.entry = null;
+    undoState.calls += 1;
+    void versions.discardUncommitted();
+    eventBus.emit('history-jumped');
+    return true;
+  },
+  navigateToChange: (position) => { navigation.calls.push(position); },
   openClassicVersionControl: () =>
     report('Classic document history placeholder'),
   editorSettingsRuntime: {
@@ -230,7 +244,7 @@ if (params.get('page') === 'versions') sidebar.openVersions();
 
 // Typed hooks for browser checks and custom scenario scripts.
 const preview = { ...mock, sidebar, versions, eventBus, cloud, workspace,
-  documentNavigation,
+  documentNavigation, undoState, navigation,
   threadStore: { listThreads, getThread, waitForThreadsPersistence } };
 export type SidebarPreview = typeof preview;
 Object.assign(window, { sidebarPreview: preview });

@@ -13,8 +13,9 @@ use super::super::{
 };
 use super::border_rendering::create_border_line_nodes;
 use super::text_measurement::{
-    compute_char_positions, estimate_text_width, estimate_text_width_unrounded,
-    extract_tab_leaders_with_extended, find_next_tab_stop, resolved_to_text_style,
+    apply_covered_hancom_fallback, compute_char_positions, estimate_text_width,
+    estimate_text_width_unrounded, extract_tab_leaders_with_extended, find_next_tab_stop,
+    resolved_to_text_style,
 };
 use super::utils::{
     expand_numbering_format, extract_shape_transform, find_bin_data,
@@ -373,9 +374,8 @@ fn is_treat_as_char_equation_control(ctrl: Option<&Control>) -> bool {
 
 /// Maximum inline-equation ascent/descent for one composed text line.
 ///
-/// The values come from the same EqEdit layout tree that is painted later.
-/// Stored object height can add leading, but it must not replace the natural
-/// baseline: doing so pushes tall sums/fractions into the line below.
+/// Natural ink extents and the authored EQEDIT object baseline jointly reserve
+/// ascent/descent; outer margins remain outside the painted object.
 fn line_equation_metrics_px(
     para: Option<&Paragraph>,
     line_tac_offsets: &[(usize, f64, usize)],
@@ -394,18 +394,23 @@ fn line_equation_metrics_px(
             continue;
         }
 
-        let metrics = crate::renderer::equation::intrinsic_metrics_px_with_font(
+        let metrics = crate::renderer::equation::intrinsic_metrics_px_with_version(
             &eq.script,
             eq.font_size,
             dpi,
             &eq.font_name,
+            &eq.version_info,
         );
         let stored_height = hwpunit_to_px(eq.common.height as i32, dpi);
-        let extra = (stored_height - metrics.height).max(0.0);
-        let top_leading = extra / 2.0;
-        let bottom_leading = extra - top_leading;
-        max_ascent = max_ascent.max(metrics.baseline + top_leading);
-        max_descent = max_descent.max(metrics.height - metrics.baseline + bottom_leading);
+        let anchor =
+            crate::renderer::equation::control_baseline_hwp(eq, metrics.baseline * 7200.0 / dpi)
+                * dpi
+                / 7200.0;
+        max_ascent = max_ascent.max(anchor + hwpunit_to_px(eq.common.margin.top as i32, dpi));
+        max_descent = max_descent.max(
+            stored_height.max(metrics.height) - anchor
+                + hwpunit_to_px(eq.common.margin.bottom as i32, dpi),
+        );
         found = true;
     }
 
@@ -453,6 +458,94 @@ mod inline_equation_alignment_tests {
 
         assert!((baseline - 31.0).abs() < 0.01);
         assert!((height - 56.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn stored_fraction_line_keeps_its_authored_advance() {
+        use super::*;
+        use crate::model::control::Equation;
+        use crate::model::paragraph::{CharShapeRef, LineSeg};
+        use crate::model::shape::CommonObjAttr;
+        use crate::renderer::composer::compose_paragraph;
+
+        let mut para = Paragraph {
+            text: "x ".to_string(),
+            char_count: 11,
+            char_offsets: vec![0, 9, 10],
+            char_shapes: vec![CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 0,
+            }],
+            line_segs: vec![LineSeg {
+                line_height: 2_340,
+                text_height: 2_340,
+                baseline_distance: 1_568,
+                line_spacing: 800,
+                segment_width: 30_000,
+                ..Default::default()
+            }],
+            controls: vec![Control::Equation(Box::new(Equation {
+                common: CommonObjAttr {
+                    width: 1_601,
+                    height: 2_340,
+                    treat_as_char: true,
+                    ..Default::default()
+                },
+                script: "x over L".to_string(),
+                baseline: 67,
+                ..Default::default()
+            }))],
+            ..Default::default()
+        };
+        for synthetic in [false, true] {
+            para.line_segs[0].tag = if synthetic {
+                LineSeg::TAG_IMPLEMENTATION_PROPERTY
+            } else {
+                0
+            };
+            let composed = compose_paragraph(&para);
+            let mut tree = PageRenderTree::new(0, 500.0, 500.0);
+            let mut parent = RenderNode::new(
+                tree.next_id(),
+                RenderNodeType::Body { clip_rect: None },
+                BoundingBox::new(0.0, 0.0, 400.0, 400.0),
+            );
+            let area = LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 400.0,
+            };
+            let next_y = LayoutEngine::new(96.0).layout_composed_paragraph(
+                &mut tree,
+                &mut parent,
+                &composed,
+                &ResolvedStyleSet::default(),
+                &area,
+                0.0,
+                0,
+                1,
+                0,
+                0,
+                None,
+                false,
+                false,
+                0.0,
+                None,
+                Some(&para),
+                None,
+                None,
+            );
+            let saved_advance = hwpunit_to_px(2_340 + 800, 96.0);
+            if synthetic {
+                assert!(
+                    next_y > saved_advance + 1.0,
+                    "newly composed fraction must fit its intrinsic metrics: {next_y}"
+                );
+            } else {
+                assert!((next_y - saved_advance).abs() < 0.01, "saved fraction line must retain its next-line position: {next_y} vs {saved_advance}");
+            }
+        }
     }
 
     #[test]
@@ -569,6 +662,50 @@ mod tac_object_box_height_tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn inline_picture_aligns_its_margin_box_and_insets_its_content() {
+        let mut picture = crate::model::image::Picture::default();
+        picture.common.height = 6000;
+        picture.common.margin.top = 750;
+        picture.common.margin.bottom = 375;
+        picture.caption = Some(caption_with(CaptionDirection::Bottom, 300, 900));
+        let box_height = super::tac_picture_box_height_px(&picture, 96.0);
+        assert!((box_height - 111.0).abs() < 0.01);
+        let content_y = inline_picture_baseline_y(50.0, 100.0, box_height)
+            + super::tac_picture_top_inset_px(&picture, 96.0);
+        assert!((content_y - 60.0).abs() < 0.01);
+        picture.caption.as_mut().unwrap().direction = CaptionDirection::Top;
+        assert!((super::tac_picture_top_inset_px(&picture, 96.0) - 26.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn sibling_picture_alignment_uses_occupied_width() {
+        use crate::model::control::Control;
+        use crate::model::image::Picture;
+
+        let mut first = Picture::default();
+        first.common.treat_as_char = true;
+        first.common.width = 3600;
+        first.common.margin.left = 750;
+        first.common.margin.right = 375;
+        let mut second = Picture::default();
+        second.common.treat_as_char = true;
+        second.common.width = 1800;
+        second.common.margin.left = 225;
+        let widths = super::collect_sibling_tac_picture_widths_px(
+            &[
+                Control::Picture(Box::new(first)),
+                Control::Picture(Box::new(second)),
+            ],
+            96.0,
+        );
+        assert_eq!(widths.len(), 2);
+        assert_eq!(widths[0].0, 0);
+        assert_eq!(widths[1].0, 1);
+        assert!((widths[0].1 - hwpunit_to_px(4725, 96.0)).abs() < 0.01);
+        assert!((widths[1].1 - hwpunit_to_px(2025, 96.0)).abs() < 0.01);
     }
 
     #[test]
@@ -697,7 +834,7 @@ fn inline_picture_baseline_y(line_y: f64, baseline: f64, picture_height: f64) ->
 /// 이런 줄에서 개체를 줄 상단에 붙이는 동작과 같은 답이다.
 ///
 /// 좌/우 캡션은 폭을 늘릴 뿐 높이를 늘리지 않으므로 세로 방향(Top/Bottom)만 센다.
-fn tac_object_box_height_px(object_h: f64, caption: &Option<Caption>, dpi: f64) -> f64 {
+pub(crate) fn tac_object_box_height_px(object_h: f64, caption: &Option<Caption>, dpi: f64) -> f64 {
     let Some(cap) = caption else {
         return object_h;
     };
@@ -713,6 +850,33 @@ fn tac_object_box_height_px(object_h: f64, caption: &Option<Caption>, dpi: f64) 
         return object_h;
     }
     object_h + hwpunit_to_px(i32::from(cap.spacing), dpi) + caption_h
+}
+
+/// 그림의 저장 크기는 바깥 여백을 제외한 그리기 영역이다. 줄 정렬에는
+/// 캡션과 위/아래 여백까지 포함하고, 실제 비트맵은 그 상자 안쪽에 놓는다.
+fn tac_picture_box_height_px(picture: &crate::model::image::Picture, dpi: f64) -> f64 {
+    let common = &picture.common;
+    tac_object_box_height_px(
+        hwpunit_to_px(common.height as i32, dpi),
+        &picture.caption,
+        dpi,
+    ) + hwpunit_to_px(
+        i32::from(common.margin.top) + i32::from(common.margin.bottom),
+        dpi,
+    )
+}
+
+pub(crate) fn tac_picture_top_inset_px(picture: &crate::model::image::Picture, dpi: f64) -> f64 {
+    let margin = hwpunit_to_px(i32::from(picture.common.margin.top), dpi);
+    if picture
+        .caption
+        .as_ref()
+        .is_some_and(|caption| matches!(caption.direction, CaptionDirection::Top))
+    {
+        margin + tac_object_box_height_px(0.0, &picture.caption, dpi)
+    } else {
+        margin
+    }
 }
 
 /// HWP5 원본 LineSeg가 저장한 column-relative 줄 시작점을 일반 본문 줄에 적용한다.
@@ -1192,6 +1356,69 @@ fn repeated_empty_tac_line_offset(
     } else {
         None
     }
+}
+
+/// A native cell's saved line starts can differ from the sum of its line boxes
+/// (for example when an inline equation changes only one line's height). Keep
+/// their authored relative positions while their line metrics still agree.
+/// An edit elsewhere in the document does not invalidate this coordinate series.
+fn saved_native_cell_line_vpos_base(
+    para: Option<&Paragraph>,
+    composed: &ComposedParagraph,
+    start_line: usize,
+    end_line: usize,
+    native_hwp5: bool,
+    y: f64,
+) -> Option<(i32, f64)> {
+    if !native_hwp5 || end_line <= start_line + 1 {
+        return None;
+    }
+    let para = para?;
+    if para.line_segs.len() != composed.lines.len() {
+        return None;
+    }
+    let range = para.line_segs.get(start_line..end_line)?;
+    if range
+        .iter()
+        .zip(&composed.lines[start_line..end_line])
+        .any(|(seg, line)| {
+            seg.line_height <= 0
+                || seg.tag & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0
+                || line.line_height != seg.line_height
+                || line.line_spacing != seg.line_spacing
+        })
+        || range.windows(2).any(|pair| {
+            pair[1].vertical_pos <= pair[0].vertical_pos
+                || pair[1].tag
+                    & (crate::model::paragraph::LineSeg::TAG_FIRST_LINE_OF_PAGE
+                        | crate::model::paragraph::LineSeg::TAG_FIRST_LINE_OF_COLUMN)
+                    != 0
+        })
+    {
+        return None;
+    }
+    Some((range[0].vertical_pos, y))
+}
+
+/// Composer stores a TAC table's painted column width. Its horizontal outer
+/// margins belong to the line's alignment width, while the painter separately
+/// advances over those margins after placing the border at pen + left margin.
+fn tac_table_alignment_margin_width(
+    para: Option<&Paragraph>,
+    line_tacs: &[(usize, f64, usize)],
+    dpi: f64,
+) -> f64 {
+    let Some(para) = para else { return 0.0 };
+    line_tacs
+        .iter()
+        .filter_map(|(_, _, index)| match para.controls.get(*index) {
+            Some(Control::Table(table)) if table.common.treat_as_char => Some(hwpunit_to_px(
+                i32::from(table.outer_margin_left) + i32::from(table.outer_margin_right),
+                dpi,
+            )),
+            _ => None,
+        })
+        .sum()
 }
 
 fn tac_picture_or_shape_height_px(ctrl: &Control, dpi: f64) -> Option<f64> {
@@ -2801,8 +3028,9 @@ impl LayoutEngine {
                             if raw_lh + 4.0 >= pic_h {
                                 *reserved_tac_picture_height = Some(pic_h);
                             }
-                            let box_h = tac_object_box_height_px(pic_h, &pic.caption, self.dpi);
-                            let img_y = (y + baseline - box_h).max(y);
+                            let box_h = tac_picture_box_height_px(pic, self.dpi);
+                            let img_y = (y + baseline - box_h).max(y)
+                                + tac_picture_top_inset_px(pic, self.dpi);
                             let bin_data_id = pic.image_attr.bin_data_id;
                             let image_data =
                                 find_bin_data(bdc, bin_data_id).map(|c| c.data.load_shared());
@@ -2818,9 +3046,11 @@ impl LayoutEngine {
                                 }
                             };
                             let original_size_hu = pic.crop_reference_size();
-                            let image_x = x + projected_cell_stack_picture_horizontal_offset_px(
-                                p, tac_ci, self.dpi,
-                            );
+                            let image_x = x
+                                + hwpunit_to_px(i32::from(pic.common.margin.left), self.dpi)
+                                + projected_cell_stack_picture_horizontal_offset_px(
+                                    p, tac_ci, self.dpi,
+                                );
                             // [Task #1151 v7 항목 7] ImageNode 생성 helper 통합.
                             let img_node = make_picture_image_node(
                                 tree,
@@ -2833,7 +3063,12 @@ impl LayoutEngine {
                                 original_size_hu,
                                 bin_data_id,
                                 image_data,
-                                BoundingBox::new(image_x, img_y, tac_w, pic_h),
+                                BoundingBox::new(
+                                    image_x,
+                                    img_y,
+                                    hwpunit_to_px(pic.common.width as i32, self.dpi),
+                                    pic_h,
+                                ),
                             );
                             line_node.children.push(img_node);
                             register_projected_cell_stack_unmatched_picture(
@@ -3067,6 +3302,7 @@ impl LayoutEngine {
             if !tac_on_line(tac_k, tac_pos) {
                 continue;
             }
+            let tac_row = tac_row_for(tac_k).min(row_inline_x.len() - 1);
             if let Some(p) = para {
                 if let Some(Control::Equation(eq)) = p.controls.get(tac_ci) {
                     let tokens = crate::renderer::equation::tokenizer::tokenize(&eq.script);
@@ -3076,7 +3312,8 @@ impl LayoutEngine {
                         font_size_px,
                         &eq.font_name,
                     )
-                    .layout(&ast);
+                    .with_version(&eq.version_info)
+                    .layout_in_control_width(&ast, hwpunit_to_px(eq.common.width as i32, self.dpi));
                     let color_str =
                         crate::renderer::equation::svg_render::eq_color_to_svg(eq.color);
                     let svg_content =
@@ -3088,12 +3325,18 @@ impl LayoutEngine {
                         );
                     let hwp_eq_h = hwpunit_to_px(eq.common.height as i32, self.dpi);
                     let eq_h = hwp_eq_h.max(layout_box.height);
-                    let tac_row = tac_row_for(tac_k).min(row_inline_x.len() - 1);
                     let row_y = (y + tac_row as f64 * (line_height + line_spacing_px)
                         - zero_endnote_boundary_result_shift)
                         .max(col_area_y);
                     let inline_x = row_inline_x[tac_row];
-                    let eq_y = row_y + baseline - layout_box.baseline;
+                    let eq_anchor = crate::renderer::equation::control_baseline_hwp(
+                        eq,
+                        layout_box.baseline * 7200.0 / self.dpi,
+                    ) * self.dpi
+                        / 7200.0;
+                    let eq_y = row_y + baseline - eq_anchor;
+                    let eq_x = inline_x + hwpunit_to_px(eq.common.margin.left as i32, self.dpi);
+                    let eq_w = hwpunit_to_px(eq.common.width as i32, self.dpi);
                     let (eq_cell_idx, eq_cell_para_idx) = if let Some(ref ctx) = cell_ctx {
                         (
                             Some(ctx.path[0].cell_index),
@@ -3116,6 +3359,7 @@ impl LayoutEngine {
                             color: eq.color,
                             font_size: font_size_px,
                             font_name: eq.font_name.clone(),
+                            version_info: eq.version_info.clone(),
                             section_index: note_ref
                                 .as_ref()
                                 .map(|r| r.section_index)
@@ -3133,9 +3377,10 @@ impl LayoutEngine {
                             inner_control_index: cell_ctx.as_ref().map(|_| tac_ci),
                             cell_index: eq_cell_idx,
                             cell_para_index: eq_cell_para_idx,
+                            cell_context: cell_ctx.clone(),
                             note_ref,
                         }),
-                        BoundingBox::new(inline_x, eq_y, tac_w, eq_h),
+                        BoundingBox::new(eq_x, eq_y, eq_w, eq_h),
                     );
                     line_node.children.push(eq_node);
                     tree.set_inline_shape_position(
@@ -3143,9 +3388,13 @@ impl LayoutEngine {
                         para_index,
                         tac_ci,
                         cell_ctx.as_ref(),
-                        inline_x,
+                        eq_x,
                         eq_y,
                     );
+                    row_inline_x[tac_row] += tac_w;
+                } else {
+                    // Picture, shape, and table TAC controls are painted by their own
+                    // branches, but they still occupy space before later equations.
                     row_inline_x[tac_row] += tac_w;
                 }
             }
@@ -3397,8 +3646,9 @@ impl LayoutEngine {
             // 가산하면 새 쪽에서도 쪽 하단에 그려져 문구·로고가 잘린다(셀 끝
             // Enter 재현). 단 절반을 넘는 과대 vpos만 차단해 상단 여백
             // 재현(test-image.hwp 폴백 목적)은 유지한다.
-            let session_stale_vpos =
-                self.profile.get().session_edited() && vpos0_px > col_area.height * 0.5;
+            let session_stale_vpos = self.profile.get().session_edited()
+                && cell_ctx.is_none()
+                && vpos0_px > col_area.height * 0.5;
             if vpos0_px > 0.0 && !session_stale_vpos {
                 y += vpos0_px;
             }
@@ -3618,6 +3868,18 @@ impl LayoutEngine {
                 None
             }
         };
+        let cell_line_vpos_base = if cell_ctx.is_some() {
+            saved_native_cell_line_vpos_base(
+                para,
+                composed,
+                start_line,
+                end,
+                self.profile.get().native_hwp5_layout(),
+                y,
+            )
+        } else {
+            None
+        };
         let mut endnote_line_vpos_y_end: Option<f64> = None;
         let mut endnote_auto_wrap_y_end: Option<f64> = None;
         let mut prev_line_reserved_tac_picture_height: Option<f64> = None;
@@ -3643,6 +3905,11 @@ impl LayoutEngine {
                 }
             } else if let (Some((base_vpos, base_y)), Some(seg)) = (
                 para_topbottom_line_vpos_base,
+                para.and_then(|p| p.line_segs.get(line_idx)),
+            ) {
+                y = base_y + hwpunit_to_px(seg.vertical_pos - base_vpos, self.dpi);
+            } else if let (Some((base_vpos, base_y)), Some(seg)) = (
+                cell_line_vpos_base,
                 para.and_then(|p| p.line_segs.get(line_idx)),
             ) {
                 y = base_y + hwpunit_to_px(seg.vertical_pos - base_vpos, self.dpi);
@@ -3774,11 +4041,25 @@ impl LayoutEngine {
                         })
                     })
                     .unwrap_or(false);
+            // 머리말/꼬리말의 저장 기준선은 인라인 도형과 글자를 함께 정렬한다.
+            // 이를 글꼴 높이로 줄이면 큰 로고 옆 글자만 줄 위로 올라간다.
+            let has_stored_band_baseline = matches!(
+                col_node.node_type,
+                RenderNodeType::Header | RenderNodeType::Footer
+            ) && !source_metrics_reflowed
+                && para
+                    .and_then(|p| p.line_segs.get(line_idx))
+                    .is_some_and(|seg| {
+                        seg.tag & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0
+                            && seg.baseline_distance > 0
+                            && seg.baseline_distance <= seg.line_height
+                    });
             let (mut line_height, mut baseline) = if text_before_picture_line {
                 let font_lh = max_fs.max(1.0);
                 let font_bl = max_fs * 0.85;
                 (font_lh, ensure_min_baseline(font_bl, max_fs))
             } else if has_tac_shape
+                && !has_stored_band_baseline
                 && !empty_tac_guide_has_explicit_shape_height
                 && (cell_ctx.is_none() || max_fs > 0.0)
                 && raw_lh > max_fs * 1.5
@@ -3808,16 +4089,33 @@ impl LayoutEngine {
                     ),
                 )
             };
-            if let Some((equation_ascent, equation_descent)) =
-                line_equation_metrics_px(para, &line_tac_offsets_for_width, self.dpi)
-            {
-                (line_height, baseline) = align_line_metrics_to_equation(
-                    line_height,
-                    baseline,
-                    max_fs,
-                    equation_ascent,
-                    equation_descent,
-                );
+            let has_stored_equation_line_metrics = para
+                .and_then(|p| p.line_segs.get(line_idx))
+                .is_some_and(|seg| {
+                    seg.tag & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0
+                        && seg.line_height > 0
+                        && seg.baseline_distance > 0
+                        && seg.baseline_distance <= seg.line_height
+                        && !source_metrics_reflowed
+                        && (line_height - hwpunit_to_px(seg.line_height, self.dpi)).abs() < 0.01
+                        && (baseline - hwpunit_to_px(seg.baseline_distance, self.dpi)).abs() < 0.01
+                });
+            // 저장 줄은 한컴이 수식과 텍스트를 함께 조판한 높이/기준선을 이미 갖는다.
+            // 수식의 자체 기준선을 다시 합치면 분수마다 줄 높이가 늘어나 셀 내용이
+            // 다음 쪽으로 밀린다. 합성 줄이나 재조판/인라인 도형으로 저장 메트릭을
+            // 바꾼 줄에만 자체 수식 메트릭을 적용한다.
+            if !has_stored_equation_line_metrics {
+                if let Some((equation_ascent, equation_descent)) =
+                    line_equation_metrics_px(para, &line_tac_offsets_for_width, self.dpi)
+                {
+                    (line_height, baseline) = align_line_metrics_to_equation(
+                        line_height,
+                        baseline,
+                        max_fs,
+                        equation_ascent,
+                        equation_descent,
+                    );
+                }
             }
             // 들여쓰기/내어쓰기: 문단 여백은 무조건 적용
             // - 보통(ind=0): 모든 줄 margin_left
@@ -4183,6 +4481,8 @@ impl LayoutEngine {
             if missing_tac_width > 0.0 && total_text_width < total_tac_width_in_line {
                 total_text_width += missing_tac_width;
             }
+            total_text_width +=
+                tac_table_alignment_margin_width(para, &line_tac_offsets_for_width, self.dpi);
             let is_last_line_of_para = line_idx == end - 1 && end == composed.lines.len();
 
             // 정렬별 간격 분배 계산
@@ -5044,6 +5344,7 @@ impl LayoutEngine {
                 }
             }
             let mut text_style = resolved_to_text_style(styles, run.char_style_id, run.lang_index);
+            apply_covered_hancom_fallback(&mut text_style, effective_text_for_metrics(run));
             text_style.default_tab_width = tab_width;
             text_style.tab_stops = tab_stops.to_vec();
             text_style.auto_tab_right = auto_tab_right;
@@ -5707,11 +6008,12 @@ impl LayoutEngine {
                                     y + label_extra
                                 } else {
                                     // [#6575] 같은 계약의 형제 경로 — 상자 전체로 맞춘다.
-                                    let box_h =
-                                        tac_object_box_height_px(pic_h, &pic.caption, self.dpi);
+                                    let box_h = tac_picture_box_height_px(pic, self.dpi);
                                     (y + baseline - box_h).max(y)
                                 };
-                                let img_y = base_img_y + sibling_reserved_px;
+                                let img_y = base_img_y
+                                    + sibling_reserved_px
+                                    + tac_picture_top_inset_px(pic, self.dpi);
                                 let bin_data_id = pic.image_attr.bin_data_id;
                                 let image_data =
                                     find_bin_data(bdc, bin_data_id).map(|c| c.data.load_shared());
@@ -5731,6 +6033,7 @@ impl LayoutEngine {
                                 };
                                 let original_size_hu = pic.crop_reference_size();
                                 let image_x = x
+                                    + hwpunit_to_px(i32::from(pic.common.margin.left), self.dpi)
                                     + projected_cell_stack_picture_horizontal_offset_px(
                                         p, tac_ci, self.dpi,
                                     );
@@ -5746,7 +6049,12 @@ impl LayoutEngine {
                                     original_size_hu,
                                     bin_data_id,
                                     image_data,
-                                    BoundingBox::new(image_x, img_y, tac_w, pic_h),
+                                    BoundingBox::new(
+                                        image_x,
+                                        img_y,
+                                        hwpunit_to_px(pic.common.width as i32, self.dpi),
+                                        pic_h,
+                                    ),
                                 );
                                 line_node.children.push(img_node);
                                 // [Task #864 Stage G] inline TAC picture 의 위치 등록.
@@ -5819,7 +6127,11 @@ impl LayoutEngine {
                                     font_size_px,
                                     &eq.font_name,
                                 )
-                                .layout(&ast);
+                                .with_version(&eq.version_info)
+                                .layout_in_control_width(
+                                    &ast,
+                                    hwpunit_to_px(eq.common.width as i32, self.dpi),
+                                );
                             let color_str =
                                 crate::renderer::equation::svg_render::eq_color_to_svg(eq.color);
                             let svg_content =
@@ -5835,7 +6147,14 @@ impl LayoutEngine {
                             // 텍스트와 섞인 인라인 수식뿐 아니라 공백 run 안의 TAC 수식도
                             // baseline을 맞춘다. 수식 renderer는 bbox 높이로 세로 스케일하지
                             // 않으므로 y에 직접 붙이면 큰 루트/분수 수식이 아래 줄을 덮는다.
-                            let eq_y = y + baseline - layout_box.baseline;
+                            let eq_anchor = crate::renderer::equation::control_baseline_hwp(
+                                eq,
+                                layout_box.baseline * 7200.0 / self.dpi,
+                            ) * self.dpi
+                                / 7200.0;
+                            let eq_y = y + baseline - eq_anchor;
+                            let eq_x = x + hwpunit_to_px(eq.common.margin.left as i32, self.dpi);
+                            let eq_w = hwpunit_to_px(eq.common.width as i32, self.dpi);
                             let (eq_cell_idx, eq_cell_para_idx) = if let Some(ref ctx) = cell_ctx {
                                 (
                                     Some(ctx.path[0].cell_index),
@@ -5859,6 +6178,7 @@ impl LayoutEngine {
                                         color: eq.color,
                                         font_size: font_size_px,
                                         font_name: eq.font_name.clone(),
+                                        version_info: eq.version_info.clone(),
                                         section_index: note_ref
                                             .as_ref()
                                             .map(|r| r.section_index)
@@ -5876,10 +6196,11 @@ impl LayoutEngine {
                                         inner_control_index: cell_ctx.as_ref().map(|_| tac_ci),
                                         cell_index: eq_cell_idx,
                                         cell_para_index: eq_cell_para_idx,
+                                        cell_context: cell_ctx.clone(),
                                         note_ref,
                                     },
                                 ),
-                                BoundingBox::new(x, eq_y, tac_w, eq_h),
+                                BoundingBox::new(eq_x, eq_y, eq_w, eq_h),
                             );
                             line_node.children.push(eq_node);
                             // 인라인 좌표 등록 → shape_layout에서 이 수식을 스킵
@@ -5888,7 +6209,7 @@ impl LayoutEngine {
                                 para_index,
                                 tac_ci,
                                 cell_ctx.as_ref(),
-                                x,
+                                eq_x,
                                 eq_y,
                             );
                         }
@@ -6895,10 +7216,12 @@ impl LayoutEngine {
                                 vars.y + label_extra
                             } else {
                                 // [#6575] baseline 정렬 대상은 그림이 아니라 개체 상자 전체다.
-                                let box_h = tac_object_box_height_px(pic_h, &pic.caption, self.dpi);
+                                let box_h = tac_picture_box_height_px(pic, self.dpi);
                                 inline_picture_baseline_y(vars.y, vars.baseline, box_h)
                             };
-                            let img_y = base_img_y + sibling_reserved_px;
+                            let img_y = base_img_y
+                                + sibling_reserved_px
+                                + tac_picture_top_inset_px(pic, self.dpi);
                             let bin_data_id = pic.image_attr.bin_data_id;
                             let image_data =
                                 find_bin_data(bdc, bin_data_id).map(|c| c.data.load_shared());
@@ -6915,6 +7238,7 @@ impl LayoutEngine {
                             };
                             let original_size_hu = pic.crop_reference_size();
                             let image_x = img_x
+                                + hwpunit_to_px(i32::from(pic.common.margin.left), self.dpi)
                                 + projected_cell_stack_picture_horizontal_offset_px(
                                     p, tac_ci, self.dpi,
                                 );
@@ -6930,7 +7254,12 @@ impl LayoutEngine {
                                 original_size_hu,
                                 bin_data_id,
                                 image_data,
-                                BoundingBox::new(image_x, img_y, tac_w, pic_h),
+                                BoundingBox::new(
+                                    image_x,
+                                    img_y,
+                                    hwpunit_to_px(pic.common.width as i32, self.dpi),
+                                    pic_h,
+                                ),
                             );
                             line_node.children.push(img_node);
                             // [Task #418/#376] layout_shape_item 의 Task #347 분기 (빈 문단 +
@@ -7355,9 +7684,13 @@ pub(crate) fn collect_sibling_tac_picture_widths_px(
         .iter()
         .enumerate()
         .filter_map(|(ci, c)| match c {
-            Control::Picture(p) if p.common.treat_as_char => {
-                Some((ci, hwpunit_to_px(p.common.width as i32, dpi)))
-            }
+            Control::Picture(p) if p.common.treat_as_char => Some((
+                ci,
+                hwpunit_to_px(
+                    crate::renderer::composer::inline_picture_occupied_width_hu(p),
+                    dpi,
+                ),
+            )),
             _ => None,
         })
         .collect()
@@ -7569,7 +7902,14 @@ mod issue_2809_split_alignment_tests {
 
 #[cfg(test)]
 mod trailing_tac_width_tests {
-    use super::{empty_tac_host_before_text, tac_offsets_for_line, tac_offsets_for_line_width};
+    use super::{
+        empty_tac_host_before_text, hwpunit_to_px, tac_offsets_for_line,
+        tac_offsets_for_line_width, tac_table_alignment_margin_width,
+    };
+    use crate::model::control::Control;
+    use crate::model::paragraph::Paragraph;
+    use crate::model::shape::CommonObjAttr;
+    use crate::model::table::Table;
     use crate::renderer::composer::{ComposedLine, ComposedParagraph, ComposedTextRun};
 
     fn line(text: &str, char_start: usize, has_line_break: bool) -> ComposedLine {
@@ -7606,6 +7946,40 @@ mod trailing_tac_width_tests {
         let offsets = tac_offsets_for_line_width(&comp, &[(6, 574.08, 0)], 0);
 
         assert_eq!(offsets, vec![(6, 574.08, 0)]);
+    }
+
+    #[test]
+    fn centered_and_right_tac_table_use_both_outer_margins_in_slot_width() {
+        let table = Table {
+            common: CommonObjAttr {
+                width: 3_600,
+                treat_as_char: true,
+                ..Default::default()
+            },
+            outer_margin_left: 300,
+            outer_margin_right: 900,
+            ..Default::default()
+        };
+        let para = Paragraph {
+            controls: vec![Control::Table(Box::new(table))],
+            ..Default::default()
+        };
+        let content = hwpunit_to_px(3_600, 96.0);
+        let left = hwpunit_to_px(300, 96.0);
+        let right = hwpunit_to_px(900, 96.0);
+        let margin = tac_table_alignment_margin_width(Some(&para), &[(0, content, 0)], 96.0);
+        assert!((margin - left - right).abs() < 0.001);
+        let area_left = 100.0;
+        let area_width = 200.0;
+        let center_border_x = area_left + (area_width - content - margin) / 2.0 + left;
+        assert!(
+            (center_border_x + content / 2.0
+                - (area_left + area_width / 2.0 + (left - right) / 2.0))
+                .abs()
+                < 0.001
+        );
+        let right_border_x = area_left + area_width - content - margin + left;
+        assert!((right_border_x + content - (area_left + area_width - right)).abs() < 0.001);
     }
 
     #[test]
@@ -7655,6 +8029,137 @@ mod trailing_tac_width_tests {
         assert_eq!(empty_tac_host_before_text(&comp, 1), None);
         assert!(tac_offsets_for_line_width(&comp, &offsets, 0).is_empty());
         assert_eq!(tac_offsets_for_line_width(&comp, &offsets, 1), offsets);
+    }
+}
+
+#[cfg(test)]
+mod saved_native_cell_vpos_tests {
+    use super::*;
+    use crate::model::control::Equation;
+    use crate::renderer::layout::CellPathEntry;
+
+    fn saved_equation_cell_paragraph() -> (Paragraph, ComposedParagraph) {
+        let segments = [(19_607, 0), (21_207, 5)];
+        let para = Paragraph {
+            text: "firstsecond".into(),
+            char_count: 11,
+            line_segs: segments
+                .iter()
+                .map(|&(vertical_pos, text_start)| LineSeg {
+                    text_start,
+                    vertical_pos,
+                    line_height: 1_125,
+                    line_spacing: 600,
+                    baseline_distance: 950,
+                    segment_width: 30_000,
+                    ..Default::default()
+                })
+                .collect(),
+            controls: vec![Control::Equation(Box::new(Equation::default()))],
+            ..Default::default()
+        };
+        let composed = ComposedParagraph {
+            lines: ["first", "second"]
+                .iter()
+                .enumerate()
+                .map(|(index, text)| ComposedLine {
+                    runs: vec![ComposedTextRun {
+                        text: (*text).into(),
+                        ..Default::default()
+                    }],
+                    line_height: 1_125,
+                    baseline_distance: 950,
+                    segment_width: 30_000,
+                    column_start: 0,
+                    line_spacing: 600,
+                    has_line_break: false,
+                    char_start: if index == 0 { 0 } else { 5 },
+                })
+                .collect(),
+            para_style_id: 0,
+            inline_controls: Vec::new(),
+            numbering_text: None,
+            tac_controls: Vec::new(),
+            footnote_positions: Vec::new(),
+            tab_extended: Vec::new(),
+        };
+        (para, composed)
+    }
+
+    #[test]
+    fn native_cell_uses_saved_line_start_after_equation_and_resets_at_continuation() {
+        let (para, composed) = saved_equation_cell_paragraph();
+        let eng = LayoutEngine::new(96.0);
+        let cell_ctx = CellContext {
+            parent_para_index: 0,
+            path: vec![CellPathEntry {
+                control_index: 0,
+                cell_index: 0,
+                cell_para_index: 0,
+                text_direction: 0,
+            }],
+        };
+        let area = LayoutRect {
+            x: 0.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let line_ys = |start, end| {
+            let mut tree = PageRenderTree::new(0, 500.0, 500.0);
+            let mut parent = RenderNode::new(
+                tree.next_id(),
+                RenderNodeType::Body { clip_rect: None },
+                BoundingBox::new(0.0, 0.0, 400.0, 400.0),
+            );
+            eng.layout_composed_paragraph(
+                &mut tree,
+                &mut parent,
+                &composed,
+                &ResolvedStyleSet::default(),
+                &area,
+                100.0,
+                start,
+                end,
+                0,
+                0,
+                Some(cell_ctx.clone()),
+                false,
+                false,
+                0.0,
+                None,
+                Some(&para),
+                None,
+                None,
+            );
+            parent
+                .children
+                .iter()
+                .filter(|node| matches!(node.node_type, RenderNodeType::TextLine(_)))
+                .map(|node| node.bbox.y)
+                .collect::<Vec<_>>()
+        };
+        let full = line_ys(0, 2);
+        assert_eq!(full.len(), 2);
+        assert!((full[1] - full[0] - hwpunit_to_px(1_600, 96.0)).abs() < 0.01);
+        let continuation = line_ys(1, 2);
+        assert_eq!(continuation.len(), 1);
+        assert!((continuation[0] - 100.0).abs() < 0.01);
+        eng.profile.set(eng.profile.get().with_session_edited(true));
+        assert_eq!(
+            line_ys(0, 2),
+            full,
+            "editing another cell preserves saved line starts"
+        );
+
+        let mut reset = para.clone();
+        reset.line_segs[1].tag = LineSeg::TAG_FIRST_LINE_OF_PAGE;
+        assert!(
+            saved_native_cell_line_vpos_base(Some(&reset), &composed, 0, 2, true, 100.0).is_none()
+        );
+        assert!(
+            saved_native_cell_line_vpos_base(Some(&para), &composed, 0, 2, true, 100.0).is_some()
+        );
     }
 }
 

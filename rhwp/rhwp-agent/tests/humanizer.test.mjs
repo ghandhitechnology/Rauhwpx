@@ -59,7 +59,7 @@ test('promptContext 는 단계에 따라 규율을 켜고 끈다', async () => {
 
 test('승인된 계획 프롬프트도 규율을 함께 전달한다', () => {
   const state = new PlanningState({ workflow: 'plan', createPlanId: () => 'plan-1', now: () => '2026-01-01T00:00:00.000Z' });
-  state.present({ title: '보고서 초안' });
+  state.present({ title: '보고서 초안', steps: [{ title: '초안 작성', details: '보고서를 작성합니다.' }] });
   const approved = state.beginApproval({ planId: 'plan-1', sessionStatus: 'idle' });
   const prompt = buildApprovedPlanPrompt(approved.approvedPlan);
   assert.match(prompt, /<korean_writing_discipline>/);

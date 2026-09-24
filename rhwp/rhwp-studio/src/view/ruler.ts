@@ -27,7 +27,7 @@ interface RulerPalette {
 }
 
 function cssVar(name: string, fallback: string): string {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  return getComputedStyle(document.getElementById('editor-area') ?? document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
 export class Ruler {

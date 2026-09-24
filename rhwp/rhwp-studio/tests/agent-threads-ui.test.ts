@@ -39,7 +39,7 @@ test('reasoning and model tweaks do not lock or rebuild the composer', () => {
 
 test('writing-style calibration opens from a local slash command', () => {
   assert.match(source, /value: '\/calibration'[^\n]*local: 'calibration'/);
-  assert.match(source, /detail: '말투를 맞출까요\? 열기'/);
+  assert.match(source, /detail: '말투 맞추기'/);
   assert.doesNotMatch(source, /말투 모방/);
   assert.match(source, /option\.local === 'calibration'[^\n]*writingStyleCalibration\.open\(\)/);
   assert.match(source, /text === '\/calibration'[^\n]*writingStyleCalibration\.open\(\)/);

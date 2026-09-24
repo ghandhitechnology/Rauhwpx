@@ -114,3 +114,17 @@
 .nd-bullet-char {
   font-size: 18px;
 }
+
+.nd-tab-bar { gap: 3px; width: fit-content; padding: 3px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-surface-muted); }
+.nd-tab { min-height: 32px; padding: 6px 14px; border: 0; border-radius: 6px; background: transparent; color: var(--ui-text-secondary); font-weight: 600; }
+.nd-tab:hover { background: var(--ui-hover); color: var(--ui-text); }
+.nd-tab.active { margin: 0; border: 0; background: var(--ui-surface-raised); color: var(--ui-text); box-shadow: 0 1px 3px rgb(0 0 0 / 12%); }
+.nd-radio-label { min-height: 32px; padding: 4px 8px; }
+.nd-radio-label:hover { background: var(--ui-hover); }
+.nd-preview { min-height: 100px; padding: 12px; border-color: var(--ui-border); border-radius: 8px; background: var(--ui-surface-raised); color: var(--ui-text); }
+.nd-bullet-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.nd-bullet-cell { min-height: 44px; border-radius: 6px; border-color: var(--ui-border); background: var(--ui-surface-raised); }
+.nd-bullet-cell:hover { background: var(--ui-hover); }
+.nd-bullet-cell.selected { border-color: var(--ui-text); background: var(--ui-selected); box-shadow: inset 0 0 0 1px var(--ui-text); }
+.nd-body :is(button, input, select):focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+@media (max-width: 560px) { .nd-bottom-row { flex-direction: column; } .nd-start-section, .nd-preview-section { width: 100%; } }

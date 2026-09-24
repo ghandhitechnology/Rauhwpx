@@ -1,0 +1,29 @@
+/* The header and status bar use production markup and styles. Only the page is a fixture. */
+.preview-editor #studio-root { width: 100%; }
+.preview-editor #editor-area {
+  position: relative;
+  inset: auto;
+  pointer-events: auto;
+  display: block;
+  min-height: 0;
+}
+.preview-editor #scroll-container { width: 100%; height: 100%; padding: 32px 24px 72px; box-sizing: border-box; }
+.editor-fixture-page {
+  box-sizing: border-box;
+  width: min(720px, 100%);
+  min-height: 930px;
+  margin: 0 auto;
+  padding: 72px 74px;
+  background: var(--doc-paper);
+  box-shadow: var(--doc-paper-shadow);
+  color: #242424;
+  font: 15px/1.8 'Malgun Gothic', sans-serif;
+}
+.editor-fixture-label { color: #777; font: 10px/1.4 sans-serif; letter-spacing: .08em; }
+.editor-fixture-page h2 { margin: 48px 0 32px; text-align: center; font-size: 25px; }
+.editor-fixture-page h3 { margin: 42px 0 12px; font-size: 18px; }
+.editor-fixture-page p { margin: 0 0 20px; }
+@media (max-width: 720px) {
+  .preview-editor #scroll-container { padding: 18px 12px 40px; }
+  .editor-fixture-page { min-height: 760px; padding: 38px 32px; }
+}

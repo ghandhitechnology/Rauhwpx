@@ -10,9 +10,7 @@ interface CloudDashboardDeps {
   configuration: HTMLElement;
   refresh(): Promise<CloudSnapshot>;
   reconnect(): Promise<CloudSnapshot>;
-  configure(trigger: HTMLElement): void;
   openTask(task: Task): Promise<void>;
-  loginAccount?: () => Promise<{ authUrl: string } | null>;
   mutationLocked(): boolean;
 }
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text = '') {
@@ -49,7 +47,6 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     return node;
   }
   const refresh = button('새로고침', 'ag-cd-refresh', 'refresh');
-  const setup = button('연결 설정', 'ag-cd-setup');
   const settings = button('Cloud 설정', 'ag-cd-settings-toggle', 'gear');
   settings.setAttribute('aria-expanded', 'false');
   const feedback = el('p', 'ag-cd-feedback');
@@ -72,16 +69,16 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   usageHead.append(usageLabel, usageValue);
   usageTrack.append(usageFill);
   usage.append(usageHead, usageTrack);
-  const login = button('로그인', 'ag-cd-login');
-  const reconnect = button('다시 연결', 'ag-cd-reconnect');
-  configuration.append(login, reconnect, deps.configuration);
+  const reconnect = button('다시 연결', 'ag-settings-btn ag-cd-reconnect');
+  configuration.append(deps.configuration);
   const statusCard = deps.configuration.querySelector<HTMLElement>('.ag-cloud-settings-card');
+  statusCard?.querySelector('.ag-cloud-settings-actions')?.prepend(reconnect);
+  // 계정 줄은 설정 패널이 이 카드 안에 넣는다.
   (statusCard ?? configuration).append(usage);
   settings.hidden = true;
-  setup.addEventListener('click', () => deps.configure(setup));
-  toolbar.append(setup, settings, refresh);
-  header.append(toolbar);
-  content.append(header, feedback, reconnectProgress.element, configuration, chatList);
+  toolbar.append(settings, refresh);
+  header.append(el('h3', 'ag-settings-section-title', '작업'), toolbar);
+  content.append(feedback, reconnectProgress.element, configuration, header, chatList);
   element.append(content);
   function error(message: string) {
     feedback.textContent = message;
@@ -100,7 +97,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
       if (!disposed) snapshot = next;
     } catch {
       failed = true;
-      if (!disposed) error('연결을 확인해 주세요. 마지막으로 저장된 작업입니다.');
+      if (!disposed) error('연결 확인 필요 · 마지막 저장 기준');
     } finally {
       pending = false;
       if (kind === 'reconnect') reconnectProgress.settle(failed ? 'failed' : 'done');
@@ -109,22 +106,6 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   }
   refresh.addEventListener('click', () => void run('refresh'));
   reconnect.addEventListener('click', () => void run('reconnect'));
-  login.addEventListener('click', async () => {
-    if (!deps.loginAccount || pending || disposed) return;
-    pending = true;
-    render();
-    try {
-      const result = await deps.loginAccount();
-      if (disposed) return;
-      if (!result?.authUrl) throw new Error('로그인을 시작하지 못했습니다.');
-      window.open(result.authUrl, '_blank', 'noopener,noreferrer');
-      feedback.textContent = '브라우저에서 로그인을 마쳐 주세요.';
-      delete feedback.dataset.kind;
-      feedback.hidden = false;
-    } catch (cause) {
-      if (!disposed) error(cause instanceof Error ? cause.message : '로그인을 시작하지 못했습니다.');
-    } finally { pending = false; if (!disposed) render(); }
-  });
   function renderSessions() {
     if (!snapshot) return;
     const tasks = cloudDashboardSessions(snapshot);
@@ -134,11 +115,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
       const focusedId = chatList.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.sessionId : undefined;
       chatList.replaceChildren();
       if (!tasks.length) {
-        const empty = el('li', 'ag-cd-empty');
-        const icon = createIcon('cloud');
-        icon.setAttribute('aria-hidden', 'true');
-        empty.append(icon, el('p', '', '채팅에서 Cloud로 작업을 맡겨 보세요.'));
-        chatList.append(empty);
+        chatList.append(el('li', 'ag-cd-empty', 'Cloud 작업 없음'));
       }
       for (const task of tasks) {
         const row = el('li', 'ag-cd-chat');
@@ -178,12 +155,8 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     if (!snapshot) return;
     refresh.disabled = pending || !snapshot.available;
     refresh.setAttribute('aria-busy', String(pending));
-    setup.hidden = snapshot.profile.kind === 'configured' || !snapshot.available;
-    setup.disabled = pending || deps.mutationLocked();
     reconnect.hidden = snapshot.profile.kind !== 'configured' || inferCloudLink(snapshot).kind === 'ready';
     reconnect.disabled = pending || deps.mutationLocked();
-    login.hidden = snapshot.account?.signedIn === true || !deps.loginAccount;
-    login.disabled = pending;
     const allowance = snapshot.account?.signedIn ? snapshot.account.quota : null;
     if (!allowance || allowance.dailyLimitMs <= 0) {
       usage.hidden = true;

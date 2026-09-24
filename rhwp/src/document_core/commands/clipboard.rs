@@ -16,6 +16,24 @@ use crate::model::paragraph::{FieldRange, LineSeg, Paragraph};
 /// 약 2mm (1mm = 7200/25.4 ≈ 283.46 HWPUNIT). 한컴 정합은 작업지시자 시각 대조로 미세조정.
 const PASTE_CASCADE_STEP_HU: u32 = 567;
 
+/// 커서는 인라인 개체만 세지만 split_at은 떠 있는 개체도 한 슬롯으로 센다.
+fn clipboard_split_offset(paragraph: &Paragraph, logical_offset: usize) -> usize {
+    let (text_offset, _) = super::super::helpers::logical_to_text_offset(paragraph, logical_offset);
+    let positions = super::super::helpers::find_logical_control_positions(paragraph);
+    text_offset
+        + paragraph
+            .controls
+            .iter()
+            .enumerate()
+            .filter(|(index, control)| {
+                Paragraph::is_split_movable_control(control)
+                    && positions
+                        .get(*index)
+                        .is_some_and(|position| *position < logical_offset)
+            })
+            .count()
+}
+
 fn clipboard_paragraphs_contain_field(paragraphs: &[Paragraph]) -> bool {
     paragraphs.iter().any(|para| !para.field_ranges.is_empty())
 }
@@ -197,6 +215,32 @@ pub(super) fn clip_paragraph_text_range_for_clipboard(
     suffix
 }
 
+/// 텍스트 전용 필드 범위의 기존 의미를 유지하면서 인라인 개체 커서 슬롯을 처리한다.
+fn clip_paragraph_logical_range_for_clipboard(
+    source: &Paragraph,
+    start_offset: usize,
+    end_offset: usize,
+) -> Paragraph {
+    let length = super::super::helpers::logical_paragraph_length(source);
+    let start = start_offset.min(length);
+    let end = end_offset.min(length).max(start);
+    let (text_start, _) = super::super::helpers::logical_to_text_offset(source, start);
+    let (text_end, _) = super::super::helpers::logical_to_text_offset(source, end);
+    if start == text_start && end == text_end && end > 0 {
+        return clip_paragraph_text_range_for_clipboard(source, text_start, text_end);
+    }
+    let mut paragraph = source.clone();
+    if end < length || end == 0 {
+        let offset = clipboard_split_offset(&paragraph, end);
+        paragraph.split_at(offset);
+    }
+    if start > 0 {
+        let offset = clipboard_split_offset(&paragraph, start);
+        paragraph = paragraph.split_at(offset);
+    }
+    paragraph
+}
+
 fn collect_max_clipboard_field_id(para: &Paragraph, max_id: &mut u32) {
     for ctrl in &para.controls {
         match ctrl {
@@ -332,7 +376,7 @@ impl DocumentCore {
         }
 
         if start_para_idx == end_para_idx {
-            clip_paragraphs.push(clip_paragraph_text_range_for_clipboard(
+            clip_paragraphs.push(clip_paragraph_logical_range_for_clipboard(
                 &section.paragraphs[start_para_idx],
                 start_char_offset,
                 end_char_offset,
@@ -340,8 +384,9 @@ impl DocumentCore {
             return Ok(());
         }
 
-        let first_text_len = section.paragraphs[start_para_idx].text.chars().count();
-        clip_paragraphs.push(clip_paragraph_text_range_for_clipboard(
+        let first_text_len =
+            super::super::helpers::logical_paragraph_length(&section.paragraphs[start_para_idx]);
+        clip_paragraphs.push(clip_paragraph_logical_range_for_clipboard(
             &section.paragraphs[start_para_idx],
             start_char_offset,
             first_text_len,
@@ -349,7 +394,7 @@ impl DocumentCore {
         for para_idx in (start_para_idx + 1)..end_para_idx {
             clip_paragraphs.push(section.paragraphs[para_idx].clone());
         }
-        clip_paragraphs.push(clip_paragraph_text_range_for_clipboard(
+        clip_paragraphs.push(clip_paragraph_logical_range_for_clipboard(
             &section.paragraphs[end_para_idx],
             0,
             end_char_offset,
@@ -441,7 +486,7 @@ impl DocumentCore {
             let range_end_offset = if section_idx == end_section_idx {
                 end_char_offset
             } else {
-                section.paragraphs[range_end_para].text.chars().count()
+                super::super::helpers::logical_paragraph_length(&section.paragraphs[range_end_para])
             };
             self.append_body_range_to_clipboard(
                 &mut clip_paragraphs,
@@ -468,82 +513,81 @@ impl DocumentCore {
         end_cell_para_idx: usize,
         end_char_offset: usize,
     ) -> Result<String, HwpError> {
-        // 셀 문단 리스트 접근
-        let cell_paragraphs = {
-            let section =
-                self.document.sections.get(section_idx).ok_or_else(|| {
-                    HwpError::RenderError(format!("구역 {} 범위 초과", section_idx))
-                })?;
-            let para = section.paragraphs.get(parent_para_idx).ok_or_else(|| {
-                HwpError::RenderError(format!("문단 {} 범위 초과", parent_para_idx))
-            })?;
-            let table = match para.controls.get(control_idx) {
-                Some(Control::Table(t)) => t,
-                _ => return Err(HwpError::RenderError("표가 아님".to_string())),
-            };
-            let cell = table
-                .cells
-                .get(cell_idx)
-                .ok_or_else(|| HwpError::RenderError(format!("셀 {} 범위 초과", cell_idx)))?;
-            &cell.paragraphs
-        };
+        self.copy_selection_in_cell_by_path_native(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, cell_idx, start_cell_para_idx)],
+            start_cell_para_idx,
+            start_char_offset,
+            end_cell_para_idx,
+            end_char_offset,
+        )
+    }
 
-        if start_cell_para_idx >= cell_paragraphs.len()
-            || end_cell_para_idx >= cell_paragraphs.len()
+    fn cell_selection_paragraphs(
+        &self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        start_para_idx: usize,
+        start_offset: usize,
+        end_para_idx: usize,
+        end_offset: usize,
+    ) -> Result<Vec<Paragraph>, HwpError> {
+        if path.is_empty()
+            || start_para_idx > end_para_idx
+            || (start_para_idx == end_para_idx && start_offset > end_offset)
         {
             return Err(HwpError::RenderError(
-                "셀 문단 인덱스 범위 초과".to_string(),
+                "셀 선택 범위가 올바르지 않습니다".into(),
             ));
         }
-
-        let mut clip_paragraphs = Vec::new();
-
-        if start_cell_para_idx == end_cell_para_idx {
-            clip_paragraphs.push(clip_paragraph_text_range_for_clipboard(
-                &cell_paragraphs[start_cell_para_idx],
-                start_char_offset,
-                end_char_offset,
-            ));
-        } else {
-            let first_text_len = cell_paragraphs[start_cell_para_idx].text.chars().count();
-            clip_paragraphs.push(clip_paragraph_text_range_for_clipboard(
-                &cell_paragraphs[start_cell_para_idx],
-                start_char_offset,
-                first_text_len,
-            ));
-
-            for i in (start_cell_para_idx + 1)..end_cell_para_idx {
-                clip_paragraphs.push(cell_paragraphs[i].clone());
-            }
-
-            clip_paragraphs.push(clip_paragraph_text_range_for_clipboard(
-                &cell_paragraphs[end_cell_para_idx],
-                0,
-                end_char_offset,
-            ));
+        let mut selection_path = path.to_vec();
+        let last = selection_path.len() - 1;
+        let mut paragraphs = Vec::new();
+        for index in start_para_idx..=end_para_idx {
+            selection_path[last].2 = index;
+            let source =
+                self.resolve_control_para(section_idx, parent_para_idx, &selection_path)?;
+            let length = super::super::helpers::logical_paragraph_length(source);
+            let start = if index == start_para_idx {
+                start_offset.min(length)
+            } else {
+                0
+            };
+            let end = if index == end_para_idx {
+                end_offset.min(length)
+            } else {
+                length
+            };
+            let mut paragraph = clip_paragraph_logical_range_for_clipboard(source, start, end);
+            strip_structural_controls_for_text_clipboard(&mut paragraph);
+            paragraphs.push(paragraph);
         }
+        Ok(paragraphs)
+    }
 
-        for para in &mut clip_paragraphs {
-            strip_structural_controls_for_text_clipboard(para);
-        }
-
-        let plain_text: String = clip_paragraphs
-            .iter()
-            .map(|p| p.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let escaped = super::super::helpers::json_escape(&plain_text);
-
-        self.clipboard = Some(ClipboardData {
-            paragraphs: clip_paragraphs,
-            plain_text: plain_text.clone(),
-        });
-
-        Ok(super::super::helpers::json_ok_with(&format!(
-            "\"text\":\"{}\"",
-            escaped
-        )))
+    /// 중첩 셀 선택을 논리적 커서 오프셋으로 복사한다.
+    pub fn copy_selection_in_cell_by_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        start_para_idx: usize,
+        start_offset: usize,
+        end_para_idx: usize,
+        end_offset: usize,
+    ) -> Result<String, HwpError> {
+        let paragraphs = self.cell_selection_paragraphs(
+            section_idx,
+            parent_para_idx,
+            path,
+            start_para_idx,
+            start_offset,
+            end_para_idx,
+            end_offset,
+        )?;
+        Ok(self.store_body_clipboard(paragraphs))
     }
 
     /// 컨트롤 객체(표, 이미지, 도형)를 내부 클립보드에 복사한다.
@@ -679,22 +723,36 @@ impl DocumentCore {
 
         let clip_count = clip_paras.len();
 
-        if clip_count == 1 && clip_paras[0].controls.is_empty() {
+        if clip_count == 1
+            && clip_paras[0].controls.is_empty()
+            && clip_paras[0].range_tags.is_empty()
+            && clip_paras[0].tab_extended.is_empty()
+            && clip_paras[0].orphan_field_ends.is_empty()
+            && clip_paras[0].markpen_marks.is_empty()
+            && !self.document.sections[section_idx].paragraphs[para_idx]
+                .controls
+                .iter()
+                .any(Paragraph::is_split_movable_control)
+        {
             // 단일 문단 텍스트 붙여넣기 (컨트롤 없음)
             let clip_text = clip_paras[0].text.clone();
             let clip_char_shapes = clip_paras[0].char_shapes.clone();
             let clip_char_offsets = clip_paras[0].char_offsets.clone();
             let new_chars = clip_text.chars().count();
+            let (text_offset, _) = super::super::helpers::logical_to_text_offset(
+                &self.document.sections[section_idx].paragraphs[para_idx],
+                char_offset,
+            );
 
             // 텍스트 삽입
             self.document.sections[section_idx].paragraphs[para_idx]
-                .insert_text_at(char_offset, &clip_text);
+                .insert_text_at(text_offset, &clip_text);
 
             // 클립보드의 글자 모양 적용
             self.apply_clipboard_char_shapes(
                 section_idx,
                 para_idx,
-                char_offset,
+                text_offset,
                 &clip_char_shapes,
                 &clip_char_offsets,
                 new_chars,
@@ -734,8 +792,12 @@ impl DocumentCore {
 
         // 다중 문단 또는 컨트롤 포함 붙여넣기
         // 1. 현재 문단을 캐럿 위치에서 분할
+        let split_offset = clipboard_split_offset(
+            &self.document.sections[section_idx].paragraphs[para_idx],
+            char_offset,
+        );
         let right_half =
-            self.document.sections[section_idx].paragraphs[para_idx].split_at(char_offset);
+            self.document.sections[section_idx].paragraphs[para_idx].split_at(split_offset);
 
         // 2. 왼쪽 절반에 첫 번째 클립보드 문단 병합
         self.document.sections[section_idx].paragraphs[para_idx].merge_from(&clip_paras[0]);
@@ -751,8 +813,10 @@ impl DocumentCore {
 
         // 4. 마지막 삽입된 문단에 오른쪽 절반 병합
         let last_para_idx = insert_idx - 1;
-        let merge_point =
-            self.document.sections[section_idx].paragraphs[last_para_idx].merge_from(&right_half);
+        let merge_point = super::super::helpers::logical_paragraph_length(
+            &self.document.sections[section_idx].paragraphs[last_para_idx],
+        );
+        self.document.sections[section_idx].paragraphs[last_para_idx].merge_from(&right_half);
 
         for i in para_idx..=last_para_idx {
             if !self.document.sections[section_idx].paragraphs[i]
@@ -812,27 +876,8 @@ impl DocumentCore {
             )));
         }
 
-        let clip_count = clip_paras.len();
-        if clip_count == 1 && clip_paras[0].controls.is_empty() {
-            let clip_text = clip_paras[0].text.clone();
-            let new_chars = clip_text.chars().count();
-
-            cell_paras[cell_para_idx].insert_text_at(char_offset, &clip_text);
-
-            let clip_char_shapes = clip_paras[0].char_shapes.clone();
-            let clip_char_offsets = clip_paras[0].char_offsets.clone();
-            Self::apply_clipboard_char_shapes_to_para(
-                &mut cell_paras[cell_para_idx],
-                char_offset,
-                &clip_char_shapes,
-                &clip_char_offsets,
-                new_chars,
-            );
-
-            return Ok((cell_para_idx, char_offset + new_chars));
-        }
-
-        let right_half = cell_paras[cell_para_idx].split_at(char_offset);
+        let split_offset = clipboard_split_offset(&cell_paras[cell_para_idx], char_offset);
+        let right_half = cell_paras[cell_para_idx].split_at(split_offset);
         cell_paras[cell_para_idx].merge_from(&clip_paras[0]);
 
         let mut insert_idx = cell_para_idx + 1;
@@ -842,7 +887,24 @@ impl DocumentCore {
         }
 
         let last_para_idx = insert_idx - 1;
-        let merge_point = cell_paras[last_para_idx].merge_from(&right_half);
+        let merge_point =
+            super::super::helpers::logical_paragraph_length(&cell_paras[last_para_idx]);
+        cell_paras[last_para_idx].merge_from(&right_half);
+        // 복사 위치의 vpos가 셀의 저장된 쪽 경계로 해석되지 않도록 삽입 원점에 맞춘다.
+        let origin = cell_paras[cell_para_idx]
+            .line_segs
+            .first()
+            .map_or(0, |seg| seg.vertical_pos);
+        for paragraph in &mut cell_paras[cell_para_idx + 1..=last_para_idx] {
+            let delta = origin
+                - paragraph
+                    .line_segs
+                    .first()
+                    .map_or(0, |seg| seg.vertical_pos);
+            for segment in &mut paragraph.line_segs {
+                segment.vertical_pos += delta;
+            }
+        }
         for para in &mut cell_paras[cell_para_idx..=last_para_idx] {
             if !para.field_ranges.is_empty() {
                 rebuild_char_offsets(para);
@@ -861,78 +923,12 @@ impl DocumentCore {
         cell_para_idx: usize,
         char_offset: usize,
     ) -> Result<String, HwpError> {
-        let mut clip_paras = match &self.clipboard {
-            Some(c) if !c.paragraphs.is_empty() => c.paragraphs.clone(),
-            _ => return Ok("{\"ok\":false,\"error\":\"clipboard empty\"}".to_string()),
-        };
-        let contains_field = clipboard_paragraphs_contain_field(&clip_paras);
-        self.renumber_pasted_field_ids(&mut clip_paras);
-
-        let (last_para_idx, merge_point) = {
-            let section =
-                self.document.sections.get_mut(section_idx).ok_or_else(|| {
-                    HwpError::RenderError(format!("구역 {} 범위 초과", section_idx))
-                })?;
-            section.raw_stream = None;
-            let para = section.paragraphs.get_mut(parent_para_idx).ok_or_else(|| {
-                HwpError::RenderError(format!("문단 {} 범위 초과", parent_para_idx))
-            })?;
-            let control = para.controls.get_mut(control_idx).ok_or_else(|| {
-                HwpError::RenderError(format!("컨트롤 {} 범위 초과", control_idx))
-            })?;
-            let cell_paras = match control {
-                Control::Table(t) => {
-                    &mut t
-                        .cells
-                        .get_mut(cell_idx)
-                        .ok_or_else(|| HwpError::RenderError(format!("셀 {} 범위 초과", cell_idx)))?
-                        .paragraphs
-                }
-                Control::Shape(s) => {
-                    &mut super::super::helpers::get_textbox_from_shape_mut(s)
-                        .ok_or_else(|| HwpError::RenderError("글상자 없음".to_string()))?
-                        .paragraphs
-                }
-                Control::Picture(p) => {
-                    &mut p
-                        .caption
-                        .as_mut()
-                        .ok_or_else(|| HwpError::RenderError("캡션 없음".to_string()))?
-                        .paragraphs
-                }
-                _ => return Err(HwpError::RenderError("표/글상자/캡션이 아님".to_string())),
-            };
-            Self::paste_paragraphs_into_cell_paragraphs(
-                cell_paras,
-                cell_para_idx,
-                char_offset,
-                &clip_paras,
-            )?
-        };
-
-        for i in cell_para_idx..=last_para_idx {
-            self.reflow_cell_paragraph(section_idx, parent_para_idx, control_idx, cell_idx, i);
-        }
-        match self.document.sections[section_idx].paragraphs[parent_para_idx]
-            .controls
-            .get_mut(control_idx)
-        {
-            Some(Control::Table(t)) => {
-                t.dirty = true;
-            }
-            _ => {}
-        }
-        self.mark_section_dirty(section_idx);
-        self.paginate_if_needed();
-
-        self.event_log.push(DocumentEvent::ContentPasted {
-            section: section_idx,
-            para: parent_para_idx,
-        });
-        Ok(super::super::helpers::json_ok_with(&format!(
-            "\"cellParaIdx\":{},\"charOffset\":{},\"containsField\":{}",
-            last_para_idx, merge_point, contains_field
-        )))
+        self.paste_internal_in_cell_by_path_native(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, cell_idx, cell_para_idx)],
+            char_offset,
+        )
     }
 
     /// 내부 클립보드의 내용을 cellPath가 가리키는 중첩 표 셀에 붙여넣는다.
@@ -974,9 +970,19 @@ impl DocumentCore {
             self.reflow_cell_paragraph_by_path(section_idx, parent_para_idx, path, i);
         }
 
+        self.recalculate_cell_paragraph_vpos_by_path(
+            section_idx,
+            parent_para_idx,
+            path,
+            cell_para_idx,
+            Some(cell_para_idx + 1),
+        );
+
         let outer_ctrl = path[0].0;
         self.mark_cell_control_dirty(section_idx, parent_para_idx, outer_ctrl);
         self.document.sections[section_idx].raw_stream = None;
+        // 문단 삽입 후 기존 셀 포인터의 줄/문단 인덱스 캐시는 재사용할 수 없다.
+        self.layout_engine.clear_layout_caches();
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -1068,6 +1074,19 @@ impl DocumentCore {
                     .unwrap_or(false)
             })
             .unwrap_or(false)
+    }
+
+    /// 단독 표/그림/도형의 개체 전용 붙여넣기가 가능한지 확인한다.
+    pub fn clipboard_is_single_control_native(&self) -> bool {
+        self.clipboard.as_ref().is_some_and(|clipboard| {
+            clipboard.paragraphs.len() == 1
+                && clipboard.paragraphs[0].text.is_empty()
+                && clipboard.paragraphs[0].controls.len() == 1
+                && matches!(
+                    clipboard.paragraphs[0].controls[0],
+                    Control::Table(_) | Control::Picture(_) | Control::Shape(_)
+                )
+        })
     }
 
     /// 내부 클립보드의 컨트롤 객체를 캐럿 위치에 붙여넣는다 (본문).
@@ -1274,35 +1293,16 @@ impl DocumentCore {
         end_para_idx: usize,
         end_char_offset: usize,
     ) -> Result<String, HwpError> {
-        let section = self
-            .document
-            .sections
-            .get(section_idx)
-            .ok_or_else(|| HwpError::RenderError(format!("구역 {} 범위 초과", section_idx)))?;
-
-        if start_para_idx >= section.paragraphs.len() || end_para_idx >= section.paragraphs.len() {
-            return Err(HwpError::RenderError("문단 범위 초과".to_string()));
-        }
-
-        let mut html = String::from("<html><body>\n<!--StartFragment-->\n");
-
-        for pi in start_para_idx..=end_para_idx {
-            let para = &section.paragraphs[pi];
-            let start = if pi == start_para_idx {
-                Some(start_char_offset)
-            } else {
-                None
-            };
-            let end = if pi == end_para_idx {
-                Some(end_char_offset)
-            } else {
-                None
-            };
-            html.push_str(&self.paragraph_to_html(para, start, end));
-        }
-
-        html.push_str("<!--EndFragment-->\n</body></html>");
-        Ok(html)
+        let mut paragraphs = Vec::new();
+        self.append_body_range_to_clipboard(
+            &mut paragraphs,
+            section_idx,
+            start_para_idx,
+            start_char_offset,
+            end_para_idx,
+            end_char_offset,
+        )?;
+        Ok(self.clipboard_paragraphs_to_html(&paragraphs))
     }
 
     /// 여러 구역의 본문 선택을 하나의 HTML fragment로 문서 순서대로 내보낸다.
@@ -1321,7 +1321,7 @@ impl DocumentCore {
             ));
         }
 
-        let mut html = String::from("<html><body>\n<!--StartFragment-->\n");
+        let mut paragraphs = Vec::new();
         for section_idx in start_section_idx..=end_section_idx {
             let section =
                 self.document.sections.get(section_idx).ok_or_else(|| {
@@ -1346,16 +1346,26 @@ impl DocumentCore {
                     section_idx
                 )));
             }
-            for para_idx in range_start..=range_end {
-                let start = (section_idx == start_section_idx && para_idx == start_para_idx)
-                    .then_some(start_char_offset);
-                let end = (section_idx == end_section_idx && para_idx == end_para_idx)
-                    .then_some(end_char_offset);
-                html.push_str(&self.paragraph_to_html(&section.paragraphs[para_idx], start, end));
-            }
+            let start = if section_idx == start_section_idx {
+                start_char_offset
+            } else {
+                0
+            };
+            let end = if section_idx == end_section_idx {
+                end_char_offset
+            } else {
+                super::super::helpers::logical_paragraph_length(&section.paragraphs[range_end])
+            };
+            self.append_body_range_to_clipboard(
+                &mut paragraphs,
+                section_idx,
+                range_start,
+                start,
+                range_end,
+                end,
+            )?;
         }
-        html.push_str("<!--EndFragment-->\n</body></html>");
-        Ok(html)
+        Ok(self.clipboard_paragraphs_to_html(&paragraphs))
     }
 
     /// 선택 영역을 HTML 문자열로 변환한다 (셀 내부).
@@ -1370,46 +1380,53 @@ impl DocumentCore {
         end_cell_para_idx: usize,
         end_char_offset: usize,
     ) -> Result<String, HwpError> {
-        let section = self
-            .document
-            .sections
-            .get(section_idx)
-            .ok_or_else(|| HwpError::RenderError(format!("구역 {} 범위 초과", section_idx)))?;
-        let para = section
-            .paragraphs
-            .get(parent_para_idx)
-            .ok_or_else(|| HwpError::RenderError(format!("문단 {} 범위 초과", parent_para_idx)))?;
-        let table = match para.controls.get(control_idx) {
-            Some(Control::Table(t)) => t,
-            _ => return Err(HwpError::RenderError("표가 아님".to_string())),
-        };
-        let cell = table
-            .cells
-            .get(cell_idx)
-            .ok_or_else(|| HwpError::RenderError(format!("셀 {} 범위 초과", cell_idx)))?;
+        self.export_selection_in_cell_by_path_html_native(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, cell_idx, start_cell_para_idx)],
+            start_cell_para_idx,
+            start_char_offset,
+            end_cell_para_idx,
+            end_char_offset,
+        )
+    }
 
+    /// 중첩 셀 선택의 텍스트와 개체를 HTML로 내보낸다.
+    pub fn export_selection_in_cell_by_path_html_native(
+        &self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        start_para_idx: usize,
+        start_offset: usize,
+        end_para_idx: usize,
+        end_offset: usize,
+    ) -> Result<String, HwpError> {
+        let paragraphs = self.cell_selection_paragraphs(
+            section_idx,
+            parent_para_idx,
+            path,
+            start_para_idx,
+            start_offset,
+            end_para_idx,
+            end_offset,
+        )?;
+        Ok(self.clipboard_paragraphs_to_html(&paragraphs))
+    }
+
+    fn clipboard_paragraphs_to_html(&self, paragraphs: &[Paragraph]) -> String {
         let mut html = String::from("<html><body>\n<!--StartFragment-->\n");
-
-        for pi in start_cell_para_idx..=end_cell_para_idx {
-            if pi >= cell.paragraphs.len() {
-                break;
+        for paragraph in paragraphs {
+            html.push_str(&self.paragraph_to_html(paragraph, None, None));
+            for control in &paragraph.controls {
+                html.push_str(&self.control_to_html(control));
             }
-            let cpara = &cell.paragraphs[pi];
-            let start = if pi == start_cell_para_idx {
-                Some(start_char_offset)
-            } else {
-                None
-            };
-            let end = if pi == end_cell_para_idx {
-                Some(end_char_offset)
-            } else {
-                None
-            };
-            html.push_str(&self.paragraph_to_html(cpara, start, end));
+            if paragraph.text.is_empty() && paragraph.controls.is_empty() {
+                html.push_str("<p><br></p>\n");
+            }
         }
-
         html.push_str("<!--EndFragment-->\n</body></html>");
-        Ok(html)
+        html
     }
 
     /// 컨트롤 객체를 HTML 문자열로 변환한다.
@@ -1991,6 +2008,370 @@ mod nested_cell_paste_reflow_tests {
     use crate::model::page::PageDef;
     use crate::model::paragraph::{CharShapeRef, Paragraph};
     use crate::model::table::{Cell, Table};
+
+    #[test]
+    fn cell_paste_preserves_inline_anchor_and_text_metadata() {
+        use crate::model::paragraph::RangeTag;
+        let mut table = Table::default();
+        table.common.treat_as_char = true;
+        let mut paragraphs = vec![Paragraph {
+            text: "AB".into(),
+            char_offsets: vec![0, 9],
+            char_count: 11,
+            controls: vec![Control::Table(Box::new(table))],
+            ..Default::default()
+        }];
+        let pasted = Paragraph {
+            text: "X\tY".into(),
+            char_offsets: vec![0, 1, 9],
+            char_count: 11,
+            range_tags: vec![RangeTag {
+                start: 0,
+                end: 1,
+                tag: 42,
+            }],
+            tab_extended: vec![[7; 7]],
+            ..Default::default()
+        };
+        let (_, offset) =
+            DocumentCore::paste_paragraphs_into_cell_paragraphs(&mut paragraphs, 0, 2, &[pasted])
+                .unwrap();
+        assert_eq!(paragraphs[0].text, "AX\tYB");
+        assert_eq!(paragraphs[0].controls.len(), 1);
+        assert_eq!(paragraphs[0].tab_extended, vec![[7; 7]]);
+        assert_eq!(paragraphs[0].range_tags.len(), 1);
+        assert_eq!(offset, 5);
+    }
+
+    fn text_paragraph(text: &str) -> Paragraph {
+        let mut paragraph = Paragraph::new_empty();
+        paragraph.insert_text_at(0, text);
+        paragraph
+    }
+
+    #[test]
+    fn body_paste_uses_logical_offsets_and_retains_rich_text_metadata() {
+        use crate::model::control::Equation;
+        use crate::model::paragraph::RangeTag;
+        for variant in 0..3 {
+            let mut core = DocumentCore::new_empty();
+            core.create_blank_document_native().unwrap();
+            let mut equation = Equation {
+                script: "x".into(),
+                ..Default::default()
+            };
+            equation.common.treat_as_char = true;
+            core.document.sections[0].paragraphs[0] = Paragraph {
+                text: "AB".into(),
+                char_offsets: vec![0, 9],
+                char_count: 11,
+                controls: vec![Control::Equation(Box::new(equation))],
+                ..text_paragraph("AB")
+            };
+            let mut first = text_paragraph(if variant == 1 { "X\tY" } else { "X" });
+            if variant == 1 {
+                first.range_tags = vec![RangeTag {
+                    start: 0,
+                    end: 1,
+                    tag: 42,
+                }];
+                first.tab_extended = vec![[7; 7]];
+            }
+            let mut paragraphs = vec![first];
+            if variant == 2 {
+                paragraphs.push(text_paragraph("Y"));
+            }
+            core.clipboard = Some(ClipboardData {
+                paragraphs,
+                plain_text: String::new(),
+            });
+            let result: serde_json::Value =
+                serde_json::from_str(&core.paste_internal_native(0, 0, 2).unwrap()).unwrap();
+            let paragraphs = &core.document.sections[0].paragraphs;
+            assert_eq!(paragraphs[0].controls.len(), 1);
+            assert_eq!(paragraphs[0].control_text_positions(), vec![1]);
+            match variant {
+                0 => {
+                    assert_eq!(paragraphs[0].text, "AXB");
+                    assert_eq!(result["charOffset"], 3);
+                }
+                1 => {
+                    assert_eq!(paragraphs[0].text, "AX\tYB");
+                    assert_eq!(paragraphs[0].range_tags.len(), 1);
+                    assert_eq!(paragraphs[0].tab_extended, vec![[7; 7]]);
+                    assert_eq!(result["charOffset"], 5);
+                }
+                _ => {
+                    assert_eq!(paragraphs[0].text, "AX");
+                    assert_eq!(paragraphs[1].text, "YB");
+                    assert_eq!(result["charOffset"], 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn body_copy_after_inline_equation_uses_cursor_offsets() {
+        use crate::model::control::Equation;
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+        let mut equation = Equation {
+            script: "x".into(),
+            ..Default::default()
+        };
+        equation.common.treat_as_char = true;
+        core.document.sections[0].paragraphs[0] = Paragraph {
+            text: "BODY".into(),
+            char_offsets: vec![0, 1, 10, 11],
+            char_count: 13,
+            controls: vec![Control::Equation(Box::new(equation))],
+            ..text_paragraph("BODY")
+        };
+        core.copy_selection_native(0, 0, 3, 0, 5).unwrap();
+        assert_eq!(core.get_clipboard_text_native(), "DY");
+        assert!(core.clipboard.as_ref().unwrap().paragraphs[0]
+            .controls
+            .is_empty());
+        let html = core.export_selection_html_native(0, 0, 3, 0, 5).unwrap();
+        assert!(html.contains("DY"));
+    }
+
+    #[test]
+    fn copied_equation_uses_inline_body_paste() {
+        use crate::model::control::Equation;
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+        let mut equation = Equation {
+            script: "x".into(),
+            ..Default::default()
+        };
+        equation.common.treat_as_char = true;
+        core.document.sections[0].paragraphs[0] = Paragraph {
+            text: "BODY".into(),
+            char_offsets: vec![0, 1, 10, 11],
+            char_count: 13,
+            controls: vec![Control::Equation(Box::new(equation))],
+            ..text_paragraph("BODY")
+        };
+        core.copy_control_native(0, 0, &[], 0).unwrap();
+        assert!(!core.clipboard_is_single_control_native());
+        core.paste_internal_native(0, 0, 2).unwrap();
+        assert_eq!(core.document.sections[0].paragraphs.len(), 1);
+        assert_eq!(core.document.sections[0].paragraphs[0].text, "BODY");
+        assert_eq!(core.document.sections[0].paragraphs[0].controls.len(), 2);
+    }
+
+    #[test]
+    fn nested_cell_selection_paste_preserves_surrounding_paragraphs_and_table() {
+        let (mut core, path) = core_with_nested_narrow_empty_cell();
+        *core.get_cell_paragraphs_mut_by_path(0, 0, &path).unwrap() =
+            ["before", "first", "second", "third", "after"]
+                .map(text_paragraph)
+                .to_vec();
+        core.copy_selection_in_cell_by_path_native(0, 0, &path, 1, 0, 3, 5)
+            .unwrap();
+        assert_eq!(core.get_clipboard_text_native(), "first\nsecond\nthird");
+        assert!(!core.clipboard_has_control_native());
+        let html = core
+            .export_selection_in_cell_by_path_html_native(0, 0, &path, 1, 0, 3, 5)
+            .unwrap();
+        assert!(html.contains("second"));
+        assert!(!html.contains("before"));
+        assert!(!html.contains("<table"));
+        core.paste_internal_in_cell_by_path_native(0, 0, &path, 2)
+            .unwrap();
+        let paragraphs = core.get_cell_paragraphs_mut_by_path(0, 0, &path).unwrap();
+        assert_eq!(
+            paragraphs
+                .iter()
+                .map(|para| para.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "befirst",
+                "second",
+                "thirdfore",
+                "first",
+                "second",
+                "third",
+                "after"
+            ]
+        );
+        for pair in paragraphs.windows(2) {
+            let end = pair[0].line_segs.last().unwrap();
+            assert!(pair[1].line_segs[0].vertical_pos >= end.vertical_pos + end.line_height);
+        }
+        assert_eq!(core.document.sections[0].paragraphs.len(), 1);
+        assert_eq!(core.document.sections[0].paragraphs[0].controls.len(), 1);
+    }
+
+    #[test]
+    fn nested_cell_copy_uses_inline_object_boundaries() {
+        let (mut core, path) = core_with_nested_narrow_empty_cell();
+        let mut table = Table::default();
+        table.common.treat_as_char = true;
+        let paragraph = &mut core.get_cell_paragraphs_mut_by_path(0, 0, &path).unwrap()[0];
+        *paragraph = Paragraph {
+            text: "AB".into(),
+            char_offsets: vec![0, 9],
+            char_count: 11,
+            controls: vec![Control::Table(Box::new(table))],
+            ..Default::default()
+        };
+        core.copy_selection_in_cell_by_path_native(0, 0, &path, 0, 2, 0, 3)
+            .unwrap();
+        assert_eq!(core.get_clipboard_text_native(), "B");
+        assert!(!core.clipboard_has_control_native());
+        core.copy_selection_in_cell_by_path_native(0, 0, &path, 0, 1, 0, 2)
+            .unwrap();
+        assert_eq!(core.get_clipboard_text_native(), "");
+        assert!(core.clipboard_has_control_native());
+        let html = core
+            .export_selection_in_cell_by_path_html_native(0, 0, &path, 0, 1, 0, 2)
+            .unwrap();
+        assert!(html.contains("<table"));
+    }
+
+    #[test]
+    fn nested_cell_mixed_clipboard_preserves_equations_images_and_suffix() {
+        use crate::model::bin_data::BinDataContent;
+        use crate::model::control::Equation;
+        use crate::model::image::Picture;
+        let (mut core, mut path) = core_with_nested_narrow_empty_cell();
+        let mut equation = Equation {
+            script: "x^2 + y^2".into(),
+            ..Default::default()
+        };
+        equation.common.treat_as_char = true;
+        let mut picture = Picture::default();
+        picture.common.treat_as_char = true;
+        picture.image_attr.bin_data_id = 1;
+        let image_bytes = vec![1, 2, 3, 4];
+        core.document.bin_data_content.push(BinDataContent {
+            id: 1,
+            extension: "png".into(),
+            data: image_bytes.clone().into(),
+        });
+        *core.get_cell_paragraphs_mut_by_path(0, 0, &path).unwrap() = vec![
+            Paragraph {
+                text: "ABC".into(),
+                char_offsets: vec![0, 9, 18],
+                char_count: 20,
+                controls: vec![
+                    Control::Equation(Box::new(equation)),
+                    Control::Picture(Box::new(picture)),
+                ],
+                ctrl_data_records: vec![Some(vec![5]), Some(vec![6])],
+                char_shapes: vec![CharShapeRef {
+                    start_pos: 0,
+                    char_shape_id: 3,
+                }],
+                ..Default::default()
+            },
+            text_paragraph("tail"),
+        ];
+        core.copy_selection_in_cell_by_path_native(0, 0, &path, 0, 0, 0, 5)
+            .unwrap();
+        assert!(core.clipboard_has_control_native());
+        assert!(!core.clipboard_is_single_control_native());
+        path.last_mut().unwrap().2 = 1;
+        core.paste_internal_in_cell_by_path_native(0, 0, &path, 2)
+            .unwrap();
+        let paragraph = &core.get_cell_paragraphs_mut_by_path(0, 0, &path).unwrap()[1];
+        assert_eq!(paragraph.text, "taABCil");
+        assert_eq!(
+            paragraph.ctrl_data_records,
+            vec![Some(vec![5]), Some(vec![6])]
+        );
+        assert_eq!(paragraph.control_text_positions(), vec![3, 4]);
+        assert_eq!(paragraph.char_shape_id_at(2), Some(3));
+        assert!(
+            matches!(&paragraph.controls[0], Control::Equation(eq) if eq.script == "x^2 + y^2")
+        );
+        assert!(
+            matches!(&paragraph.controls[1], Control::Picture(pic) if pic.image_attr.bin_data_id == 1)
+        );
+        assert_eq!(core.get_bin_data_image_data_native(1).unwrap(), image_bytes);
+
+        core.copy_control_native(0, 0, &path, 1).unwrap();
+        assert!(core.clipboard_is_single_control_native());
+        core.copy_selection_in_cell_by_path_native(0, 0, &path, 0, 0, 1, 7)
+            .unwrap();
+        assert!(!core.clipboard_is_single_control_native());
+        let before = format!("{:?}", core.document.sections);
+        assert!(core
+            .paste_internal_in_cell_by_path_native(0, 0, &[(999, 0, 0)], 0)
+            .is_err());
+        assert_eq!(format!("{:?}", core.document.sections), before);
+    }
+
+    #[test]
+    fn cell_paste_invalidates_cached_wrapped_line_ranges() {
+        fn rendered_text(core: &DocumentCore) -> String {
+            fn walk(value: &serde_json::Value, text: &mut String) {
+                if value["type"].as_str() == Some("textRun") {
+                    text.push_str(value["text"].as_str().unwrap_or_default());
+                }
+                if let Some(object) = value.as_object() {
+                    for child in object.values() {
+                        walk(child, text);
+                    }
+                } else if let Some(array) = value.as_array() {
+                    for child in array {
+                        walk(child, text);
+                    }
+                }
+            }
+            let mut text = String::new();
+            for page in 0..core.page_count() {
+                walk(
+                    &serde_json::from_str(&core.get_page_layer_tree_native(page).unwrap()).unwrap(),
+                    &mut text,
+                );
+            }
+            text
+        }
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+        let result: serde_json::Value = serde_json::from_str(
+            &core
+                .create_table_ex_native(0, 0, 0, 1, 1, false, None, None)
+                .unwrap(),
+        )
+        .unwrap();
+        let parent = result["paraIdx"].as_u64().unwrap() as usize;
+        let control = result["controlIdx"].as_u64().unwrap() as usize;
+        let path = [(control, 0, 0)];
+        let content = "abcdefghijklmnopqrstuvwxyz".repeat(5);
+        *core
+            .get_cell_paragraphs_mut_by_path(0, parent, &path)
+            .unwrap() = (0..35).map(|_| text_paragraph(&content)).collect();
+        if let Control::Table(table) =
+            &mut core.document.sections[0].paragraphs[parent].controls[control]
+        {
+            table.page_break = crate::model::table::TablePageBreak::RowBreak;
+            table.cells[0].width = 7200;
+        }
+        for index in 0..35 {
+            core.reflow_cell_paragraph_by_path(0, parent, &path, index);
+        }
+        core.recalculate_cell_paragraph_vpos_by_path(0, parent, &path, 0, None);
+        core.mark_cell_control_dirty(0, parent, control);
+        core.mark_section_dirty(0);
+        core.paginate_if_needed();
+        let before = rendered_text(&core);
+        assert!(before.contains("abcdefghijklmnopqrstuvwxyz"));
+        core.copy_selection_in_cell_by_path_native(0, parent, &path, 0, 0, 1, content.len())
+            .unwrap();
+        core.paste_internal_in_cell_by_path_native(0, parent, &path, 0)
+            .unwrap();
+        let after = rendered_text(&core);
+        assert_eq!(
+            after.chars().filter(|ch| ch.is_ascii_lowercase()).count(),
+            before.chars().filter(|ch| ch.is_ascii_lowercase()).count() + content.len() * 2
+        );
+        core.invalidate_page_tree_cache();
+        assert_eq!(rendered_text(&core), after);
+    }
 
     /// 바깥 표(셀 폭 5000, 넉넉함) 문단 안에 안쪽 표(셀 폭 200, 좁음)를 중첩시키고,
     /// 안쪽 셀에는 빈 문단 하나만 둔다. path 는 [(outer,0,0),(inner,0,0)].

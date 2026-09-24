@@ -11,6 +11,8 @@ import type { EventBus } from '../core/event-bus.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
+import type { CellPathEntry, CharShapeRun } from '../core/types.ts';
+import type { CatalogAgent, ModelCatalogEntry } from './models.ts';
 
 export const AGENT_PROTOCOL_VERSION = 5;
 
@@ -175,9 +177,29 @@ export interface AgentInstructionsDraft {
 }
 
 export interface StructuredPlanStep {
+  id?: string;
   title: string;
   details: string;
+  target?: string;
+  preview?: string;
   files?: string[];
+}
+
+export interface PlanSource {
+  title: string;
+  url?: string;
+  fileId?: string;
+  chunkId?: string;
+  note?: string;
+}
+
+export interface PlanExecution {
+  status: 'running' | 'awaiting-review' | 'completed' | 'blocked' | 'interrupted';
+  steps: Array<{
+    stepId: string;
+    status: 'pending' | 'in-progress' | 'completed' | 'blocked';
+    note?: string;
+  }>;
 }
 
 /** Server-authored plan. Its epoch is descriptive; capabilityEpoch is the write authority. */
@@ -195,6 +217,12 @@ export interface StructuredPlan {
   exclusions: string[];
   createdAt: string;
   epoch: number;
+  revision?: number;
+  previousPlanId?: string;
+  changeSummary?: string;
+  documentRevision?: number;
+  sources?: PlanSource[];
+  execution?: PlanExecution;
 }
 
 export interface AgentWorkflowState {
@@ -237,6 +265,7 @@ export function isStructuredPlan(value: unknown): value is StructuredPlan {
       const item = step as Record<string, unknown>;
       return typeof item['title'] === 'string'
         && typeof item['details'] === 'string'
+        && ['id', 'target', 'preview'].every((key) => item[key] === undefined || typeof item[key] === 'string')
         && (item['files'] === undefined || isStringArray(item['files']));
     })
     && isStringArray(plan['files'])
@@ -246,7 +275,34 @@ export function isStructuredPlan(value: unknown): value is StructuredPlan {
     && typeof plan['createdAt'] === 'string'
     && typeof plan['epoch'] === 'number'
     && Number.isSafeInteger(plan['epoch'])
-    && plan['epoch'] >= 0;
+    && plan['epoch'] >= 0
+    && ['previousPlanId', 'changeSummary'].every((key) => plan[key] === undefined || typeof plan[key] === 'string')
+    && (plan['revision'] === undefined || (Number.isSafeInteger(plan['revision']) && Number(plan['revision']) > 0))
+    && (plan['documentRevision'] === undefined || (Number.isSafeInteger(plan['documentRevision']) && Number(plan['documentRevision']) >= 0))
+    && (plan['sources'] === undefined || (Array.isArray(plan['sources']) && plan['sources'].every((source: unknown) => {
+      if (!source || typeof source !== 'object' || Array.isArray(source)) return false;
+      const item = source as Record<string, unknown>;
+      return typeof item['title'] === 'string'
+        && ['url', 'fileId', 'chunkId', 'note'].every((key) => item[key] === undefined || typeof item[key] === 'string');
+    })))
+    && (plan['execution'] === undefined || isPlanExecution(plan['execution'], plan['steps'] as StructuredPlanStep[]));
+}
+
+function isPlanExecution(value: unknown, steps: StructuredPlanStep[]): value is PlanExecution {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const execution = value as Record<string, unknown>;
+  const ids = new Set(steps.map((step, index) => step.id ?? `step-${index + 1}`));
+  if (typeof execution['status'] !== 'string'
+    || !['running', 'awaiting-review', 'completed', 'blocked', 'interrupted'].includes(execution['status'])
+    || !Array.isArray(execution['steps']) || execution['steps'].length !== steps.length) return false;
+  return execution['steps'].every((step: unknown) => {
+    if (!step || typeof step !== 'object' || Array.isArray(step)) return false;
+    const item = step as Record<string, unknown>;
+    if (typeof item['stepId'] !== 'string' || !ids.delete(item['stepId'])) return false;
+    return typeof item['status'] === 'string'
+      && ['pending', 'in-progress', 'completed', 'blocked'].includes(item['status'])
+      && (item['note'] === undefined || typeof item['note'] === 'string');
+  });
 }
 
 export interface WritingStyleStatus {
@@ -808,6 +864,7 @@ export type SidebarEvent =
   | ({ type: 'plan-approved'; planId: string } & AgentWorkflowState)
   | ({ type: 'plan-invalidated'; planId: string | null; reason?: string } & AgentWorkflowState)
   | ({ type: 'implementation-started'; planId: string } & AgentWorkflowState)
+  | ({ type: 'plan-progress'; planId: string } & AgentWorkflowState)
   | { type: 'planning-document-saved'; revision: number }
   | { type: 'skills-catalog'; catalog: SkillCatalog }
   | { type: 'harness-list-result'; requestId: string; rows: HarnessSkillRow[] }
@@ -819,6 +876,8 @@ export type SidebarEvent =
   | { type: 'writing-style-error'; requestId: string; code: string; message: string }
   | { type: 'writing-style-catalog'; requestId: string; catalog: WritingStyleCatalog }
   | { type: 'provider-status'; providers: ProviderStatusMap }
+  | { type: 'model-catalog'; agent: CatalogAgent; requestId: string; models: ModelCatalogEntry[] }
+  | { type: 'model-catalog-error'; agent: CatalogAgent; requestId: string; code: string; message: string }
   | { type: 'agent-setup-status'; statuses: AgentSetupStatusMap }
   | {
       type: 'agent-setup-progress';
@@ -906,18 +965,24 @@ export interface DocPoint {
 }
 
 /**
- * 표 셀 주소 (최상위 표만 — 중첩 표는 Phase-1 범위 밖).
+ * 표 셀 주소. path 는 중첩 표 셀의 최외곽 표부터 대상 셀까지의 경로다.
  * paraIdx = 표 컨트롤을 담은 본문 문단, cellIdx = flat 셀 인덱스.
  */
 export interface CellAddr {
   paraIdx: number;
   controlIdx: number;
   cellIdx: number;
+  path?: CellPathEntry[];
 }
 
 export function sameCell(a: CellAddr | undefined, b: CellAddr | undefined): boolean {
   if (!a || !b) return !a && !b;
-  return a.paraIdx === b.paraIdx && a.controlIdx === b.controlIdx && a.cellIdx === b.cellIdx;
+  if (a.paraIdx !== b.paraIdx || a.controlIdx !== b.controlIdx || a.cellIdx !== b.cellIdx) return false;
+  if (!a.path || !b.path) return !a.path && !b.path;
+  return a.path.length === b.path.length && a.path.every((entry, index) =>
+    entry.controlIndex === b.path![index].controlIndex
+    && entry.cellIndex === b.path![index].cellIndex
+    && (index === a.path!.length - 1 || entry.cellParaIndex === b.path![index].cellParaIndex));
 }
 
 export interface DocRange {
@@ -1003,6 +1068,7 @@ export type ObjectOp =
       /** 존재하면 paraIdx 는 이 셀 내부 문단 인덱스, anchor.controlIdx 는 셀 문단 내 수식 인덱스 */
       cell?: CellAddr;
       script: string; fontSizeHu: number; colorRef: number;
+      previewSvg?: string;
       anchor?: ObjectAnchor;
     }
   | {
@@ -1223,6 +1289,8 @@ export type PendingOp =
       deletedText: string;
       /** 원본 시작 지점 글자 모양 id (삽입 서식 + 폴백 되돌림용) */
       charShapeId: number | null;
+      /** Original runs in scalar offsets relative to deletedText, including newlines. */
+      charShapeRuns?: CharShapeRun[];
       /** 원본 문단별 paraShapeId (폴백 되돌림용, -1 = 캡처 실패) */
       paraShapeIds: number[];
       /** 변이 직전 스냅샷 — 되돌림 시 원본을 정확히 복원하는 소스 */
@@ -1232,6 +1300,8 @@ export type PendingOp =
        * 다르면 스냅샷 복원이 그 사용자 편집을 지우므로 역연산 폴백을 쓴다.
        */
       userEditSeqAtSnapshot?: number;
+      /** A different set settled after this whole-document snapshot. */
+      settledSetSeqAtSnapshot?: number;
       seq?: number;
     } // applied
   | {
@@ -1249,7 +1319,9 @@ export type PendingOp =
       kind: 'field'; id: string; agent: AgentName; name: string; oldValue: string; newValue: string;
       seq?: number;
     } // applied
-  | { kind: 'object'; id: string; agent: AgentName; obj: ObjectOp; seq?: number }; // applied 여부는 isObjectOpApplied(obj)
+  | { kind: 'object'; id: string; agent: AgentName; obj: ObjectOp; seq?: number;
+      snapshotId?: number | null; userEditSeqAtSnapshot?: number;
+      settledSetSeqAtSnapshot?: number }; // applied 여부는 isObjectOpApplied(obj)
 
 export type ChangeSetStatus = 'open' | 'awaiting-review';
 
@@ -1266,4 +1338,4 @@ export type PendingEditsChangeEvent =
   | { type: 'set-finalized'; changeSetId: string }
   | { type: 'approved'; changeSetId: string }
   | { type: 'rejected'; changeSetId: string }
-  | { type: 'invalidated'; reason: string };
+  | { type: 'invalidated'; reason: string; changeSetId?: string; droppedOpIds?: string[] };

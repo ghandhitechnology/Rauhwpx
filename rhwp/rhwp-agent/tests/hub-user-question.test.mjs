@@ -115,7 +115,7 @@ async function closeClient(client) {
   await closed;
 }
 
-function prepareFakePi(root) {
+function prepareFakePi(root, fixtureSource = ALIVE_PI_FIXTURE_SOURCE) {
   const packageDir = path.join(root, 'prefix', 'node_modules', '@earendil-works', 'pi-coding-agent');
   const binDir = path.join(root, 'prefix', 'node_modules', '.bin');
   mkdirSync(packageDir, { recursive: true });
@@ -136,13 +136,22 @@ function prepareFakePi(root) {
   writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({
     providers: { openrouter: { apiKey: 'test-placeholder-key' } },
   }));
-  writeFakeCliBin(binDir, 'pi', ALIVE_PI_FIXTURE_SOURCE);
+  writeFakeCliBin(binDir, 'pi', fixtureSource);
 }
 
-async function startHub(t, { fakePi = false } = {}) {
+async function startHub(t, { fakePi = false, controlledCompletion = false } = {}) {
   const workRoot = mkdtempSync(path.join(os.tmpdir(), 'rhwp-hub-user-question-'));
   const piRoot = path.join(workRoot, 'pi');
-  if (fakePi) prepareFakePi(piRoot);
+  const completePi = path.join(workRoot, 'complete-pi');
+  if (fakePi) prepareFakePi(piRoot, controlledCompletion ? `
+    if (process.argv.includes('--version')) { console.log('0.0.0-test'); process.exit(0); }
+    const timer = setInterval(() => {
+      if (!require('node:fs').existsSync(${JSON.stringify(completePi)})) return;
+      clearInterval(timer);
+      require('node:fs').unlinkSync(${JSON.stringify(completePi)});
+      console.log(JSON.stringify({ type: 'agent_settled' }));
+    }, 20);
+  ` : ALIVE_PI_FIXTURE_SOURCE);
   const testPath = process.env.PATH;
   const child = spawn(process.execPath, ['server.mjs'], {
     cwd: new URL('..', import.meta.url),
@@ -170,6 +179,7 @@ async function startHub(t, { fakePi = false } = {}) {
   const ready = JSON.parse(readyLine.slice('RHWP_HUB_READY '.length));
   return {
     port: ready.port,
+    completePi: () => writeFileSync(completePi, ''),
     stderr: () => stderr,
   };
 }
@@ -241,7 +251,7 @@ test('an explicit unknown workflow is rejected instead of opening Direct mode', 
   assert.match(error.message, /Unknown workflow: surprise-mode/);
 });
 
-test('a standalone implementation command follows the same Plan approval transition', { timeout: 40_000 }, async (t) => {
+test('plan discussion retains review, revisions check freshness, and execution reports real progress', { timeout: 40_000 }, async (t) => {
   const { port } = await startHub(t, { fakePi: true });
   const sessionId = 'typed-plan-approval';
   const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=${sessionId}&instance=page-1`);
@@ -302,17 +312,124 @@ test('a standalone implementation command follows the same Plan approval transit
   );
 
   sendFrame(studio, {
+    type: 'chat-user-message', threadId: started.threadId, documentId: started.documentId,
+    text: 'Why did you choose this approach?',
+  });
+  await studio.next((frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-start');
+  const discussion = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=pi&role=chat`);
+  t.after(() => closeClient(discussion));
+  sendFrame(discussion, { type: 'tool-call', id: 32, tool: 'get_structure', args: {}, workflow: 'plan', capabilityEpoch: ready.capabilityEpoch });
+  const read = await studio.next((frame) => frame.type === 'tool-request' && frame.tool === 'get_structure');
+  assert.equal(read.phase, 'awaiting-approval', 'ordinary discussion must preserve the reviewable plan');
+  sendFrame(studio, { type: 'tool-response', id: read.id, ok: true, result: { revision: 4, paragraphs: [] } });
+  assert.equal((await discussion.next((frame) => frame.type === 'tool-result' && frame.id === 32)).ok, true);
+  sendFrame(discussion, { type: 'tool-call', id: 33, tool: 'present_implementation_plan', args: {
+    ...implementationPlanArgs(), changeSummary: 'Clarified the document target.',
+    sources: [{ title: 'Attached research', fileId: 'reference-1', chunkId: 'chunk-2' }],
+  }, workflow: 'plan', capabilityEpoch: ready.capabilityEpoch });
+  const revised = await studio.next((frame) => frame.type === 'plan-ready' && frame.planId !== ready.planId);
+  assert.equal(revised.plan.revision, 2);
+  assert.equal(revised.plan.previousPlanId, ready.planId);
+  assert.equal(revised.plan.documentRevision, 4);
+  assert.equal(revised.plan.sources[0].chunkId, 'chunk-2');
+  assert.equal((await discussion.next((frame) => frame.type === 'tool-result' && frame.id === 33)).ok, true);
+  sendFrame(studio, { type: 'chat-interrupt' });
+  await studio.next((frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-end');
+  sendFrame(studio, { type: 'plan-approve', planId: revised.planId, documentRevision: 5 });
+  await studio.next((frame) => frame.type === 'chat-error' && frame.code === 'STALE_PLAN_DOCUMENT');
+
+  sendFrame(studio, {
     type: 'chat-user-message',
     threadId: started.threadId,
     documentId: started.documentId,
     text: 'implement the plan',
+    documentRevision: 4,
   });
   const approved = await studio.next((frame) => frame.type === 'plan-approved');
   const implementing = await studio.next((frame) => frame.type === 'implementation-started');
-  assert.equal(approved.planId, ready.planId);
+  assert.equal(approved.planId, revised.planId);
   assert.equal(approved.phase, 'switching');
-  assert.equal(implementing.planId, ready.planId);
+  assert.equal(implementing.planId, revised.planId);
   assert.equal(implementing.phase, 'implementing');
+  assert.equal(implementing.latestPlan.execution.steps[0].status, 'pending');
+  const turn = await studio.next((frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-start');
+  const executor = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=pi&role=chat`);
+  t.after(() => closeClient(executor));
+  sendFrame(executor, { type: 'tool-call', id: 34, tool: 'update_plan_progress', args: {
+    planId: revised.planId, stepId: 'step-1', status: 'in-progress', note: 'Checking the target paragraph.',
+  }, workflow: 'plan', capabilityEpoch: implementing.capabilityEpoch });
+  const progress = await studio.next((frame) => frame.type === 'plan-progress' && frame.latestPlan?.execution?.steps[0]?.status === 'in-progress');
+  assert.equal(progress.latestPlan.execution.status, 'running');
+  assert.equal((await executor.next((frame) => frame.type === 'tool-result' && frame.id === 34)).ok, true);
+  sendFrame(studio, { type: 'chat-interrupt' });
+  await studio.next((frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-end');
+  await studio.next((frame) => frame.type === 'plan-progress' && frame.latestPlan?.execution?.status === 'interrupted');
+  sendFrame(studio, { type: 'chat-plan-execution-result', planId: revised.planId, turnId: turn.event.turnId, status: 'completed' });
+  await studio.next((frame) => frame.type === 'chat-error' && frame.code === 'PLAN_EXECUTION_FAILED');
+});
+
+test('reconnect restores plan progress and prior review rejection survives a queued follow-up', { timeout: 40_000 }, async (t) => {
+  const { port, completePi } = await startHub(t, { fakePi: true, controlledCompletion: true });
+  const studioUrl = `ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=plan-reconnect&instance=plan-page`;
+  const mcpUrl = `ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=plan-reconnect&agent=pi&role=chat`;
+  const studio = await openClient(studioUrl);
+  await studio.next((frame) => frame.type === 'welcome');
+  sendFrame(studio, { type: 'chat-start', agent: 'pi', workflow: 'plan', threadId: 'plan-thread', documentId: 'plan-doc' });
+  const started = await studio.next((frame) => frame.type === 'chat-started');
+  sendFrame(studio, { type: 'chat-user-message', text: 'Draft the plan.', threadId: 'plan-thread', documentId: 'plan-doc' });
+  await studio.next((frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-start');
+  const planner = await openClient(mcpUrl);
+  t.after(() => closeClient(planner));
+  sendFrame(planner, { type: 'tool-call', id: 1, tool: 'present_implementation_plan', args: implementationPlanArgs(),
+    workflow: 'plan', capabilityEpoch: started.capabilityEpoch });
+  const ready = await studio.next((frame) => frame.type === 'plan-ready');
+  await planner.next((frame) => frame.type === 'tool-result' && frame.id === 1);
+  sendFrame(studio, { type: 'chat-interrupt' });
+  await studio.next((frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-end');
+  sendFrame(studio, { type: 'plan-approve', planId: ready.planId });
+  const implementing = await studio.next((frame) => frame.type === 'implementation-started');
+  await studio.next((frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-start');
+  const executor = await openClient(mcpUrl);
+  t.after(() => closeClient(executor));
+  await closeClient(studio);
+  sendFrame(executor, { type: 'tool-call', id: 2, tool: 'update_plan_progress',
+    args: { planId: ready.planId, stepId: 'step-1', status: 'completed' },
+    workflow: 'plan', capabilityEpoch: implementing.capabilityEpoch });
+  assert.equal((await executor.next((frame) => frame.type === 'tool-result' && frame.id === 2)).ok, true);
+  const settled = once(executor.socket, 'close');
+  completePi();
+  await settled;
+
+  const reconnected = await openClient(studioUrl);
+  t.after(() => closeClient(reconnected));
+  const frames = [];
+  do { frames.push(await reconnected.next(() => true)); } while (frames.at(-1).type !== 'welcome');
+  const progressIndex = frames.findIndex((frame) => frame.type === 'plan-progress');
+  const endIndex = frames.findIndex((frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-end');
+  assert.ok(progressIndex >= 0 && endIndex > progressIndex, 'authoritative progress must precede terminal replay');
+  assert.equal(frames[progressIndex].latestPlan.execution.status, 'awaiting-review');
+  assert.equal(frames[progressIndex].latestPlan.execution.steps[0].status, 'completed');
+  assert.equal(frames[endIndex].event.stopReason, 'completed');
+  const reviewedTurnId = frames[endIndex].event.turnId;
+  sendFrame(reconnected, { type: 'chat-plan-execution-result', planId: ready.planId,
+    turnId: reviewedTurnId, status: 'awaiting-review' });
+  await reconnected.next((frame) => frame.type === 'plan-progress' && frame.latestPlan.execution.status === 'awaiting-review');
+
+  // Studio's editing lease remains idle until turn-start. A user can reject
+  // the previous turn's edits just after dispatching this follow-up message.
+  sendFrame(reconnected, { type: 'chat-user-message', text: 'Explain the changes.', threadId: 'plan-thread', documentId: 'plan-doc' });
+  sendFrame(reconnected, { type: 'chat-plan-execution-result', planId: ready.planId,
+    turnId: reviewedTurnId, status: 'blocked' });
+  const blocked = await reconnected.next((frame) => frame.type === 'plan-progress' && frame.latestPlan.execution.status === 'blocked');
+  assert.equal(blocked.latestPlan.execution.steps[0].status, 'pending');
+  const followup = await reconnected.next((frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-start');
+  completePi();
+  await reconnected.next((frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-end');
+  const followupResult = await reconnected.next((frame) => frame.type === 'plan-progress' && frame.latestPlan.execution.status === 'blocked');
+  assert.equal(followupResult.latestPlan.execution.steps[0].status, 'pending', 'discussion cannot restore rolled-back work');
+  sendFrame(reconnected, { type: 'chat-plan-execution-result', planId: ready.planId,
+    turnId: followup.event.turnId, status: 'completed' });
+  await reconnected.next((frame) => frame.type === 'chat-error' && frame.code === 'PLAN_EXECUTION_FAILED');
 });
 
 test('direct MCP questions survive Studio reload and settle atomically', { timeout: 40_000 }, async (t) => {

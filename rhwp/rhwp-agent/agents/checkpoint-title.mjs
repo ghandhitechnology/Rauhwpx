@@ -176,6 +176,7 @@ export function buildCheckpointTitlePrompt(input) {
 
 export function buildCheckpointTitleCliSpec(provider, {
   command,
+  model,
   promptFilePath,
   sessionId = crypto.randomUUID(),
 } = {}) {
@@ -191,7 +192,7 @@ export function buildCheckpointTitleCliSpec(provider, {
         '--disable', 'skill_search', '--disable', 'shell_tool', '--disable', 'unified_exec',
         '--disable', 'code_mode_host', '--disable', 'standalone_web_search',
         '--disable', 'view_image', '--disable', 'shell_snapshot', '--sandbox', 'read-only',
-        '-m', 'gpt-5.6-luna', '-c', 'model_reasoning_effort="low"', '-',
+        '-m', model ?? 'gpt-6-luna', '-c', 'model_reasoning_effort="low"', '-',
       ],
       stdin: true,
     };
@@ -412,6 +413,7 @@ async function prepareCliWorkspace(provider, prompt, deps) {
       tempRoot,
       spec: buildCheckpointTitleCliSpec(provider, {
         command: deps.commands?.[provider],
+        model: deps.cliModel ?? deps.readiness?.[provider]?.model,
         promptFilePath,
       }),
       env: isolatedProcessEnv(
@@ -604,6 +606,13 @@ export async function generateCheckpointTitle(raw, deps = {}) {
     if (deps.signal?.aborted) break;
     const route = deps.readiness?.[provider];
     if (route?.ready !== true || typeof route.model !== 'string' || !route.model) continue;
+    if (overallDeadline - Date.now() <= 0) break;
+    let model = route.model;
+    if (provider === 'codex' && deps.resolveCodexTitleModel) {
+      try { model = await deps.resolveCodexTitleModel(); }
+      catch { continue; }
+      if (!model || deps.signal?.aborted) continue;
+    }
     const remaining = overallDeadline - Date.now();
     if (remaining <= 0) break;
     const timeoutMs = Math.max(1, Math.min(providerTimeoutMs, remaining));
@@ -611,11 +620,11 @@ export async function generateCheckpointTitle(raw, deps = {}) {
     try {
       output = await runTimedProvider(
         provider,
-        route.model,
+        model,
         prompt,
         timeoutMs,
         overallDeadline,
-        deps,
+        { ...deps, cliModel: model },
       );
     } catch (error) {
       if (error?.processCleanupUncertain === true) return null;
@@ -628,7 +637,7 @@ export async function generateCheckpointTitle(raw, deps = {}) {
       titleRevision: input.titleRevision,
       title,
       provider,
-      model: route.model,
+      model,
     };
   }
   return null;

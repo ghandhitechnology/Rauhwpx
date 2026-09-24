@@ -73,7 +73,7 @@ test('헤더에 설정(기어) 버튼이 있다', () => {
   assert.match(source, /settingsBtn\.setAttribute\('aria-label', '설정'\)/);
   assert.match(source, /settingsBtn\.setAttribute\('aria-controls', 'ag-settings-panel'\)/);
   assert.match(source, /settingsBtn\.appendChild\(createIcon\('gear'\)\)/);
-  assert.match(source, /headerActions\.append\(versionsBtn, threadsBtn, settingsBtn\)/);
+  assert.match(source, /headerActions\.append\(connDot, takeoverBtn, agentUndoBtn, versionsBtn, threadsBtn, settingsBtn\)/);
   assert.match(icons, /gear: 'M/);
   assert.match(icons, /refresh: 'M/);
 });
@@ -149,7 +149,12 @@ test('설정은 편집·AI·스킬 목적지와 업무별 묶음을 갖는다', 
   assert.match(settings, /\{ id: 'editing', label: '편집' \}/);
   assert.match(settings, /\{ id: 'ai', label: 'AI' \}/);
   assert.match(settings, /\{ id: 'skills', label: '스킬' \}/);
-  assert.match(settings, /aiContent\.prepend\(connectionContent\)/);
+  // 중요한 설정부터: 기본값 → 연결 → 사용량 → 모델 → 지시 → 보정 → 템플릿 → 고급.
+  assert.match(
+    settings,
+    /aiContent\.append\(\s*defaults\.root,\s*connection\.root,\s*quotaSection\.root,\s*modelCatalogSection\.root,\s*instructionsSection\.root,\s*calibration\.root,\s*templatesSection\.root,\s*advanced,\s*aiFooter,\s*\)/,
+  );
+  assert.match(settings, /advanced\.append\(advancedSummary, browserbaseSection\.root, gitSection\.root\)/);
   assert.match(source, /composerUtilityActions\.append\(phaseBadge, permissionBtn\)/);
   assert.match(source, /skillsSettings: skillsShelf\.root/);
   assert.doesNotMatch(settings, /'product'/);
@@ -185,14 +190,14 @@ test('저장 설정은 짧은 라벨만 보이고 PDF 안내는 기본값을 쓴
   ]) {
     assert.doesNotMatch(editingSettings, new RegExp(removedCopy));
   }
-  assert.match(settings, /채팅에서는 \/templates로 선택하세요\./);
+  assert.match(settings, /'채팅에서 \/templates로 선택'/);
   assert.doesNotMatch(settings, /HWP\/HWPX 파일을 기기 전체 템플릿으로 보관합니다/);
 });
 
 test('한컴용 Git 토글은 기본 이력과 Git 버전 관리 진입을 전환한다', () => {
   assert.match(settings, /createToggleRow\('한컴용 Git 사용하기'\)/);
   assert.match(settings, /userSettings\.setUseHancomGit\(hancomGit\.input\.checked\)/);
-  assert.match(settings, /instructionsSection\.body\.append\([\s\S]*hancomGit\.root/);
+  assert.match(settings, /const gitSection = createSection\('Git'\);[\s\S]*?gitSection\.body\.append\(hancomGit\.root\)/);
   assert.match(editingSettings, /userSettings\.tryApplyEditorScalarSettings\(next\)/);
   assert.match(editingSettings, /next\.versionControl\.useHancomGit = userSettings\.getUseHancomGit\(\)/);
   assert.match(settingsCss, /\.ag-settings-toggle-input:checked \+ \.ag-settings-toggle-track/);
@@ -214,17 +219,14 @@ test('사이드바 버전 버튼은 한컴 Git 설정을 따르고 상단 메뉴
 });
 
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {
-  assert.match(
-    settings,
-    /aiContent\.append\(defaults\.root, calibration\.root, instructionsSection\.root, templatesSection\.root, aiFooter\)/,
-  );
+  assert.match(settings, /templatesSection\.body\.append\(templatesList, templatesStatus, templatesFooter/);
   assert.doesNotMatch(editingSettings, /documentResources/);
   assert.match(settings, /requestTemplateName\('템플릿 추가'/);
   assert.match(settings, /bridge\.addTemplate\(file, name\)/);
   assert.match(settings, /bridge\.renameTemplate\(id, name\)/);
   assert.doesNotMatch(settings, /window\.prompt/);
   assert.match(settings, /bridge\.replaceTemplate\(id, file\)/);
-  assert.match(settings, /window\.confirm\(`“\$\{template\.name\}” 템플릿을 삭제할까요\?`\)/);
+  assert.match(settings, /await confirmSheet\(remove, `“\$\{template\.name\}” 삭제`, undefined, \{ confirmLabel: '삭제', destructive: true \}\)/);
   assert.match(settings, /bridge\.deleteTemplate\(id\)/);
 });
 
@@ -240,7 +242,7 @@ test('연결 묶음은 허브 재연결과 상태 새로고침을 제공하고 �
   assert.doesNotMatch(settings, /reconnectSession\(\)/);
   // 접힌 행에는 계정을, 펼친 행에는 오류 사유를 표시한다.
   assert.match(settings, /label = identity \|\| '연결됨'/);
-  assert.match(settings, /message = setup\?\.error \|\| health\?\.error \|\| '연결 상태를 확인해 주세요\.'/);
+  assert.match(settings, /message = setup\?\.error \|\| health\?\.error \|\| '연결 상태 확인 필요'/);
   assert.match(settingsCss, /\.ag-settings-dot\[data-state='connected'\]/);
 });
 
@@ -261,11 +263,13 @@ test('Rauhwpx 계정은 Cloud와 분리된 일반 브릿지와 설정 카드로 
   assert.match(bridgeSource, /cancelAccountLogin\(authRunId: string\): void/);
   assert.match(bridgeSource, /logoutAccount\(\): Promise<AccountSessionStatus \| null>/);
   assert.match(bridgeSource, /function readAccountSessionStatus\([\s\S]+account: signedIn[\s\S]+email:/);
-  assert.match(accountCard, /createSection\('Rauhwpx 계정'\)/);
+  assert.match(accountCard, /'Rauhwpx 계정'/);
   assert.match(accountCard, /'로그인'/);
   assert.match(accountCard, /'로그인 취소'/);
   assert.doesNotMatch(accountCard, /cloud|quota|allowance|크레딧|한도/i);
-  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, quotaSection\.root, browserbaseSection\.root, usageSection\.root\)/);
+  // 계정 줄은 AI 연결이 아니라 Cloud 서버 카드 안에 선다.
+  assert.match(settings, /connection\.body\.append\(providerList, hubRow\)/);
+  assert.match(settings, /const accountNodes = \[accountRow, accountLoginBox, accountError\]/);
   assert.match(settings, /bridge\.requestAccountStatus\(\)/);
   assert.match(settings, /bridge\.loginAccount\(\)/);
   assert.match(settings, /bridge\.cancelAccountLogin\(accountAuthRunId\)/);
@@ -298,7 +302,7 @@ test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에
   assert.match(settings, /setSetupInstallProgress\(ev\.percent, ev\.phase \?\? ev\.state\)/);
   assert.match(settings, /setPiInstallProgress\(ev\.percent, ev\.state/);
   assert.match(settings, /INSTALL_PROGRESS_CEILING/);
-  assert.match(settingsCss, /transition: width 480ms cubic-bezier/);
+  assert.match(settingsCss, /transition: width var\(--ag-dur-slow\) var\(--ag-ease-out\)/);
 });
 
 test('브라우저 로그인은 인증 주소와 기기 코드를 카드 안에 직접 그린다', () => {
@@ -328,8 +332,8 @@ test('브라우저 로그인은 인증 주소와 기기 코드를 카드 안에 
   // 기기 코드와 안내 문구.
   assert.match(settings, /const setupUserCodeValue = el\('strong', 'ag-agent-login-code-value'\)/);
   assert.match(settings, /if \(setupUserCode\) setupUserCodeValue\.textContent = setupUserCode/);
-  assert.match(settings, /'브라우저에서 이 코드를 확인해 주세요\.'/);
-  assert.match(settings, /'브라우저에서 로그인을 마치면 자동으로 완료돼요\.'/);
+  assert.match(settings, /'브라우저에서 이 코드를 확인합니다\.'/);
+  assert.match(settings, /'브라우저에서 로그인하면 자동으로 완료됩니다\.'/);
   assert.match(settingsCss, /\.ag-agent-login-code-value \{[\s\S]*user-select: all/);
   // 로그인이 도는 동안 취소 버튼이 함께 선다.
   assert.match(settings, /el\('button', 'ag-settings-btn ag-agent-login-cancel', '로그인 취소'\)/);
@@ -379,7 +383,7 @@ test('AI 기본 설정은 Apply 전까지 초안이고 성공 후 사이드바�
   assert.match(settings, /const result = trySaveAgentPrefs\(nextPrefs\)/);
   assert.match(settings, /applyDefaults\(result\.value\)/);
   assert.match(settings, /aiStatus\.textContent = 'AI 설정을 적용했습니다\.'/);
-  assert.match(settings, /nextPrefs\.defaultPermissionProfile === 'unrestricted'[\s\S]*window\.confirm\(UNRESTRICTED_DEFAULT_WARNING\)/);
+  assert.match(settings, /nextPrefs\.defaultPermissionProfile === 'unrestricted'[\s\S]*confirmSheet\(aiStatus, '기본값을 전체 접근으로', UNRESTRICTED_DEFAULT_WARNING/);
   assert.match(settings, /saveAgentInstructions\(\)[\s\S]*persistPrefs\(nextPrefs\)/);
   assert.match(settings, /agentField\.select\.disabled = aiPrefsSaving/);
   assert.match(settings, /modelField\.select\.disabled = aiPrefsSaving/);
@@ -402,20 +406,14 @@ test('사이드바는 저장된 기본값으로 시작하고 새 대화에 적�
 });
 
 test('글쓰기 보정 상태와 진입 버튼', () => {
-  assert.match(settings, /'아직 보정되지 않았어요'/);
+  assert.match(settings, /'보정 전'/);
   assert.match(settings, /const parts = \['보정됨', language, `문서 \$\{writingStyle\.sourceCount\}개`\]/);
   assert.match(settings, /calibrationStatus\.textContent = parts\.join\(' \/ '\)/);
   assert.match(settings, /문서 \$\{writingStyle\.sourceCount\}개/);
-  assert.match(settings, /el\('button', 'ag-settings-primary', '보정 시작'\)/);
+  assert.match(settings, /el\('button', 'ag-settings-btn', '보정 시작'\)/);
   assert.match(settings, /calibrationBtn\.textContent = '다시 보정'/);
   assert.match(settings, /openCalibration\(\)/);
   assert.match(source, /openCalibration: \(\) => writingStyleCalibration\.open\(\)/);
-});
-
-test('Pi 모델 목록은 검색 결과 수와 선택 한도를 표시한다', () => {
-  assert.match(settings, /piCatalogNote\.textContent = `\$\{matches\.length\}개 · 최대 \$\{PI_MODEL_MAX\}개`/);
-  assert.match(settings, /piCatalogNote\.textContent = `\$\{matches\.length\}개 중 \$\{visible\.length\}개`/);
-  assert.doesNotMatch(settings, /검색으로 좁혀 보세요/);
 });
 
 test('구독 한도는 직접 조회하고 로컬 토큰 기록과 분리한다', () => {
@@ -555,7 +553,7 @@ test('설정 목록은 Claude 가 맨 앞이고 공통 테두리를 갖는다', 
   assert.match(settings, /setupKeyBox\.hidden = true/);
   assert.match(settings, /로그아웃/);
   assert.match(source, /function rauCreditsEmpty\(\): boolean/);
-  assert.match(source, /체험 크레딧이 다 됐어요\. 다른 모델을 연결해 주세요\./);
+  assert.match(source, /체험 크레딧 소진 · 다른 모델 연결/);
   assert.match(source, /case 'usage-report':\s*\n\s*lastUsage = e\.usage/);
   assert.match(source, /if \(!rauSetupComplete && lastUsage\?\.rau\)/);
   assert.match(source, /selectedAgent === 'rau' && !rauSetupComplete/);
@@ -568,7 +566,7 @@ test('설정 목록은 Claude 가 맨 앞이고 공통 테두리를 갖는다', 
 test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대를 함께 보여 준다', () => {
   assert.match(settings, /setupAccountTitle = el\('h3', 'ag-agent-setup-section-title', '로그인된 계정'\)/);
   assert.match(settings, /accountStatus\?\.account\?\.email \?\? '로그인됨'/);
-  assert.match(settings, /체험 크레딧을 다 썼어요\. 다른 모델을 연결해 주세요\./);
+  assert.match(settings, /체험 크레딧 소진 · 다른 모델 연결/);
   assert.doesNotMatch(settings, /연결된 키 \*\*\*\*/);
   assert.match(settings, /renderUsage\(\): void \{\s*\n\s*quotaCards.render\(usage\);\s*\n\s*renderPiUsage\(\);/);
   assert.match(settingsCss, /\.ag-agent-setup-account \{[\s\S]*?border-radius: 12px/);
@@ -578,7 +576,7 @@ test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대
 test('Rau 재설정은 압축 동작만 두고 OAuth 완료를 잠깐 알린다', () => {
   assert.match(settings, /type RauAuthFeedback = 'idle' \| 'success'/);
   assert.match(settings, /'로그인이 완료되었습니다'/);
-  assert.match(settings, /'계정을 확인하고 계속하세요\.'/);
+  assert.match(settings, /'계정 확인 후 계속'/);
   assert.match(settings, /setupDoneClose\.textContent = agent === 'rau' && rauAuthFeedback === 'success' \? '계속' : '완료'/);
   // 로컬 Rau OAuth가 진행 중이고 완료 상태가 도착한 경우에만 성공 피드백을 시작한다.
   assert.match(
@@ -645,14 +643,14 @@ test('OpenCode 설정은 허브의 터미널 로그인 지원 여부를 따르�
   assert.match(settings, /case 'agent-setup-terminal':[\s\S]*if \(setupAuthRunId && ev\.authRunId !== setupAuthRunId\) break;/);
 });
 
-test('원격 브라우저 구역은 사용량 아래 서고, 키는 앱 수명 동안만 허브를 덮는다', () => {
+test('원격 브라우저 구역은 고급 묶음에 서고, 키는 앱 수명 동안만 허브를 덮는다', () => {
   const bridge = readSource('../src/agent/bridge.ts');
   assert.match(settings, /createSection\('원격 브라우저'\)/);
-  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, quotaSection\.root, browserbaseSection\.root, usageSection\.root\)/);
+  assert.match(settings, /advanced\.append\(advancedSummary, browserbaseSection\.root, gitSection\.root\)/);
   // 키 칸은 비밀번호 칸이고 자동완성에 걸리지 않는다.
   assert.match(settings, /createTextField\('Browserbase 키', \{\s*type: 'password',\s*placeholder: 'bb_live_…',\s*autocomplete: 'new-password',\s*\}\)/);
   assert.match(settings, /createTextField\('Gemini 키', \{\s*type: 'password',\s*placeholder: 'AIza…',\s*autocomplete: 'new-password',\s*\}\)/);
-  assert.match(settings, /createTextField\('프로젝트 ID', \{ placeholder: '비우면 계정에서 골라요' \}\)/);
+  assert.match(settings, /createTextField\('프로젝트 ID', \{ placeholder: '비우면 자동 선택' \}\)/);
   // 적용은 허브 검증을 거치고, 성공한 if (status) 안에서만 보관·칸 비우기가 일어난다.
   const submit = settings.match(
     /async function submitBrowserbase\(\): Promise<void> \{[\s\S]*?\n  async function resetBrowserbase/,

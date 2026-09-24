@@ -28,7 +28,7 @@ export async function verifyDocumentShell(page) {
     const input = document.querySelector('textarea[aria-label="문서 편집 입력"], [contenteditable="true"][aria-label="문서 편집 입력"]');
     const previousFocus = document.activeElement;
     input?.focus({ preventScroll: true });
-    const inputReady = Boolean(input && document.activeElement === input);
+    const inputReady = Boolean(input && visible(input) && document.activeElement === input);
     if (previousFocus instanceof HTMLElement && previousFocus !== input) previousFocus.focus({ preventScroll: true });
     if (inputReady && document.activeElement === input && previousFocus !== input) input.blur();
     const scroll = document.querySelector('#scroll-container');

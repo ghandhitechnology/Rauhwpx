@@ -19,6 +19,8 @@ export const auditScenarios: readonly AuditScenario[] = [
   scene('chat-plan', 'Conversation', 'Plan approval', 'Inspect approval, revision, and long plan scrolling.', { scenario: 'plan', play: '1' }),
   scene('chat-question', 'Conversation', 'Question and answers', 'Inspect selectable answers, free text, and submission.', { scenario: 'question', play: '1' }),
   scene('chat-review', 'Conversation', 'Document change review', 'Inspect pending changes and accept/reject controls.', { scenario: 'review', play: '1' }),
+  scene('chat-changes-full', 'Conversation', 'Full-screen changes', 'Inspect applied text, table, and image changes beside the conversation.',
+    { scenario: 'review', review: 'full', permission: 'unrestricted', play: '1', surface: 'changes' }),
   scene('chat-fleet', 'Conversation', 'Tools and subagents', 'Expand tool activity and inspect subagent progress.', { scenario: 'fleet', play: '1', hold: '1' }),
   scene('chat-error', 'Conversation', 'Failed turn', 'Inspect error text and recovery actions.', { scenario: 'error', play: '1' }),
   scene('chat-streaming', 'Conversation', 'Streaming response', 'Inspect the active turn, stop control, and composer while work is running.', { scenario: 'chat', play: '1', hold: '1' }),

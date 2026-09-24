@@ -22,7 +22,12 @@ export type ObjectOverlayRef =
       rowIdx?: number; colIdx?: number; cellIdx?: number;
       rect?: { startRow: number; startCol: number; endRow: number; endCol: number };
     }
-  | { sort: 'control'; sectionIdx: number; paraIdx: number; controlIdx: number }
+  | {
+      sort: 'agentObject'; kind: 'image' | 'equation';
+      sectionIdx: number; paraIdx: number; controlIdx: number;
+      cellIdx?: number; cellParaIdx?: number; innerControlIdx?: number;
+      cellPath?: CellAddr['path'];
+    }
   | { sort: 'para'; sectionIdx: number; paraIdx: number; cell?: CellAddr };
 
 interface LegacyOverlayOp {
@@ -85,11 +90,9 @@ interface MeasuredRange {
   enters: EnterMark[];
 }
 
-/** key 하나가 소유하는 DOM 쌍. 렌더 간에 재사용해 애니메이션/스타일 상태를 보존한다. */
+/** key 하나가 소유하는 DOM 표시. 렌더 간에 재사용해 애니메이션/스타일 상태를 보존한다. */
 interface PooledNode {
-  ink: HTMLDivElement | null;
   marker: HTMLDivElement | null;
-  inkClass: string;
   markerClass: string;
 }
 
@@ -135,8 +138,19 @@ function createEnterGlyph(): SVGSVGElement {
 
 function rangeKey(range: DocRange | undefined): string {
   if (!range) return '';
-  const cell = range.cell ? `c${range.cell.paraIdx}/${range.cell.controlIdx}/${range.cell.cellIdx}` : '';
+  const cell = range.cell
+    ? `c${range.cell.paraIdx}/${range.cell.controlIdx}/${range.cell.cellIdx}${range.cell.path
+      ? `/${range.cell.path.map((entry) => `${entry.controlIndex}.${entry.cellIndex}.${entry.cellParaIndex}`).join('/')}`
+      : ''}`
+    : '';
   return `s${range.sectionIdx}${cell}:${range.startParaIdx}.${range.startCharOffset}-${range.endParaIdx}.${range.endCharOffset}`;
+}
+
+function cellPathAt(cell: CellAddr, paraIdx: number): string {
+  const path = cell.path ?? [];
+  return JSON.stringify(path.map((entry, index) => index === path.length - 1
+    ? { ...entry, cellParaIndex: paraIdx }
+    : entry));
 }
 
 /**
@@ -314,7 +328,6 @@ export class PendingOverlayRenderer {
 
   private dropAllNodes(): void {
     for (const node of this.nodePool.values()) {
-      node.ink?.remove();
       node.marker?.remove();
     }
     this.nodePool.clear();
@@ -360,7 +373,13 @@ export class PendingOverlayRenderer {
 
   private rangeRects(range: DocRange): SelectionRect[] {
     const cell = range.cell;
-    return cell
+    return cell?.path
+      ? this.deps.wasm.getSelectionRectsByPath(
+        range.sectionIdx, cell.paraIdx, cell.path,
+        range.startParaIdx, range.startCharOffset,
+        range.endParaIdx, range.endCharOffset,
+      )
+      : cell
       ? this.deps.wasm.getSelectionRectsInCell(
         range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
         range.startParaIdx, range.startCharOffset,
@@ -375,7 +394,9 @@ export class PendingOverlayRenderer {
 
   private paragraphLength(range: DocRange, paraIdx: number): number {
     const cell = range.cell;
-    return cell
+    return cell?.path
+      ? this.deps.wasm.getCellParagraphLengthByPath(range.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx))
+      : cell
       ? this.deps.wasm.getCellParagraphLength(
         range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx,
       )
@@ -384,7 +405,9 @@ export class PendingOverlayRenderer {
 
   private caretRectAt(range: DocRange, paraIdx: number, charOffset: number): SelectionRect {
     const cell = range.cell;
-    const rect = cell
+    const rect = cell?.path
+      ? this.deps.wasm.getCursorRectByPath(range.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), charOffset)
+      : cell
       ? this.deps.wasm.getCursorRectInCell(
         range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset,
       )
@@ -419,7 +442,9 @@ export class PendingOverlayRenderer {
   private rangeText(range: DocRange, paraIdx: number, start: number, count: number): string {
     if (count <= 0) return '';
     const cell = range.cell;
-    return cell
+    return cell?.path
+      ? this.deps.wasm.getTextInCellByPath(range.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), start, count)
+      : cell
       ? this.deps.wasm.getTextInCell(
         range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
         paraIdx, start, count,
@@ -430,7 +455,11 @@ export class PendingOverlayRenderer {
   private cursorRect(op: ReplaceOverlayOp, scalarOffset: number): SelectionRect {
     const point = pointAtNewScalarOffset(op.range, op.newText, scalarOffset);
     const cell = op.range.cell;
-    const rect = cell
+    const rect = cell?.path
+      ? this.deps.wasm.getCursorRectByPath(
+        op.range.sectionIdx, cell.paraIdx, cellPathAt(cell, point.paraIdx), point.charOffset,
+      )
+      : cell
       ? this.deps.wasm.getCursorRectInCell(
         op.range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
         point.paraIdx, point.charOffset,
@@ -516,7 +545,7 @@ export class PendingOverlayRenderer {
 
   /**
    * Long documents can contain many pending ranges, while only a handful of
-   * pages are on screen. DOM ink outside the visible rows still costs style,
+   * pages are on screen. DOM markers outside the visible rows still cost style,
    * paint, and GPU surface memory. Keep one adjacent row as a scroll cushion so
    * fast trackpad movement never reveals a blank frame.
    */
@@ -537,36 +566,18 @@ export class PendingOverlayRenderer {
   }
 
   /**
-   * key 의 DOM 쌍을 확보한다. 이미 있으면 그대로 재사용해 진행 중인 애니메이션과
+   * key 의 DOM 표시를 확보한다. 이미 있으면 그대로 재사용해 진행 중인 애니메이션과
    * 스타일 상태를 보존하고, 클래스가 달라졌을 때만 갱신한다.
    */
   private ensureNode(
     key: string,
-    scrollContent: HTMLElement,
-    inkClass: string | null,
     markerClass: string | null,
     onCreateMarker?: (marker: HTMLDivElement) => void,
   ): PooledNode {
     let node = this.nodePool.get(key);
     if (!node) {
-      node = { ink: null, marker: null, inkClass: '', markerClass: '' };
+      node = { marker: null, markerClass: '' };
       this.nodePool.set(key, node);
-    }
-    if (inkClass) {
-      if (!node.ink) {
-        node.ink = document.createElement('div');
-        node.ink.dataset.agKey = key;
-      }
-      if (node.inkClass !== inkClass) {
-        node.ink.className = inkClass;
-        node.inkClass = inkClass;
-      }
-      if (node.ink.parentElement !== scrollContent) scrollContent.appendChild(node.ink);
-    } else if (node.ink) {
-      this.positionedNodes.delete(node.ink);
-      node.ink.remove();
-      node.ink = null;
-      node.inkClass = '';
     }
     if (markerClass) {
       const created = !node.marker;
@@ -611,14 +622,20 @@ export class PendingOverlayRenderer {
         if (!pos) return;
         const key = this.legacyNodeKey(op, rectIdx);
         desired.add(key);
+        const objectKind = op.objRef?.sort === 'agentObject' ? op.objRef.kind : null;
+        const structureBox = op.objRef?.sort === 'table' || op.objRef?.sort === 'cells';
         const node = this.ensureNode(
           key,
-          scrollContent,
-          `ag-pending-rect ag-pending-ink ag-${op.agent}`,
-          `ag-pending-rect ag-pending-marker ag-${op.agent} ag-${op.kind}`,
+          objectKind
+            ? `ag-pending-rect ag-pending-marker ag-pending-object ag-pending-object-${objectKind} ag-${op.agent}`
+            : structureBox
+            ? `ag-pending-rect ag-pending-marker ag-pending-structure ag-${op.agent} ag-${op.kind}`
+            : `ag-pending-rect ag-pending-marker ag-${op.agent} ag-${op.kind}`,
         );
-        if (node.ink) this.positionRect(node.ink, pos);
-        if (node.marker) this.positionRect(node.marker, pos);
+        if (node.marker) {
+          this.positionRect(node.marker, pos);
+          if (objectKind) node.marker.dataset.objectLabel = objectKind === 'image' ? '그림 추가' : '수식 추가';
+        }
       });
     }
 
@@ -631,8 +648,6 @@ export class PendingOverlayRenderer {
         const isDeletion = visual.hunk.kind === 'delete';
         const node = this.ensureNode(
           visual.nodeKey,
-          scrollContent,
-          null,
           `ag-exact-anchor ${isDeletion ? 'ag-exact-anchor-delete' : 'ag-exact-anchor-insert'}`,
           (marker) => {
             // 생성 시 1회만 재생 — 노드가 렌더 간에 살아남으므로 중복 재생이 없다.
@@ -653,14 +668,8 @@ export class PendingOverlayRenderer {
 
       const node = this.ensureNode(
         visual.nodeKey,
-        scrollContent,
-        'ag-pending-rect ag-pending-ink ag-exact-ink',
         'ag-pending-rect ag-pending-marker ag-exact-change',
       );
-      if (node.ink) {
-        this.positionRect(node.ink, pos);
-        node.ink.dataset.diffHunk = visual.key;
-      }
       if (node.marker) {
         this.positionRect(node.marker, pos);
         node.marker.dataset.diffHunk = visual.key;
@@ -682,7 +691,7 @@ export class PendingOverlayRenderer {
       desired.add(key);
       const size = pos.height * ENTER_SIZE_FACTOR;
       const node = this.ensureNode(
-        key, scrollContent, null,
+        key,
         `ag-pending-enter ${mark.tone === 'exact' ? 'ag-enter-exact' : `ag-${mark.tone}`}`,
         (marker) => marker.appendChild(createEnterGlyph()),
       );
@@ -699,9 +708,7 @@ export class PendingOverlayRenderer {
     // 더 이상 쓰이지 않는 노드 정리
     for (const [key, node] of this.nodePool) {
       if (desired.has(key)) continue;
-      node.ink?.remove();
       node.marker?.remove();
-      if (node.ink) this.positionedNodes.delete(node.ink);
       if (node.marker) this.positionedNodes.delete(node.marker);
       this.nodePool.delete(key);
     }
@@ -741,10 +748,23 @@ export class PendingOverlayRenderer {
     if (position.sectionIndex !== range.sectionIdx) return false;
     let paraIdx = position.paragraphIndex;
     if (range.cell) {
-      if (position.parentParaIndex !== range.cell.paraIdx
-        || position.controlIndex !== range.cell.controlIdx
-        || position.cellIndex !== range.cell.cellIdx) return false;
-      paraIdx = position.cellParaIndex ?? position.paragraphIndex;
+      if (position.parentParaIndex !== range.cell.paraIdx) return false;
+      if (range.cell.path) {
+        const path = position.cellPath;
+        if (!path || path.length !== range.cell.path.length
+          || !path.every((entry, index) => {
+            const target = range.cell!.path![index];
+            return entry.controlIndex === target.controlIndex
+              && entry.cellIndex === target.cellIndex
+              && (index === path.length - 1 || entry.cellParaIndex === target.cellParaIndex);
+          })) return false;
+        paraIdx = path[path.length - 1].cellParaIndex;
+      } else {
+        if (position.controlIndex !== range.cell.controlIdx
+          || position.cellIndex !== range.cell.cellIdx
+          || (position.cellPath?.length ?? 0) > 1) return false;
+        paraIdx = position.cellParaIndex ?? position.paragraphIndex;
+      }
     } else if (position.parentParaIndex !== undefined) {
       return false;
     }
@@ -807,8 +827,11 @@ export class PendingOverlayRenderer {
         const b = wasm.getTableBBox(ref.sectionIdx, ref.paraIdx, ref.controlIdx);
         return [{ pageIndex: b.pageIndex, x: b.x, y: b.y, width: b.width, height: b.height }];
       }
-      case 'control': {
-        const b = wasm.getShapeBBox(ref.sectionIdx, ref.paraIdx, ref.controlIdx);
+      case 'agentObject': {
+        const b = wasm.getObjectBBox(
+          ref.kind, ref.sectionIdx, ref.paraIdx, ref.controlIdx,
+          ref.cellIdx, ref.cellParaIdx, ref.innerControlIdx, ref.cellPath,
+        );
         return [{ pageIndex: b.pageIndex, x: b.x, y: b.y, width: b.width, height: b.height }];
       }
       case 'cells': {
@@ -828,6 +851,15 @@ export class PendingOverlayRenderer {
       }
       case 'para': {
         if (ref.cell) {
+          if (ref.cell.path) {
+            const len = wasm.getCellParagraphLengthByPath(
+              ref.sectionIdx, ref.cell.paraIdx, cellPathAt(ref.cell, ref.paraIdx),
+            );
+            return wasm.getSelectionRectsByPath(
+              ref.sectionIdx, ref.cell.paraIdx, ref.cell.path,
+              ref.paraIdx, 0, ref.paraIdx, len,
+            );
+          }
           const len = wasm.getCellParagraphLength(ref.sectionIdx, ref.cell.paraIdx, ref.cell.controlIdx, ref.cell.cellIdx, ref.paraIdx);
           return wasm.getSelectionRectsInCell(
             ref.sectionIdx, ref.cell.paraIdx, ref.cell.controlIdx, ref.cell.cellIdx,

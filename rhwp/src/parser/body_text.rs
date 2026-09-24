@@ -365,9 +365,12 @@ fn parse_para_text(
         } else if ch < 0x0020 {
             // 문자 컨트롤 (1 code unit = 2바이트)
             match ch {
-                0x0018 => {
+                tags::CHAR_HYPHEN => {
                     char_offsets.push(code_unit_pos);
-                    text.push('-'); // 하이픈 (HWP 5.0 표 7: 코드 24)
+                    // HWP's hyphen control is discretionary. It occupies one
+                    // character position but has no ink or advance unless a line
+                    // breaks here. Keep it distinct from a literal U+002D hyphen.
+                    text.push('\u{00AD}');
                     char_count += 1;
                 }
                 0x0019 => {

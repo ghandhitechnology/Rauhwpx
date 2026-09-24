@@ -566,10 +566,7 @@ export class EndnoteShapeDialog extends ModalDialog {
       swatch.type = 'button';
       swatch.title = color;
       swatch.dataset.color = color;
-      swatch.style.cssText = [
-        'width:20px;height:20px;border:1px solid var(--color-border);background:var(--color-surface);padding:0;',
-        'display:flex;align-items:center;justify-content:center;cursor:pointer;',
-      ].join('');
+      swatch.className = 'endnote-shape-swatch';
       const chip = document.createElement('span');
       chip.style.cssText = `display:block;width:14px;height:14px;background:${color};border:1px solid var(--color-border-dark);`;
       swatch.appendChild(chip);
@@ -584,10 +581,7 @@ export class EndnoteShapeDialog extends ModalDialog {
     const custom = document.createElement('button');
     custom.type = 'button';
     custom.textContent = '다른 색...';
-    custom.style.cssText = [
-      'grid-column:1 / -1;height:24px;border:1px solid var(--color-border);background:var(--color-surface);',
-      'font-size:12px;color:var(--color-text);cursor:pointer;margin-top:2px;color-scheme:inherit;',
-    ].join('');
+    custom.className = 'endnote-shape-custom-color';
     custom.addEventListener('click', (event) => {
       event.stopPropagation();
       this.closePopupMenus();
@@ -605,11 +599,7 @@ export class EndnoteShapeDialog extends ModalDialog {
   private previewButton(): HTMLButtonElement {
     const button = document.createElement('button');
     button.type = 'button';
-    button.style.cssText = [
-      'width:104px;height:26px;border:1px solid var(--color-border);background:var(--color-surface);',
-      'display:flex;align-items:center;justify-content:center;padding:0 20px 0 8px;',
-      'position:relative;cursor:pointer;color:var(--color-text);color-scheme:inherit;',
-    ].join('');
+    button.className = 'endnote-shape-preview-button';
     const arrow = document.createElement('span');
     arrow.textContent = '▾';
     arrow.dataset.dropdownArrow = '1';
@@ -620,11 +610,9 @@ export class EndnoteShapeDialog extends ModalDialog {
 
   private popupMenu(width: number): HTMLDivElement {
     const menu = document.createElement('div');
-    menu.style.cssText = [
-      'display:none;position:absolute;left:0;top:27px;z-index:1200;',
-      `width:${width}px;background:var(--color-surface);border:1px solid var(--color-border);box-shadow:var(--shadow-dropdown);`,
-      'padding:4px;max-height:260px;overflow:auto;color:var(--color-text);',
-    ].join('');
+    menu.className = 'endnote-shape-popup-menu';
+    menu.style.display = 'none';
+    menu.style.width = `${width}px`;
     menu.addEventListener('click', event => event.stopPropagation());
     return menu;
   }
@@ -632,12 +620,7 @@ export class EndnoteShapeDialog extends ModalDialog {
   private menuOption(onClick: () => void): HTMLButtonElement {
     const option = document.createElement('button');
     option.type = 'button';
-    option.style.cssText = [
-      'width:100%;height:24px;border:0;background:var(--color-surface);display:flex;align-items:center;',
-      'gap:8px;padding:2px 8px;cursor:pointer;color:var(--color-text);color-scheme:inherit;',
-    ].join('');
-    option.addEventListener('mouseenter', () => { option.style.background = 'var(--color-accent-bg)'; });
-    option.addEventListener('mouseleave', () => { option.style.background = 'var(--color-surface)'; });
+    option.className = 'endnote-shape-popup-option';
     option.addEventListener('click', event => {
       event.stopPropagation();
       onClick();

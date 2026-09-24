@@ -22,7 +22,7 @@
   padding: 12px;
   background: rgba(12, 12, 14, 0.34);
   opacity: 0;
-  transition: opacity 160ms ease-out;
+  transition: opacity var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-calibration-overlay.ag-open {
@@ -44,7 +44,7 @@
   box-shadow: var(--n-elev-3);
   font-family: var(--ag-font, -apple-system, BlinkMacSystemFont, '맑은 고딕', 'Segoe UI', sans-serif);
   transform: translateY(8px) scale(0.99);
-  transition: transform 180ms var(--ag-motion-out, cubic-bezier(0.16, 1, 0.3, 1));
+  transition: transform var(--ag-dur-base) var(--ag-motion-out, var(--ag-ease-out));
 }
 
 .ag-calibration-overlay.ag-open .ag-calibration-dialog {
@@ -117,8 +117,8 @@
   visibility: hidden;
   pointer-events: none;
   transition:
-    opacity 150ms ease-out,
-    transform 180ms var(--ag-motion-out, cubic-bezier(0.16, 1, 0.3, 1)),
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
+    transform var(--ag-dur-base) var(--ag-motion-out, var(--ag-ease-out)),
     visibility 0s linear 180ms;
 }
 
@@ -186,7 +186,7 @@
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+  transition: background var(--ag-dur-fast) var(--ag-ease-out), border-color var(--ag-dur-fast) var(--ag-ease-out), box-shadow var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-calibration-language:hover {
@@ -557,7 +557,7 @@
   color: var(--n-text);
   text-align: center;
   cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease;
+  transition: background var(--ag-dur-fast) var(--ag-ease-out), border-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
 .ag-calibration-dropzone:hover,
@@ -683,9 +683,9 @@
   stroke-width: 1.15;
   opacity: 0.35;
   transition:
-    stroke-dashoffset 700ms var(--ag-motion-out, cubic-bezier(0.16, 1, 0.3, 1)),
-    stroke 220ms ease-out,
-    opacity 220ms ease-out;
+    stroke-dashoffset 700ms var(--ag-motion-out, var(--ag-ease-out)),
+    stroke var(--ag-dur-base) var(--ag-ease-out),
+    opacity var(--ag-dur-base) var(--ag-ease-out);
 }
 
 .ag-calibration-network-edge.ag-on {
@@ -701,7 +701,7 @@
 
 .ag-calibration-network-node {
   opacity: 0.42;
-  transition: opacity 220ms ease-out;
+  transition: opacity var(--ag-dur-base) var(--ag-ease-out);
 }
 
 .ag-calibration-node-orbit {
@@ -710,12 +710,12 @@
   stroke-width: 1;
   transform-box: fill-box;
   transform-origin: center;
-  transition: fill 220ms ease-out, stroke 220ms ease-out;
+  transition: fill var(--ag-dur-base) var(--ag-ease-out), stroke var(--ag-dur-base) var(--ag-ease-out);
 }
 
 .ag-calibration-node-core {
   fill: var(--n-text-muted);
-  transition: fill 220ms ease-out;
+  transition: fill var(--ag-dur-base) var(--ag-ease-out);
 }
 
 .ag-calibration-network-node.ag-on {
@@ -781,7 +781,7 @@
   background: var(--accent-primary);
   transform: scaleX(0);
   transform-origin: left center;
-  transition: transform 300ms var(--ag-motion-out, cubic-bezier(0.16, 1, 0.3, 1));
+  transition: transform var(--ag-dur-slow) var(--ag-motion-out, var(--ag-ease-out));
 }
 
 .ag-calibration-determinate-label,

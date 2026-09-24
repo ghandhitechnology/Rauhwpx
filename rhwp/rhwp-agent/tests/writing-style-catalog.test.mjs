@@ -28,10 +28,50 @@ test('catalog exposes Codex, Claude, and only the Pi models the user configured'
   assert.deepEqual(catalog.defaultSelection, { agent: 'claude', model: 'sonnet', effort: 'high' });
 });
 test('Astra calibration selection survives catalog reload with max effort', () => {
-  const selection = { agent: 'codex', model: 'gpt-6-astra', effort: 'max' };
+  const selection = { agent: 'codex', model: 'astra', effort: 'max' };
   const options = { health: { codex: { available: true } } };
   assert.deepEqual(resolveWritingStyleSelection(selection, options), selection);
   assert.deepEqual(buildWritingStyleCatalog({ ...options, currentSelection: selection }).defaultSelection, selection);
+});
+
+test('new Codex and Claude models resolve for calibration', () => {
+  for (const selection of [
+    { agent: 'codex', model: 'sol', effort: 'max' },
+    { agent: 'codex', model: 'luna', effort: 'high' },
+    { agent: 'claude', model: 'opus', effort: 'medium' },
+    { agent: 'claude', model: 'fable', effort: 'high' },
+  ]) {
+    assert.deepEqual(resolveWritingStyleSelection(selection), selection);
+  }
+});
+
+test('old model IDs keep their lineup in calibration', () => {
+  assert.deepEqual(
+    resolveWritingStyleSelection({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high' }),
+    { agent: 'codex', model: 'sol', effort: 'high' },
+  );
+  assert.deepEqual(
+    resolveWritingStyleSelection({ agent: 'claude', model: 'claude-opus-5-5', effort: 'medium' }),
+    { agent: 'claude', model: 'opus', effort: 'medium' },
+  );
+});
+
+test('live provider catalogs retain exact model IDs for calibration', () => {
+  const options = {
+    codexModels: [
+      { id: 'gpt-5.5', label: 'GPT-5.5', supportedEfforts: ['low', 'medium', 'high'] },
+      { id: 'gpt-6-sol', label: 'GPT-6 Sol', supportedEfforts: ['low', 'medium', 'high', 'max'] },
+    ],
+    claudeModels: [{ id: 'claude-sonnet-5', label: 'Claude Sonnet 5' }],
+  };
+  assert.deepEqual(
+    buildWritingStyleCatalog(options).providers.find((provider) => provider.id === 'codex').models.map((model) => model.id),
+    ['gpt-5.5', 'gpt-6-sol'],
+  );
+  assert.deepEqual(resolveWritingStyleSelection({ agent: 'codex', model: 'gpt-5.5', effort: 'high' }, options),
+    { agent: 'codex', model: 'gpt-5.5', effort: 'high' });
+  assert.deepEqual(resolveWritingStyleSelection({ agent: 'claude', model: 'claude-sonnet-5', effort: 'high' }, options),
+    { agent: 'claude', model: 'claude-sonnet-5', effort: 'high' });
 });
 
 test('calibration selection rejects unavailable providers and stale models without fallback', () => {

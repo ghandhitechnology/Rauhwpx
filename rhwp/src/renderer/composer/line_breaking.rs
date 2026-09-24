@@ -1725,11 +1725,16 @@ struct InlineControlMetricsHwp {
 fn inline_control_metrics_hwp(ctrl: &Control) -> Option<InlineControlMetricsHwp> {
     let (width, height, baseline) = match ctrl {
         Control::Picture(pic) if pic.common.treat_as_char => {
-            let height = pic.common.height as i32;
+            let image_height = pic.common.height as i32;
+            let top_margin = i32::from(pic.common.margin.top);
+            let bottom_margin = i32::from(pic.common.margin.bottom);
+            let height = image_height
+                .saturating_add(top_margin)
+                .saturating_add(bottom_margin);
             (
-                pic.common.width as i32,
+                super::inline_picture_occupied_width_hu(pic),
                 height,
-                (height as f64 * 0.85).round() as i32,
+                top_margin.saturating_add((image_height as f64 * 0.85).round() as i32),
             )
         }
         Control::Shape(shape) if shape.common().treat_as_char => {
@@ -1746,24 +1751,22 @@ fn inline_control_metrics_hwp(ctrl: &Control) -> Option<InlineControlMetricsHwp>
         }
         Control::Equation(eq) if eq.common.treat_as_char => {
             let (natural_width, natural_height, natural_baseline) =
-                crate::renderer::equation::intrinsic_metrics_hwp_with_font(
+                crate::renderer::equation::intrinsic_metrics_hwp_with_version(
                     &eq.script,
                     eq.font_size,
                     &eq.font_name,
+                    &eq.version_info,
                 );
-            let width = (eq.common.width as i32).max(natural_width as i32);
-            let stored_height = eq.common.height as i32;
-            let natural_height = natural_height as i32;
-            let extra = (stored_height - natural_height).max(0);
-            // The painter uses the EqEdit layout baseline.  Split any larger
-            // stored object slot evenly around that visual box so the line
-            // still reserves the author's requested height without shifting
-            // the equation ink away from the surrounding text baseline.
-            let top_leading = extra / 2;
+            let margin = &eq.common.margin;
+            let width = crate::renderer::equation::occupied_width_hwp(eq)
+                .saturating_add(natural_width.saturating_sub(eq.common.width) as i32);
+            let height = (eq.common.height as i32).max(natural_height as i32);
+            let baseline =
+                crate::renderer::equation::control_baseline_hwp(eq, natural_baseline as f64);
             (
                 width,
-                natural_height + extra,
-                natural_baseline as i32 + top_leading,
+                height + i32::from(margin.top) + i32::from(margin.bottom),
+                baseline.round() as i32 + i32::from(margin.top),
             )
         }
         Control::Form(form) => {
@@ -1855,6 +1858,32 @@ mod inline_equation_metric_tests {
     use crate::model::shape::CommonObjAttr;
 
     #[test]
+    fn equation_reflow_reserves_outer_margins_and_authored_baseline() {
+        let mut eq = Equation::default();
+        eq.common.treat_as_char = true;
+        eq.common.width = 2400;
+        eq.common.height = 1800;
+        eq.common.margin = crate::model::Padding {
+            left: 100,
+            right: 200,
+            top: 150,
+            bottom: 250,
+        };
+        eq.script = "x".to_string();
+        eq.baseline = 70;
+        let para = Paragraph {
+            controls: vec![Control::Equation(Box::new(eq))],
+            ..Default::default()
+        };
+        let metrics = inline_control_metrics_hwp(&para.controls[0]).unwrap();
+        assert_eq!(metrics.width, 2700);
+        assert_eq!(metrics.height, 2200);
+        assert_eq!(metrics.baseline, 1410);
+        let composed = crate::renderer::composer::compose_paragraph(&para);
+        assert_eq!(composed.tac_controls[0].1, 2700);
+    }
+
+    #[test]
     fn equation_metrics_are_applied_to_the_anchored_wrapped_line() {
         let script = "W = sum_{i=1}^{n} u_i";
         let (width, height, equation_baseline) =
@@ -1868,8 +1897,12 @@ mod inline_equation_metric_tests {
             },
             script: script.to_string(),
             font_size: 1000,
+            baseline: ((equation_baseline as f64 / height as f64) * 100.0).round() as i16,
             ..Default::default()
         };
+        let expected_baseline =
+            crate::renderer::equation::control_baseline_hwp(&equation, equation_baseline as f64)
+                .round() as i32;
         let mut para = Paragraph {
             text: "abcdefghij".to_string(),
             // One 8-code-unit control gap before character 5.
@@ -1909,7 +1942,7 @@ mod inline_equation_metric_tests {
         assert_eq!(line_segs[0].baseline_distance, plain_line.baseline_distance);
         assert_eq!(
             line_segs[1].baseline_distance,
-            (equation_baseline as i32).max(plain_line.baseline_distance)
+            expected_baseline.max(plain_line.baseline_distance)
         );
         assert!(line_segs[1].line_height >= height as i32);
     }
@@ -2480,6 +2513,45 @@ mod inline_control_wrap_tests {
                 .all(|line| line.line_height == 1200),
             "text after the picture must retain text height"
         );
+    }
+
+    #[test]
+    fn edited_picture_line_reserves_outer_margins_with_ink_baseline() {
+        use crate::model::Padding;
+
+        let picture = Control::Picture(Box::new(crate::model::image::Picture {
+            common: CommonObjAttr {
+                treat_as_char: true,
+                width: 3600,
+                height: 3000,
+                margin: Padding {
+                    left: 300,
+                    right: 450,
+                    top: 500,
+                    bottom: 700,
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+        let metrics = inline_control_metrics_hwp(&picture).unwrap();
+        assert_eq!(metrics.width, 4350);
+        assert_eq!(metrics.height, 4200);
+        assert_eq!(metrics.baseline, 3050);
+
+        let mut para = Paragraph {
+            controls: vec![picture],
+            line_segs: vec![LineSeg {
+                segment_width: 7000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        reflow_line_segs(&mut para, 100.0, &styles_16px(), 96.0);
+        assert_eq!(para.line_segs.len(), 1);
+        assert!(para.line_segs[0].line_height >= 4200);
+        assert_eq!(para.line_segs[0].baseline_distance, 3050);
+        assert_eq!(para.line_segs[0].segment_width, 7000);
     }
 
     /// 줄이 거의 찬 텍스트에 넓은 인라인 수식이 삽입되면 수식 폭을 예약해

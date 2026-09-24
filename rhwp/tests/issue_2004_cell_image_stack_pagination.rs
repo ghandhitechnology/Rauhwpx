@@ -119,3 +119,54 @@ fn cell_image_stack_continuations_repeat_authored_outer_top() {
         );
     }
 }
+
+#[test]
+fn same_length_header_cell_edit_preserves_header_table_height() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/issue2004_cell_image_stack.hwp");
+    let bytes = fs::read(&path).expect("read #2004 fixture");
+    let mut core = DocumentCore::from_bytes(&bytes).expect("parse #2004 fixture");
+    let header_height = |core: &DocumentCore| {
+        fn find_header(node: &RenderNode) -> Option<f64> {
+            if let RenderNodeType::Table(table) = &node.node_type {
+                if table.para_index == Some(1) && table.control_index == Some(0) {
+                    return Some(node.bbox.height);
+                }
+            }
+            node.children.iter().find_map(find_header)
+        }
+        let page = core.build_page_render_tree(0).expect("render first page");
+        find_header(&page.root).expect("header table")
+    };
+    let baseline = header_height(&core);
+    let body_runs = |core: &DocumentCore| {
+        let layout: serde_json::Value =
+            serde_json::from_str(&core.get_page_text_layout_native(0).unwrap()).unwrap();
+        layout["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|run| run["paraIdx"] == 14 && run["parentParaIdx"].is_null())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let baseline_body = body_runs(&core);
+    let paragraph = match &core.document().sections[0].paragraphs[1].controls[0] {
+        rhwp::model::control::Control::Table(table) => &table.cells[1].paragraphs[0],
+        _ => panic!("expected header table"),
+    };
+    assert_eq!(paragraph.text, "보도자료");
+    core.delete_text_in_cell_native(0, 1, 0, 1, 0, 0, 4)
+        .expect("delete header cell text");
+    core.insert_text_in_cell_native(0, 1, 0, 1, 0, 0, "보도자가")
+        .expect("insert same-length header cell text");
+    let pending = header_height(&core);
+    assert!(
+        (pending - baseline).abs() <= 0.2,
+        "same-length header cell edit must not grow table: baseline={baseline:.2}, edited={pending:.2}"
+    );
+    assert_eq!(
+        body_runs(&core),
+        baseline_body,
+        "unchanged body text keeps its saved position"
+    );
+}

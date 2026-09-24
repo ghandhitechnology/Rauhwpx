@@ -338,10 +338,14 @@ function makeEnv(sourcePath: string | null = null) {
 
   const bus = new EventBus();
   const revision = new RevisionTracker(bus);
+  let externalSnapshotIds = 0;
   const inputHandler = {
     executeOperation: (op: { operation?: (w: unknown) => unknown }) => { op.operation?.(wasm); },
     getCursorPosition: () => ({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 }),
     getSelection: () => null,
+    prepareSnapshotCapacity: () => {},
+    retainExternalSnapshot: () => { externalSnapshotIds++; },
+    releaseExternalSnapshot: () => { externalSnapshotIds--; },
   };
   const pending = new PendingEditManager({
     wasm: wasm as never,
@@ -360,7 +364,8 @@ function makeEnv(sourcePath: string | null = null) {
   });
   const call = (tool: string, args: Record<string, unknown> = {}) =>
     executor.execute(tool, { expectedRevision: revision.revision, ...args }, 'claude');
-  return { executor, pending, revision, call, body, tables, calls, bus, wasm };
+  return { executor, pending, revision, call, body, tables, calls, bus, wasm, snapshots,
+    getExternalSnapshotCount: () => externalSnapshotIds };
 }
 
 async function expectErr(p: Promise<unknown>, code: string): Promise<AgentToolError> {
@@ -1008,7 +1013,156 @@ test('insert_equation: cell 인자로 셀 문단에 삽입하고 reject 시 셀 
   const ins = calls.find((x) => x.m === 'insertEquationInCell')!;
   assert.deepEqual(ins.a.slice(0, 4), [t.paraIdx, t.controlIdx, 0, 0]);
   pending.reject(r.changeSetId);
-  assert.ok(calls.some((x) => x.m === 'deleteEquationControlInCell'));
+  assert.equal((tables[0] as FakeTable & { eqs?: Map<string, string> }).eqs?.get('0:0'), undefined);
+});
+
+test('rejecting an equation preserves later user edits and other pending sets', async () => {
+  for (const laterEdit of ['user', 'agent'] as const) {
+    const { call, pending, tables, body, calls, bus } = makeEnv();
+    const created = await call('create_table', {
+      sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['합계']],
+    }) as { changeSetId: string };
+    pending.approve(created.changeSetId);
+    const table = tables[0];
+    const equation = await call('insert_equation', {
+      sectionIdx: 0, paraIdx: 0, charOffset: 0,
+      cell: { paraIdx: table.paraIdx, controlIdx: table.controlIdx, cellIdx: 0 }, script: 'x over y',
+    }) as { changeSetId: string };
+    pending.endTurn('review');
+    if (laterEdit === 'user') {
+      body[0] = 'User text';
+      bus.emit('document-mutated', 'input-handler-edit');
+    } else {
+      pending.beginTurn('claude');
+      await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'Agent ' });
+      pending.endTurn('review');
+    }
+    const expected = body[0];
+    pending.reject(equation.changeSetId);
+    assert.equal(body[0], expected, `${laterEdit} text survives rejecting an earlier object`);
+    assert.ok(calls.some(call => call.m === 'deleteEquationControlInCell'), 'uses the local inverse');
+    assert.equal((tables[0] as FakeTable & { eqs?: Map<string, string> }).eqs?.get('0:0'), undefined);
+  }
+});
+
+test('equation preview snapshots are released after reject, approve, and disposal', async () => {
+  for (const finish of ['reject', 'approve', 'dispose'] as const) {
+    const { call, pending, tables, snapshots, getExternalSnapshotCount } = makeEnv();
+    const created = await call('create_table', {
+      sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['합계']],
+    }) as { changeSetId: string };
+    pending.approve(created.changeSetId);
+    const table = tables[0];
+    const beforeHeld = getExternalSnapshotCount();
+    const equation = await call('insert_equation', {
+      sectionIdx: 0, paraIdx: 0, charOffset: 0,
+      cell: { paraIdx: table.paraIdx, controlIdx: table.controlIdx, cellIdx: 0 },
+      script: 'x over y',
+    }) as { changeSetId: string };
+    pending.endTurn('review');
+    const set = pending.getChangeSets().find(candidate => candidate.id === equation.changeSetId)!;
+    const op = set.ops.find(candidate => candidate.kind === 'object')!;
+    assert.equal(op.kind, 'object');
+    const previewId = op.snapshotId!;
+    assert.ok(snapshots.has(previewId), `${finish}: preview snapshot is retained`);
+    assert.equal(getExternalSnapshotCount(), beforeHeld + 1);
+
+    if (finish === 'dispose') pending.dispose();
+    else pending[finish](equation.changeSetId);
+
+    assert.equal(snapshots.has(previewId), false, `${finish}: preview snapshot is discarded`);
+    assert.equal(getExternalSnapshotCount(), beforeHeld, `${finish}: external snapshot count is released`);
+  }
+});
+
+test('rejecting an earlier set cannot return through a later equation snapshot', async () => {
+  const { call, pending, body, tables } = makeEnv();
+  const created = await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['합계']],
+  }) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const first = await call('insert_text', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'Earlier ',
+  }) as { changeSetId: string };
+  pending.endTurn('review');
+  const table = tables[0];
+  const later = await call('insert_equation', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 0,
+    cell: { paraIdx: table.paraIdx, controlIdx: table.controlIdx, cellIdx: 0 }, script: 'x over y',
+  }) as { changeSetId: string };
+  pending.endTurn('review');
+
+  pending.reject(first.changeSetId);
+  assert.equal(body[0], 'Title');
+  pending.reject(later.changeSetId);
+  assert.equal(body[0], 'Title');
+});
+
+test('one set can still restore its own object snapshots in reverse order', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const created = await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['A', 'B']],
+  }) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const table = tables[0];
+  const first = await call('insert_equation', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 0,
+    cell: { paraIdx: table.paraIdx, controlIdx: table.controlIdx, cellIdx: 0 }, script: 'a over b',
+  }) as { changeSetId: string };
+  const second = await call('insert_equation', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 0,
+    cell: { paraIdx: table.paraIdx, controlIdx: table.controlIdx, cellIdx: 1 }, script: 'c over d',
+  }) as { changeSetId: string };
+  assert.equal(first.changeSetId, second.changeSetId);
+  pending.endTurn('review');
+
+  pending.reject(first.changeSetId);
+  assert.equal((tables[0] as FakeTable & { eqs?: Map<string, string> }).eqs?.size ?? 0, 0);
+  assert.equal(calls.filter(call => call.m === 'deleteEquationControlInCell').length, 0);
+});
+
+test('rejecting a later replacement cannot return an earlier rejected set', async () => {
+  const { call, pending, body } = makeEnv();
+  const first = await call('insert_text', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'Earlier ',
+  }) as { changeSetId: string };
+  pending.endTurn('review');
+  const later = pending.replaceText({
+    sectionIdx: 0, startParaIdx: 1, startCharOffset: 0,
+    endParaIdx: 1, endCharOffset: 6,
+  }, 'Latest', 'claude');
+  pending.endTurn('review');
+
+  pending.reject(first.changeSetId);
+  assert.equal(body[0], 'Title');
+  pending.reject(later.changeSetId);
+  assert.equal(body[0], 'Title');
+  assert.equal(body[1], 'Second paragraph with text');
+});
+
+test('rejecting a later equation keeps an earlier approved marked change', async () => {
+  const { call, pending, tables } = makeEnv();
+  const created = await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['합계']],
+  }) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const table = tables[0];
+  const first = pending.addObjectOp('claude', {
+    type: 'setCellProps', sectionIdx: 0, tableParaIdx: table.paraIdx,
+    controlIdx: table.controlIdx, cellIdx: 0, props: { reviewMarker: 'approved' },
+    dims: { rowCount: table.rows, colCount: table.cols },
+  });
+  pending.endTurn('review');
+  const later = await call('insert_equation', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 0,
+    cell: { paraIdx: table.paraIdx, controlIdx: table.controlIdx, cellIdx: 0 }, script: 'x over y',
+  }) as { changeSetId: string };
+  pending.endTurn('review');
+
+  assert.equal(pending.approve(first.changeSetId), true);
+  assert.equal(tables[0].cellProps[0].reviewMarker, 'approved');
+  pending.reject(later.changeSetId);
+  assert.equal(tables[0].cellProps[0].reviewMarker, 'approved');
 });
 
 test('get_document_info 에 registeredFonts 가 실린다', async () => {

@@ -27,6 +27,7 @@ test('bridge matches rapid settings replies, reconnects, failures and queued fol
         activeAgent: null, selectedAgent: 'codex', selectedModel: null, selectedEffort: null,
         permissionProfile: 'safe', serviceTier: 'standard', workflow: 'direct', phase: 'direct',
         threadId: 'test-thread', documentId: 'test-document', documentName: 'test.hwpx',
+        revision: { revision: 42 },
         chatHistory: [], queuedMessages: [], workflowSwitchPending: false,
         pendingUserQuestion: null, pendingTurnOpen: false,
         sendJson: (frame: any) => { frames.push(structuredClone(frame)); return true; },
@@ -101,6 +102,7 @@ test('bridge matches rapid settings replies, reconnects, failures and queued fol
     });
     assert.equal(results.messages.length, 1);
     assert.equal(results.messages[0].text, 'Use the latest settings');
+    assert.equal(results.messages[0].documentRevision, 42);
     assert.equal(results.clearedEffort, null);
     assert.deepEqual(results.rollback, { agent: 'pi', effort: null, pending: null });
     assert.equal(results.retryAgent, 'codex');

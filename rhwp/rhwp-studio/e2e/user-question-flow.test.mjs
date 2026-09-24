@@ -282,13 +282,13 @@ try {
       'Live question is attached immediately above the composer',
     );
     assert(await page.$('.ag-messages > .ag-question-timeline-anchor'), 'Transcript position is reserved while the question is live');
-    assert(await page.$eval('.ag-question-count', (node) => node.textContent === '1 / 2'), 'First card is active');
+    assert(await page.$eval('.ag-question-step', (node) => node.textContent === '1/2'), 'First card is active');
     // The prompt receives focus when a card opens, so number shortcuts must
     // select options without stealing an editable control's keystrokes.
     await page.keyboard.press('1');
     await page.keyboard.press('2');
     await page.click('.ag-question-next');
-    await page.waitForFunction(() => document.querySelector('.ag-question-count')?.textContent === '2 / 2');
+    await page.waitForFunction(() => document.querySelector('.ag-question-step')?.textContent === '2/2');
     await page.click('.ag-question-other');
     await page.type('.ag-input', 'Keep my reconnect');
     await page.keyboard.down('Shift');
@@ -302,7 +302,7 @@ try {
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForFunction(
       () => window.__agentBridge?.getConnectionState?.() === 'connected'
-        && document.querySelector('.ag-question-count')?.textContent === '2 / 2',
+        && document.querySelector('.ag-question-step')?.textContent === '2/2',
       { timeout: 30_000 },
     );
     await delay(500);
@@ -360,17 +360,13 @@ try {
     }
 
     const a11y = await page.$eval('.ag-user-question', (node) => ({
-      disclosureExpanded: node.querySelector('.ag-question-disclosure')?.getAttribute('aria-expanded'),
       live: node.querySelector('[aria-live="polite"]')?.getAttribute('aria-atomic'),
       optionPressed: node.querySelector('.ag-question-other')?.getAttribute('aria-pressed'),
       promptIsHtmlSafe: !node.querySelector('script, iframe, object'),
     }));
-    assert(a11y.disclosureExpanded === 'true' && a11y.live === 'true', 'Disclosure and live-region semantics present');
+    assert(a11y.live === 'true', 'Live-region semantics present');
     assert(a11y.optionPressed === 'true' && a11y.promptIsHtmlSafe, 'Selected Other and plain-text provider content are accessible');
 
-    await page.click('.ag-question-disclosure');
-    assert(await page.$eval('.ag-question-disclosure', (node) => node.getAttribute('aria-expanded') === 'false'), 'Question card collapses without cancelling');
-    await page.click('.ag-question-disclosure');
     // Drop the Studio socket at submit time. Enter must still route through
     // the question composer, buffer one response ID, and resume after reconnect.
     await page.click('.ag-input');

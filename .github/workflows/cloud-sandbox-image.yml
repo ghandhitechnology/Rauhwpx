@@ -33,7 +33,7 @@ jobs:
     permissions:
       packages: write
     name: Build and publish Railway sandbox image
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 90
     steps:
       - name: Check out requested source
@@ -58,10 +58,14 @@ jobs:
           wasm: 'true'
           cache: package
 
+      - uses: ./.github/actions/build-wasm
+        if: ${{ !inputs.document_shell_only }}
+        with:
+          setup-rust: 'false'
+
       - name: Build cloud runtime assets
         if: ${{ !inputs.document_shell_only }}
         run: |
-          wasm-pack build rhwp --target web
           cargo build --manifest-path rhwp/Cargo.toml --release --locked --bin rhwp
           npm --prefix cloud ci
           npm --prefix rhwp/rhwp-studio ci

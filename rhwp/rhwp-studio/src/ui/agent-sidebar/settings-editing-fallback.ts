@@ -1,7 +1,9 @@
 import type { EventBus } from '../../core/event-bus.ts';
 import { createEditingSettings } from './settings-editing.ts';
 import type { EditorSettingsRuntime } from './settings-contract.ts';
+import './motion.css';
 import './agent-sidebar.css';
+import { confirmSheet } from './sheet.ts';
 import './settings.css';
 import './sidebar-button-modern.css';
 
@@ -78,12 +80,12 @@ export function showEditingSettingsFallback(options: EditingSettingsFallbackOpti
     activeDialog = null;
     previousFocus?.focus();
   };
-  const requestClose = (): void => {
-    if (dirty && !window.confirm('적용하지 않은 설정을 버릴까요?')) return;
+  const requestClose = async (): Promise<void> => {
+    if (dirty && !await confirmSheet(close, '변경 버리기', '적용하지 않은 설정을 버립니다.', { confirmLabel: '버리기', destructive: true })) return;
     finish(dirty);
   };
 
-  close.addEventListener('click', requestClose);
+  close.addEventListener('click', () => void requestClose());
   cancel.addEventListener('click', () => finish(true));
   apply.addEventListener('click', () => {
     if (controller.apply()) finish(false);
@@ -92,7 +94,7 @@ export function showEditingSettingsFallback(options: EditingSettingsFallbackOpti
     if (event.key !== 'Escape') return;
     event.preventDefault();
     event.stopPropagation();
-    requestClose();
+    void requestClose();
   });
 
   activeDialog = dialog;

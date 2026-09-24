@@ -54,15 +54,21 @@ runs:
         npm ci
         npm --prefix rhwp/rhwp-studio ci
         npm --prefix rhwp/rhwp-agent ci --omit=dev
+    - name: Build native reference extractor
+      shell: bash
+      run: npm run build:native
+    - uses: ./.github/actions/build-wasm
+      with:
+        setup-rust: 'false'
     - name: Set nightly package version
       if: inputs.version != ''
       shell: bash
       env:
         PACKAGE_VERSION: ${{ inputs.version }}
       run: npm version --no-git-tag-version "$PACKAGE_VERSION"
-    - name: Build desktop application
+    - name: Build Studio application
       shell: bash
-      run: npm run build:desktop
+      run: npm run build:studio:app
     - name: Verify native Windows atomic replacement
       if: inputs.platform == 'windows'
       shell: bash
