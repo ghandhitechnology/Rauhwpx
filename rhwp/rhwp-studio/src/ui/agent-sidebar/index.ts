@@ -94,6 +94,7 @@ import { showActionMenu } from '../action-menu.ts';
 import { createHieumGlyph, createIcon, createStopIcon } from './icons.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
 import { createEffortSlider } from './effort-slider.ts';
+import { createComposerRestingMotion } from './composer-resting.ts';
 import { createSubagentFleet, isSpawnToolName } from './subagent-fleet.ts';
 import { createSettingsPanel } from './settings.ts';
 import {
@@ -261,6 +262,12 @@ const SIDEBAR_WIDTH_DEFAULT = 480;
 const SIDEBAR_WIDTH_MIN_FALLBACK = 280;
 const SIDEBAR_PACKED_BUFFER_PX = 8;
 const COMPOSER_COMPACT_WIDTH_PX = 400;
+/** 한 번의 스크롤 제스처가 이만큼 위로 움직이면 입력기를 한 줄로 접는다. */
+const COMPOSER_REST_SCROLL_PX = 24;
+/** 휠 이벤트 사이가 이보다 벌어지면 새 제스처로 센다. */
+const COMPOSER_REST_GESTURE_MS = 120;
+/** 한 줄 입력의 textarea 높이 상한. 넘으면 접지 않는다. */
+const COMPOSER_REST_MAX_INPUT_PX = 40;
 const SIDEBAR_MOTION_DURATION_MS = 320;
 /* 전체 화면 전환도 사이드바·용지와 같은 320ms 축을 쓴다(모션 계약).
    타이머는 전이가 끝날 때까지의 여유분을 포함한다. */
@@ -2825,6 +2832,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const onMessagesScroll = (): void => {
     const previousTop = conversationLastScrollTop;
     conversationLastScrollTop = messages.scrollTop;
+    // 휠 처리기가 conversationLastScrollTop 을 먼저 맞출 수 있어 방향은 따로 잰다.
+    const scrolledDown = messages.scrollTop > composerRestLastScrollTop;
+    composerRestLastScrollTop = messages.scrollTop;
+    if (composerRest.resting && scrolledDown && isConversationEndVisible()) {
+      composerRest.setResting(false);
+    }
     if (conversationScrollLock) return;
     if (conversationScrollPaused) {
       // 현재 턴으로 다시 내려오면 새 출력을 따라간다.
@@ -2838,6 +2851,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   };
   const onMessagesWheel = (event: WheelEvent): void => {
     if (event.deltaY === 0) return;
+    if (event.deltaY < 0 && !event.ctrlKey) {
+      const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? messages.clientHeight : 1;
+      noteConversationScrollUp(-event.deltaY * unit);
+    }
     stopFollowingConversation();
     if (event.deltaY > 0 && isConversationFollowingTurn()) {
       conversationScrollPaused = false;
@@ -2845,15 +2863,42 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
   };
   let messagesTouchStartY: number | null = null;
+  let messagesTouchLastY: number | null = null;
   const onMessagesTouchStart = (event: TouchEvent): void => {
     messagesTouchStartY = event.touches[0]?.clientY ?? null;
+    messagesTouchLastY = messagesTouchStartY;
   };
   const onMessagesTouchMove = (event: TouchEvent): void => {
     const y = event.touches[0]?.clientY;
+    if (y !== undefined && messagesTouchLastY !== null && y > messagesTouchLastY) {
+      noteConversationScrollUp(y - messagesTouchLastY);
+    }
+    messagesTouchLastY = y ?? null;
     if (y !== undefined && messagesTouchStartY !== null && Math.abs(y - messagesTouchStartY) > 6) {
       stopFollowingConversation();
     }
   };
+  // 위로 읽기 시작하면 입력기를 한 줄로 접는다. 제스처 하나가 임계값을
+  // 넘을 때만 접어서, 스크롤 휠의 작은 흔들림에는 반응하지 않는다.
+  let composerRestScrollPx = 0;
+  let composerRestLastScrollTop = 0;
+  let composerRestScrollAt = Number.NEGATIVE_INFINITY;
+  function noteConversationScrollUp(deltaPx: number): void {
+    const now = performance.now();
+    if (now - composerRestScrollAt > COMPOSER_REST_GESTURE_MS) composerRestScrollPx = 0;
+    composerRestScrollAt = now;
+    if (composerRest.resting || messages.scrollTop <= 0 || !canComposerRest()) {
+      composerRestScrollPx = 0;
+      return;
+    }
+    composerRestScrollPx += deltaPx;
+    if (composerRestScrollPx < COMPOSER_REST_SCROLL_PX) return;
+    composerRestScrollPx = 0;
+    composerRest.setResting(true);
+  }
+  function isConversationEndVisible(): boolean {
+    return messagesEnd.getBoundingClientRect().top <= messages.getBoundingClientRect().bottom + 1;
+  }
   const onMessagesPointerDown = (event: PointerEvent): void => {
     if (event.target === messages && event.offsetX >= messages.clientWidth) stopFollowingConversation();
   };
@@ -2958,6 +3003,25 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   composerUtilityActions.append(phaseBadge, permissionBtn);
   composerUtilities.append(composerUtilityActions);
   const composer = el('form', 'ag-composer');
+  const composerRest = createComposerRestingMotion({
+    composer,
+    // 흐름 안에 있는 행과 입력 줄의 요소만 제자리를 지킨다. 떠 있는 overlay·
+    // 메뉴·도크는 입력기 위쪽 가장자리를 따라 자연스럽게 움직인다.
+    movingParts: () => [
+      ...Array.from(composer.children).filter((child): child is HTMLElement =>
+        child instanceof HTMLElement
+        && child !== composerField
+        && (child === composerMeta || !['absolute', 'fixed'].includes(getComputedStyle(child).position))),
+      ...Array.from(composerField.children).filter((child): child is HTMLElement => child instanceof HTMLElement),
+    ],
+  });
+  function canComposerRest(): boolean {
+    return !configPanelOpen
+      && slashMenu.hidden
+      && !questionController.hasPending()
+      && !input.value.includes('\n')
+      && input.scrollHeight <= COMPOSER_REST_MAX_INPUT_PX;
+  }
   // 진행 상태는 계획/변경 surface와 별개인 입력기 overlay다. 이 행은 문서
   // 흐름의 높이를 차지하지 않으며, 왼쪽 작업 상태와 오른쪽 계획 복원 버튼이
   // 서로의 자리를 침범하지 않도록 하나의 semantic cluster로 묶는다.
@@ -3019,6 +3083,29 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   templateChipClear.appendChild(createIcon('close'));
   templateChip.append(el('span', 'ag-template-chip-label', '템플릿'), templateChipName, templateChipClear);
   composer.append(composerOverlay, slashMenu, templateChip, composerField, composerMeta, configPanel);
+  // 접힌 입력기는 손이 닿는 순간 편다. 보내기 버튼만은 접힌 채로 바로 누를 수 있다.
+  composer.addEventListener('pointerdown', (event) => {
+    if (!composerRest.resting || send.contains(event.target as Node)) return;
+    composerRest.setResting(false);
+    if (event.target === composer || event.target === composerField) {
+      event.preventDefault();
+      input.focus({ preventScroll: true });
+    }
+  });
+  // 창으로 돌아올 때 원래 초점이 다시 들어오는 것은 사용자의 손길이 아니다.
+  let windowRefocusFrame: number | null = null;
+  const onWindowRefocus = (): void => {
+    if (windowRefocusFrame !== null) window.cancelAnimationFrame(windowRefocusFrame);
+    windowRefocusFrame = window.requestAnimationFrame(() => { windowRefocusFrame = null; });
+  };
+  window.addEventListener('focus', onWindowRefocus);
+  composer.addEventListener('focusin', (event) => {
+    if (!composerRest.resting || event.target === send || windowRefocusFrame !== null) return;
+    composerRest.setResting(false);
+  });
+  input.addEventListener('keydown', () => {
+    if (composerRest.resting) composerRest.setResting(false);
+  });
 
   const cloudDocumentControls = el('div', 'ag-cloud-document-controls');
   cloudDocumentControls.setAttribute('role', 'group');
@@ -3096,7 +3183,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   cloudControlsResizeObserver?.observe(cloudDocumentControls);
   // 사이드바에서는 변경 검토와 계획을 분리한다. 계획은 입력기 바로 위에
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
-  chatPage.append(header, messages, review, planSurface, questionController.root, calibrationChip, composer);
+  // 질문 카드와 입력기는 인접 형제여야 하나의 입력 면으로 이어진다.
+  chatPage.append(header, messages, review, planSurface, calibrationChip, questionController.root, composer);
 
   /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다.
    *  펼쳐진 사이드바의 현재 폭이 아니라 max-content(말줄임 바닥)로 잰다.
@@ -3913,6 +4001,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     syncWorkspaceSwitchMount();
     hideThreadPopover();
     cancelFsMotionTimers();
+    // 두 모드의 쉬는 모양이 달라서, 화면 전환은 펼친 입력기로 시작한다.
+    composerRest.setResting(false);
 
     const animate = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     // clip 이 자라나는 출발점 — 배치가 바뀌기 전에 잰다. 접히던
@@ -4575,6 +4665,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   });
   composer.addEventListener('submit', (e) => {
     e.preventDefault();
+    composerRest.setResting(false);
     if (readOnlyDocLabel !== null || mergeResolverLocked) return;
     const execution = composerExecution(workspace.composerTarget());
     if (execution.kind === 'blocked') {
@@ -5314,6 +5405,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function renderMessagesFromThread(thread: ChatThread): void {
+    composerRest.setResting(false);
     cancelPendingAssistantRender();
     resetConversation();
     streamBubble = null;
@@ -6189,6 +6281,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function updateComposer(): void {
+    if (composerRest.resting && !canComposerRest()) composerRest.setResting(false);
     updateCalibrationChip();
     syncCloudProviderSelection();
     syncProviderMenu();
@@ -8359,6 +8452,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       rootResizeObserver?.disconnect();
       messages.removeEventListener('scroll', onMessagesScroll);
       messages.removeEventListener('wheel', onMessagesWheel);
+      window.removeEventListener('focus', onWindowRefocus);
+      composerRest.dispose();
       messages.removeEventListener('touchstart', onMessagesTouchStart);
       messages.removeEventListener('touchmove', onMessagesTouchMove);
       messages.removeEventListener('pointerdown', onMessagesPointerDown);
