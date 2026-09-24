@@ -3183,7 +3183,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   cloudControlsResizeObserver?.observe(cloudDocumentControls);
   // 사이드바에서는 변경 검토와 계획을 분리한다. 계획은 입력기 바로 위에
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
-  chatPage.append(header, messages, review, planSurface, questionController.root, calibrationChip, composer);
+  // 질문 카드와 입력기는 인접 형제여야 하나의 입력 면으로 이어진다.
+  chatPage.append(header, messages, review, planSurface, calibrationChip, questionController.root, composer);
 
   /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다.
    *  펼쳐진 사이드바의 현재 폭이 아니라 max-content(말줄임 바닥)로 잰다.
