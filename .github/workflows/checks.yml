@@ -14,7 +14,7 @@ concurrency:
 jobs:
   website:
     name: Website links and assets
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -24,7 +24,7 @@ jobs:
 
   publish-docs:
     name: Publish docs
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -38,7 +38,7 @@ jobs:
 
   changes:
     name: Select affected checks
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     outputs:
       sessions: ${{ steps.changes.outputs.sessions }}
@@ -58,7 +58,7 @@ jobs:
     name: Cloud transfer contracts
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.app == 'true' || needs.changes.outputs.browser == 'true') }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
 
     steps:
@@ -100,10 +100,12 @@ jobs:
       matrix:
         include:
           - os: macos-15
+            runner: blacksmith-6vcpu-macos-15
             architecture: arm64
           - os: windows-latest
+            runner: blacksmith-2vcpu-windows-2025
             architecture: x64
-    runs-on: ${{ needs.changes.outputs.sessions == 'false' && 'ubuntu-latest' || matrix.os }}
+    runs-on: ${{ needs.changes.outputs.sessions == 'false' && 'blacksmith-2vcpu-ubuntu-2404' || matrix.runner }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -156,7 +158,7 @@ jobs:
     name: Auth and resource boundary regressions
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.app == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -200,7 +202,7 @@ jobs:
     name: Studio browser integration
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.browser == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     env:
       PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
@@ -213,12 +215,7 @@ jobs:
           node-version: 22.18.0
           cache: npm
           cache-dependency-path: rhwp/rhwp-studio/package-lock.json
-      - uses: ./.github/actions/setup-rust
-        with:
-          wasm: 'true'
-          cache: wasm
-      - name: Build WASM engine
-        run: npm run build:wasm
+      - uses: ./.github/actions/build-wasm
       - name: Install Studio dependencies
         run: npm --prefix rhwp/rhwp-studio ci
       - name: Verify provisioned browser
@@ -268,7 +265,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.engine == 'true') }}
     name: Hostile document input boundaries
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
 
     steps:
