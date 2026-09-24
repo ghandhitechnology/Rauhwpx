@@ -590,6 +590,15 @@ impl Table {
         // Extract only real single-column evidence. `base_grid_column_widths`
         // intentionally fills holes from the display grid; that fallback would
         // make excluded local/outlier data look like a paragraph-frame base.
+        let local_resize_rows = self
+            .local_resize_rows
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let base_grid_outlier_rows = self
+            .base_grid_outlier_rows()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
         let mut base_tracks = vec![0u32; col_count];
         for cell in &self.cells {
             let col = usize::from(cell.col);
@@ -598,6 +607,8 @@ impl Table {
                 || cell.width == 0
                 || col >= col_count
                 || nonclosing_rows.contains(&cell.row)
+                || local_resize_rows.contains(&cell.row)
+                || base_grid_outlier_rows.contains(&cell.row)
             {
                 continue;
             }
@@ -622,7 +633,11 @@ impl Table {
             }
         }
         for (row_index, cell_indices) in rows.iter_mut().enumerate() {
-            if nonclosing_rows.contains(&(row_index as u16)) {
+            let row = row_index as u16;
+            if nonclosing_rows.contains(&row)
+                || local_resize_rows.contains(&row)
+                || base_grid_outlier_rows.contains(&row)
+            {
                 continue;
             }
             cell_indices.sort_by_key(|index| self.cells[*index].col);

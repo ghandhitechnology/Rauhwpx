@@ -157,9 +157,11 @@ impl LayoutEngine {
 
         // 글자처럼 표 셀 그림은 저장 frame으로 그린 뒤 TableCell clip에 맡긴다. 한/글은
         // 셀 안쪽 폭에 맞춰 비율 축소하지 않으며, 넘치는 오른쪽·아래만 셀 경계에서 자른다.
-        // 먼저 축소하면 #7333 31쪽 스크린샷과 그 안의 주석 도형이 함께 작아진다. 그 밖의
-        // 그림은 기존처럼 컨테이너를 넘지 않도록 비율 유지 축소한다.
-        let preserve_inline_cell_frame = picture.common.treat_as_char && cell_ctx.is_some();
+        // 먼저 축소하면 #7333 31쪽 스크린샷과 그 안의 주석 도형이 함께 작아진다. 글상자
+        // 경로는 식별용 sentinel `CellContext`를 넘기지만 clip이 없으므로 기존처럼
+        // 컨테이너에 맞춘다. `cell_ctx.is_some()`만으로는 clip을 보장하지 않는다.
+        let preserve_inline_cell_frame = picture.common.treat_as_char
+            && matches!(parent_node.node_type, RenderNodeType::TableCell(_));
         if !preserve_inline_cell_frame {
             // 회전 프레임과 실제 이미지를 같은 비율로 축소해야 중심/회전축이 유지된다.
             if container.width > 0.0 && frame_width > container.width {

@@ -1352,6 +1352,35 @@ impl LayoutEngine {
     /// 음수 축척·이동·전단이 있는 경우에는 그 절댓값만 쓰면 시작과 끝이 뒤집혀
     /// 화살표의 방향까지 반대가 된다. 묶음 자식은 이미 별도 affine 경로를 지나므로
     /// 여기서는 top-level 직선만 보정한다.
+    fn line_uses_signed_rendering_affine(
+        line: &crate::model::shape::LineShape,
+        matrix_positioned: bool,
+    ) -> bool {
+        if matrix_positioned {
+            return false;
+        }
+        let sa = &line.drawing.shape_attr;
+        if !(sa.render_sx < 0.0
+            || sa.render_sy < 0.0
+            || sa.render_b.abs() > 1e-6
+            || sa.render_c.abs() > 1e-6
+            || sa.render_tx.abs() > 1e-6
+            || sa.render_ty.abs() > 1e-6)
+        {
+            return false;
+        }
+        [
+            sa.render_sx,
+            sa.render_b,
+            sa.render_tx,
+            sa.render_c,
+            sa.render_sy,
+            sa.render_ty,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+    }
+
     fn line_point_in_rendering_frame(
         &self,
         line: &crate::model::shape::LineShape,
@@ -1363,26 +1392,8 @@ impl LayoutEngine {
         x: i32,
         y: i32,
     ) -> (f64, f64) {
-        let sa = &line.drawing.shape_attr;
-        let uses_signed_affine = !matrix_positioned
-            && (sa.render_sx < 0.0
-                || sa.render_sy < 0.0
-                || sa.render_b.abs() > 1e-6
-                || sa.render_c.abs() > 1e-6
-                || sa.render_tx.abs() > 1e-6
-                || sa.render_ty.abs() > 1e-6);
-        if uses_signed_affine
-            && [
-                sa.render_sx,
-                sa.render_b,
-                sa.render_tx,
-                sa.render_c,
-                sa.render_sy,
-                sa.render_ty,
-            ]
-            .iter()
-            .all(|value| value.is_finite())
-        {
+        if Self::line_uses_signed_rendering_affine(line, matrix_positioned) {
+            let sa = &line.drawing.shape_attr;
             let x_hu = sa.render_sx * f64::from(x) + sa.render_b * f64::from(y) + sa.render_tx;
             let y_hu = sa.render_c * f64::from(x) + sa.render_sy * f64::from(y) + sa.render_ty;
             return (
@@ -1560,6 +1571,14 @@ impl LayoutEngine {
                 } else {
                     1.0
                 };
+                // 끝점에 renderingInfo affine을 이미 넣었으면 flip/rotation을 다시
+                // 씌우지 않는다. SVG/Skia가 bbox 기준으로 한 번 더 뒤집으면 화살표가 반대가 된다.
+                let line_transform =
+                    if Self::line_uses_signed_rendering_affine(line, matrix_positioned) {
+                        ShapeTransform::default()
+                    } else {
+                        transform
+                    };
 
                 // 연결선: 제어점이 있으면 Path로, 없으면 Line으로 렌더링
                 if let Some(ref conn) = line.connector {
@@ -1647,12 +1666,7 @@ impl LayoutEngine {
                             let ctrl_pts: Vec<(f64, f64)> = cps
                                 .iter()
                                 .filter(|cp| cp.point_type == 2)
-                                .map(|cp| {
-                                    (
-                                        render_x + hwpunit_to_px(cp.x, self.dpi) * sx,
-                                        render_y + hwpunit_to_px(cp.y, self.dpi) * sy,
-                                    )
-                                })
+                                .map(connector_point_xy)
                                 .collect();
                             match ctrl_pts.len() {
                                 0 => {
@@ -1733,7 +1747,7 @@ impl LayoutEngine {
                         path_node.section_index = Some(section_index);
                         path_node.para_index = Some(para_index);
                         path_node.control_index = Some(control_index);
-                        path_node.transform = transform;
+                        path_node.transform = line_transform;
                         path_node.cell_index = cell_index;
                         path_node.cell_para_index = cell_para_index;
                         path_node.outer_table_control_index = outer_table_control_index;
@@ -1785,7 +1799,7 @@ impl LayoutEngine {
                         line_node.section_index = Some(section_index);
                         line_node.para_index = Some(para_index);
                         line_node.control_index = Some(control_index);
-                        line_node.transform = transform;
+                        line_node.transform = line_transform;
                         line_node.cell_index = cell_index;
                         line_node.cell_para_index = cell_para_index;
                         line_node.outer_table_control_index = outer_table_control_index;
@@ -1812,7 +1826,7 @@ impl LayoutEngine {
                     line_node.section_index = Some(section_index);
                     line_node.para_index = Some(para_index);
                     line_node.control_index = Some(control_index);
-                    line_node.transform = transform;
+                    line_node.transform = line_transform;
                     line_node.cell_index = cell_index;
                     line_node.cell_para_index = cell_para_index;
                     line_node.outer_table_control_index = outer_table_control_index;

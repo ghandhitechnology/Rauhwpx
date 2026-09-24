@@ -143,48 +143,47 @@ fn image_bboxes_for_para(
     }
 }
 
-fn find_footer_logo_frame_y(node: &serde_json::Value) -> Option<f64> {
+fn find_footer_image_y(
+    node: &serde_json::Value,
+    matches_size: impl Fn(f64, f64) -> bool + Copy,
+) -> Option<f64> {
     if node.get("type").and_then(|value| value.as_str()) == Some("Footer") {
-        return node
-            .get("children")
-            .and_then(|value| value.as_array())?
-            .iter()
-            .find_map(find_footer_logo_frame_y);
+        return find_matching_image_y(node, matches_size);
     }
+    node.get("children")
+        .and_then(|value| value.as_array())?
+        .iter()
+        .find_map(|child| find_footer_image_y(child, matches_size))
+}
+
+fn find_matching_image_y(
+    node: &serde_json::Value,
+    matches_size: impl Fn(f64, f64) -> bool + Copy,
+) -> Option<f64> {
     if node.get("type").and_then(|value| value.as_str()) == Some("Image") {
         let bbox = node.get("bbox")?;
         let width = bbox.get("w")?.as_f64()?;
         let height = bbox.get("h")?.as_f64()?;
-        if (165.0..171.0).contains(&width) && (46.0..51.0).contains(&height) {
+        if matches_size(width, height) {
             return bbox.get("y")?.as_f64();
         }
     }
     node.get("children")
         .and_then(|value| value.as_array())?
         .iter()
-        .find_map(find_footer_logo_frame_y)
+        .find_map(|child| find_matching_image_y(child, matches_size))
+}
+
+fn find_footer_logo_frame_y(node: &serde_json::Value) -> Option<f64> {
+    find_footer_image_y(node, |width, height| {
+        (165.0..171.0).contains(&width) && (46.0..51.0).contains(&height)
+    })
 }
 
 fn find_footer_rule_y(node: &serde_json::Value) -> Option<f64> {
-    if node.get("type").and_then(|value| value.as_str()) == Some("Footer") {
-        return node
-            .get("children")
-            .and_then(|value| value.as_array())?
-            .iter()
-            .find_map(find_footer_rule_y);
-    }
-    if node.get("type").and_then(|value| value.as_str()) == Some("Image") {
-        let bbox = node.get("bbox")?;
-        let width = bbox.get("w")?.as_f64()?;
-        let height = bbox.get("h")?.as_f64()?;
-        if (620.0..640.0).contains(&width) && height < 6.0 {
-            return bbox.get("y")?.as_f64();
-        }
-    }
-    node.get("children")
-        .and_then(|value| value.as_array())?
-        .iter()
-        .find_map(find_footer_rule_y)
+    find_footer_image_y(node, |width, height| {
+        (620.0..640.0).contains(&width) && height < 6.0
+    })
 }
 
 fn rectangles(node: &serde_json::Value, out: &mut Vec<(f64, f64, f64, f64)>) {

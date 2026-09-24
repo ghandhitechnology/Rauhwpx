@@ -6948,14 +6948,20 @@ impl LayoutEngine {
                             );
                             // full-band TAC flow_end가 이미 overlay 다음 본문 vpos까지
                             // 올려 둔 경우에는 같은 줄을 두 번 소비하지 않는다 (#7333 p33).
-                            let already_reserved = para.line_segs.first().is_some_and(|seg| {
-                                let stored_end = col_area.y
-                                    + hwpunit_to_px(
-                                        seg.vertical_pos + seg.line_height + seg.line_spacing,
-                                        self.dpi,
-                                    );
-                                y_offset + 0.5 >= stored_end
-                            });
+                            // vpos=0 합성 줄은 페이지 상단에서 오탐하므로 저장 양수 vpos만 본다.
+                            let already_reserved = self.profile.get().native_hwp5_layout()
+                                && para.line_segs.first().is_some_and(|seg| {
+                                    seg.vertical_pos > 0 && {
+                                        let stored_end = col_area.y
+                                            + hwpunit_to_px(
+                                                seg.vertical_pos
+                                                    + seg.line_height
+                                                    + seg.line_spacing,
+                                                self.dpi,
+                                            );
+                                        y_offset + 0.5 >= stored_end
+                                    }
+                                });
                             if already_reserved {
                                 return (y_offset, false);
                             }
@@ -8026,7 +8032,10 @@ impl LayoutEngine {
                     table_y_start,
                     self.dpi,
                 );
-                let table_y_start = if is_tac && inline_pos.is_none() {
+                let table_y_start = if is_tac
+                    && inline_pos.is_none()
+                    && self.profile.get().native_hwp5_layout()
+                {
                     stored_empty_full_band_tac_table_top(para, control_index, t, col_area, self.dpi)
                         .or_else(|| {
                             stored_in_front_decoration_shared_vpos_tac_top(

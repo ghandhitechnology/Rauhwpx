@@ -3228,9 +3228,17 @@ impl LayoutEngine {
 
             // 줄별 TAC 컨트롤 너비 합산: 각 TAC가 속한 줄을 판별하여 줄별 최대 너비 계산
             let tac_line_widths: Vec<f64> = {
-                // 줄별 너비 합산 벡터
-                let mut line_widths = vec![0.0f64; composed.lines.len().max(1)];
-                for ctrl in &para.controls {
+                let use_stored_line_buckets =
+                    para.text.trim().is_empty() && para.line_segs.len() > 1;
+                let mut line_widths = vec![
+                    0.0f64;
+                    if use_stored_line_buckets {
+                        para.line_segs.len()
+                    } else {
+                        composed.lines.len().max(1)
+                    }
+                ];
+                for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
                     let (is_tac, w) = match ctrl {
                         Control::Picture(pic) if pic.common.treat_as_char => {
                             (true, hwpunit_to_px(pic.common.width as i32, self.dpi))
@@ -3257,6 +3265,12 @@ impl LayoutEngine {
                         _ => (false, 0.0),
                     };
                     if !is_tac {
+                        continue;
+                    }
+                    if use_stored_line_buckets {
+                        let target = super::control_line_seg_index(para, ctrl_idx).unwrap_or(0);
+                        let idx = target.min(line_widths.len().saturating_sub(1));
+                        line_widths[idx] += w;
                         continue;
                     }
                     // 줄이 1개이면 무조건 0번 줄
@@ -3506,8 +3520,11 @@ impl LayoutEngine {
                                 if target_line > current_tac_line {
                                     // 줄이 바뀜: inline_x 리셋, y를 LINE_SEG vpos 기준으로 이동
                                     current_tac_line = target_line;
-                                    let line_w =
-                                        tac_line_widths.get(target_line).copied().unwrap_or(0.0);
+                                    let line_w = tac_line_widths
+                                        .get(target_line)
+                                        .copied()
+                                        .or_else(|| tac_line_widths.first().copied())
+                                        .unwrap_or(0.0);
                                     // [Task #548] target_line 의 effective_margin_left 적용
                                     let line_margin = effective_margin_left_line(
                                         para_margin_left_px,
@@ -3794,9 +3811,9 @@ impl LayoutEngine {
                             // inline_x/tac_img_y 리셋. multi-line paragraph 에서 사각형이
                             // ls[1]+ 에 있을 때 paragraph 첫 줄 좌표가 잘못 사용되던 결함 정정.
                             let target_line = if all_runs_empty && para.line_segs.len() > 1 {
-                                let li = tac_seq_index.min(para.line_segs.len() - 1);
+                                let fallback = tac_seq_index.min(para.line_segs.len() - 1);
                                 tac_seq_index += 1;
-                                li
+                                super::control_line_seg_index(para, ctrl_idx).unwrap_or(fallback)
                             } else {
                                 composed
                                     .tac_controls
@@ -3816,8 +3833,11 @@ impl LayoutEngine {
                             };
                             if target_line > current_tac_line {
                                 current_tac_line = target_line;
-                                let line_w =
-                                    tac_line_widths.get(target_line).copied().unwrap_or(0.0);
+                                let line_w = tac_line_widths
+                                    .get(target_line)
+                                    .copied()
+                                    .or_else(|| tac_line_widths.first().copied())
+                                    .unwrap_or(0.0);
                                 // [Task #548] target_line 의 effective_margin_left 적용
                                 let line_margin = effective_margin_left_line(
                                     para_margin_left_px,

@@ -2335,7 +2335,7 @@ impl HeightMeasurer {
                                 object_only_tac_picture_line_extent_px(p, self.dpi)
                             {
                                 line_heights.truncate(line_start);
-                                line_heights.push(extent);
+                                line_heights.push(spacing_before + extent + spacing_after);
                                 para_line_counts.push(1);
                             } else {
                                 para_line_counts.push(line_count);

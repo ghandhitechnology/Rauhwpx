@@ -2646,6 +2646,10 @@ impl SvgRenderer {
     /// 연결선은 `PathNode`로 보존되므로, 일반 `LineNode`와 같은 marker를 별도
     /// 투명 기준선에 붙인다. SVG marker는 기준선 stroke와 독립적으로 정의된 색을
     /// 사용한다. 따라서 경로 본문을 두 번 칠하지 않고도 시작/끝 모양을 유지한다.
+    ///
+    /// 방향은 `connector_endpoints` 현(chord)을 쓴다. 꺾인 경로의 마지막 접선으로
+    /// 바꾸면 #7333 연결선 회귀가 깨진다. 끝점은 `draw_line`과 같이 화살표 길이만큼
+    /// 안쪽으로 당겨 머리가 선 밖으로 나가지 않게 한다.
     fn draw_path_arrow_markers(&mut self, path: &PathNode) {
         let (Some(style), Some((x1, y1, x2, y2))) = (&path.line_style, path.connector_endpoints)
         else {
@@ -2657,35 +2661,50 @@ impl SvgRenderer {
             return;
         }
         let color = color_to_svg(style.color);
-        let line_len = ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt();
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let line_len = (dx * dx + dy * dy).sqrt();
         if line_len <= f64::EPSILON {
             return;
         }
+        let ux = dx / line_len;
+        let uy = dy / line_len;
+        let width = style.width.max(0.5);
+        let mut lx1 = x1;
+        let mut ly1 = y1;
+        let mut lx2 = x2;
+        let mut ly2 = y2;
         let mut markers = String::new();
         if style.start_arrow != super::ArrowStyle::None {
+            let (arrow_w, _) = Self::calc_arrow_dims(width, line_len, style.start_arrow_size);
             let marker_id = self.ensure_arrow_marker(
                 &color,
-                style.width.max(0.5),
+                width,
                 line_len,
                 &style.start_arrow,
                 style.start_arrow_size,
                 true,
             );
             markers.push_str(&format!(" marker-start=\"url(#{marker_id})\""));
+            lx1 += ux * arrow_w;
+            ly1 += uy * arrow_w;
         }
         if style.end_arrow != super::ArrowStyle::None {
+            let (arrow_w, _) = Self::calc_arrow_dims(width, line_len, style.end_arrow_size);
             let marker_id = self.ensure_arrow_marker(
                 &color,
-                style.width.max(0.5),
+                width,
                 line_len,
                 &style.end_arrow,
                 style.end_arrow_size,
                 false,
             );
             markers.push_str(&format!(" marker-end=\"url(#{marker_id})\""));
+            lx2 -= ux * arrow_w;
+            ly2 -= uy * arrow_w;
         }
         self.output.push_str(&format!(
-            "<line x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y2}\" stroke=\"none\" fill=\"none\"{markers}/>\n"
+            "<line x1=\"{lx1}\" y1=\"{ly1}\" x2=\"{lx2}\" y2=\"{ly2}\" stroke=\"none\" fill=\"none\"{markers}/>\n"
         ));
     }
 }
