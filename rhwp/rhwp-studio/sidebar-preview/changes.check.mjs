@@ -18,7 +18,7 @@ export async function checkChangesPreview(page, origin, artifacts) {
   assert.equal(await itemCount(), 5);
   assert.match(await page.$eval('.ag-changes-review-slot', (node) => node.textContent), /적용됨/);
   assert.equal(await page.$$eval('.ag-changes-review-slot .ag-changes-pending-item', (nodes) => nodes.length), 3);
-  assert.match(await page.$eval('.ag-changes-diff-list', (node) => node.textContent), /예산표 수정|서비스 흐름도 추가/);
+  assert.match(await page.$eval('.ag-changes-diff-list', (node) => node.textContent), /주문 접수부터 정산까지 이어지는 흐름도/);
   await page.screenshot({ path: resolve(artifacts, 'changes-full-applied.png') });
   assert.equal(await page.$eval('.ag-changes-expand', (node) => node.getAttribute('aria-expanded')), 'false');
   await page.click('.ag-changes-expand');
@@ -29,7 +29,7 @@ export async function checkChangesPreview(page, origin, artifacts) {
   await page.click('.ag-changes-commit-toggle');
   await page.waitForSelector('.ag-changes-commit-detail .ag-changes-item');
   assert.equal(await page.$eval('.ag-changes-commit-toggle', (node) => node.getAttribute('aria-expanded')), 'true');
-  assert.match(await page.$eval('.ag-changes-commit-detail', (node) => node.textContent), /본문 수정/);
+  assert.match(await page.$eval('.ag-changes-commit-detail', (node) => node.textContent), /추진 일정과 기대 효과를 정리했습니다/);
   await page.click('.ag-changes-review-slot .ag-changes-undo');
   await page.waitForFunction(() => window.sidebarPreview.undoState.calls === 1);
   await page.waitForFunction(() => document.querySelectorAll('.ag-changes-diff-list .ag-changes-item').length === 0);

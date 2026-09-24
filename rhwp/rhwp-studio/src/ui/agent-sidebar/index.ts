@@ -9,7 +9,7 @@
 import './motion.css';
 import './agent-sidebar.css';
 import { confirmSheet } from './sheet.ts';
-import { createChangesDrawer, renderPendingOpDiff, renderPendingOpsDiff, summarizeDiffItems } from './changes-drawer.ts';
+import { createChangesDrawer, createJumpButton, renderPendingOpDiff, renderPendingOpsDiff, summarizeDiffItems } from './changes-drawer.ts';
 import { TurnChanges } from './turn-changes.ts';
 import type { DiffItem } from '../../compare/types.ts';
 import type { DocumentPosition } from '../../core/types.ts';
@@ -3303,7 +3303,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const reviewColumnHeading = el('div', 'ag-review-column-heading');
   const reviewColumnTitle = el('span', 'ag-review-column-title', '변경 사항');
   reviewColumnTitle.id = 'ag-review-column-title';
-  const reviewColumnMeta = el('span', 'ag-review-column-meta', '대기 중인 변경 없음');
+  const reviewColumnMeta = el('span', 'ag-review-column-meta', '');
   reviewColumnHeading.append(reviewColumnTitle, reviewColumnMeta);
   reviewColumnHead.append(reviewColumnHeading, reviewColumnClose);
   reviewColumn.appendChild(reviewColumnHead);
@@ -3801,8 +3801,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const hasOtherChanges = !hasPending && workingDiff.length === 0 && versionController?.getState().dirty === true;
     reviewColumnTitle.textContent = '변경 사항';
     reviewColumnMeta.textContent = hasPending
-      ? `${pendingReviewOpCount}개 변경 검토 대기`
-      : workingDiff.length ? `${workingDiff.length}개 커밋되지 않은 변경` : hasOtherChanges ? '커밋되지 않은 변경' : '모든 변경이 커밋되었습니다';
+      ? `검토 대기 ${pendingReviewOpCount}`
+      : workingDiff.length ? `커밋 전 ${workingDiff.length}` : hasOtherChanges ? '커밋 전' : '';
     const hasTextDiff = diff.additions > 0 || diff.deletions > 0;
     environmentAdditions.hidden = diff.additions === 0;
     environmentAdditions.textContent = `+${diff.additions.toLocaleString('ko-KR')}`;
@@ -7476,10 +7476,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           ? { ...part, cellParaIndex: paragraph } : part) } : {}),
     } : null;
     if (position && canNavigate && deps.navigateToChange) {
-      const jump = el('button', 'ag-changes-text-button ag-changes-jump', '문단으로 이동');
-      jump.type = 'button';
+      const jump = createJumpButton(`${entry.dataset.location ?? '문단'}으로 이동`, 'ag-changes-jump');
       jump.addEventListener('click', () => navigateToChange(position));
-      entry.querySelector('.ag-changes-item-title')?.append(jump);
+      entry.append(jump);
     }
     return entry;
   }
@@ -8063,15 +8062,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (reviewSets.length === 0 && latestTurn?.applied) {
       const card = el('div', 'ag-review-card ag-applied-turn');
       const head = el('div', 'ag-review-title');
-      head.append(el('span', 'ag-review-title-text', `${AGENT_LABEL[latestTurn.set.agent]} 편집`),
-        el('span', 'ag-changes-applied', '적용됨'));
+      const applied = el('span', 'ag-changes-applied');
+      applied.append(createIcon('check'), el('span', '', '적용됨'));
+      head.append(el('span', 'ag-review-title-text', AGENT_LABEL[latestTurn.set.agent]), applied);
+      card.classList.add(`ag-${latestTurn.set.agent}`);
       card.append(head);
       const canNavigate = latestTurn.undoEntry !== null && deps.getAgentUndoEntry?.() === latestTurn.undoEntry;
       card.append(renderPendingOpsDiff(latestTurn.set.ops, (op) => buildReviewOp(op, canNavigate)));
       const entry = latestTurn.undoEntry;
       if (entry && deps.getAgentUndoEntry?.() === entry && deps.undoAgentTurn) {
-        const undo = el('button', 'ag-changes-secondary ag-changes-undo', '되돌리기');
+        const undo = el('button', 'ag-changes-secondary ag-changes-undo');
         undo.type = 'button';
+        undo.append(createIcon('undo'), el('span', '', '되돌리기'));
         undo.disabled = bridge.getEditingLease().active || mergeResolverLocked;
         undo.addEventListener('click', () => {
           if (bridge.getEditingLease().active || mergeResolverLocked) return;
@@ -8082,7 +8084,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             scheduleChangesRefresh();
           }
         });
-        card.append(undo);
+        head.append(undo);
       }
       review.append(card);
     } else if (reviewSets.length === 0) {

@@ -1,5 +1,6 @@
 import './changes-drawer.css';
 
+import { createIcon } from './icons.ts';
 import type { PendingOp } from '../../agent/types.ts';
 import type { DiffItem } from '../../compare/types.ts';
 import type { VersionCommitView, VersionManagerController, VersionManagerState } from './version-manager.ts';
@@ -164,14 +165,28 @@ function pendingAddress(op: PendingOp): string {
   if (op.kind === 'template') return op.label;
   if (op.kind === 'object') {
     const obj = op.obj;
-    const section = `${obj.sectionIdx + 1}구역`;
     const para = 'tableParaIdx' in obj ? obj.tableParaIdx : 'paraIdx' in obj ? obj.paraIdx : null;
     const cell = 'cellIdx' in obj && typeof obj.cellIdx === 'number' ? ` · ${obj.cellIdx + 1}셀` : '';
-    return `${section}${para === null ? '' : ` · ${para + 1}문단`}${cell}`;
+    return `${para === null ? '문서' : `${para + 1}문단`}${cell}`;
   }
   const range = op.range;
-  const cell = range.cell ? ` · ${range.cell.cellIdx + 1}셀` : '';
-  return `${range.sectionIdx + 1}구역${cell} · ${range.startParaIdx + 1}문단${range.startParaIdx === range.endParaIdx ? '' : `–${range.endParaIdx + 1}문단`}`;
+  const cell = range.cell ? `${range.cell.cellIdx + 1}셀 · ` : '';
+  return `${cell}${range.startParaIdx + 1}문단${range.startParaIdx === range.endParaIdx ? '' : `–${range.endParaIdx + 1}문단`}`;
+}
+
+/** Icon-only jump button. The label stays available to screen readers and on hover. */
+export function createJumpButton(label: string, className = ''): HTMLButtonElement {
+  const button = el('button', `ag-changes-text-button ag-changes-go${className ? ` ${className}` : ''}`);
+  button.type = 'button';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.append(createIcon('jump'));
+  return button;
+}
+
+/** Section headings only earn their space when changes span several sections. */
+function needsSectionHeadings(sections: readonly (number | null)[]): boolean {
+  return sections.length > 1 || (sections.length === 1 && sections[0] !== 0);
 }
 
 function pendingObjectDetail(op: PendingOp): string {
@@ -215,7 +230,8 @@ function pendingObjectDetail(op: PendingOp): string {
 /** Full pending operation diff shared by the latest-turn review and drawer. */
 export function renderPendingOpDiff(op: PendingOp): HTMLElement {
   const item = el('article', 'ag-changes-item ag-changes-pending-item');
-  item.append(el('div', 'ag-changes-item-title', pendingAddress(op)));
+  // The address is not shown. It labels the jump button instead.
+  item.dataset.location = pendingAddress(op);
   const lines = el('div', 'ag-changes-lines');
   if (op.kind === 'insert') lines.append(diffLine('+', [{ text: op.text, changed: false }], `${op.id}:add`));
   else if (op.kind === 'delete') lines.append(diffLine('−', [{ text: op.text, changed: false }], `${op.id}:del`));
@@ -244,16 +260,16 @@ export function renderPendingOpsDiff(
     groups.set(section, group);
   }
   const fragment = document.createDocumentFragment();
+  const headings = needsSectionHeadings([...groups.keys()]);
   for (const [section, group] of groups) {
-    fragment.append(el('div', 'ag-changes-group-heading', section === null ? '문서 전체' : `${section + 1}구역`));
+    if (headings) fragment.append(el('div', 'ag-changes-group-heading', section === null ? '문서 전체' : `${section + 1}구역`));
     for (const op of group) fragment.append(renderOp(op));
   }
   return fragment;
 }
 
 function itemLocation(item: DiffItem): string {
-  const section = `${item.path.section + 1}구역`;
-  return item.path.paragraph === undefined ? section : `${section} · ${item.path.paragraph + 1}문단`;
+  return item.path.paragraph === undefined ? '' : `${item.path.paragraph + 1}문단`;
 }
 
 function summaryFields(value: string): Record<string, string> {
@@ -338,20 +354,15 @@ function displayDiffTitle(item: DiffItem): string {
 
 function renderDiffItem(item: DiffItem, onNavigate?: (item: DiffItem) => void, navigateLabel = '문서에서 보기', navigateDisabled = false, keyPrefix = ''): HTMLElement {
   const card = el('article', 'ag-changes-item');
-  const top = el('div', 'ag-changes-item-top');
-  const meta = el('div', 'ag-changes-item-meta');
-  meta.append(el('span', 'ag-changes-item-kind', displayDiffTitle(item)), el('span', 'ag-changes-item-location', itemLocation(item)));
-  top.append(meta);
+  const location = itemLocation(item);
   if (onNavigate && (navigateLabel !== '문서에서 보기' || item.severity !== 'removed' || item.contextOnRight || item.rightAnchor)) {
-    const jump = el('button', 'ag-changes-text-button', navigateLabel);
-    jump.type = 'button';
+    const jump = createJumpButton(location && navigateLabel === '문서에서 보기' ? `${location}으로 이동` : navigateLabel);
     jump.disabled = navigateDisabled;
     jump.dataset.navigateJump = '';
     if (navigateLabel === '비교에서 보기') jump.dataset.compareJump = '';
     jump.addEventListener('click', () => onNavigate(item));
-    top.append(jump);
+    card.append(jump);
   }
-  card.append(top);
   const lines = el('div', 'ag-changes-lines');
   let before = formatDiffPreview(item.kind, item.leftPreview);
   let after = formatDiffPreview(item.kind, item.rightPreview);
@@ -365,7 +376,7 @@ function renderDiffItem(item: DiffItem, onNavigate?: (item: DiffItem) => void, n
   if (item.severity === 'removed') parts.before = [{ text: before, changed: false }];
   if (item.leftPreview || item.severity !== 'added') lines.append(diffLine('−', parts.before, `${keyPrefix}${item.id}:del`));
   if (item.rightPreview || item.severity !== 'removed') lines.append(diffLine('+', parts.after, `${keyPrefix}${item.id}:add`));
-  if (!lines.childElementCount) lines.append(diffLine('·', [{ text: item.title, changed: false }]));
+  if (!lines.childElementCount) lines.append(diffLine('·', [{ text: displayDiffTitle(item), changed: false }]));
   card.append(lines);
   return card;
 }
@@ -378,22 +389,51 @@ function renderDiffList(items: readonly DiffItem[], onNavigate?: (item: DiffItem
     group.push(item);
     sections.set(item.path.section, group);
   }
-  for (const [section, group] of [...sections].sort(([a], [b]) => a - b)) {
-    fragment.append(el('div', 'ag-changes-group-heading', `${section + 1}구역`));
+  const sorted = [...sections].sort(([a], [b]) => a - b);
+  const headings = needsSectionHeadings(sorted.map(([section]) => section));
+  for (const [section, group] of sorted) {
+    if (headings) fragment.append(el('div', 'ag-changes-group-heading', `${section + 1}구역`));
     for (const item of group) fragment.append(renderDiffItem(item, onNavigate, navigateLabel, navigateDisabled, keyPrefix));
   }
   return fragment;
 }
 
 function stateMessage(state: VersionManagerState): string | null {
-  if (!state.documentId) return '문서를 열면 변경 내역을 볼 수 있습니다.';
-  if (!state.saved) return '문서를 저장하면 버전 기록을 사용할 수 있습니다.';
-  if (!state.enabled) return '버전 기록을 켜면 작업 중인 변경과 이전 커밋을 볼 수 있습니다.';
+  if (!state.documentId) return '열린 문서 없음';
+  if (!state.saved) return '문서 저장 필요';
+  if (!state.enabled) return '버전 기록 꺼짐';
   return null;
 }
 
 function formatDate(timestamp: number): string {
   return new Intl.DateTimeFormat('ko-KR', { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(timestamp);
+}
+
+function relativeDate(timestamp: number, now = Date.now()): string {
+  const minutes = Math.floor((now - timestamp) / 60_000);
+  if (minutes < 1) return '방금';
+  if (minutes < 60) return `${minutes}분 전`;
+  if (minutes < 24 * 60) return `${Math.floor(minutes / 60)}시간 전`;
+  const sameYear = new Date(timestamp).getFullYear() === new Date(now).getFullYear();
+  return new Intl.DateTimeFormat('ko-KR', sameYear ? { month: 'short', day: 'numeric' }
+    : { year: 'numeric', month: 'short', day: 'numeric' }).format(timestamp);
+}
+
+/** `+12 −3 · 개체 1`, colored per part. Zero parts are left out. */
+function statsParts(summary: DiffItemSummary): HTMLElement[] {
+  const parts: HTMLElement[] = [];
+  if (summary.additions) parts.push(el('span', 'ag-changes-add', `+${summary.additions.toLocaleString('ko-KR')}`));
+  if (summary.deletions) parts.push(el('span', 'ag-changes-del', `−${summary.deletions.toLocaleString('ko-KR')}`));
+  if (summary.nonTextChanges) parts.push(el('span', 'ag-changes-obj', `개체 ${summary.nonTextChanges}`));
+  if (!parts.length && summary.itemCount) parts.push(el('span', 'ag-changes-obj', `${summary.itemCount}건`));
+  return parts;
+}
+
+function emptyState(text: string, done = false): HTMLElement {
+  const node = el('div', `ag-changes-notice ag-changes-empty${done ? ' ag-changes-done' : ''}`);
+  if (done) node.append(createIcon('check', 'ag-changes-empty-icon'));
+  node.append(el('span', '', text));
+  return node;
 }
 
 export function createChangesDrawer(options: ChangesDrawerOptions): ChangesDrawer {
@@ -403,7 +443,7 @@ export function createChangesDrawer(options: ChangesDrawerOptions): ChangesDrawe
   const panel = el('section', 'ag-changes-drawer');
   const body = el('div', 'ag-changes-body');
 
-  const latestSection = el('section', 'ag-changes-section');
+  const latestSection = el('section', 'ag-changes-section ag-changes-latest');
   const latestHeading = el('div', 'ag-changes-section-head');
   latestHeading.append(el('h2', 'ag-changes-section-title', '이번 턴'));
   const reviewSlot = el('div', 'ag-changes-review-slot');
@@ -412,32 +452,37 @@ export function createChangesDrawer(options: ChangesDrawerOptions): ChangesDrawe
   const workingSection = el('section', 'ag-changes-section');
   const workingHeading = el('div', 'ag-changes-section-head');
   const workingCount = el('span', 'ag-changes-section-count');
-  workingHeading.append(el('h2', 'ag-changes-section-title', '커밋되지 않은 작업'), workingCount);
+  workingHeading.append(el('h2', 'ag-changes-section-title', '커밋 전'), workingCount);
   const workingNotice = el('div', 'ag-changes-notice');
   const workingList = el('div', 'ag-changes-diff-list');
   const workingActions = el('div', 'ag-changes-working-actions');
-  const messageLabel = el('label', 'ag-changes-message-label', '커밋 메시지');
+  const composer = el('div', 'ag-changes-composer');
   const message = el('input', 'ag-changes-message');
   message.type = 'text';
   message.maxLength = 160;
-  message.placeholder = '이번 변경을 설명하는 문장';
-  messageLabel.append(message);
+  message.placeholder = '커밋 메시지';
+  message.setAttribute('aria-label', '커밋 메시지');
+  message.enterKeyHint = 'done';
   const commit = el('button', 'ag-changes-primary', '커밋');
   commit.type = 'button';
-  const discard = el('button', 'ag-changes-danger', '모두 되돌리기');
+  composer.append(message, commit);
+  const discard = el('button', 'ag-changes-danger');
   discard.type = 'button';
+  discard.title = '모두 되돌리기';
+  discard.setAttribute('aria-label', '모두 되돌리기');
+  discard.append(createIcon('undo'));
   const discardConfirm = el('div', 'ag-changes-confirm');
   discardConfirm.hidden = true;
-  discardConfirm.append(el('span', '', '커밋하지 않은 변경을 모두 되돌릴까요?'));
-  const confirmDiscard = el('button', 'ag-changes-danger-solid', '모두 되돌리기');
-  confirmDiscard.type = 'button';
+  discardConfirm.append(el('span', '', '모두 되돌릴까요?'));
   const cancelDiscard = el('button', 'ag-changes-text-button', '취소');
   cancelDiscard.type = 'button';
-  discardConfirm.append(confirmDiscard, cancelDiscard);
-  workingActions.append(messageLabel, commit, discard, discardConfirm);
-  workingSection.append(workingHeading, workingNotice, workingActions, workingList);
+  const confirmDiscard = el('button', 'ag-changes-danger-solid', '되돌리기');
+  confirmDiscard.type = 'button';
+  discardConfirm.append(cancelDiscard, confirmDiscard);
+  workingActions.append(composer, discard, discardConfirm);
+  workingSection.append(workingHeading, workingActions, workingNotice, workingList);
 
-  const historySection = el('section', 'ag-changes-section');
+  const historySection = el('section', 'ag-changes-section ag-changes-history');
   const historyHeading = el('div', 'ag-changes-section-head');
   historyHeading.append(el('h2', 'ag-changes-section-title', '커밋'));
   const historyList = el('div', 'ag-changes-history-list');
@@ -458,6 +503,8 @@ export function createChangesDrawer(options: ChangesDrawerOptions): ChangesDrawe
   let commitError: string | null = null;
   let commitLoading = false;
   let commitSerial = 0;
+  let animateDetail = false;
+  let flashCommitId: string | null = null;
   let currentDocumentId = controller?.getState().documentId ?? null;
   const stateSignature = (state: VersionManagerState): string =>
     [state.documentId, state.saved, state.enabled, state.dirty, state.activeBranch,
@@ -476,40 +523,53 @@ export function createChangesDrawer(options: ChangesDrawerOptions): ChangesDrawe
     const state = controller?.getState();
     const unavailable = !state || stateMessage(state);
     const summary = summarizeDiffItems(workingItems);
-    workingCount.textContent = !unavailable && !loading
-      ? summary.itemCount ? `${summary.itemCount}건 · +${summary.additions} −${summary.deletions}`
-        : state.dirty ? '서식·설정 변경' : '0건' : '';
+    workingCount.replaceChildren(...(!unavailable && !loading && summary.itemCount ? statsParts(summary) : []));
     workingNotice.hidden = false;
-    if (!state) workingNotice.textContent = '버전 기록을 사용할 수 없습니다.';
-    else if (stateMessage(state)) workingNotice.textContent = stateMessage(state);
-    else if (loading) workingNotice.textContent = '변경 내용을 불러오는 중…';
+    // A lone "no document" message belongs to the whole drawer, not to one section.
+    historySection.hidden = Boolean(unavailable);
+    if (!state) workingNotice.replaceChildren(emptyState('버전 기록 사용 불가'));
+    else if (stateMessage(state)) workingNotice.replaceChildren(emptyState(stateMessage(state)!));
+    else if (loading && !workingItems.length) workingNotice.replaceChildren(emptyState('불러오는 중…'));
     else if (workingError) {
-      workingNotice.replaceChildren(el('span', '', workingError));
+      const notice = emptyState(workingError);
+      notice.classList.add('ag-changes-error');
       const retry = el('button', 'ag-changes-text-button', '다시 시도');
       retry.type = 'button';
       retry.addEventListener('click', () => void refresh());
-      workingNotice.append(retry);
-    } else if (!workingItems.length) workingNotice.textContent = state.dirty
-      ? '서식 또는 문서 설정이 변경되었습니다.' : '커밋하지 않은 변경이 없습니다.';
+      notice.append(retry);
+      workingNotice.replaceChildren(notice);
+    } else if (!workingItems.length) workingNotice.replaceChildren(state.dirty
+      ? emptyState('서식·설정 변경') : emptyState('모두 커밋됨', true));
     else workingNotice.hidden = true;
     const focusedLine = workingList.contains(document.activeElement)
       ? (document.activeElement as HTMLElement).dataset.lineKey : undefined;
     workingList.replaceChildren();
-    if (!unavailable && !loading && !workingError) workingList.append(renderDiffList(workingItems, options.onNavigate, undefined, isLocked(), 'working:'));
+    // Keep the previous list while a refresh is in flight so rows do not blink.
+    workingList.classList.toggle('ag-changes-stale', loading);
+    if (!unavailable && !workingError) workingList.append(renderDiffList(workingItems, options.onNavigate, undefined, isLocked(), 'working:'));
     if (focusedLine) {
       const next = Array.from(workingList.querySelectorAll<HTMLButtonElement>('[data-line-key]'))
         .find((button) => button.dataset.lineKey === focusedLine);
       next?.focus({ preventScroll: true });
     }
-    workingActions.hidden = Boolean(unavailable) || loading || Boolean(workingError) || (!workingItems.length && !state?.dirty);
+    workingActions.hidden = Boolean(unavailable) || Boolean(workingError) || (!workingItems.length && !state?.dirty);
+    composer.hidden = !discardConfirm.hidden;
+    discard.hidden = !discardConfirm.hidden;
     commit.disabled = isLocked();
     discard.disabled = isLocked();
     confirmDiscard.disabled = isLocked();
     message.disabled = isLocked();
     if (state?.mutationBlockedReason && workingItems.length && !unavailable) {
       workingNotice.hidden = false;
-      workingNotice.textContent = state.mutationBlockedReason;
+      workingNotice.replaceChildren(emptyState(state.mutationBlockedReason));
     }
+  }
+
+  function fillStats(node: HTMLElement, id: string): void {
+    const summary = commitSummaries.get(id);
+    node.classList.toggle('ag-pending', !summary && !commitFailures.has(id));
+    node.title = commitFailures.has(id) ? '변경 확인 실패' : '';
+    node.replaceChildren(...(summary ? statsParts(summary) : commitFailures.has(id) ? [el('span', '', '—')] : []));
   }
 
   function renderHistory(): void {
@@ -517,29 +577,34 @@ export function createChangesDrawer(options: ChangesDrawerOptions): ChangesDrawe
     const focusedCommit = historyList.contains(document.activeElement)
       ? (document.activeElement as HTMLElement).dataset.commitId : undefined;
     historyList.replaceChildren();
-    if (!state || stateMessage(state)) {
-      historyList.append(el('div', 'ag-changes-notice', state ? stateMessage(state) ?? '' : '버전 기록을 사용할 수 없습니다.'));
-      return;
-    }
+    if (!state || stateMessage(state)) return;
     const commits = state.commits.slice(0, 12);
     if (!commits.length) {
-      historyList.append(el('div', 'ag-changes-notice', state.loading ? '커밋을 불러오는 중…' : '아직 커밋이 없습니다.'));
+      historyList.append(emptyState(state.loading ? '불러오는 중…' : '커밋 없음'));
       return;
     }
+    const now = Date.now();
     for (const entry of commits) {
+      const expanded = expandedCommitId === entry.id;
       const row = el('article', 'ag-changes-commit');
+      if (expanded) row.classList.add('ag-open');
+      if (entry.id === flashCommitId) {
+        row.classList.add('ag-changes-commit-new');
+        flashCommitId = null;
+      }
       const toggle = el('button', 'ag-changes-commit-toggle');
       toggle.type = 'button';
       toggle.dataset.commitId = entry.id;
-      toggle.setAttribute('aria-expanded', String(expandedCommitId === entry.id));
-      toggle.append(el('span', 'ag-changes-commit-chevron', '⌄'));
+      toggle.setAttribute('aria-expanded', String(expanded));
       const copy = el('span', 'ag-changes-commit-copy');
-      const meta = el('span', 'ag-changes-commit-meta', `${entry.shortId} · ${formatDate(entry.createdAt)}`);
+      const meta = el('span', 'ag-changes-commit-meta');
+      const date = el('span', '', relativeDate(entry.createdAt, now));
+      date.title = formatDate(entry.createdAt);
+      meta.append(el('span', 'ag-changes-commit-hash', entry.shortId), date);
+      copy.append(el('span', 'ag-changes-commit-title', entry.title), meta);
       const stats = el('span', 'ag-changes-commit-stats');
-      stats.textContent = commitSummaries.has(entry.id) ? summaryLabel(commitSummaries.get(entry.id)!)
-        : commitFailures.has(entry.id) ? '변경 확인 실패' : '변경 계산 중…';
-      copy.append(el('span', 'ag-changes-commit-title', entry.title), meta, stats);
-      toggle.append(copy);
+      fillStats(stats, entry.id);
+      toggle.append(el('span', 'ag-changes-commit-dot'), copy, stats);
       toggle.addEventListener('click', () => {
         if (expandedCommitId === entry.id) {
           expandedCommitId = null;
@@ -548,24 +613,32 @@ export function createChangesDrawer(options: ChangesDrawerOptions): ChangesDrawe
         } else void expandCommit(entry);
       });
       row.append(toggle);
-      if (expandedCommitId === entry.id) {
+      if (expanded) {
         const detail = el('div', 'ag-changes-commit-detail');
-        const compare = el('button', 'ag-changes-secondary', '현재 문서와 비교');
+        if (animateDetail) {
+          detail.classList.add('ag-enter');
+          if (!commitLoading) animateDetail = false;
+        }
+        const compare = el('button', 'ag-changes-secondary', '현재와 비교');
         compare.type = 'button';
         compare.disabled = isLocked();
         compare.addEventListener('click', () => void perform(async () => controller!.compare(entry.id)));
         detail.append(compare);
-        if (commitLoading) detail.append(el('div', 'ag-changes-notice', '커밋 변경을 불러오는 중…'));
+        if (commitLoading) detail.append(emptyState('불러오는 중…'));
         else if (commitError) {
-          const notice = el('div', 'ag-changes-notice', commitError);
+          const notice = emptyState(commitError);
+          notice.classList.add('ag-changes-error');
           const retry = el('button', 'ag-changes-text-button', '다시 시도');
           retry.type = 'button';
           retry.addEventListener('click', () => void expandCommit(entry));
           notice.append(retry);
           detail.append(notice);
-        } else if (commitDiff?.length) detail.append(renderDiffList(commitDiff,
-          () => void perform(() => controller!.compare(entry.id)), '비교에서 보기', isLocked(), `commit:${entry.id}:`));
-        else detail.append(el('div', 'ag-changes-notice', entry.parentIds.length ? '이 커밋에는 표시할 변경이 없습니다.' : '첫 커밋입니다.'));
+        } else if (commitDiff?.length) {
+          const list = el('div', 'ag-changes-commit-diff');
+          list.append(renderDiffList(commitDiff,
+            () => void perform(() => controller!.compare(entry.id)), '비교에서 보기', isLocked(), `commit:${entry.id}:`));
+          detail.append(list);
+        } else detail.append(emptyState(entry.parentIds.length ? '표시할 변경 없음' : '첫 커밋'));
         row.append(detail);
       }
       historyList.append(row);
@@ -575,10 +648,6 @@ export function createChangesDrawer(options: ChangesDrawerOptions): ChangesDrawe
         .find((button) => button.dataset.commitId === focusedCommit);
       next?.focus({ preventScroll: true });
     }
-  }
-
-  function summaryLabel(summary: DiffItemSummary): string {
-    return `${summary.itemCount}건 · +${summary.additions} −${summary.deletions}${summary.nonTextChanges ? ` · 개체 ${summary.nonTextChanges}` : ''}`;
   }
 
   function getCommitDiff(id: string): Promise<DiffItem[]> {
@@ -614,8 +683,7 @@ export function createChangesDrawer(options: ChangesDrawerOptions): ChangesDrawe
         const row = Array.from(historyList.querySelectorAll<HTMLElement>('.ag-changes-commit'))
           .find((node) => node.querySelector<HTMLButtonElement>('.ag-changes-commit-toggle')?.dataset.commitId === entry.id);
         const stats = row?.querySelector<HTMLElement>('.ag-changes-commit-stats');
-        if (stats) stats.textContent = commitSummaries.has(entry.id)
-          ? summaryLabel(commitSummaries.get(entry.id)!) : '변경 확인 실패';
+        if (stats) fillStats(stats, entry.id);
         // Let clicks enqueue mutations before the next historical comparison.
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
@@ -629,6 +697,7 @@ export function createChangesDrawer(options: ChangesDrawerOptions): ChangesDrawe
     if (!controller) return;
     const docId = controller.getState().documentId;
     const request = ++commitSerial;
+    if (expandedCommitId !== entry.id) animateDetail = true;
     expandedCommitId = entry.id;
     commitDiff = null;
     commitError = null;
@@ -760,10 +829,26 @@ export function createChangesDrawer(options: ChangesDrawerOptions): ChangesDrawe
     const documentId = controller!.getState().documentId;
     const draft = message.value;
     await controller!.checkpoint(draft.trim() || undefined);
-    if (controller!.getState().documentId === documentId && message.value === draft) message.value = '';
+    if (controller!.getState().documentId !== documentId) return;
+    flashCommitId = controller!.getState().commits[0]?.id ?? null;
+    if (message.value === draft) message.value = '';
   }));
-  discard.addEventListener('click', () => { discardConfirm.hidden = false; confirmDiscard.focus(); });
-  cancelDiscard.addEventListener('click', () => { discardConfirm.hidden = true; discard.focus(); });
+  message.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.isComposing || commit.disabled) return;
+    event.preventDefault();
+    commit.click();
+  });
+  const setConfirming = (confirming: boolean): void => {
+    discardConfirm.hidden = !confirming;
+    composer.hidden = confirming;
+    discard.hidden = confirming;
+    (confirming ? confirmDiscard : discard).focus();
+  };
+  discard.addEventListener('click', () => setConfirming(true));
+  cancelDiscard.addEventListener('click', () => setConfirming(false));
+  discardConfirm.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { event.stopPropagation(); setConfirming(false); }
+  });
   confirmDiscard.addEventListener('click', () => void perform(() => controller!.discardUncommitted()));
   const unsubscribe = controller?.subscribe(onState);
   renderWorking();
