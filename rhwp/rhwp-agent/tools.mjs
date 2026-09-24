@@ -790,13 +790,13 @@ const BASE_TOOL_DEFINITIONS = [
     // insert_image 만 특별 — 파일은 mcp-stdio 프로세스가 읽어 base64 로 허브에 전달하므로
     // mcp-stdio.mjs 가 이 정의의 description/shape 로 커스텀 핸들러를 등록한다.
     name: 'insert_image',
-    description: `Insert an image into the document at (sectionIdx, paraIdx, charOffset), inline with the text. Preferred input is imagePath — an absolute local file path; this MCP server reads the file, detects its pixel size, and streams the bytes itself (the model never emits image data). png/jpg/gif/bmp, max 5MB. Default size is the natural pixel size at 96dpi, shrunk to the page body width only if wider; pass widthMm/heightMm to force a size (giving just one scales proportionally). ${UNIT_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    description: `Insert an image into the document at (sectionIdx, paraIdx, charOffset), inline with the text. Use imagePath for a local PNG/JPEG/GIF/BMP file; this MCP server reads the bytes and pixel size. For a Codex-generated image, copy the selected file into the session workspace first and pass its absolute path. The file must be inside an approved readable root and at most 5MB. Default size is the natural pixel size at 96dpi, shrunk to the page body width only if wider; pass widthMm/heightMm to force a size (giving just one scales proportionally). ${UNIT_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
       paraIdx: z.number().int().min(0),
       charOffset: z.number().int().min(0),
-      imagePath: z.string().optional().describe('Absolute path to a local png/jpg/gif/bmp file (preferred)'),
+      imagePath: z.string().optional().describe('Absolute path to a local PNG/JPEG/GIF/BMP file inside the session workspace or another approved readable root (preferred)'),
       imageBase64: z.string().optional().describe('Raw base64 image data — only when the bytes are not on disk; requires extension'),
       extension: z.enum(['png', 'jpg', 'jpeg', 'gif', 'bmp']).optional().describe('Required with imageBase64; ignored with imagePath'),
       widthMm: z.number().positive().max(500).optional(),
