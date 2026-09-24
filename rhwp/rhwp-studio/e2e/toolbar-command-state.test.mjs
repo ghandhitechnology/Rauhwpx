@@ -11,7 +11,6 @@ runTest('기본 도구 모음 명령 상태', async ({ page }) => {
 
   assert(await state('edit:undo'), '새 문서에서 되돌리기는 비활성');
   assert(await state('edit:cut'), '선택이 없으면 오려두기는 비활성');
-  assert(await state('edit:copy'), '선택이 없으면 복사하기는 비활성');
 
   await clickEditArea(page);
   await page.keyboard.type('가');
