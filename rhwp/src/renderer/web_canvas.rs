@@ -24,7 +24,9 @@ use super::render_tree::{
     REAL_PICTURE_WATERMARK_PAGE_OPACITY, REAL_PICTURE_WATERMARK_SATURATION,
 };
 use super::text_replay_policy::{
-    canvas_uses_native_run_shaping, web_canvas_supports_positioned_glyph_replay,
+    canvas_cluster_fit_scale, canvas_symbol_fit_transform, canvas_uses_native_run_shaping,
+    preserves_symbol_ink_shape, web_canvas_supports_positioned_glyph_replay,
+    CanvasClusterTransform,
 };
 use super::{
     clamp_tab_leader_end_x, GradientFillInfo, LineStyle, PathCommand, PatternFillInfo, Renderer,
@@ -76,26 +78,50 @@ fn pixel_aligned_hairline_rect(
     Some((left, top, right - left, bottom - top, device_width))
 }
 
-/// Canvas 폰트의 실측 폭을 레이아웃 advance에 맞출 때 적용할 배율을 계산한다.
-///
-/// 음수 자간은 다음 글자의 시작 위치만 당기는 속성이다. 이를 글자 자체의 폭 제한으로
-/// 사용하면 한글 glyph가 가로로 눌리므로, 음수 자간에서는 폭 맞춤을 적용하지 않는다.
-fn canvas_cluster_fit_scale(
-    cluster_advance: f64,
-    visual_width: f64,
+/// 일반 글자와 효과 글자가 동일한 폰트 측정/변환 규칙을 사용한다.
+#[cfg(target_arch = "wasm32")]
+fn canvas_cluster_transform(
+    ctx: &CanvasRenderingContext2d,
+    cluster: &str,
+    advance: f64,
+    ratio: f64,
     letter_spacing: f64,
-    pin_ascii_advance: bool,
-) -> Option<f64> {
-    if cluster_advance <= 0.0 || visual_width <= 0.0 || letter_spacing < 0.0 {
-        return None;
+) -> CanvasClusterTransform {
+    let authored = CanvasClusterTransform {
+        scale_x: ratio,
+        scale_y: 1.0,
+        offset_x: 0.0,
+        offset_y: 0.0,
+    };
+    let Ok(metrics) = ctx.measure_text(cluster) else {
+        return authored;
+    };
+    if preserves_symbol_ink_shape(cluster) {
+        return canvas_symbol_fit_transform(
+            advance,
+            metrics.width(),
+            (
+                metrics.actual_bounding_box_left(),
+                metrics.actual_bounding_box_right(),
+                metrics.actual_bounding_box_ascent(),
+                metrics.actual_bounding_box_descent(),
+            ),
+            ratio,
+            letter_spacing,
+        )
+        .unwrap_or(authored);
     }
-    if pin_ascii_advance {
-        return Some((cluster_advance / visual_width).clamp(0.1, 2.0));
+    let fit = canvas_cluster_fit_scale(
+        advance,
+        metrics.width() * ratio,
+        letter_spacing,
+        cluster.chars().any(|ch| ch.is_ascii_alphanumeric()),
+    )
+    .unwrap_or(1.0);
+    CanvasClusterTransform {
+        scale_x: ratio * fit,
+        ..authored
     }
-    if visual_width > cluster_advance + 0.25 {
-        return Some((cluster_advance / visual_width).clamp(0.1, 1.0));
-    }
-    None
 }
 
 /// Hanyang-PUA 옛한글 코드포인트를 KS X 1026-1:2007 자모 시퀀스로 확장 (Task #528).
@@ -2536,29 +2562,19 @@ impl Renderer for WebCanvasRenderer {
                                 0.0
                             }
                         };
-                        let pin_ascii_advance =
-                            cluster_str.chars().any(|ch| ch.is_ascii_alphanumeric());
-                        let fit_scale = if glyph_advance > 0.0 {
-                            self.ctx
-                                .measure_text(cluster_str)
-                                .ok()
-                                .map(|metrics| metrics.width())
-                                .and_then(|actual_w| {
-                                    canvas_cluster_fit_scale(
-                                        glyph_advance,
-                                        actual_w * ratio,
-                                        style.letter_spacing,
-                                        pin_ascii_advance,
-                                    )
-                                })
-                        } else {
-                            None
-                        };
-
+                        let transform = canvas_cluster_transform(
+                            &self.ctx,
+                            cluster_str,
+                            glyph_advance,
+                            ratio,
+                            style.letter_spacing,
+                        );
                         self.ctx.save();
-                        self.ctx.translate(char_x, y).unwrap_or(());
                         self.ctx
-                            .scale(ratio * fit_scale.unwrap_or(1.0), 1.0)
+                            .translate(char_x + transform.offset_x, y + transform.offset_y)
+                            .unwrap_or(());
+                        self.ctx
+                            .scale(transform.scale_x, transform.scale_y)
                             .unwrap_or(());
                         let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
                         if synthetic_bold {
@@ -3062,24 +3078,19 @@ impl WebCanvasRenderer {
                     .zip(glyph_positions.get(*char_idx))
                     .map(|(end, start)| end - start)
                     .unwrap_or(0.0);
-                let pin_ascii_advance = cs.chars().any(|ch| ch.is_ascii_alphanumeric());
-                let fit_scale = ctx
-                    .measure_text(cs)
-                    .ok()
-                    .and_then(|metrics| {
-                        canvas_cluster_fit_scale(
-                            glyph_advance,
-                            metrics.width() * ratio,
-                            style.letter_spacing,
-                            pin_ascii_advance,
-                        )
-                    })
-                    .unwrap_or(1.0);
-
-                if has_ratio || (fit_scale - 1.0).abs() > 0.001 {
+                let transform =
+                    canvas_cluster_transform(ctx, cs, glyph_advance, ratio, style.letter_spacing);
+                if has_ratio
+                    || (transform.scale_x / ratio - 1.0).abs() > 0.001
+                    || (transform.scale_y - 1.0).abs() > 0.001
+                    || transform.offset_x != 0.0
+                    || transform.offset_y != 0.0
+                {
                     ctx.save();
-                    ctx.translate(char_x, char_y).unwrap_or(());
-                    ctx.scale(ratio * fit_scale, 1.0).unwrap_or(());
+                    ctx.translate(char_x + transform.offset_x, char_y + transform.offset_y)
+                        .unwrap_or(());
+                    ctx.scale(transform.scale_x, transform.scale_y)
+                        .unwrap_or(());
                     let _ = ctx.fill_text(cs, 0.0, 0.0);
                     if stroke {
                         let _ = ctx.stroke_text(cs, 0.0, 0.0);
@@ -3958,19 +3969,6 @@ mod tests {
         assert_eq!(color_to_css(0x00FF0000), "#0000ff"); // 파랑
         assert_eq!(color_to_css(0x00FFFFFF), "#ffffff"); // 흰색
         assert_eq!(color_to_css(0x00000000), "#000000"); // 검정
-    }
-
-    #[test]
-    fn issue_2809_negative_letter_spacing_does_not_compress_glyph() {
-        assert_eq!(canvas_cluster_fit_scale(7.5, 15.0, -7.5, false), None);
-        assert_eq!(canvas_cluster_fit_scale(7.5, 15.0, -7.5, true), None);
-    }
-
-    #[test]
-    fn non_negative_letter_spacing_keeps_existing_font_fit_policy() {
-        assert_eq!(canvas_cluster_fit_scale(7.5, 15.0, 0.0, false), Some(0.5));
-        assert_eq!(canvas_cluster_fit_scale(7.5, 15.0, 0.0, true), Some(0.5));
-        assert_eq!(canvas_cluster_fit_scale(15.0, 14.9, 0.0, false), None);
     }
 
     #[test]
