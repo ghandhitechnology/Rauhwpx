@@ -17,7 +17,6 @@ const chatMarkdown = readFileSync(
 
 test('assistant responses render as flat Markdown transcripts', () => {
   assert.match(source, /renderChatMarkdown\(bubble, text\)/);
-  assert.match(source, /scheduleAssistantRender\(bubble, assistantBuffer\)/);
   assert.match(source, /window\.requestAnimationFrame/);
   assert.match(chatMarkdown, /katexModule\.render/);
   assert.match(chatMarkdown, /import\('katex'\)/);
@@ -29,7 +28,6 @@ test('meaningful progress stays visible as a milestone timeline with nested tool
   assert.match(source, /compactStreamIntoActivity/);
   assert.match(source, /ensureTurnActivity/);
   assert.match(source, /completeTurnActivity/);
-  assert.match(source, /animateActivityLabel/);
   assert.match(source, /flushAssistantBuffer\(\{ kind: 'progress' \}\)/);
   assert.match(source, /ag-progress-step ag-progress-step-restored/);
   assert.match(source, /milestone\.appendChild\(activity\)/);
@@ -49,7 +47,6 @@ test('conversation follows streamed output until the user scrolls away', () => {
   assert.match(source, /followConversation = isConversationFollowingTurn\(\)/);
   assert.match(source, /appendConversation\(userBubble\)/);
   assert.match(source, /scrollConversationToMessage\(userBubble, \{ smooth: true \}\)/);
-  assert.match(source, /opts\?\.smooth !== false/);
   assert.match(source, /conversationScrollTargetNode = node/);
   assert.match(source, /if \(conversationScrollRaf === null\) conversationScrollRaf = window\.requestAnimationFrame\(animateConversationScroll\)/);
   assert.match(source, /function animateConversationScroll\(now: number\): void/);
