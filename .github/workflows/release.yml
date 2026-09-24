@@ -122,7 +122,7 @@ jobs:
   windows:
     name: Build Windows installers
     needs: [preflight, cloud]
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: blacksmith-8vcpu-windows-2025
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
@@ -147,9 +147,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: blacksmith-4vcpu-ubuntu-2404
+          - runner: blacksmith-8vcpu-ubuntu-2404
             arch: x64
-          - runner: blacksmith-4vcpu-ubuntu-2404-arm
+          - runner: blacksmith-8vcpu-ubuntu-2404-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -228,10 +228,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: blacksmith-4vcpu-ubuntu-2404
+          - runner: blacksmith-8vcpu-ubuntu-2404
             machine_arch: x86_64
             asset_arch: amd64
-          - runner: blacksmith-4vcpu-ubuntu-2404-arm
+          - runner: blacksmith-8vcpu-ubuntu-2404-arm
             machine_arch: aarch64
             asset_arch: arm64
     runs-on: ${{ matrix.runner }}

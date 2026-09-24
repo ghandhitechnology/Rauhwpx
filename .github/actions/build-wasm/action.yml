@@ -1,0 +1,42 @@
+name: Build cached WASM package
+description: Reuse the complete release WASM package for unchanged engine inputs.
+inputs:
+  setup-rust:
+    description: Install Rust on a cache miss; set to false when the job already did so.
+    default: 'true'
+runs:
+  using: composite
+  steps:
+    - name: Fingerprint committed engine inputs
+      id: source
+      shell: bash
+      run: echo "digest=$(python3 scripts/wasm-source-fingerprint.py)" >> "$GITHUB_OUTPUT"
+    - name: Restore complete WASM package
+      id: pkg
+      uses: actions/cache/restore@v4
+      with:
+        path: rhwp/pkg
+        key: wasm-pkg-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.source.outputs.digest }}-${{ hashFiles('.cargo/**', '.github/workflows/*.yml', 'rust-toolchain*', '.github/actions/setup-rust/action.yml', '.github/actions/build-wasm/action.yml', 'scripts/wasm-source-fingerprint.py', 'package.json') }}
+    - uses: ./.github/actions/setup-rust
+      if: inputs.setup-rust == 'true' && steps.pkg.outputs.cache-hit != 'true'
+      with:
+        wasm: 'true'
+        cache: wasm
+    - name: Build WASM engine
+      if: steps.pkg.outputs.cache-hit != 'true'
+      shell: bash
+      run: npm run build:wasm
+    - name: Verify WASM package
+      shell: bash
+      run: |
+        test -s rhwp/pkg/rhwp_bg.wasm
+        test -s rhwp/pkg/rhwp.js
+        test -s rhwp/pkg/rhwp.d.ts
+        test -s rhwp/pkg/rhwp_bg.wasm.d.ts
+        test -s rhwp/pkg/package.json
+    - name: Save complete WASM package
+      if: steps.pkg.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: rhwp/pkg
+        key: ${{ steps.pkg.outputs.cache-primary-key }}
