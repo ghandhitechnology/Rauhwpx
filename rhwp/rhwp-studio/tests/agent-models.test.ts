@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   agentSupportsFast,
   availableModelsForAgent,
+  claudeModelDescription,
+  claudeModelLabel,
   defaultEffortForAgent,
   defaultModelForAgent,
   effortsForAgent,
@@ -21,6 +23,8 @@ import {
   setSelectedModels,
 } from '../src/agent/models.ts';
 import type { PiModelConfig } from '../src/agent/types.ts';
+// 허브 카탈로그와 같은 이름 규칙을 쓰는지 직접 비교한다.
+import * as hubLabels from '../../rhwp-agent/claude-model-label.mjs';
 
 test('claude and codex expose distinct model catalogs', () => {
   const claude = modelsForAgent('claude').map((m) => m.id);
@@ -40,11 +44,11 @@ test('resolveModelForAgent falls back to provider default when model does not fi
 test('isModelForAgent and labels stay provider-scoped', () => {
   assert.equal(isModelForAgent('claude', 'opus'), true);
   assert.equal(isModelForAgent('claude', 'gpt-5.6-sol'), false);
-  assert.equal(labelForModel('claude', 'haiku'), 'Haiku');
+  assert.equal(labelForModel('claude', 'haiku'), 'Haiku 4.5');
   assert.equal(labelForModel('codex', 'terra'), 'Terra');
   assert.equal(labelForModel('codex', 'astra'), 'Astra');
-  assert.equal(labelForModel('claude', 'opus'), 'Opus');
-  assert.equal(labelForModel('claude', 'fable'), 'Fable');
+  assert.equal(labelForModel('claude', 'opus'), 'Opus 5.5');
+  assert.equal(labelForModel('claude', 'fable'), 'Fable 5.1');
 });
 
 test('effort catalogs follow provider capabilities', () => {
@@ -201,3 +205,37 @@ test('pi 레지스트리 유예는 다른 프로바이더 id 검사와 무관하
   assert.equal(resolveModelForAgent('claude', 'composer-1'), 'sonnet');
   assert.equal(resolveModelForAgent('codex', 'composer-1'), 'sol');
 });
+
+test('Claude 모델은 해석된 ID에서 버전 이름을 얻고 허브와 같은 규칙을 쓴다', () => {
+  const ids = [
+    'claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5[1m]', 'claude-sonnet-5',
+    'claude-haiku-4-5-20251001', 'claude-3-5-sonnet-20241022', 'sonnet',
+  ];
+  assert.deepEqual(ids.map((id) => claudeModelLabel(id)), [
+    'Fable 5.1', 'Opus 5.5', 'Opus 5 (1M)', 'Sonnet 5', 'Haiku 4.5', 'claude-3-5-sonnet-20241022', 'sonnet',
+  ]);
+  for (const id of ids) assert.equal(claudeModelLabel(id, 'CLI'), hubLabels.claudeModelLabel(id, 'CLI'));
+  for (const text of ['Sonnet 5 · Efficient for routine tasks', 'Opus 5 with 1M context · Best for everyday, complex tasks', 'Plain']) {
+    assert.equal(claudeModelDescription(text), hubLabels.claudeModelDescription(text));
+  }
+});
+
+test('Claude 카탈로그는 예전 캐시 이름도 버전 이름으로 고치고 카탈로그 순서로 선다', () => {
+  setModelCatalog('claude', [
+    { id: 'claude-opus-5-5', label: 'Opus', description: 'Opus 5.5 · Most capable', supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'claude-sonnet-5', label: 'Sonnet', description: 'Sonnet 5 · Efficient for routine tasks' },
+    { id: 'claude-haiku-4-5-20251001', label: 'Haiku' },
+  ]);
+  setSelectedModels({ claude: ['haiku', 'sonnet', 'opus'], codex: ['sol'] });
+  try {
+    assert.deepEqual(modelsForAgent('claude').map((model) => model.label), ['Opus 5.5', 'Sonnet 5', 'Haiku 4.5']);
+    assert.equal(labelForModel('claude', 'sonnet'), 'Sonnet 5');
+    assert.equal(availableModelsForAgent('claude')[1]?.description, 'Efficient for routine tasks');
+    assert.deepEqual(effortsForAgent('claude', 'claude-haiku-4-5-20251001').map((effort) => effort.id), ['high', 'medium', 'low']);
+    assert.deepEqual(effortsForAgent('claude', 'opus').map((effort) => effort.id), ['max', 'xhigh', 'high', 'medium', 'low']);
+  } finally {
+    setModelCatalog('claude', []);
+    setSelectedModels({ claude: ['fable', 'opus', 'sonnet', 'haiku'], codex: ['astra', 'sol', 'luna', 'terra'] });
+  }
+});
+

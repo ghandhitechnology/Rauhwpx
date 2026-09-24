@@ -886,6 +886,12 @@ function installMenu() {
       );
     },
   };
+  // The stock window menu binds CmdOrCtrl+M to Minimize, which swallows the
+  // editor's Cmd+M chord (equations, footnotes, text colors).
+  const minimizeWindow = {
+    label: 'Minimize',
+    click: (_menuItem, browserWindow) => browserWindow?.minimize(),
+  };
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(isMac ? [{
       label: 'Rauhwpx',
@@ -926,7 +932,13 @@ function installMenu() {
       ],
     },
     { role: 'viewMenu' },
-    { role: 'windowMenu' },
+    {
+      label: 'Window',
+      role: 'window',
+      submenu: isMac
+        ? [minimizeWindow, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
+        : [minimizeWindow, { role: 'close' }],
+    },
     ...(isMac ? [] : [{ role: 'help', submenu: [{ role: 'about' }] }]),
   ]));
 }

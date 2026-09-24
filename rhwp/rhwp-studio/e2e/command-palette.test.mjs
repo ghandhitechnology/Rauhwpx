@@ -142,4 +142,29 @@ runTest('/커맨드 팔레트', async ({ page }) => {
   assert(allItemsCount > 10, `TC7: 빈 검색어 시 전체 목록 (${allItemsCount}개)`);
 
   await page.keyboard.press('Escape');
+
+  // Visible launcher can reopen repeatedly and Escape returns focus to it.
+  for (let i = 0; i < 2; i++) {
+    await page.click('#editor-command-search');
+    assert(await page.evaluate(() => !!document.querySelector('.cp-panel')), 'Launcher opens palette');
+    await page.keyboard.press('Escape');
+    assert(await page.evaluate(() => document.activeElement?.id === 'editor-command-search'), 'Escape restores launcher focus');
+  }
+
+  // Menu commands can be reached without a pointer and Escape restores the title.
+  await page.evaluate(() => document.querySelector('.menu-item[data-menu="edit"] .menu-title')?.focus());
+  await page.keyboard.press('ArrowDown');
+  assert(await page.evaluate(() => !!document.querySelector('.menu-item[data-menu="edit"].open')), 'ArrowDown opens menu');
+  assert(await page.evaluate(() => document.activeElement?.classList.contains('md-item')), 'ArrowDown focuses an enabled command');
+  await page.keyboard.press('Escape');
+  assert(await page.evaluate(() => document.activeElement?.classList.contains('menu-title')), 'Escape restores menu title focus');
+  await page.keyboard.press('ArrowRight');
+  assert(await page.evaluate(() => document.activeElement?.closest('.menu-item')?.dataset.menu === 'view'), 'ArrowRight moves between menu titles');
+  await page.keyboard.press('ArrowLeft');
+
+  // The existing shortcut also works from the editor shell outside the text input.
+  await page.keyboard.down('Control'); await page.keyboard.press('/'); await page.keyboard.up('Control');
+  assert(await page.evaluate(() => !!document.querySelector('.cp-panel')), 'Ctrl+/ opens palette from menu title');
+  await page.keyboard.press('Escape');
+  assert(await page.evaluate(() => document.activeElement?.classList.contains('menu-title')), 'Palette restores menu title focus');
 });

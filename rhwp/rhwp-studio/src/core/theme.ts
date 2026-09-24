@@ -13,7 +13,8 @@ function prefersDark(): boolean {
 function syncThemeColorMeta(root: HTMLElement): void {
   const meta = document.querySelector<HTMLMetaElement>(THEME_COLOR_META_SELECTOR);
   if (!meta) return;
-  const themeColor = getComputedStyle(root).getPropertyValue('--ui-bg-light').trim() || '#f5f5f5';
+  const themeColor = getComputedStyle(document.getElementById('studio-header') ?? root)
+    .getPropertyValue('--ui-bg-light').trim() || '#ffffff';
   meta.content = themeColor;
 }
 

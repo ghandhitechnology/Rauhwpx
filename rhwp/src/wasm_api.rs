@@ -992,6 +992,82 @@ impl HwpDocument {
         self.core.get_document_info()
     }
 
+    /// User-visible grapheme count across all authored document text scopes.
+    #[wasm_bindgen(js_name = getDocumentCharacterCount)]
+    pub fn get_document_character_count(&self) -> u32 {
+        self.core
+            .get_document_character_count()
+            .min(u32::MAX as usize) as u32
+    }
+
+    #[wasm_bindgen(js_name = getBodyRangeCharacterCount)]
+    pub fn get_body_range_character_count(
+        &self,
+        start_section: u32,
+        start_paragraph: u32,
+        start_offset: u32,
+        end_section: u32,
+        end_paragraph: u32,
+        end_offset: u32,
+    ) -> Result<u32, JsValue> {
+        self.core
+            .get_body_range_character_count(
+                start_section as usize,
+                start_paragraph as usize,
+                start_offset as usize,
+                end_section as usize,
+                end_paragraph as usize,
+                end_offset as usize,
+            )
+            .map(|count| count.min(u32::MAX as usize) as u32)
+            .map_err(Into::into)
+    }
+
+    /// User-visible count for the entire innermost cell/text box at a cursor path.
+    #[wasm_bindgen(js_name = getContainerCharacterCountByPath)]
+    pub fn get_container_character_count_by_path(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+    ) -> Result<u32, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.core
+            .get_container_character_count_by_path(
+                section_idx as usize,
+                parent_para_idx as usize,
+                &path,
+            )
+            .map(|count| count.min(u32::MAX as usize) as u32)
+            .map_err(Into::into)
+    }
+
+    #[wasm_bindgen(js_name = getContainerRangeCharacterCountByPath)]
+    pub fn get_container_range_character_count_by_path(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        start_para_idx: u32,
+        start_offset: u32,
+        end_para_idx: u32,
+        end_offset: u32,
+    ) -> Result<u32, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.core
+            .get_container_range_character_count_by_path(
+                section_idx as usize,
+                parent_para_idx as usize,
+                &path,
+                start_para_idx as usize,
+                start_offset as usize,
+                end_para_idx as usize,
+                end_offset as usize,
+            )
+            .map(|count| count.min(u32::MAX as usize) as u32)
+            .map_err(Into::into)
+    }
+
     /// 등록된 글꼴 목록을 조회한다.
     ///
     /// 반환: JSON `[{"lang":0,"id":0,"name":"..."}]` — 대체 해소 없는 등록 원본 이름.

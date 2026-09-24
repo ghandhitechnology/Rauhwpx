@@ -30,3 +30,19 @@
   .dialog-hyperlink > .dialog-footer { flex-direction: row; justify-content: flex-end; padding: 0 16px 16px; }
   .dialog-hyperlink .dialog-label { flex-basis: 86px; }
 }
+
+.modal-overlay .dialog-wrap.dialog-hyperlink { display: flex; flex-direction: column; width: min(560px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: hidden; }
+.dialog-hyperlink > .dialog-body { min-width: 0; padding: 16px 20px; overflow-y: auto; }
+.dialog-hyperlink > .dialog-footer { flex-direction: row; justify-content: flex-end; gap: 8px; padding: 12px 20px 16px; border-top: 1px solid var(--ui-border); background: var(--ui-surface); }
+.dialog-hyperlink .dialog-row { margin-bottom: 12px; }
+.dialog-hyperlink .dialog-label { flex-basis: 82px; color: var(--ui-text-secondary); font-weight: 600; }
+.dialog-hyperlink-target { margin-top: 16px; }
+.dialog-hyperlink-panel { padding: 12px; border-color: var(--ui-border); border-radius: 0 0 8px 8px; background: var(--ui-surface-raised); }
+.dialog-hyperlink-preview { color: var(--ui-text); }
+.dialog-hyperlink :is(button, input, select):focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+@media (max-width: 520px) {
+  .dialog-hyperlink > .dialog-body { padding: 12px; }
+  .dialog-hyperlink > .dialog-footer { padding: 10px 12px; }
+  .dialog-hyperlink .dialog-row { flex-wrap: wrap; gap: 5px; }
+  .dialog-hyperlink .dialog-label { flex-basis: 100%; }
+}

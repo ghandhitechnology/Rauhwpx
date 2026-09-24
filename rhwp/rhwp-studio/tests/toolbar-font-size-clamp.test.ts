@@ -6,5 +6,6 @@ const toolbar = readFileSync(new URL('../src/ui/toolbar.ts', import.meta.url), '
 
 test('툴바 글자 크기 입력은 char-shape-dialog와 동일하게 1~4096pt로 clamp한다', () => {
   assert.match(toolbar, /const clampedPt = Math\.min\(4096, Math\.max\(1, pt\)\);/);
-  assert.match(toolbar, /const newPt = Math\.min\(4096, pt \+ 1\);/);
+  assert.match(toolbar, /const next = Math\.max\(1, Math\.min\(4096, \(parseFloat\(this\.fontSize\.value\) \|\| 10\) \+ delta\)\);/);
+  assert.match(toolbar, /this\.onKeyboardActivate\(this\.btnSizeUp, \(\) => this\.adjustFontSize\(1\)\);/);
 });

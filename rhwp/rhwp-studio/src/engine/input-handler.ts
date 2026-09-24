@@ -4032,6 +4032,7 @@ export class InputHandler {
     const ctx = this.cursor.getCellTableContext();
     if (!range || !ctx) {
       this.cellSelectionRenderer.clear();
+      this.eventBus.emit('cell-selection-changed');
       return;
     }
     try {
@@ -4046,6 +4047,7 @@ export class InputHandler {
       const zoom = this.viewportManager.getZoom();
       const excluded = this.cursor.getExcludedCells();
       this.cellSelectionRenderer.render(bboxes, range, zoom, excluded.size > 0 ? excluded : undefined);
+      this.eventBus.emit('cell-selection-changed');
     } catch (e) {
       console.warn('[InputHandler] updateCellSelection 실패:', e);
       this.cellSelectionRenderer.clear();
@@ -5500,6 +5502,9 @@ export class InputHandler {
   /** 제외 셀이 있는 비직사각형 셀 선택인가? */
   hasExcludedCellSelection(): boolean { return this.cursor.getExcludedCells().size > 0; }
 
+  /** Cells removed from an F5 rectangular selection by Ctrl-click. */
+  getExcludedCells(): ReadonlySet<string> { return this.cursor.getExcludedCells(); }
+
   /** 셀 선택 모드 종료 */
   exitCellSelectionMode(): void {
     this.cursor.exitCellSelectionMode();
@@ -6075,6 +6080,36 @@ export class InputHandler {
   /** 현재 선택 범위를 반환한다 (커맨드 시스템용) */
   getSelection(): { start: DocumentPosition; end: DocumentPosition } | null {
     return this.cursor.getSelectionOrdered();
+  }
+
+  /** Selected note or header/footer text for read-only status information. */
+  getAuxiliaryTextSelection(): string | null {
+    const headerFooter = this.cursor.getHeaderFooterSelectionOrdered();
+    if (headerFooter && (headerFooter.start.paraIdx !== headerFooter.end.paraIdx
+      || headerFooter.start.charOffset !== headerFooter.end.charOffset)) {
+      const { start, end } = headerFooter;
+      const parts: string[] = [];
+      for (let paragraph = start.paraIdx; paragraph <= end.paraIdx; paragraph++) {
+        const info = JSON.parse(this.wasm.getHeaderFooterParaInfo(start.sectionIdx, start.isHeader, start.applyTo, paragraph)) as { text: string };
+        const chars = Array.from(info.text);
+        parts.push(chars.slice(paragraph === start.paraIdx ? start.charOffset : 0,
+          paragraph === end.paraIdx ? end.charOffset : chars.length).join(''));
+      }
+      return parts.join('\n');
+    }
+    const footnote = this.cursor.getFootnoteSelectionOrdered();
+    if (footnote && (footnote.start.fnParaIdx !== footnote.end.fnParaIdx
+      || footnote.start.charOffset !== footnote.end.charOffset)) {
+      const info = this.wasm.getFootnoteInfo(this.cursor.fnSectionIdx, this.cursor.fnParaIdx, this.cursor.fnControlIdx);
+      const parts: string[] = [];
+      for (let paragraph = footnote.start.fnParaIdx; paragraph <= footnote.end.fnParaIdx; paragraph++) {
+        const chars = Array.from(info.texts[paragraph] ?? '');
+        parts.push(chars.slice(paragraph === footnote.start.fnParaIdx ? footnote.start.charOffset : 0,
+          paragraph === footnote.end.fnParaIdx ? footnote.end.charOffset : chars.length).join(''));
+      }
+      return parts.join('\n');
+    }
+    return null;
   }
 
   /** 지정된 선택 범위에 글자 서식을 적용한다 (커맨드 시스템용) */

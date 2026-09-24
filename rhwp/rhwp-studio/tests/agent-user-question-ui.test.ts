@@ -40,7 +40,7 @@ test('question interaction uses strict protocol v5 and a reconnect-idempotent an
 });
 
 test('pending question stays above the composer while its transcript position is reserved', () => {
-  assert.match(sidebar, /chatPage\.append\(header, messages, review, planSurface, calibrationChip, questionController\.root, composer\)/);
+  assert.match(sidebar, /chatPage\.append\(header, messages, review, compactChanges, planSurface, calibrationChip, questionController\.root, composer\)/);
   assert.match(sidebar, /const questionTimelineAnchor = el\('span', 'ag-question-timeline-anchor'\)/);
   assert.match(sidebar, /function mountQuestionTimelineAnchor\(\): void \{[\s\S]*appendConversation\(questionTimelineAnchor\)/);
   assert.doesNotMatch(sidebar, /appendConversation\(questionController\.root\)/);

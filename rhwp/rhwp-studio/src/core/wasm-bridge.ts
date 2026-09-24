@@ -865,6 +865,26 @@ export class WasmBridge {
     return this.doc?.getSectionCount() ?? 0;
   }
 
+  getDocumentCharacterCount(): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).getDocumentCharacterCount();
+  }
+
+  getBodyRangeCharacterCount(startSec: number, startPara: number, startOffset: number, endSec: number, endPara: number, endOffset: number): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).getBodyRangeCharacterCount(startSec, startPara, startOffset, endSec, endPara, endOffset);
+  }
+
+  getContainerCharacterCountByPath(sec: number, parentPara: number, pathJson: string): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).getContainerCharacterCountByPath(sec, parentPara, pathJson);
+  }
+
+  getContainerRangeCharacterCountByPath(sec: number, parentPara: number, pathJson: string, startPara: number, startOffset: number, endPara: number, endOffset: number): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).getContainerRangeCharacterCountByPath(sec, parentPara, pathJson, startPara, startOffset, endPara, endOffset);
+  }
+
   getPageInfo(pageNum: number): PageInfo {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.getPageInfo(pageNum));

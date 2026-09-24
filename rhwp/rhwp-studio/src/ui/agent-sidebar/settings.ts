@@ -1,7 +1,6 @@
 import { createSetupTerminal } from './setup-terminal.ts';
 /** 설정 허브의 탐색과 AI·연결 목적지를 소유한다. 편집 설정은 전용 모듈이 맡는다. */
 import './settings.css';
-import './settings-defaults-redesign.css';
 import { confirmSheet } from './sheet.ts';
 
 import {
@@ -205,12 +204,14 @@ function createToggleRow(
   return { root, input };
 }
 
-function createSection(title: string): { root: HTMLElement; body: HTMLElement } {
+function createSection(title: string): { root: HTMLElement; head: HTMLElement; body: HTMLElement } {
   const root = el('section', 'ag-settings-section');
+  const head = el('div', 'ag-settings-section-head');
   const heading = el('h3', 'ag-settings-section-title', title);
+  head.append(heading);
   const body = el('div', 'ag-settings-section-body');
-  root.append(heading, body);
-  return { root, body };
+  root.append(head, body);
+  return { root, head, body };
 }
 
 function createTextField(
@@ -512,25 +513,20 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   panes.get('editing')?.appendChild(editingSettings.element);
 
   // ── Rauhwpx 계정 ───────────────────────────────────────
-  const accountSection = createSection('Rauhwpx 계정');
-  accountSection.root.firstElementChild?.remove();
-  accountSection.root.setAttribute('aria-label', 'Rauhwpx 계정');
+  // 연결 카드의 한 줄로 선다 — 프로바이더 행과 같은 모양이다.
   const accountRow = el('div', 'ag-settings-row ag-account-session-row');
   const accountDot = el('span', 'ag-settings-dot');
   accountDot.setAttribute('aria-hidden', 'true');
   const accountText = el('div', 'ag-settings-row-text');
-  const accountName = el('span', 'ag-settings-row-name', 'Rauhwpx');
+  const accountName = el('span', 'ag-settings-row-name');
+  const accountIcon = el('span', 'ag-account-brand-icon');
+  accountIcon.setAttribute('aria-hidden', 'true');
+  accountName.append(accountIcon, document.createTextNode('Rauhwpx 계정'));
   const accountDetail = el('span', 'ag-settings-row-detail', '확인 중…');
   accountText.append(accountName, accountDetail);
   const accountAction = el('button', 'ag-settings-btn', '로그인');
   accountAction.type = 'button';
-  const accountIcon = el('img', 'ag-account-brand-icon');
-  accountIcon.src = new URL('./assets/rauhwpx-silhouette.png', import.meta.url).href;
-  accountIcon.alt = '';
-  accountIcon.width = 52;
-  accountIcon.height = 52;
-  accountDot.hidden = true;
-  accountRow.append(accountIcon, accountDot, accountText, accountAction);
+  accountRow.append(accountText, accountDot, accountAction);
 
   const accountLoginBox = el('div', 'ag-agent-login-box ag-account-login-box');
   accountLoginBox.hidden = true;
@@ -549,7 +545,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const accountError = el('p', 'ag-settings-cliproxy-error');
   accountError.hidden = true;
   accountError.setAttribute('role', 'status');
-  accountSection.body.append(accountRow, accountLoginBox, accountError);
 
   accountAction.addEventListener('click', () => {
     if (accountStatus?.signedIn) void logoutAccount();
@@ -579,7 +574,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     void bridge.reconnectNow();
     renderConnection();
   });
-  hubRow.append(hubDot, hubText, hubReconnect);
+  hubRow.append(hubText, hubDot, hubReconnect);
 
   const providerRows = new Map<
     AgentName,
@@ -627,8 +622,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     try { await Promise.all([refreshProviders(true), refreshSetupStatuses(true)]); }
     finally { connectionRefreshing = false; if (!disposed) renderConnection(); }
   });
-  hubRow.append(refreshBtn);
-  connection.body.append(hubRow, providerList);
+  refreshBtn.classList.add('ag-settings-section-action');
+  connection.head.append(refreshBtn);
+  connection.body.append(providerList, hubRow);
 
   // ── 1-1. 원격 브라우저 (Browserbase) ──────────────────
   // 여기 넣은 키는 허브 메모리에만 머물고, 이 탭을 쓰는 동안만 환경 변수를 덮는다.
@@ -646,7 +642,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     placeholder: 'AIza…',
     autocomplete: 'new-password',
   });
-  const browserbaseNote = el('p', 'ag-settings-note', '이 탭에서만 허브 환경 변수 대신 사용합니다.');
   const browserbaseError = el('p', 'ag-settings-cliproxy-error');
   browserbaseError.hidden = true;
   const browserbaseActions = el('div', 'ag-settings-actions');
@@ -661,7 +656,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     browserbaseKey.field,
     browserbaseProject.field,
     browserbaseGemini.field,
-    browserbaseNote,
     browserbaseError,
     browserbaseActions,
   );
@@ -1266,13 +1260,17 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   // ── 5. 글쓰기 보정 ────────────────────────────────────
   const calibration = createSection('글쓰기 보정');
   calibration.root.classList.add('ag-settings-calibration-section');
-  const calibrationStatus = el('p', 'ag-settings-status', '보정 전');
-  const calibrationSummary = el('p', 'ag-settings-note');
+  const calibrationRow = el('div', 'ag-settings-row ag-settings-calibration-row');
+  const calibrationText = el('div', 'ag-settings-row-text');
+  const calibrationStatus = el('span', 'ag-settings-row-name', '보정 전');
+  const calibrationSummary = el('span', 'ag-settings-row-detail ag-settings-calibration-summary');
   calibrationSummary.hidden = true;
-  const calibrationBtn = el('button', 'ag-settings-primary', '보정 시작');
+  calibrationText.append(calibrationStatus, calibrationSummary);
+  const calibrationBtn = el('button', 'ag-settings-btn', '보정 시작');
   calibrationBtn.type = 'button';
   calibrationBtn.addEventListener('click', () => openCalibration());
-  calibration.body.append(calibrationStatus, calibrationSummary, calibrationBtn);
+  calibrationRow.append(calibrationText, calibrationBtn);
+  calibration.body.append(calibrationRow);
 
   // ── 6. 템플릿 ─────────────────────────────────────────
   const templatesSection = createSection('템플릿');
@@ -1290,7 +1288,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   replaceTemplateInput.accept = '.hwp,.hwpx';
   replaceTemplateInput.hidden = true;
   let replacingTemplateId: string | null = null;
-  const addTemplateBtn = el('button', 'ag-settings-primary', '템플릿 추가');
+  const addTemplateBtn = el('button', 'ag-settings-btn', '템플릿 추가');
   addTemplateBtn.type = 'button';
   addTemplateBtn.addEventListener('click', () => addTemplateInput.click());
   addTemplateInput.addEventListener('change', () => {
@@ -1305,7 +1303,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     replacingTemplateId = null;
     if (file && id) void replaceTemplate(id, file);
   });
-  templatesSection.body.append(templatesNote, templatesList, templatesStatus, addTemplateBtn, addTemplateInput, replaceTemplateInput);
+  const templatesFooter = el('div', 'ag-settings-row ag-template-footer');
+  templatesFooter.append(templatesNote, addTemplateBtn);
+  templatesSection.body.append(templatesList, templatesStatus, templatesFooter, addTemplateInput, replaceTemplateInput);
 
   // Electron's native browser prompt is unreliable, so add and rename share
   // a small in-app naming dialog.
@@ -1379,7 +1379,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   usageTableHead.append(usageColumns);
   usageTable.append(usageTableHead);
   usageDisclosure.append(usageSummary, usageTable);
-  const usageSection = { root: usageDisclosure };
+  quotaSection.body.append(usageDisclosure);
 
   function createUsageRow(agent: AgentName) {
     const root = el('tbody', 'ag-settings-usage-block');
@@ -1433,19 +1433,38 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   aiApply.type = 'button';
   const aiFooter = el('div', 'ag-settings-apply-footer ag-settings-ai-footer');
   aiFooter.append(aiStatus, aiCancel, aiApply);
+  // 자주 바꾸고 결과가 큰 것부터: 기본값 → 연결 → 사용량 → 모델 목록 → 지시·보정·템플릿.
+  // 드물게 쓰는 원격 브라우저 키와 Git 전환은 접힌 고급 묶음에 둔다.
+  const advanced = el('details', 'ag-settings-advanced');
+  const advancedSummary = el('summary', 'ag-settings-advanced-summary', '고급');
+  advanced.append(advancedSummary, browserbaseSection.root, gitSection.root);
   const aiContent = el('div', 'ag-settings-destination-content');
-  aiContent.append(defaults.root, modelCatalogSection.root, calibration.root, instructionsSection.root, gitSection.root, templatesSection.root, aiFooter);
+  aiContent.append(
+    defaults.root,
+    connection.root,
+    quotaSection.root,
+    modelCatalogSection.root,
+    instructionsSection.root,
+    calibration.root,
+    templatesSection.root,
+    advanced,
+    aiFooter,
+  );
   panes.get('ai')?.appendChild(aiContent);
-
-  const connectionContent = el('div', 'ag-settings-destination-content ag-settings-connection-content');
-  connectionContent.append(accountSection.root, connection.root, quotaSection.root, browserbaseSection.root, usageSection.root);
-  aiContent.prepend(connectionContent);
   if (skillsSettings) {
     const skillsContent = el('div', 'ag-settings-destination-content ag-settings-skills-content');
     skillsContent.appendChild(skillsSettings);
     panes.get('skills')?.appendChild(skillsContent);
   }
-  if (cloudSettings) panes.get('cloud')?.appendChild(cloudSettings);
+  if (cloudSettings) {
+    panes.get('cloud')?.appendChild(cloudSettings);
+    // Rauhwpx 계정은 Cloud에만 쓰이므로 Cloud 서버 카드의 한 줄로 둔다.
+    const cloudCard = cloudSettings.querySelector<HTMLElement>('.ag-cloud-settings-card');
+    const usage = cloudCard?.querySelector('.ag-cd-usage');
+    const accountNodes = [accountRow, accountLoginBox, accountError];
+    if (cloudCard && usage) usage.before(...accountNodes);
+    else (cloudCard ?? cloudSettings).append(...accountNodes);
+  }
 
   aiApply.addEventListener('click', () => void applyAiDraft());
   aiCancel.addEventListener('click', cancelAiDraft);
@@ -1760,9 +1779,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   function renderTemplates(): void {
     templatesList.replaceChildren();
-    if (templates.length === 0) {
-      templatesList.appendChild(el('p', 'ag-settings-note', '추가된 템플릿이 없습니다.'));
-    }
     for (const template of templates) {
       const row = el('div', 'ag-template-row');
       const text = el('div', 'ag-template-row-text');
@@ -1926,6 +1942,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       const text = el('span', 'ag-settings-model-row-text');
       const name = el('span', 'ag-settings-model-row-name', entry.label);
       text.append(name);
+      if (entry.description) text.append(el('span', 'ag-settings-model-row-description', entry.description));
       const trailing = el('span', 'ag-settings-model-row-trailing');
       if (prefsDraft.defaultAgent === agent && prefsDraft.defaultModel === entry.id) {
         trailing.append(el('span', 'ag-settings-model-default', '기본값'));

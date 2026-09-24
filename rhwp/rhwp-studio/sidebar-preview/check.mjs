@@ -156,7 +156,7 @@ try {
     await open('cloud=1&dashboard=1&page=settings&destination=cloud&controls=0');
     await page.waitForSelector('.ag-cd-task');
     assert.equal(await page.$$eval('.ag-cd-task', nodes => nodes.length), 4);
-    assert.equal(await page.$$eval('.ag-cd-stats, .ag-cd-chart, .ag-cd-content h3', nodes => nodes.some(node => node.checkVisibility())), false);
+    assert.equal(await page.$$eval('.ag-cd-stats, .ag-cd-chart', nodes => nodes.some(node => node.checkVisibility())), false);
     const initialStatuses = await page.$$eval('.ag-cd-task-status', nodes => nodes.map(node => node.textContent));
     await page.focus('.ag-cd-task');
     await page.evaluate(() => window.sidebarPreview.cloud.publish());
@@ -185,14 +185,9 @@ try {
     await page.click('.ag-cd-refresh');
     await page.waitForFunction(() => !document.querySelector('.ag-cd-refresh').disabled);
     await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('logged-out'));
-    assert.equal(await page.$eval('.ag-cd-login', node => node.checkVisibility()), true);
-    await page.evaluate(() => {
-      window.previewOriginalOpen = window.open;
-      window.open = url => { window.previewLoginUrl = url; return null; };
-    });
-    await page.click('.ag-cd-login');
-    await page.waitForFunction(() => window.previewLoginUrl === 'https://accounts.example.invalid/preview');
-    await page.evaluate(() => { window.open = window.previewOriginalOpen; });
+    // Rauhwpx 계정 줄은 AI 연결이 아니라 Cloud 서버 카드 안에만 있다.
+    assert.equal(await page.$$eval('.ag-cloud-settings-card .ag-account-session-row', nodes => nodes.length), 1);
+    assert.equal(await page.$$eval('#ag-settings-pane-ai .ag-account-session-row', nodes => nodes.length), 0);
     await open('cloud=1&dashboard=1&page=settings&destination=cloud&width=280&theme=dark&controls=0');
     assert.equal(await page.$eval('#ag-settings-pane-cloud', node => node.scrollWidth > node.clientWidth), false);
     await screenshot('cloud-inbox-narrow');
@@ -465,6 +460,11 @@ try {
       await page.waitForFunction(
         () => window.sidebarPreview.snapshot().pendingChanges === 0,
       );
+      assert.equal(await page.$('.ag-review-card:not(.ag-review-card-leaving)'), null);
+      assert.equal(await page.$eval('.ag-agent-undo-btn', (node) => node.hidden), false);
+      await page.click('.ag-agent-undo-btn');
+      await page.waitForFunction(() => window.sidebarPreview.undoState.calls === 1);
+      assert.equal(await page.$eval('.ag-agent-undo-btn', (node) => node.hidden), true);
       await play('review');
       await page.waitForSelector('.ag-review-card .ag-reject', {
         visible: true,
@@ -661,7 +661,8 @@ try {
       assert.equal(await page.$eval('[data-action="refresh-usage"]', (el) => el.disabled), true);
       await page.waitForFunction(() => !document.querySelector('[data-action="refresh-usage"]').disabled);
       await screenshot('settings');
-      await clickText('.ag-settings-nav-button', 'AI');
+      // Rauhwpx 계정은 Cloud 서버 카드에서 로그인한다.
+      await open('cloud=1&page=settings&destination=cloud');
       await page.waitForFunction(() =>
         document
           .querySelector('.ag-account-session-row')
@@ -681,6 +682,7 @@ try {
       await page.waitForFunction(
         () => window.sidebarPreview.snapshot().account === 'signed-out',
       );
+      await open('page=settings');
       await clickText('.ag-settings-nav-button', 'AI');
       await page.waitForSelector('.ag-template-row', { visible: true });
       await screenshot('ai-settings');

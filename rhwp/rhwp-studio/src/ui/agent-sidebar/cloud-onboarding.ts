@@ -10,7 +10,6 @@ import type {
 import { labelForEffort, labelForModel } from '../../agent/models.ts';
 import { inferCloudLink } from '../../cloud/link.ts';
 import { isCloudSupportedAgent } from '../../cloud/cloud-start.ts';
-import cloudPixelUrl from './cloud-pixel.svg';
 import {
   appServerProvider,
   createCloudSetupState,
@@ -157,22 +156,23 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   const settingsElement = el('section', 'ag-settings-section ag-cloud-settings');
   const settingsTitle = el('h3', 'ag-settings-section-title', 'Cloud 서버');
   const settingsCard = el('div', 'ag-cloud-settings-card');
-  const settingsIcon = el('span', 'ag-cloud-settings-icon');
-  const pixelCloud = document.createElement('img');
-  pixelCloud.className = 'ag-cloud-settings-pixel';
-  pixelCloud.src = cloudPixelUrl;
-  pixelCloud.alt = '';
-  pixelCloud.setAttribute('aria-hidden', 'true');
-  settingsIcon.appendChild(pixelCloud);
+  const settingsRow = el('div', 'ag-cloud-settings-row');
+  const settingsDot = el('span', 'ag-settings-dot ag-cloud-settings-dot');
+  settingsDot.setAttribute('aria-hidden', 'true');
   const settingsCopy = el('div', 'ag-cloud-settings-copy');
   const settingsStatus = el('strong', 'ag-cloud-settings-status');
   const settingsDetail = el('span', 'ag-cloud-settings-detail');
   settingsCopy.append(settingsStatus, settingsDetail);
+  const settingsActions = el('div', 'ag-cloud-settings-actions');
   const settingsAction = el('button', 'ag-settings-btn ag-cloud-settings-action') as HTMLButtonElement;
   settingsAction.type = 'button';
   settingsAction.addEventListener('click', () => open('manage', settingsAction));
-  settingsCard.append(settingsIcon, settingsCopy, settingsAction);
-  settingsElement.append(settingsTitle, settingsCard);
+  settingsActions.append(settingsAction);
+  settingsRow.append(settingsDot, settingsCopy, settingsActions);
+  settingsCard.append(settingsRow);
+  const settingsHead = el('div', 'ag-settings-section-head');
+  settingsHead.append(settingsTitle);
+  settingsElement.append(settingsHead, settingsCard);
 
   function button(label: string, tone: 'primary' | 'quiet' | 'danger' = 'quiet'): HTMLButtonElement {
     const item = el('button', `ag-cloud-setup-button ag-${tone}`, label) as HTMLButtonElement;
@@ -769,7 +769,6 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const provider = appServerProvider(snapshot);
       const appHostedLock = raucloudLock(snapshot);
       title.textContent = 'Cloud 서버 선택';
-      body.append(description('앱을 닫아도 에이전트가 계속 작업할 서버입니다.'));
       if (state.notice) body.append(callout('cloud', '남은 서버 확인', state.notice));
       const options = el('div', 'ag-cloud-setup-options');
       options.setAttribute('role', 'radiogroup');
@@ -796,8 +795,6 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         ),
       );
       body.appendChild(options);
-      const context = transferContext(intent);
-      if (context) body.appendChild(context);
       const loginRequired = mode === 'app-hosted' && needsRaucloudLogin(snapshot);
       const hardLock = mode === 'app-hosted' ? raucloudHardLock(snapshot) : null;
       const primary = button(
@@ -1114,6 +1111,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
 
   function renderSettings(): void {
     settingsAction.disabled = !snapshot.available || mutationLocked;
+    settingsDot.dataset.state = 'unknown';
     if (!snapshot.available) {
       settingsStatus.textContent = '이 빌드에서는 사용할 수 없습니다';
       settingsDetail.textContent = 'Cloud 지원 데스크톱 앱이 필요합니다.';
@@ -1130,6 +1128,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
           ? `${raucloudSetupElapsed(state.startedAt)}째 Raucloud를 만들고 있습니다.`
           : 'Raucloud를 만들고 있습니다.';
         settingsAction.textContent = '진행 보기';
+        settingsDot.dataset.state = 'connecting';
         return;
       }
       settingsStatus.textContent = '설정되지 않음';
@@ -1168,6 +1167,12 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       ? appHostedLock ?? `Raucloud · ${snapshot.profile.name}${snapshot.profile.sandbox.host ? `, ${snapshot.profile.sandbox.host}` : ''}`
       : `내 서버 · ${snapshot.profile.profile.name}, ${snapshot.profile.profile.host}`;
     settingsAction.textContent = '관리';
+    settingsDot.dataset.state = appHostedLock || link.kind === 'failed' || lifecycle === 'error'
+      || snapshot.profile.connection === 'error'
+      ? 'disconnected'
+      : link.kind === 'ready' && snapshot.profile.connection === 'ready' && !sandboxLabel
+        ? 'connected'
+        : 'connecting';
   }
 
   function open(intent: CloudSetupIntent, nextTrigger: HTMLElement): void {
@@ -1177,6 +1182,14 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     sidebarResizeObserver.disconnect();
     const sidebar = trigger.closest('.ag-root');
     if (sidebar) sidebarResizeObserver.observe(sidebar);
+    // body에 붙은 창도 사이드바와 같은 강조색을 쓴다.
+    if (sidebar) {
+      const tokens = getComputedStyle(sidebar);
+      for (const name of ['--accent-primary', '--n-on-accent', '--focus-ring']) {
+        const value = tokens.getPropertyValue(name).trim();
+        if (value) dialog.style.setProperty(name, value);
+      }
+    }
     const preservedFailure = preserveOnOpen
       && (state?.kind === 'install-failed' || state?.kind === 'sandbox-failed');
     if (!operationActive(state) && !preservedFailure) {

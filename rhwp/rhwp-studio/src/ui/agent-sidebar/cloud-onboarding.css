@@ -72,6 +72,8 @@
   animation: ag-cloud-setup-enter var(--ag-dur-slow) var(--ag-spring) both;
 }
 
+.ag-cloud-setup-dialog:focus { outline: none; }
+
 .ag-cloud-setup-header {
   display: flex;
   flex: 0 0 auto;
@@ -592,33 +594,30 @@
   padding: 10px 20px;
 }
 
+/* 설정의 Cloud 서버 카드 — 상태 점 · 상태 문구 · 동작이 한 줄에 선다. */
 .ag-cloud-settings-card {
-  display: grid;
-  grid-template-columns: 112px minmax(0, 1fr) auto;
-  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: var(--ag-set-radius, 12px);
+  background: var(--ag-set-card, var(--ag-bg-2));
+  box-shadow: var(--n-elev-1), inset 0 0 0 1px var(--ag-set-edge, var(--ag-border));
+}
+
+.ag-cloud-settings-card > :not([hidden]) ~ :not([hidden]) {
+  background-image: linear-gradient(var(--ag-set-sep, var(--ag-border)), var(--ag-set-sep, var(--ag-border)));
+  background-position: var(--ag-set-inset, 14px) 0;
+  background-size: calc(100% - var(--ag-set-inset, 14px)) 1px;
+  background-repeat: no-repeat;
+}
+
+.ag-cloud-settings-row {
+  display: flex;
   align-items: center;
-  gap: 8px 16px;
-  padding: 12px 18px 14px;
-  image-rendering: pixelated;
-  border: 1px solid var(--ag-border);
-  border-radius: 2px;
-  background: var(--ag-bg-2);
-}
-
-.ag-cloud-settings-icon {
-  display: grid;
-  width: 88px;
-  height: 88px;
-  flex: 0 0 auto;
-  place-items: center;
-  background: transparent;
-  color: var(--accent-primary);
-}
-
-.ag-cloud-settings-pixel {
-  width: 74px;
-  height: auto;
-  image-rendering: pixelated;
+  gap: 10px;
+  min-height: 56px;
+  padding: 10px var(--ag-set-inset, 14px);
 }
 
 .ag-cloud-settings-copy {
@@ -629,25 +628,26 @@
 }
 
 .ag-cloud-settings-status {
-  color: var(--ag-text);
-  font-size: 18px;
-  line-height: 1.2;
-  letter-spacing: -.02em;
+  color: var(--n-text, var(--ag-text));
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .ag-cloud-settings-detail {
   overflow: hidden;
-  color: var(--ag-text-muted);
-  font-size: 13px;
+  color: var(--n-text-secondary, var(--ag-text-muted));
+  font-size: 11.5px;
+  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ag-cloud-settings-action {
-  min-height: 38px;
-  padding-inline: 14px;
-  border-radius: 3px;
-  font-size: 13px;
+.ag-cloud-settings-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
 }
 
 @keyframes ag-cloud-setup-enter {

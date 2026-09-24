@@ -377,7 +377,11 @@ impl EqLayout {
 
         let mut boxes: Vec<LayoutBox> = children
             .iter()
-            .map(|c| self.layout_node(c, fs))
+            .enumerate()
+            .map(|(i, c)| match c {
+                EqNode::Symbol(s) if is_sign(children, i) => self.padded_symbol(s, fs, SIGN_PAD_EM),
+                _ => self.layout_node(c, fs),
+            })
             .filter(|b| b.width > 0.0 || matches!(b.kind, LayoutKind::Newline))
             .collect();
 
@@ -448,13 +452,13 @@ impl EqLayout {
     }
 
     fn layout_symbol(&self, text: &str, fs: f64) -> LayoutBox {
+        // 연산자 좌우 여백: 관계 > 이항 > 그 밖의 기호
+        self.padded_symbol(text, fs, operator_pad_em(text).unwrap_or(0.05))
+    }
+
+    fn padded_symbol(&self, text: &str, fs: f64, pad_em: f64) -> LayoutBox {
         let w = self.text_width(text, fs, false, false);
-        // 연산자 좌우 여백
-        let pad = if matches!(text, "+" | "-" | "=" | "<" | ">" | "×" | "÷") {
-            fs * 0.15
-        } else {
-            fs * 0.05
-        };
+        let pad = fs * pad_em;
         LayoutBox {
             x: 0.0,
             y: 0.0,
@@ -480,6 +484,10 @@ impl EqLayout {
                 baseline: op_fs * 0.7, // 적분 기호 baseline: 기호 높이의 70%
                 kind: LayoutKind::MathSymbol(text.to_string()),
             };
+        }
+        // 관계·이항 연산 기호는 Symbol 로 두어 좌우 여백 가운데에 그린다.
+        if let Some(pad_em) = operator_pad_em(text) {
+            return self.padded_symbol(text, fs, pad_em);
         }
         let italic = self.italic && super::font::is_greek_variable(text);
         let w = self.text_width(text, fs, italic, false);
@@ -1849,5 +1857,32 @@ mod tests {
             narrow.width,
             wide.width,
         );
+    }
+}
+
+/// 부호로 쓰인 +/- 의 좌우 여백 (em)
+const SIGN_PAD_EM: f64 = 0.03;
+
+/// 행 첫머리나 다른 연산자 뒤의 +/- 는 부호이므로 붙여 쓴다.
+fn is_sign(children: &[EqNode], i: usize) -> bool {
+    if !matches!(&children[i], EqNode::Symbol(s) if s == "+" || s == "-") {
+        return false;
+    }
+    match i.checked_sub(1).map(|p| &children[p]) {
+        None | Some(EqNode::Symbol(_)) => true,
+        Some(EqNode::MathSymbol(p)) => operator_pad_em(p).is_some(),
+        _ => false,
+    }
+}
+
+/// 연산자 좌우 여백 (em). TeX 의 관계(5mu)·이항(4mu) 간격을 따른다.
+pub(crate) fn operator_pad_em(text: &str) -> Option<f64> {
+    match text {
+        "=" | "<" | ">" | "<=" | ">=" | "!=" | "==" | "->" | "<<" | ">>" | "<<<" | ">>>" | "≤"
+        | "≥" | "≠" | "≈" | "≡" | "∼" | "≃" | "≅" | "∝" | "≪" | "≫" | "→" | "←" | "↔" | "⇒"
+        | "⇐" | "⇔" | "∈" | "∉" | "∋" | "⊂" | "⊃" | "⊆" | "⊇" => Some(0.28),
+        "+" | "-" | "−" | "×" | "÷" | "±" | "∓" | "·" | "∙" | "∘" | "⊕" | "⊖" | "⊗" | "∪" | "∩"
+        | "∧" | "∨" => Some(0.22),
+        _ => None,
     }
 }

@@ -726,6 +726,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const turnChanges = new TurnChanges();
   let turnOwnerThreadId: string | null = null;
   let workingDiff: DiffItem[] = [];
+  let compactChangesOpen = false;
   let changesRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   let reviewColCollapsed = true;
   let planColCollapsed = true;
@@ -1168,7 +1169,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       // 라벨이 있는 모델 묶음은 머리글과 함께 그린다.
       if (group.label) llmMenu.appendChild(el('span', 'ag-llm-group-label', group.label));
       for (const opt of group.options) {
-        const item = el('button', 'ag-model-item ag-llm-item', opt.label);
+        // 이름 + 한 줄 설명 + 선택 표시. 설명은 카탈로그가 줄 때만 그린다.
+        const item = el('button', 'ag-model-item ag-llm-item');
+        const copy = el('span', 'ag-llm-item-copy');
+        copy.append(el('span', 'ag-llm-item-name', opt.label));
+        if (opt.description) copy.append(el('span', 'ag-llm-item-description', opt.description));
+        const check = el('span', 'ag-llm-item-check');
+        check.setAttribute('aria-hidden', 'true');
+        check.append(createIcon('check'));
+        item.append(copy, check);
         item.type = 'button';
         item.dataset.model = opt.id;
         item.title = opt.id;
@@ -1344,6 +1353,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const headerActions = el('div', 'ag-header-actions');
   threadsBtn.classList.add('ag-header-icon-btn');
 
+  const agentUndoBtn = el('button', 'ag-header-icon-btn ag-agent-undo-btn');
+  agentUndoBtn.type = 'button';
+  agentUndoBtn.hidden = true;
+  agentUndoBtn.setAttribute('aria-label', '승인한 변경 되돌리기');
+  agentUndoBtn.title = '승인한 변경 되돌리기';
+  agentUndoBtn.appendChild(createIcon('undo'));
+  agentUndoBtn.addEventListener('click', undoLatestAgentTurn);
+
   // 콘솔 펼치기 — 사이드바 폭에서는 diff 를 읽을 수 없어 전체 화면으로 넘긴다.
   const fullscreenBtn = el('button', 'ag-header-icon-btn ag-fullscreen-btn');
   fullscreenBtn.type = 'button';
@@ -1380,7 +1397,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     openConfiguredVersionControl();
   });
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
-  headerActions.append(connDot, takeoverBtn, versionsBtn, threadsBtn, settingsBtn);
+  headerActions.append(connDot, takeoverBtn, agentUndoBtn, versionsBtn, threadsBtn, settingsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
@@ -2935,6 +2952,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const review = el('div', 'ag-review');
   review.tabIndex = 0;
   review.setAttribute('aria-label', '변경 사항 검토');
+  const compactChanges = el('section', 'ag-compact-changes');
+  compactChanges.hidden = true;
+  const compactChangesToggle = el('button', 'ag-compact-changes-toggle');
+  compactChangesToggle.type = 'button';
+  compactChangesToggle.setAttribute('aria-controls', 'ag-compact-changes-content');
+  compactChangesToggle.setAttribute('aria-expanded', 'false');
+  compactChangesToggle.append(createIcon('changes'), el('span', '', '커밋 전'));
+  const compactChangesCount = el('span', 'ag-compact-changes-count');
+  compactChangesToggle.append(compactChangesCount, createChevron('ag-compact-changes-chevron'));
+  compactChangesToggle.addEventListener('click', () => setCompactChangesOpen(!compactChangesOpen));
+  const compactChangesContent = el('div', 'ag-compact-changes-content');
+  compactChangesContent.id = 'ag-compact-changes-content';
+  compactChangesContent.hidden = true;
+  compactChanges.append(compactChangesToggle, compactChangesContent);
   const planSurface = el('section', 'ag-plan-surface');
   planSurface.setAttribute('aria-label', '실행 계획');
   const planCardSlot = el('div', 'ag-plan-card-slot');
@@ -3186,7 +3217,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   // 사이드바에서는 변경 검토와 계획을 분리한다. 계획은 입력기 바로 위에
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
   // 질문 카드와 입력기는 인접 형제여야 하나의 입력 면으로 이어진다.
-  chatPage.append(header, messages, review, planSurface, calibrationChip, questionController.root, composer);
+  chatPage.append(header, messages, review, compactChanges, planSurface, calibrationChip, questionController.root, composer);
 
   /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다.
    *  펼쳐진 사이드바의 현재 폭이 아니라 max-content(말줄임 바닥)로 잰다.
@@ -3411,7 +3442,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   reviewColumnTitle.id = 'ag-review-column-title';
   const reviewColumnMeta = el('span', 'ag-review-column-meta', '');
   reviewColumnHeading.append(reviewColumnTitle, reviewColumnMeta);
-  reviewColumnHead.append(reviewColumnHeading, reviewColumnClose);
+  const reviewColumnUndo = el('button', 'ag-header-icon-btn ag-review-column-undo');
+  reviewColumnUndo.type = 'button';
+  reviewColumnUndo.hidden = true;
+  reviewColumnUndo.setAttribute('aria-label', '승인한 변경 되돌리기');
+  reviewColumnUndo.title = '승인한 변경 되돌리기';
+  reviewColumnUndo.appendChild(createIcon('undo'));
+  reviewColumnUndo.addEventListener('click', undoLatestAgentTurn);
+  const reviewColumnActions = el('div', 'ag-review-column-actions');
+  reviewColumnActions.append(reviewColumnUndo, reviewColumnClose);
+  reviewColumnHead.append(reviewColumnHeading, reviewColumnActions);
   reviewColumn.appendChild(reviewColumnHead);
   const changesDrawer = createChangesDrawer({
     versionController,
@@ -3423,10 +3463,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     },
     onWorkingDiff: (items) => {
       workingDiff = items;
+      updateCompactChangesVisibility();
       updateReviewControl(bridge.pendingEdits.getChangeSets());
     },
   });
   reviewColumn.append(changesDrawer.element);
+  changesDrawer.setCompactHost(compactChangesContent);
+  updateCompactChangesVisibility();
 
   function scheduleChangesRefresh(): void {
     clearTimeout(changesRefreshTimer);
@@ -3694,6 +3737,24 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function isCompactWorkspace(): boolean {
     return fullscreen && workspaceCompact;
+  }
+
+  function setCompactChangesOpen(open: boolean): void {
+    const next = open && !fullscreen && !compactChanges.hidden;
+    if (compactChangesOpen === next) return;
+    compactChangesOpen = next;
+    compactChangesContent.hidden = !next;
+    compactChangesToggle.setAttribute('aria-expanded', String(next));
+    compactChanges.classList.toggle('ag-open', next);
+    if (next) void changesDrawer.refresh();
+  }
+
+  function updateCompactChangesVisibility(): void {
+    const state = versionController?.getState();
+    const visible = !fullscreen && Boolean(state?.saved && state.enabled && state.dirty);
+    compactChanges.hidden = !visible;
+    compactChangesCount.textContent = workingDiff.length ? `${workingDiff.length}건` : '';
+    if (!visible) setCompactChangesOpen(false);
   }
 
   function clearCompactRailHoverClose(): void {
@@ -3989,7 +4050,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     threadsPage.setAttribute('aria-hidden', 'true');
     chatPage.setAttribute('aria-hidden', 'false');
     // 변경 검토·계획·질문·입력기는 다시 사이드바의 분리된 inline 흐름으로 돌아간다.
-    chatPage.append(review, planSurface, questionController.root, composer);
+    chatPage.append(review, compactChanges, planSurface, questionController.root, composer);
+    changesDrawer.setCompactHost(compactChangesContent);
+    updateCompactChangesVisibility();
     applyPlanMinimizedState();
   }
 
@@ -4060,6 +4123,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       applyRailWidth(railWidth, { persist: false });
       applyReviewWidth(reviewWidth, { persist: false });
       // 변경 사항과 계획은 각각의 환경 drawer에 둔다.
+      setCompactChangesOpen(false);
+      changesDrawer.setCompactHost(null);
+      updateCompactChangesVisibility();
       changesDrawer.reviewSlot.appendChild(review);
       planColumn.appendChild(planSurface);
       reviewColCollapsed = true;
@@ -8280,6 +8346,37 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     updateTurnPending(activeEdit?.agent);
   }
 
+  function currentAgentUndoEntry(): object | null {
+    const turn = turnChanges.get(currentThread.id, currentDocumentId);
+    const entry = turn?.applied ? turn.undoEntry : null;
+    return entry && deps.undoAgentTurn && deps.getAgentUndoEntry?.() === entry ? entry : null;
+  }
+
+  function updateAgentUndoButtons(): void {
+    const available = currentAgentUndoEntry() !== null;
+    const disabled = bridge.getEditingLease().active || mergeResolverLocked;
+    for (const button of [agentUndoBtn, reviewColumnUndo]) {
+      if (available && button.hidden) {
+        button.classList.remove('ag-undo-arrive');
+        void button.offsetWidth;
+        button.classList.add('ag-undo-arrive');
+      }
+      button.hidden = !available;
+      button.disabled = !available || disabled;
+    }
+  }
+
+  function undoLatestAgentTurn(): void {
+    if (bridge.getEditingLease().active || mergeResolverLocked) return;
+    const entry = currentAgentUndoEntry();
+    if (!entry) return;
+    if (deps.undoAgentTurn?.(entry)) {
+      turnChanges.begin(currentThread.id);
+      rebuildReview();
+      scheduleChangesRefresh();
+    } else updateAgentUndoButtons();
+  }
+
   /** 승인·거절로 사라지는 검토 카드는 제자리에서 접히며 빠진다. */
   function collapseLeavingReviewCard(card: HTMLElement, height: number): void {
     card.classList.add('ag-review-card-leaving');
@@ -8347,11 +8444,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     const changeSets = bridge.pendingEdits.getChangeSets();
     const reviewSets = changeSets.filter((set) => set.status !== 'open');
-    const latestTurn = turnChanges.get(currentThread.id, currentDocumentId);
-    const activeOps = new Set([
-      ...changeSets.flatMap(set => set.ops.map(op => op.id)),
-      ...(reviewSets.length === 0 && latestTurn?.applied ? latestTurn.set.ops.map(op => op.id) : []),
-    ]);
+    const activeOps = new Set(changeSets.flatMap(set => set.ops.map(op => op.id)));
     for (const [id, url] of reviewImageUrls) {
       if (!activeOps.has(id)) {
         URL.revokeObjectURL(url);
@@ -8371,45 +8464,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         collapseLeavingReviewCard(card, height);
       }
     }
-    if (reviewSets.length === 0 && latestTurn?.applied) {
-      const card = el('div', 'ag-review-card ag-applied-turn');
-      const head = el('div', 'ag-review-title');
-      const applied = el('span', 'ag-changes-applied');
-      applied.append(createIcon('check'), el('span', '', '적용됨'));
-      head.append(el('span', 'ag-review-title-text', AGENT_LABEL[latestTurn.set.agent]), applied);
-      card.classList.add(`ag-${latestTurn.set.agent}`);
-      card.append(head);
-      const canNavigate = latestTurn.undoEntry !== null && deps.getAgentUndoEntry?.() === latestTurn.undoEntry;
-      card.append(renderPendingOpsDiff(latestTurn.set.ops, (op) => buildReviewOp(op, canNavigate)));
-      const entry = latestTurn.undoEntry;
-      if (entry && deps.getAgentUndoEntry?.() === entry && deps.undoAgentTurn) {
-        const undo = el('button', 'ag-changes-secondary ag-changes-undo');
-        undo.type = 'button';
-        undo.append(createIcon('undo'), el('span', '', '되돌리기'));
-        undo.disabled = bridge.getEditingLease().active || mergeResolverLocked;
-        undo.addEventListener('click', () => {
-          if (bridge.getEditingLease().active || mergeResolverLocked) return;
-          if (deps.undoAgentTurn?.(entry)) {
-            latestTurn.applied = false;
-            latestTurn.undoEntry = null;
-            rebuildReview();
-            scheduleChangesRefresh();
-          }
-        });
-        head.append(undo);
-      }
-      review.append(card);
-    } else if (reviewSets.length === 0) {
-      const empty = el('div', 'ag-review-empty');
-      const emptyIcon = el('div', 'ag-review-empty-icon');
-      emptyIcon.appendChild(createIcon('changes'));
-      empty.append(
-        emptyIcon,
-        el('div', 'ag-review-empty-title', '변경 사항 없음'),
-        el('div', 'ag-review-empty-copy', '에이전트가 수정하면 여기에 표시됩니다.'),
-      );
-      review.appendChild(empty);
-    }
+    updateAgentUndoButtons();
     applyPlanMinimizedState();
     updateReviewControl(changeSets);
   }
@@ -8467,11 +8522,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     ? [
         eventBus.on('document-mutated', () => {
           scheduleChangesRefresh();
-          const latest = turnChanges.get(currentThread.id, currentDocumentId);
-          if (latest?.undoEntry && deps.getAgentUndoEntry?.() !== latest.undoEntry) {
-            review.querySelector('.ag-changes-undo')?.remove();
-            review.querySelectorAll('.ag-applied-turn .ag-changes-jump').forEach((jump) => jump.remove());
-          }
+          updateAgentUndoButtons();
         }),
         eventBus.on('history-jumped', () => { turnChanges.clear(); rebuildReview(); scheduleChangesRefresh(); }),
         eventBus.on('document-swapped', () => { turnChanges.clear(); rebuildReview(); scheduleChangesRefresh(); }),
