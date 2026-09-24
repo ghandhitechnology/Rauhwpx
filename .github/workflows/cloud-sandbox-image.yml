@@ -33,7 +33,7 @@ jobs:
     permissions:
       packages: write
     name: Build and publish Railway sandbox image
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 90
     steps:
       - name: Check out requested source

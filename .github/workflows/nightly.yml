@@ -254,7 +254,7 @@ jobs:
   windows:
     name: Build Windows installers
     needs: prepare
-    runs-on: blacksmith-8vcpu-windows-2025
+    runs-on: blacksmith-4vcpu-windows-2025
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5

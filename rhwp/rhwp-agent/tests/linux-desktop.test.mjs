@@ -88,8 +88,8 @@ test('Repository browser checks build WASM with the shared pinned toolchain', ()
 });
 
 test('Linux releases run on native Blacksmith Ubuntu x64 and arm64 runners', () => {
-  assert.match(releaseWorkflow, /blacksmith-8vcpu-ubuntu-2404(?!-arm)\b/);
-  assert.match(releaseWorkflow, /blacksmith-8vcpu-ubuntu-2404-arm\b/);
+  assert.match(releaseWorkflow, /blacksmith-4vcpu-ubuntu-2404(?!-arm)\b/);
+  assert.match(releaseWorkflow, /blacksmith-4vcpu-ubuntu-2404-arm\b/);
   assert.match(releaseWorkflow, /release\/\*\.AppImage/);
   assert.match(releaseWorkflow, /release\/\*\.deb/);
   assert.match(releaseWorkflow, /latest-linux\*\.yml/);
