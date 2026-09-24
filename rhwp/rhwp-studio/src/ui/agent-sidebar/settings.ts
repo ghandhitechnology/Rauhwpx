@@ -1244,8 +1244,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     instructionsEditor,
     instructionsStatus,
     instructionsActions,
-    hancomGit.root,
   );
+  const gitSection = createSection('Git');
+  gitSection.body.append(hancomGit.root);
 
   instructionsEditor.addEventListener('input', () => {
     instructionsDirty = instructionsEditor.value !== (agentInstructions?.content ?? '');
@@ -1433,7 +1434,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const aiFooter = el('div', 'ag-settings-apply-footer ag-settings-ai-footer');
   aiFooter.append(aiStatus, aiCancel, aiApply);
   const aiContent = el('div', 'ag-settings-destination-content');
-  aiContent.append(defaults.root, modelCatalogSection.root, calibration.root, instructionsSection.root, templatesSection.root, aiFooter);
+  aiContent.append(defaults.root, modelCatalogSection.root, calibration.root, instructionsSection.root, gitSection.root, templatesSection.root, aiFooter);
   panes.get('ai')?.appendChild(aiContent);
 
   const connectionContent = el('div', 'ag-settings-destination-content ag-settings-connection-content');

@@ -2693,13 +2693,6 @@
   background-image: none;
 }
 
-#ag-settings-pane-ai .ag-settings-instructions-section .ag-settings-control-row {
-  padding: 10px 12px;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-field);
-  background-color: var(--ag-bg-2);
-}
-
 #ag-settings-pane-ai .ag-settings-templates-section :is(.ag-template-list, .ag-template-row) {
   min-width: 0;
 }
