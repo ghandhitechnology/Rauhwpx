@@ -15,7 +15,7 @@ test('desktop, cloud runtime metadata and default sandbox image use one release 
   assert.equal(cloud.version, version);
   assert.equal(lock.version, version);
   assert.equal(lock.packages[''].version, version);
-  assert.equal(RAILWAY_DEFAULT_IMAGE, `ghcr.io/ghandhitechnology/rauhwpx-cloud:${version}`);
+  assert.equal(RAILWAY_DEFAULT_IMAGE, `ghcr.io/heemangstudio/rauhwpx-cloud:${version}`);
   assert.equal(HOSTED_RAILWAY_DEFAULT_IMAGE, RAILWAY_DEFAULT_IMAGE);
 });
 

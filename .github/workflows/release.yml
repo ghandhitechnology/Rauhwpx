@@ -15,7 +15,7 @@ concurrency:
 jobs:
   preflight:
     name: Verify release tag
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - name: Check out tagged source
@@ -52,7 +52,7 @@ jobs:
           assert.equal(cloud.version, version, 'Cloud and desktop release versions must match');
           assert.equal(lock.version, version, 'Cloud lockfile version must match');
           assert.equal(lock.packages[''].version, version, 'Cloud lockfile root version must match');
-          assert.equal(RAILWAY_DEFAULT_IMAGE, `ghcr.io/ghandhitechnology/rauhwpx-cloud:${version}`);
+          assert.equal(RAILWAY_DEFAULT_IMAGE, `ghcr.io/heemangstudio/rauhwpx-cloud:${version}`);
           assert.equal(HOSTED_RAILWAY_DEFAULT_IMAGE, RAILWAY_DEFAULT_IMAGE, 'Hosted and desktop cloud images must match');
           NODE
 
@@ -62,7 +62,7 @@ jobs:
   verification:
     name: Verify release contracts
     needs: preflight
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
@@ -94,7 +94,7 @@ jobs:
     name: Build macOS installers
     # Bundle the verified cloud runtimes while tagged-source verification runs.
     needs: [preflight, cloud]
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 120
     environment: macos-release
     steps:
@@ -122,7 +122,7 @@ jobs:
   windows:
     name: Build Windows installers
     needs: [preflight, cloud]
-    runs-on: windows-latest
+    runs-on: blacksmith-4vcpu-windows-2025
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
@@ -147,9 +147,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: blacksmith-4vcpu-ubuntu-2404
             arch: x64
-          - runner: ubuntu-24.04-arm
+          - runner: blacksmith-4vcpu-ubuntu-2404-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -228,10 +228,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: blacksmith-4vcpu-ubuntu-2404
             machine_arch: x86_64
             asset_arch: amd64
-          - runner: ubuntu-24.04-arm
+          - runner: blacksmith-4vcpu-ubuntu-2404-arm
             machine_arch: aarch64
             asset_arch: arm64
     runs-on: ${{ matrix.runner }}
@@ -337,7 +337,7 @@ jobs:
           (cd release && sha256sum --check "$(basename "$asset").sha256")
           cosign verify-blob "$asset" \
             --bundle "$asset.sigstore.json" \
-            --certificate-identity-regexp '^https://github\.com/ghandhitechnology/Rauhwpx/\.github/workflows/release\.yml@refs/tags/' \
+            --certificate-identity-regexp '^https://github\.com/heemangstudio/Rauhwpx/\.github/workflows/release\.yml@refs/tags/' \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
 
       - name: Upload cloud runtime
@@ -354,7 +354,7 @@ jobs:
   cloud-image:
     name: Publish multi-architecture cloud sandbox image
     needs: [verification, cloud]
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
       contents: read
@@ -377,7 +377,7 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: [verification, macos, windows, linux, cloud, cloud-image]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
       contents: write

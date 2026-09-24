@@ -105,7 +105,7 @@ if [[ -n ${RAUHWpx_RELEASE_URL:-} ]]; then
 else
   ASSET=rauhwpx-cloud-linux-arm64.tar.gz
   RELEASES_JSON=$(curl --fail --location --silent --show-error \
-    'https://api.github.com/repos/ghandhitechnology/Rauhwpx/releases?per_page=30')
+    'https://api.github.com/repos/heemangstudio/Rauhwpx/releases?per_page=30')
   ARCHIVE_URL=$("${NODE}" -e '
     const releases=JSON.parse(process.argv[1]),name=process.argv[2],prerelease=process.argv[3]==="prerelease";
     const release=releases.find((item)=>item.prerelease===prerelease&&!item.draft&&item.assets?.some((asset)=>asset.name===name));
@@ -120,7 +120,7 @@ curl --fail --location --silent --show-error "${RAUHWpx_RELEASE_SHA256_URL:-${AR
 curl --fail --location --silent --show-error "${RAUHWpx_RELEASE_BUNDLE_URL:-${ARCHIVE_URL}.sigstore.json}" --output "${ARCHIVE}.sigstore.json"
 "${COSIGN}" verify-blob "${ARCHIVE}" \
   --bundle "${ARCHIVE}.sigstore.json" \
-  --certificate-identity-regexp '^https://github.com/ghandhitechnology/Rauhwpx/.github/workflows/release.yml@refs/(heads|tags)/' \
+  --certificate-identity-regexp '^https://github.com/heemangstudio/Rauhwpx/.github/workflows/release.yml@refs/(heads|tags)/' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' >/dev/null
 
 mkdir "${TMP}/unpacked"
