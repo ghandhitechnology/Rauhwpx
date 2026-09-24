@@ -1,6 +1,7 @@
 /** 대화를 위로 읽는 동안 입력기를 한 줄로 접는 전환.
  *
- *  입력기의 아래 가장자리를 고정하고 높이만 바꾼다. 높이와 margin-top 을 같은
+ *  입력기의 아래 가장자리를 고정하고 높이를 바꾼다. 전체 화면처럼 쉬는 모양의
+ *  폭이 다르면 가운데를 축으로 폭도 함께 옮긴다. 높이와 margin-top 을 같은
  *  곡선으로 반대 방향에 걸어 두 값의 합을 목적지 높이로 유지하므로, 대화 목록은
  *  첫 프레임에 한 번만 크기가 바뀌고 전환 내내 흔들리지 않는다. 안쪽 요소는
  *  이전 위치에서 새 위치로 translate 로 이어 붙여 튀지 않게 한다.
@@ -60,6 +61,7 @@ export function createComposerRestingMotion(opts: {
     // 진행 중인 전환이 있으면 지금 화면에 보이는 높이·위치가 출발점이다.
     const box = composer.getBoundingClientRect();
     const fromHeight = box.height;
+    const fromWidth = box.width;
     const fromBottomOffsets = new Map(
       visibleParts().map((part) => [part, box.bottom - part.getBoundingClientRect().top] as const),
     );
@@ -70,16 +72,21 @@ export function createComposerRestingMotion(opts: {
 
     const { duration, easing } = timing();
     if (fromHeight === 0 || duration < 20) return;
-    const toHeight = composer.getBoundingClientRect().height;
+    const target = composer.getBoundingClientRect();
+    const toHeight = target.height;
     const delta = toHeight - fromHeight;
-    if (Math.abs(delta) < 0.5) return;
+    const widthChanges = Math.abs(target.width - fromWidth) >= 0.5;
+    if (Math.abs(delta) < 0.5 && !widthChanges) return;
 
-    const running: Animation[] = [
-      animate(composer, [
-        { height: `${fromHeight}px`, marginTop: `${delta}px` },
-        { height: `${toHeight}px`, marginTop: '0px' },
-      ], duration, easing),
-    ];
+    // 폭은 흐름 안에서 가운데 정렬되어 있어 폭만 옮겨도 양쪽이 함께 모인다.
+    // 안쪽 행은 매 프레임 새 폭에 맞춰 다시 배치되므로 가로 보정은 필요 없다.
+    const from: Keyframe = { height: `${fromHeight}px`, marginTop: `${delta}px` };
+    const to: Keyframe = { height: `${toHeight}px`, marginTop: '0px' };
+    if (widthChanges) {
+      from.width = `${fromWidth}px`;
+      to.width = `${target.width}px`;
+    }
+    const running: Animation[] = [animate(composer, [from, to], duration, easing)];
     const bottom = composer.getBoundingClientRect().bottom;
     for (const part of visibleParts()) {
       const fromBottom = fromBottomOffsets.get(part);

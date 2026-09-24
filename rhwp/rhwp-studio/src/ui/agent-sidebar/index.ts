@@ -4000,6 +4000,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     syncWorkspaceSwitchMount();
     hideThreadPopover();
     cancelFsMotionTimers();
+    // 두 모드의 쉬는 모양이 달라서, 화면 전환은 펼친 입력기로 시작한다.
+    composerRest.setResting(false);
 
     const animate = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     // clip 이 자라나는 출발점 — 배치가 바뀌기 전에 잰다. 접히던

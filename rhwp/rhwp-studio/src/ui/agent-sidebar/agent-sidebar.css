@@ -4454,6 +4454,21 @@ button.ag-skill-copy {
   border-radius: 15px;
 }
 
+/* 전체 화면에서는 iOS Safari 의 작은 주소창처럼 가운데의 짧은 캡슐로 모인다.
+   넓은 대화 폭을 가로지르는 막대 대신, 읽는 동안 떠 있는 작은 손잡이가 된다. */
+.ag-root.ag-fullscreen .ag-composer.ag-resting {
+  width: min(460px, calc(100% - 48px));
+  border-radius: 21px;
+  box-shadow: var(--n-elev-3);
+}
+
+.ag-root.ag-fullscreen .ag-chat-page .ag-composer {
+  transition:
+    border-color var(--ag-dur-fast) var(--ag-ease-out),
+    box-shadow var(--ag-dur-slow) var(--ag-spring),
+    border-radius var(--ag-dur-slow) var(--ag-spring);
+}
+
 /* 설정 줄은 흐름에서 빠져 아래 가장자리에 붙은 채 사라지고, 펼칠 때는
    높이가 거의 자리 잡은 뒤에 떠오른다. */
 .ag-composer-meta {
