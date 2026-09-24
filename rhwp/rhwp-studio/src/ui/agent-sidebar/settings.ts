@@ -1,6 +1,7 @@
 import { createSetupTerminal } from './setup-terminal.ts';
 /** 설정 허브의 탐색과 AI·연결 목적지를 소유한다. 편집 설정은 전용 모듈이 맡는다. */
 import './settings.css';
+import './settings-defaults-redesign.css';
 import { confirmSheet } from './sheet.ts';
 
 import {
