@@ -9,7 +9,7 @@ use crate::error::HwpError;
 use crate::model::control::{Control, FieldType};
 use crate::model::event::DocumentEvent;
 use crate::model::page::ColumnDef;
-use crate::model::paragraph::{ParaMeta, Paragraph};
+use crate::model::paragraph::{LineSeg, ParaMeta, Paragraph};
 use crate::model::shape::{ShapeObject, TextWrap, VertRelTo};
 use crate::model::style::ParaShapeMods;
 use crate::renderer::composer::{compose_paragraph, reflow_line_segs, ComposedParagraph};
@@ -24,43 +24,33 @@ enum ParagraphSplitIntent {
     RestoreMetadata(ParaMeta),
 }
 
-fn recalculate_cell_paragraph_vpos(
+fn cell_vpos_resets(previous: &Paragraph, current: &Paragraph) -> bool {
+    if let Some(reset) = current.cell_vpos_reset {
+        return reset;
+    }
+    match (previous.line_segs.first(), current.line_segs.first()) {
+        (Some(previous), Some(current)) => {
+            current.vertical_pos < previous.vertical_pos
+                && current.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0
+                && previous.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0
+        }
+        _ => false,
+    }
+}
+
+/// [#4138/#6639] 표 셀의 vpos 사다리를 start부터 stop까지 단조 재구축한다.
+fn apply_cell_vpos_ladder(
     paragraphs: &mut [Paragraph],
     start_para: usize,
-    ignore_reset_at: Option<usize>,
+    stop_para: usize,
     styles: &ResolvedStyleSet,
     dpi: f64,
     is_hwp3_variant: bool,
 ) {
-    if paragraphs.is_empty() || start_para >= paragraphs.len() {
+    if paragraphs.is_empty() || start_para >= paragraphs.len() || start_para >= stop_para {
         return;
     }
-
-    // RowBreak 거대 셀은 후속 문단 vpos를 뒤로 되돌려 다음 조각의 로컬 원점을
-    // 표현하기도 한다. 그 경계까지 선형 편집 결과를 연결하되, 경계 이후 저장
-    // 좌표는 페이지 분할 신호이므로 이동하지 않는다.
-    // [Task #2299] 합성 seg(TAG_IMPLEMENTATION_PROPERTY, #1811)의 vpos=0 은 배치 전
-    // placeholder 이지 분할 신호가 아니다 — 섹션 recalc 와 동일하게 정지 대상에서
-    // 제외한다 (로드가 합성한 중간-셀 문단에서 가짜 정지 → 꼬리 미갱신 방지).
-    let stop_para = paragraphs
-        .windows(2)
-        .enumerate()
-        .skip(start_para)
-        .find_map(|(idx, pair)| {
-            let previous_seg = pair[0].line_segs.first()?;
-            let previous = previous_seg.vertical_pos;
-            let current_seg = pair[1].line_segs.first()?;
-            let current = current_seg.vertical_pos;
-            // 되감김의 양쪽 모두 저장 레이아웃 증거(비합성 seg)여야 분할 신호다 —
-            // 한쪽이라도 배치 전 placeholder 면 저장 좌표 비교가 성립하지 않는다.
-            let synthetic = crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY;
-            let is_synthetic =
-                (current_seg.tag & synthetic != 0) || (previous_seg.tag & synthetic != 0);
-            let reset_para = idx + 1;
-            let is_inserted_paragraph = ignore_reset_at == Some(reset_para);
-            (current < previous && !is_inserted_paragraph && !is_synthetic).then_some(reset_para)
-        })
-        .unwrap_or(paragraphs.len());
+    let stop_para = stop_para.min(paragraphs.len());
 
     let boundary_gaps: Vec<i32> = paragraphs
         .windows(2)
@@ -116,6 +106,112 @@ fn recalculate_cell_paragraph_vpos(
             next_vpos += gap;
         }
     }
+}
+
+fn visit_paragraph_slices(paragraphs: &mut [Paragraph], visit: &mut impl FnMut(&mut [Paragraph])) {
+    visit(paragraphs);
+    for para in paragraphs.iter_mut() {
+        for control in para.controls.iter_mut() {
+            visit_control_paragraph_slices(control, visit);
+        }
+    }
+}
+
+fn visit_control_paragraph_slices(control: &mut Control, visit: &mut impl FnMut(&mut [Paragraph])) {
+    match control {
+        Control::Table(table) => {
+            if let Some(caption) = table.caption.as_mut() {
+                visit_paragraph_slices(&mut caption.paragraphs, visit);
+            }
+            for cell in table.cells.iter_mut() {
+                visit_paragraph_slices(&mut cell.paragraphs, visit);
+            }
+        }
+        Control::Shape(shape) => visit_shape_paragraph_slices(shape, visit),
+        Control::Picture(picture) => {
+            if let Some(caption) = picture.caption.as_mut() {
+                visit_paragraph_slices(&mut caption.paragraphs, visit);
+            }
+        }
+        Control::Header(header) => visit_paragraph_slices(&mut header.paragraphs, visit),
+        Control::Footer(footer) => visit_paragraph_slices(&mut footer.paragraphs, visit),
+        Control::Footnote(note) => visit_paragraph_slices(&mut note.paragraphs, visit),
+        Control::Endnote(note) => visit_paragraph_slices(&mut note.paragraphs, visit),
+        Control::HiddenComment(comment) => visit_paragraph_slices(&mut comment.paragraphs, visit),
+        Control::Field(field) => visit_paragraph_slices(&mut field.memo_paragraphs, visit),
+        _ => {}
+    }
+}
+
+fn visit_shape_paragraph_slices(shape: &mut ShapeObject, visit: &mut impl FnMut(&mut [Paragraph])) {
+    match shape {
+        ShapeObject::Group(group) => {
+            if let Some(caption) = group.caption.as_mut() {
+                visit_paragraph_slices(&mut caption.paragraphs, visit);
+            }
+            for child in group.children.iter_mut() {
+                visit_shape_paragraph_slices(child, visit);
+            }
+        }
+        ShapeObject::Picture(picture) => {
+            if let Some(caption) = picture.caption.as_mut() {
+                visit_paragraph_slices(&mut caption.paragraphs, visit);
+            }
+        }
+        other => {
+            if let Some(drawing) = other.drawing_mut() {
+                if let Some(text_box) = drawing.text_box.as_mut() {
+                    visit_paragraph_slices(&mut text_box.paragraphs, visit);
+                }
+                if let Some(caption) = drawing.caption.as_mut() {
+                    visit_paragraph_slices(&mut caption.paragraphs, visit);
+                }
+            }
+        }
+    }
+}
+
+fn recalculate_cell_paragraph_vpos(
+    paragraphs: &mut [Paragraph],
+    start_para: usize,
+    ignore_reset_at: Option<usize>,
+    styles: &ResolvedStyleSet,
+    dpi: f64,
+    is_hwp3_variant: bool,
+) {
+    if paragraphs.is_empty() || start_para >= paragraphs.len() {
+        return;
+    }
+
+    // RowBreak 거대 셀은 후속 문단 vpos를 뒤로 되돌려 다음 조각의 로컬 원점을
+    // 표현하기도 한다. 그 경계까지 선형 편집 결과를 연결하되, 경계 이후 저장
+    // 좌표는 페이지 분할 신호이므로 이동하지 않는다.
+    // [Task #2299] 합성 seg(TAG_IMPLEMENTATION_PROPERTY, #1811)의 vpos=0 은 배치 전
+    // placeholder 이지 분할 신호가 아니다 — 섹션 recalc 와 동일하게 정지 대상에서
+    // 제외한다 (로드가 합성한 중간-셀 문단에서 가짜 정지 → 꼬리 미갱신 방지).
+    let fragment_start = (1..=start_para)
+        .rev()
+        .find(|&idx| paragraphs[idx].cell_vpos_reset == Some(true))
+        .unwrap_or(0);
+    let stop_para = paragraphs
+        .windows(2)
+        .enumerate()
+        .skip(start_para)
+        .find_map(|(idx, pair)| {
+            let reset_para = idx + 1;
+            let is_inserted_paragraph = ignore_reset_at == Some(reset_para);
+            (cell_vpos_resets(&pair[0], &pair[1]) && !is_inserted_paragraph).then_some(reset_para)
+        })
+        .unwrap_or(paragraphs.len());
+
+    apply_cell_vpos_ladder(
+        &mut paragraphs[fragment_start..stop_para],
+        start_para - fragment_start,
+        stop_para - fragment_start,
+        styles,
+        dpi,
+        is_hwp3_variant,
+    );
 }
 
 fn shift_paragraph_vpos_origin(para: &mut Paragraph, target_vpos: i32) {
@@ -1838,6 +1934,56 @@ impl DocumentCore {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// [#6639] 각 셀을 한 번 순회한다. 저장 RowBreak 원점은 유지하고 변경된 조각만 갱신한다.
+    pub(crate) fn flush_cell_format_vpos(&mut self) {
+        if !std::mem::take(&mut self.pending_cell_format_vpos) {
+            return;
+        }
+        self.styles = resolve_styles(&self.document.doc_info, self.dpi);
+        let is_hwp3_variant = self.document.layout_profile().hwp3_layout();
+        let dpi = self.dpi;
+        let styles = &self.styles;
+        for section in &mut self.document.sections {
+            visit_paragraph_slices(&mut section.paragraphs, &mut |paragraphs| {
+                if !paragraphs.iter().any(|p| p.cell_format_vpos_dirty) {
+                    return;
+                }
+                // 구조 편집에도 표시가 문단과 함께 이동한다. 좌표 변경 전에 경계를 읽는다.
+                for idx in 1..paragraphs.len() {
+                    let reset = cell_vpos_resets(&paragraphs[idx - 1], &paragraphs[idx]);
+                    paragraphs[idx].cell_vpos_reset = Some(reset);
+                }
+                let stops: Vec<usize> = paragraphs
+                    .windows(2)
+                    .enumerate()
+                    .filter_map(|(idx, pair)| {
+                        cell_vpos_resets(&pair[0], &pair[1]).then_some(idx + 1)
+                    })
+                    .chain(std::iter::once(paragraphs.len()))
+                    .collect();
+                let mut start = 0;
+                for stop in stops {
+                    let fragment = &mut paragraphs[start..stop];
+                    let first = fragment.iter().position(|p| p.cell_format_vpos_dirty);
+                    for para in fragment.iter_mut() {
+                        para.cell_format_vpos_dirty = false;
+                    }
+                    if let Some(first) = first {
+                        apply_cell_vpos_ladder(
+                            fragment,
+                            first,
+                            fragment.len(),
+                            styles,
+                            dpi,
+                            is_hwp3_variant,
+                        );
+                    }
+                    start = stop;
+                }
+            });
         }
     }
 

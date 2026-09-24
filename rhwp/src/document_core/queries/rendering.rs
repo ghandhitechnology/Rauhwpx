@@ -6000,6 +6000,20 @@ impl DocumentCore {
 
     pub(crate) fn rebuild_section(&mut self, section_idx: usize) {
         self.styles = resolve_styles(&self.document.doc_info, self.dpi);
+        if !self.batch_mode {
+            self.flush_cell_format_vpos();
+        }
+        self.recompose_section(section_idx);
+        self.paginate();
+    }
+
+    /// 셀 문단 서식 setter용. 배치 중에는 스타일만 갱신하고 vpos/페이지네이션은 모은다.
+    pub(crate) fn rebuild_section_deferred_in_batch(&mut self, section_idx: usize) {
+        self.styles = resolve_styles(&self.document.doc_info, self.dpi);
+        if self.batch_mode {
+            return;
+        }
+        self.flush_cell_format_vpos();
         self.recompose_section(section_idx);
         self.paginate();
     }
