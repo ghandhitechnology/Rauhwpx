@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { createServer } from 'vite';
 import puppeteer from 'puppeteer-core';
 import { pathToFileURL } from 'node:url';
+import { browserExecutable, browserLaunchArgs } from '../tests/browser-support.ts';
 
 export async function checkCloudStreaming(page, origin) {
   await page.setViewport({ width: 1280, height: 900 });
@@ -13,7 +14,9 @@ export async function checkCloudStreaming(page, origin) {
   await page.evaluate(() => {
     window.cloudStreamingAnimations = [];
     document.querySelector('.ag-messages').addEventListener('animationstart', (event) => {
-      if (event.animationName === 'ag-message-arrive') window.cloudStreamingAnimations.push(event.target);
+      if (event.animationName === 'ag-message-arrive' || event.animationName === 'ag-assistant-arrive') {
+        window.cloudStreamingAnimations.push(event.target);
+      }
     });
     const cloud = window.sidebarPreview.cloud;
     cloud.emitAgentEvent({ type: 'turn-start', agent: 'codex' });
@@ -60,6 +63,7 @@ export async function checkCloudStreaming(page, origin) {
   assert.equal(stability.text, stability.expected);
   assert.equal(stability.count, 1);
   assert.equal(stability.animations, 1, 'Snapshot refresh restarted the arrival animation');
+  await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
   await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
   console.log('PASS Cloud refresh, text chunks, and completion preserve streaming DOM and text');
 }
@@ -72,8 +76,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   });
   await server.listen();
   const browser = await puppeteer.launch({
-    executablePath: process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    executablePath: browserExecutable(),
     headless: true,
+    args: [...new Set([...browserLaunchArgs(), '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])],
   });
   try {
     await checkCloudStreaming(await browser.newPage(), `http://127.0.0.1:${server.httpServer.address().port}`);

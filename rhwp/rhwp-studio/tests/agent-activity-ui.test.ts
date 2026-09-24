@@ -16,7 +16,7 @@ const chatMarkdown = readFileSync(
 );
 
 test('assistant responses render as flat Markdown transcripts', () => {
-  assert.match(source, /renderChatMarkdown\(bubble, text\)/);
+  assert.match(source, /renderChatMarkdown\(bubble, text, workspace\.mode\(\) === 'cloud'\)/);
   assert.match(source, /window\.requestAnimationFrame/);
   assert.match(chatMarkdown, /katexModule\.render/);
   assert.match(chatMarkdown, /import\('katex'\)/);
