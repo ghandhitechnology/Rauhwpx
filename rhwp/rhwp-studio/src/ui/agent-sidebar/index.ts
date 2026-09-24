@@ -1169,7 +1169,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       // 라벨이 있는 모델 묶음은 머리글과 함께 그린다.
       if (group.label) llmMenu.appendChild(el('span', 'ag-llm-group-label', group.label));
       for (const opt of group.options) {
-        const item = el('button', 'ag-model-item ag-llm-item', opt.label);
+        // 이름 + 한 줄 설명 + 선택 표시. 설명은 카탈로그가 줄 때만 그린다.
+        const item = el('button', 'ag-model-item ag-llm-item');
+        const copy = el('span', 'ag-llm-item-copy');
+        copy.append(el('span', 'ag-llm-item-name', opt.label));
+        if (opt.description) copy.append(el('span', 'ag-llm-item-description', opt.description));
+        const check = el('span', 'ag-llm-item-check');
+        check.setAttribute('aria-hidden', 'true');
+        check.append(createIcon('check'));
+        item.append(copy, check);
         item.type = 'button';
         item.dataset.model = opt.id;
         item.title = opt.id;

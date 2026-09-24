@@ -411,11 +411,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     },
   });
   const dashboard = createCloudDashboard({
-    loginAccount: deps.loginAccount,
     configuration: onboarding.settingsElement,
     refresh: () => deps.controller.refresh(selectedScope()),
     reconnect: () => deps.controller.reconnectLink(),
-    configure: (trigger) => onboarding.open('manage', trigger),
     mutationLocked: () => busy || authorityTransitionActive() || workspaceLocked,
     openTask: async (task) => {
       if (!await deps.onOpenTask(task)) return;
