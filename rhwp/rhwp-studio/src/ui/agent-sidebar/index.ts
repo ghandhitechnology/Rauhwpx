@@ -1344,6 +1344,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const headerActions = el('div', 'ag-header-actions');
   threadsBtn.classList.add('ag-header-icon-btn');
 
+  const agentUndoBtn = el('button', 'ag-header-icon-btn ag-agent-undo-btn');
+  agentUndoBtn.type = 'button';
+  agentUndoBtn.hidden = true;
+  agentUndoBtn.setAttribute('aria-label', '에이전트 변경 되돌리기');
+  agentUndoBtn.title = '에이전트 변경 되돌리기';
+  agentUndoBtn.appendChild(createIcon('undo'));
+  agentUndoBtn.addEventListener('click', undoLatestAgentTurn);
+
   // 콘솔 펼치기 — 사이드바 폭에서는 diff 를 읽을 수 없어 전체 화면으로 넘긴다.
   const fullscreenBtn = el('button', 'ag-header-icon-btn ag-fullscreen-btn');
   fullscreenBtn.type = 'button';
@@ -1380,7 +1388,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     openConfiguredVersionControl();
   });
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
-  headerActions.append(connDot, takeoverBtn, versionsBtn, threadsBtn, settingsBtn);
+  headerActions.append(connDot, takeoverBtn, agentUndoBtn, versionsBtn, threadsBtn, settingsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
@@ -3411,7 +3419,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   reviewColumnTitle.id = 'ag-review-column-title';
   const reviewColumnMeta = el('span', 'ag-review-column-meta', '');
   reviewColumnHeading.append(reviewColumnTitle, reviewColumnMeta);
-  reviewColumnHead.append(reviewColumnHeading, reviewColumnClose);
+  const reviewColumnUndo = el('button', 'ag-header-icon-btn ag-review-column-undo');
+  reviewColumnUndo.type = 'button';
+  reviewColumnUndo.hidden = true;
+  reviewColumnUndo.setAttribute('aria-label', '에이전트 변경 되돌리기');
+  reviewColumnUndo.title = '에이전트 변경 되돌리기';
+  reviewColumnUndo.appendChild(createIcon('undo'));
+  reviewColumnUndo.addEventListener('click', undoLatestAgentTurn);
+  const reviewColumnActions = el('div', 'ag-review-column-actions');
+  reviewColumnActions.append(reviewColumnUndo, reviewColumnClose);
+  reviewColumnHead.append(reviewColumnHeading, reviewColumnActions);
   reviewColumn.appendChild(reviewColumnHead);
   const changesDrawer = createChangesDrawer({
     versionController,
@@ -8280,6 +8297,32 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     updateTurnPending(activeEdit?.agent);
   }
 
+  function currentAgentUndoEntry(): object | null {
+    const turn = turnChanges.get(currentThread.id, currentDocumentId);
+    const entry = turn?.applied ? turn.undoEntry : null;
+    return entry && deps.undoAgentTurn && deps.getAgentUndoEntry?.() === entry ? entry : null;
+  }
+
+  function updateAgentUndoButtons(): void {
+    const available = currentAgentUndoEntry() !== null;
+    const disabled = bridge.getEditingLease().active || mergeResolverLocked;
+    for (const button of [agentUndoBtn, reviewColumnUndo]) {
+      button.hidden = !available;
+      button.disabled = !available || disabled;
+    }
+  }
+
+  function undoLatestAgentTurn(): void {
+    if (bridge.getEditingLease().active || mergeResolverLocked) return;
+    const entry = currentAgentUndoEntry();
+    if (!entry) return;
+    if (deps.undoAgentTurn?.(entry)) {
+      turnChanges.begin(currentThread.id);
+      rebuildReview();
+      scheduleChangesRefresh();
+    } else updateAgentUndoButtons();
+  }
+
   /** 승인·거절로 사라지는 검토 카드는 제자리에서 접히며 빠진다. */
   function collapseLeavingReviewCard(card: HTMLElement, height: number): void {
     card.classList.add('ag-review-card-leaving');
@@ -8347,11 +8390,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     const changeSets = bridge.pendingEdits.getChangeSets();
     const reviewSets = changeSets.filter((set) => set.status !== 'open');
-    const latestTurn = turnChanges.get(currentThread.id, currentDocumentId);
-    const activeOps = new Set([
-      ...changeSets.flatMap(set => set.ops.map(op => op.id)),
-      ...(reviewSets.length === 0 && latestTurn?.applied ? latestTurn.set.ops.map(op => op.id) : []),
-    ]);
+    const activeOps = new Set(changeSets.flatMap(set => set.ops.map(op => op.id)));
     for (const [id, url] of reviewImageUrls) {
       if (!activeOps.has(id)) {
         URL.revokeObjectURL(url);
@@ -8371,45 +8410,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         collapseLeavingReviewCard(card, height);
       }
     }
-    if (reviewSets.length === 0 && latestTurn?.applied) {
-      const card = el('div', 'ag-review-card ag-applied-turn');
-      const head = el('div', 'ag-review-title');
-      const applied = el('span', 'ag-changes-applied');
-      applied.append(createIcon('check'), el('span', '', '적용됨'));
-      head.append(el('span', 'ag-review-title-text', AGENT_LABEL[latestTurn.set.agent]), applied);
-      card.classList.add(`ag-${latestTurn.set.agent}`);
-      card.append(head);
-      const canNavigate = latestTurn.undoEntry !== null && deps.getAgentUndoEntry?.() === latestTurn.undoEntry;
-      card.append(renderPendingOpsDiff(latestTurn.set.ops, (op) => buildReviewOp(op, canNavigate)));
-      const entry = latestTurn.undoEntry;
-      if (entry && deps.getAgentUndoEntry?.() === entry && deps.undoAgentTurn) {
-        const undo = el('button', 'ag-changes-secondary ag-changes-undo');
-        undo.type = 'button';
-        undo.append(createIcon('undo'), el('span', '', '되돌리기'));
-        undo.disabled = bridge.getEditingLease().active || mergeResolverLocked;
-        undo.addEventListener('click', () => {
-          if (bridge.getEditingLease().active || mergeResolverLocked) return;
-          if (deps.undoAgentTurn?.(entry)) {
-            latestTurn.applied = false;
-            latestTurn.undoEntry = null;
-            rebuildReview();
-            scheduleChangesRefresh();
-          }
-        });
-        head.append(undo);
-      }
-      review.append(card);
-    } else if (reviewSets.length === 0) {
-      const empty = el('div', 'ag-review-empty');
-      const emptyIcon = el('div', 'ag-review-empty-icon');
-      emptyIcon.appendChild(createIcon('changes'));
-      empty.append(
-        emptyIcon,
-        el('div', 'ag-review-empty-title', '변경 사항 없음'),
-        el('div', 'ag-review-empty-copy', '에이전트가 수정하면 여기에 표시됩니다.'),
-      );
-      review.appendChild(empty);
-    }
+    updateAgentUndoButtons();
     applyPlanMinimizedState();
     updateReviewControl(changeSets);
   }
@@ -8467,11 +8468,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     ? [
         eventBus.on('document-mutated', () => {
           scheduleChangesRefresh();
-          const latest = turnChanges.get(currentThread.id, currentDocumentId);
-          if (latest?.undoEntry && deps.getAgentUndoEntry?.() !== latest.undoEntry) {
-            review.querySelector('.ag-changes-undo')?.remove();
-            review.querySelectorAll('.ag-applied-turn .ag-changes-jump').forEach((jump) => jump.remove());
-          }
+          updateAgentUndoButtons();
         }),
         eventBus.on('history-jumped', () => { turnChanges.clear(); rebuildReview(); scheduleChangesRefresh(); }),
         eventBus.on('document-swapped', () => { turnChanges.clear(); rebuildReview(); scheduleChangesRefresh(); }),

@@ -3292,10 +3292,6 @@ button.ag-skill-copy {
   transform: scale(0.98);
 }
 
-.ag-review:has(> .ag-review-card-leaving) > .ag-review-empty {
-  display: none;
-}
-
 /* Review cards use the same neutral elevation as other contextual surfaces. */
 .ag-review-card {
   display: flex;
@@ -5407,7 +5403,10 @@ body.ag-col-resizing {
   font-variant-numeric: tabular-nums;
 }
 
-.ag-review-column-close {
+.ag-review-column-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   margin-left: auto;
 }
 
@@ -5456,48 +5455,6 @@ body.ag-col-resizing {
 
 .ag-fullscreen .ag-review-column .ag-review-summary {
   max-height: calc(100dvh - 166px);
-}
-
-.ag-review-empty {
-  display: flex;
-  min-height: 220px;
-  padding: 28px;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  text-align: center;
-}
-
-.ag-review-empty-icon {
-  display: grid;
-  width: 36px;
-  height: 36px;
-  margin-bottom: 12px;
-  place-items: center;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-field);
-  background: var(--ag-raised);
-  color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: 15px;
-}
-
-.ag-review-empty-title {
-  color: var(--ag-text);
-  font-size: var(--font-size-md, 13px);
-  font-weight: 650;
-}
-
-.ag-review-empty-copy {
-  max-width: 280px;
-  margin-top: 5px;
-  color: var(--ag-text-muted);
-  font-size: var(--font-size-base, 12px);
-  line-height: 1.55;
-}
-
-.ag-root:not(.ag-fullscreen) .ag-review:has(> .ag-review-empty:only-child) {
-  display: none;
 }
 
 @media (max-width: 960px) {

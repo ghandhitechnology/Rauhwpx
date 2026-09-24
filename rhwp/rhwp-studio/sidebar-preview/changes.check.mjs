@@ -14,10 +14,11 @@ export async function checkChangesPreview(page, origin, artifacts) {
   await open(fullScene);
   assert.deepEqual(await page.evaluate(() => window.sidebarPreview.snapshot().changeEvents), ['set-finalized', 'approved']);
   assert.equal(await page.evaluate(() => window.sidebarPreview.snapshot().pendingChanges), 0);
+  assert.equal(await page.$('.ag-changes-review-slot .ag-review-card'), null);
+  assert.equal(await page.$eval('.ag-review-column-head .ag-review-column-undo', (node) => node.hidden), false);
   assert.equal(await page.$eval('.ag-changes-overlay', (node) => node.hidden), false);
   assert.equal(await itemCount(), 5);
-  assert.match(await page.$eval('.ag-changes-review-slot', (node) => node.textContent), /적용됨/);
-  assert.equal(await page.$$eval('.ag-changes-review-slot .ag-changes-pending-item', (nodes) => nodes.length), 3);
+  assert.equal(await page.$eval('.ag-changes-latest', (node) => getComputedStyle(node).display), 'none');
   assert.match(await page.$eval('.ag-changes-diff-list', (node) => node.textContent), /주문 접수부터 정산까지 이어지는 흐름도/);
   await page.screenshot({ path: resolve(artifacts, 'changes-full-applied.png') });
   assert.equal(await page.$eval('.ag-changes-expand', (node) => node.getAttribute('aria-expanded')), 'false');
@@ -30,17 +31,17 @@ export async function checkChangesPreview(page, origin, artifacts) {
   await page.waitForSelector('.ag-changes-commit-detail .ag-changes-item');
   assert.equal(await page.$eval('.ag-changes-commit-toggle', (node) => node.getAttribute('aria-expanded')), 'true');
   assert.match(await page.$eval('.ag-changes-commit-detail', (node) => node.textContent), /추진 일정과 기대 효과를 정리했습니다/);
-  await page.click('.ag-changes-review-slot .ag-changes-undo');
+  await page.click('.ag-review-column-head .ag-review-column-undo');
   await page.waitForFunction(() => window.sidebarPreview.undoState.calls === 1);
   await page.waitForFunction(() => document.querySelectorAll('.ag-changes-diff-list .ag-changes-item').length === 0);
-  assert.equal(await page.$('.ag-changes-review-slot .ag-changes-undo'), null);
+  assert.equal(await page.$eval('.ag-review-column-head .ag-review-column-undo', (node) => node.hidden), true);
 
   await open(fullScene);
   await page.evaluate(() => {
     window.sidebarPreview.undoState.entry = null;
     window.sidebarPreview.eventBus.emit('document-mutated');
   });
-  await page.waitForFunction(() => !document.querySelector('.ag-changes-review-slot .ag-changes-undo'));
+  await page.waitForFunction(() => document.querySelector('.ag-review-column-head .ag-review-column-undo').hidden);
   await page.click('.ag-changes-diff-list .ag-changes-text-button');
   await page.waitForFunction(() => window.sidebarPreview.navigation.calls.length === 1);
   assert.deepEqual(await page.evaluate(() => window.sidebarPreview.navigation.calls[0]),

@@ -465,6 +465,11 @@ try {
       await page.waitForFunction(
         () => window.sidebarPreview.snapshot().pendingChanges === 0,
       );
+      assert.equal(await page.$('.ag-review-card:not(.ag-review-card-leaving)'), null);
+      assert.equal(await page.$eval('.ag-agent-undo-btn', (node) => node.hidden), false);
+      await page.click('.ag-agent-undo-btn');
+      await page.waitForFunction(() => window.sidebarPreview.undoState.calls === 1);
+      assert.equal(await page.$eval('.ag-agent-undo-btn', (node) => node.hidden), true);
       await play('review');
       await page.waitForSelector('.ag-review-card .ag-reject', {
         visible: true,

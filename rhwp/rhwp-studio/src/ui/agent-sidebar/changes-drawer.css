@@ -51,10 +51,10 @@
 .ag-changes-section { padding: 20px 0 8px; }
 .ag-changes-section + .ag-changes-section { margin-top: 8px; border-top: 1px solid var(--ag-border, #39393d); }
 
-/* 이번 턴이 비어 있으면 자리만 차지하므로 통째로 숨긴다. */
-.ag-changes-latest:has(.ag-changes-review-slot > .ag-review > .ag-review-empty:only-child),
+/* 승인 후 검토 목록이 비면 섹션까지 닫는다. */
+.ag-changes-latest:has(.ag-changes-review-slot > .ag-review:empty),
 .ag-changes-latest:has(.ag-changes-review-slot:empty) { display: none; }
-.ag-changes-latest:has(.ag-changes-review-slot > .ag-review > .ag-review-empty:only-child) + .ag-changes-section,
+.ag-changes-latest:has(.ag-changes-review-slot > .ag-review:empty) + .ag-changes-section,
 .ag-changes-latest:has(.ag-changes-review-slot:empty) + .ag-changes-section { border-top: 0; margin-top: 0; }
 
 .ag-changes-section-head {
@@ -122,40 +122,7 @@
 
 .ag-changes-review-slot .ag-review-title-text { flex: 0 1 auto; }
 
-.ag-changes-applied {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 20px;
-  margin-right: auto;
-  padding: 0 7px 0 5px;
-  border-radius: 999px;
-  color: var(--ag-ok, #2f7d4f);
-  background: color-mix(in srgb, var(--ag-ok, #2f7d4f) 11%, transparent);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.ag-changes-applied .ag-icon { width: 11px; height: 11px; }
-
 .ag-changes-review-slot .ag-changes-group-heading { padding-inline: 14px; }
-
-.ag-changes-undo {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 11px 0 9px;
-  border: 1px solid var(--ag-border, #39393d);
-  border-radius: 8px;
-  color: var(--ag-text, #eae9e7);
-  background: transparent;
-  font-size: 12px;
-  font-weight: 600;
-  transition: background-color var(--chg-fast) var(--chg-ease), border-color var(--chg-fast) var(--chg-ease);
-}
-
-.ag-changes-undo:hover:not(:disabled) { border-color: var(--ag-border-strong, #4b4a4f); background: var(--ag-hover, #303036); }
 
 /* ── diff 항목 ── */
 
