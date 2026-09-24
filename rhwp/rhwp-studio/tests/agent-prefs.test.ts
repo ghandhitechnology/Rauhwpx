@@ -12,7 +12,7 @@ import {
   saveAgentPrefs,
   trySaveAgentPrefs,
 } from '../src/agent/agent-prefs.ts';
-import { setPiModels } from '../src/agent/models.ts';
+import { modelsForAgent, setModelCatalog, setPiModels } from '../src/agent/models.ts';
 import type { PiModelConfig } from '../src/agent/types.ts';
 
 /** localStorage 대역 — 테스트는 브라우저 없이 돌아간다. */
@@ -39,6 +39,10 @@ test('빈 저장소는 Claude/Sonnet/High/안전 기본값을 준다', () => {
     defaultModel: 'sonnet',
     defaultEffort: 'high',
     defaultPermissionProfile: 'safe',
+    selectedModels: {
+      claude: ['fable', 'opus', 'sonnet', 'haiku'],
+      codex: ['astra', 'sol', 'luna', 'terra'],
+    },
   });
   assert.deepEqual(prefs, defaultAgentPrefs());
   assert.equal(DEFAULT_CHAT_AGENT, 'claude');
@@ -101,6 +105,32 @@ test('저장은 부분 갱신이고, 저장된 값은 다시 읽힌다', () => {
   assert.equal(switched.defaultModel, 'sol');
   assert.equal(switched.defaultEffort, 'max');
   assert.equal(JSON.parse(storage.map.get(AGENT_PREFS_STORAGE_KEY)!).defaultAgent, 'codex');
+});
+
+test('a staged concrete selection remains valid without changing the saved sidebar picker', () => {
+  const storage = makeStorage();
+  loadAgentPrefs(storage);
+  setModelCatalog('codex', [
+    { id: 'gpt-6-sol', label: 'GPT-6 Sol' },
+    { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
+  ]);
+  try {
+    const draft = normalizeAgentPrefs({
+      defaultAgent: 'codex',
+      defaultModel: 'gpt-5.3-codex',
+      selectedModels: { claude: ['sonnet'], codex: ['gpt-5.3-codex'] },
+    });
+    assert.equal(draft.defaultModel, 'gpt-5.3-codex');
+    assert.deepEqual(draft.selectedModels.codex, ['gpt-5.3-codex']);
+    assert.notDeepEqual(modelsForAgent('codex').map((model) => model.id), ['gpt-5.3-codex']);
+
+    const saved = saveAgentPrefs(draft, storage);
+    assert.deepEqual(modelsForAgent('codex').map((model) => model.id), ['gpt-5.3-codex']);
+    assert.deepEqual(loadAgentPrefs(storage), saved);
+  } finally {
+    setModelCatalog('codex', []);
+    loadAgentPrefs(makeStorage());
+  }
 });
 
 test('저장소가 없으면 정규화된 값만 돌려주고 던지지 않는다', () => {
@@ -215,9 +245,9 @@ for (const model of ['gpt-5.6-terra', 'gpt-6-astra']) {
     assert.equal(hasExplicitDefaultAgent(storage), true);
     const kept = applyFirstRunDefaultAgent(['claude'], storage);
     assert.equal(kept.defaultAgent, 'codex');
-    assert.equal(kept.defaultModel, model.endsWith('terra') ? 'terra' : 'astra');
+    assert.equal(kept.defaultModel, model);
     assert.equal(loadAgentPrefs(storage).defaultAgent, 'codex');
-    assert.equal(loadAgentPrefs(storage).defaultModel, model.endsWith('terra') ? 'terra' : 'astra');
+    assert.equal(loadAgentPrefs(storage).defaultModel, model);
   });
 }
 

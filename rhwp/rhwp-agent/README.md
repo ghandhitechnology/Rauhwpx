@@ -76,7 +76,7 @@ Browserbase credentials come from the variables below or from Studio **Settings 
 | `RHWP_AGENT_PORT` | `5175` | Hub port, bound to 127.0.0.1 |
 | `RHWP_AGENT_TOKEN` | `dev` | Shared token for WS connections (`?token=`) |
 | `RHWP_CLAUDE_MODEL` | `sonnet` | Claude model |
-| `RHWP_CODEX_MODEL` | `sol` | Codex lineup (`astra`, `sol`, `luna`, or `terra`) |
+| `RHWP_CODEX_MODEL` | `sol` | Codex model ID or legacy lineup (`astra`, `sol`, `luna`, `terra`) |
 | `RHWP_SKILLS_DIR` | OS application-data directory | Product skill directory |
 | `RHWP_USAGE_DIR` | OS application-data directory | Token-usage log directory |
 | `RHWP_REFERENCES_DIR` | OS application-data directory | Reference file store |

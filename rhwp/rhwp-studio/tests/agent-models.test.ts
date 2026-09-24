@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   agentSupportsFast,
+  availableModelsForAgent,
   defaultEffortForAgent,
   defaultModelForAgent,
   effortsForAgent,
@@ -16,6 +17,8 @@ import {
   resolveModelForAgent,
   resolveServiceTier,
   setPiModels,
+  setModelCatalog,
+  setSelectedModels,
 } from '../src/agent/models.ts';
 import type { PiModelConfig } from '../src/agent/types.ts';
 
@@ -30,14 +33,8 @@ test('resolveModelForAgent falls back to provider default when model does not fi
   assert.equal(resolveModelForAgent('claude', 'gpt-5.6-sol'), defaultModelForAgent('claude'));
   assert.equal(resolveModelForAgent('codex', 'sonnet'), defaultModelForAgent('codex'));
   assert.equal(resolveModelForAgent('claude', 'fable'), 'fable');
-  assert.equal(resolveModelForAgent('codex', 'gpt-5.6-luna'), 'luna');
-  assert.equal(resolveModelForAgent('codex', 'gpt-6-astra'), 'astra');
+  assert.equal(resolveModelForAgent('codex', 'gpt-5.6-luna'), 'sol');
   assert.equal(resolveModelForAgent('codex', 'gpt-6-sol'), 'sol');
-  assert.equal(resolveModelForAgent('codex', 'gpt-6.1-sol'), 'sol');
-  assert.equal(resolveModelForAgent('codex', 'gpt-6-luna'), 'luna');
-  assert.equal(resolveModelForAgent('claude', 'claude-opus-5-5'), 'opus');
-  assert.equal(resolveModelForAgent('claude', 'claude-fable-5-1'), 'fable');
-  assert.equal(resolveModelForAgent('codex', 'gpt-6-sol-preview'), 'sol');
 });
 
 test('isModelForAgent and labels stay provider-scoped', () => {
@@ -172,6 +169,29 @@ test('claude and codex model groups stay a single unlabeled list', () => {
     modelGroupsForAgent('codex')[0]!.options.map((m) => m.id),
     modelsForAgent('codex').map((m) => m.id),
   );
+});
+
+test('live catalogs expose all models while the sidebar shows only saved selections', () => {
+  setModelCatalog('codex', [
+    { id: 'gpt-6-sol', label: 'GPT-6 Sol', supportedEfforts: ['low', 'medium', 'high'] },
+    { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', supportedEfforts: ['medium', 'high', 'xhigh'] },
+    { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', supportedEfforts: [] },
+  ]);
+  setSelectedModels({ claude: ['sonnet'], codex: ['sol', 'gpt-5.3-codex'] });
+  try {
+    assert.equal(availableModelsForAgent('codex').length, 3);
+    assert.deepEqual(modelsForAgent('codex').map((model) => model.id), ['gpt-6.1-sol', 'gpt-5.3-codex']);
+    assert.deepEqual(effortsForAgent('codex', 'gpt-6.1-sol').map((effort) => effort.id), ['xhigh', 'high', 'medium']);
+    assert.deepEqual(effortsForAgent('codex', 'gpt-5.3-codex'), []);
+    assert.equal(resolveModelForAgent('codex', 'gpt-5.3-codex'), 'gpt-5.3-codex');
+    assert.equal(resolveModelForAgent('codex', 'gpt-6-sol'), 'gpt-6.1-sol');
+    setSelectedModels({ claude: ['sonnet'], codex: ['astra', 'terra'] });
+    setModelCatalog('codex', availableModelsForAgent('codex'));
+    assert.deepEqual(modelsForAgent('codex').map((model) => model.id), ['gpt-6.1-sol']);
+  } finally {
+    setModelCatalog('codex', []);
+    setSelectedModels({ claude: ['fable', 'opus', 'sonnet', 'haiku'], codex: ['astra', 'sol', 'luna', 'terra'] });
+  }
 });
 
 test('pi 레지스트리 유예는 다른 프로바이더 id 검사와 무관하게 유지된다', () => {

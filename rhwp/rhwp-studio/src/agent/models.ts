@@ -1,14 +1,16 @@
 import type { AgentName, PiModelConfig, ServiceTier } from './types.ts';
 
 export interface AgentModelOption { id: string; label: string }
+export interface ModelCatalogEntry extends AgentModelOption { description?: string; supportedEfforts?: string[] }
 export interface AgentEffortOption { id: string; label: string }
 export interface AgentModelGroup { label: string | null; options: readonly AgentModelOption[] }
+export type CatalogAgent = 'claude' | 'codex';
+export type SelectedModels = Record<CatalogAgent, string[]>;
 
-type StaticAgentName = Exclude<AgentName, 'pi' | 'grok' | 'cursor' | 'opencode' | 'rau'>;
-function isSupportedAgent(agent: AgentName): agent is 'claude' | 'codex' | 'pi' {
-  return agent === 'claude' || agent === 'codex' || agent === 'pi';
+function isCatalogAgent(agent: AgentName): agent is CatalogAgent {
+  return agent === 'claude' || agent === 'codex';
 }
-export const AGENT_MODELS: Record<StaticAgentName, readonly AgentModelOption[]> = {
+export const AGENT_MODELS: Record<CatalogAgent, readonly AgentModelOption[]> = {
   claude: [
     { id: 'fable', label: 'Fable' }, { id: 'opus', label: 'Opus' },
     { id: 'sonnet', label: 'Sonnet' }, { id: 'haiku', label: 'Haiku' },
@@ -27,43 +29,170 @@ const CLAUDE_EFFORTS_COMPACT = [
   { id: 'high', label: 'High' }, { id: 'medium', label: 'Medium' }, { id: 'low', label: 'Low' },
 ] as const;
 const CODEX_EFFORTS = [
+  { id: 'ultra', label: 'Ultra' },
   { id: 'max', label: 'Max' }, { id: 'xhigh', label: 'Extra high' },
   { id: 'high', label: 'High' }, { id: 'medium', label: 'Medium' }, { id: 'low', label: 'Low' },
 ] as const;
 const PI_EFFORT_IDS = ['high', 'medium', 'low'] as const;
 const PI_EFFORT_LABELS: Record<string, string> = { low: 'Low', medium: 'Medium', high: 'High' };
-export const DEFAULT_AGENT_MODEL: Record<StaticAgentName, string> = { claude: 'sonnet', codex: 'sol' };
-export const DEFAULT_AGENT_EFFORT: Record<StaticAgentName, string> = { claude: 'high', codex: 'medium' };
+export const DEFAULT_AGENT_MODEL: Record<CatalogAgent, string> = { claude: 'sonnet', codex: 'sol' };
+export const DEFAULT_AGENT_EFFORT: Record<CatalogAgent, string> = { claude: 'high', codex: 'medium' };
 
 let piModelRegistry: readonly PiModelConfig[] = [];
 export function setPiModels(models: readonly PiModelConfig[]): void { piModelRegistry = models; }
 export function piModels(): readonly PiModelConfig[] { return piModelRegistry; }
 function findPiModel(id: string | null | undefined): PiModelConfig | undefined { return piModelRegistry.find((model) => model.id === id); }
 
-function legacyLineup(agent: AgentName, model: string): string | null {
-  if (agent === 'codex') return /^gpt-\d+(?:\.\d+)*-(astra|sol|luna|terra)$/.exec(model)?.[1] ?? null;
-  if (agent === 'claude') return /^claude-(fable|opus|sonnet|haiku)-\d+(?:[-.]\d+)*$/.exec(model)?.[1] ?? null;
-  return null;
+const CATALOG_STORAGE_KEY = 'rhwp-agent-model-catalog';
+const catalogs: Record<CatalogAgent, ModelCatalogEntry[]> = { claude: [], codex: [] };
+let cacheLoaded = false;
+let selectedModels: SelectedModels = {
+  claude: AGENT_MODELS.claude.map((model) => model.id),
+  codex: AGENT_MODELS.codex.map((model) => model.id),
+};
+
+function readCatalog(raw: unknown): ModelCatalogEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const result: ModelCatalogEntry[] = [];
+  for (const value of raw) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const item = value as Record<string, unknown>;
+    if (typeof item.id !== 'string' || !item.id.trim() || seen.has(item.id)) continue;
+    seen.add(item.id);
+    result.push({
+      id: item.id,
+      label: typeof item.label === 'string' && item.label.trim() ? item.label : item.id,
+      ...(typeof item.description === 'string' && item.description.trim() ? { description: item.description } : {}),
+      ...(Array.isArray(item.supportedEfforts)
+        ? { supportedEfforts: item.supportedEfforts.filter((effort): effort is string => typeof effort === 'string') }
+        : {}),
+    });
+  }
+  return result;
+}
+
+function ensureCache(): void {
+  if (cacheLoaded) return;
+  cacheLoaded = true;
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const raw = localStorage.getItem(CATALOG_STORAGE_KEY);
+    if (!raw) return;
+    const saved = JSON.parse(raw) as Record<string, unknown>;
+    catalogs.claude = readCatalog(saved.claude);
+    catalogs.codex = readCatalog(saved.codex);
+  } catch { /* A stale cache must not block the picker. */ }
+}
+
+export function availableModelsForAgent(agent: AgentName): readonly ModelCatalogEntry[] {
+  if (!isCatalogAgent(agent)) return [];
+  ensureCache();
+  return catalogs[agent].length ? catalogs[agent] : AGENT_MODELS[agent];
+}
+export function hasLiveModelCatalog(agent: CatalogAgent): boolean {
+  ensureCache();
+  return catalogs[agent].length > 0;
+}
+
+export function setModelCatalog(agent: CatalogAgent, models: readonly ModelCatalogEntry[]): void {
+  ensureCache();
+  catalogs[agent] = readCatalog(models);
+  selectedModels[agent] = normalizeSelectedModels(selectedModels)[agent];
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify(catalogs));
+  } catch { /* The live catalog still works without storage. */ }
+}
+
+/** Apply saved preferences to the sidebar registry; staged settings do not call this. */
+export function setSelectedModels(models: SelectedModels): void {
+  selectedModels = { claude: [...models.claude], codex: [...models.codex] };
+}
+
+function legacyLineup(agent: CatalogAgent, model: string): string | null {
+  if (AGENT_MODELS[agent].some((option) => option.id === model)) return model;
+  if (agent === 'codex') return /^gpt-\d+(?:\.\d+)*-(astra|sol|luna|terra)(?:-preview)?$/.exec(model)?.[1] ?? null;
+  return /^claude-(fable|opus|sonnet|haiku)-\d+(?:[-.]\d+)*$/.exec(model)?.[1] ?? null;
+}
+
+function versionNumbers(id: string): number[] {
+  const match = /(?:^|-)\d+(?:[.-]\d+)*/.exec(id);
+  return match ? match[0].replace(/^-/, '').split(/[.-]/).map(Number) : [];
+}
+
+export function concreteModelForAgent(agent: CatalogAgent, id: string): string {
+  ensureCache();
+  if (!catalogs[agent].length || catalogs[agent].some((model) => model.id === id)) return id;
+  const lineup = legacyLineup(agent, id);
+  if (!lineup) return id;
+  const matches = catalogs[agent].filter((model) => legacyLineup(agent, model.id) === lineup);
+  matches.sort((a, b) => {
+    const av = versionNumbers(a.id);
+    const bv = versionNumbers(b.id);
+    for (let i = 0; i < Math.max(av.length, bv.length); i++) {
+      const difference = (bv[i] ?? 0) - (av[i] ?? 0);
+      if (difference) return difference;
+    }
+    return Number(a.id.includes('preview')) - Number(b.id.includes('preview'));
+  });
+  return matches[0]?.id ?? id;
+}
+
+export function normalizeSelectedModels(raw: unknown): SelectedModels {
+  ensureCache();
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const normalized = {} as SelectedModels;
+  for (const agent of ['claude', 'codex'] as const) {
+    const input = Array.isArray(source[agent]) ? source[agent] : AGENT_MODELS[agent].map((model) => model.id);
+    const ids = input.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      .map((id) => concreteModelForAgent(agent, id))
+      .filter((id) => catalogs[agent].length === 0 || catalogs[agent].some((model) => model.id === id));
+    normalized[agent] = [...new Set(ids)];
+    if (!normalized[agent].length) {
+      const preferred = concreteModelForAgent(agent, DEFAULT_AGENT_MODEL[agent]);
+      normalized[agent] = [catalogs[agent].find((model) => model.id === preferred)?.id
+        ?? catalogs[agent][0]?.id ?? preferred];
+    }
+  }
+  return normalized;
 }
 
 export function modelsForAgent(agent: AgentName): readonly AgentModelOption[] {
   if (agent === 'pi') return piModelRegistry.map((model) => ({ id: model.id, label: model.name }));
-  return isSupportedAgent(agent) ? AGENT_MODELS[agent] : [];
+  if (!isCatalogAgent(agent)) return [];
+  const catalog = availableModelsForAgent(agent);
+  return selectedModels[agent].flatMap((id) => {
+    const concrete = concreteModelForAgent(agent, id);
+    const found = catalog.find((model) => model.id === concrete);
+    return found ? [found] : [];
+  });
 }
 export function modelGroupsForAgent(agent: AgentName): readonly AgentModelGroup[] { return [{ label: null, options: modelsForAgent(agent) }]; }
-export function defaultModelForAgent(agent: AgentName): string { return agent === 'pi' ? piModelRegistry[0]?.id ?? '' : isSupportedAgent(agent) ? DEFAULT_AGENT_MODEL[agent] : ''; }
+export function defaultModelForAgent(agent: AgentName): string {
+  if (agent === 'pi') return piModelRegistry[0]?.id ?? '';
+  if (!isCatalogAgent(agent)) return '';
+  const preferred = concreteModelForAgent(agent, DEFAULT_AGENT_MODEL[agent]);
+  const selected = modelsForAgent(agent);
+  return selected.find((model) => model.id === preferred)?.id ?? selected[0]?.id ?? preferred;
+}
 export function isModelForAgent(agent: AgentName, model: string): boolean { return modelsForAgent(agent).some((option) => option.id === model); }
 export function modelSupportsImages(agent: AgentName, model?: string | null): boolean {
   return agent !== 'pi' || findPiModel(resolveModelForAgent('pi', model))?.supportsImages === true;
 }
 export function resolveModelForAgent(agent: AgentName, model?: string | null): string {
   if (agent === 'pi' && piModelRegistry.length === 0) return model ?? '';
-  const lineage = model ? legacyLineup(agent, model) : null;
-  if (lineage) return lineage;
+  if (isCatalogAgent(agent) && model) {
+    const concrete = concreteModelForAgent(agent, model);
+    if (isModelForAgent(agent, concrete)) return concrete;
+  }
   return model && isModelForAgent(agent, model) ? model : defaultModelForAgent(agent);
 }
 export function labelForModel(agent: AgentName, modelId: string): string {
-  return modelsForAgent(agent).find((model) => model.id === (legacyLineup(agent, modelId) ?? modelId))?.label ?? modelId;
+  if (isCatalogAgent(agent)) {
+    const concrete = concreteModelForAgent(agent, modelId);
+    return availableModelsForAgent(agent).find((model) => model.id === concrete)?.label ?? modelId;
+  }
+  return modelsForAgent(agent).find((model) => model.id === modelId)?.label ?? modelId;
 }
 export function effortsForAgent(agent: AgentName, model?: string | null): readonly AgentEffortOption[] {
   if (agent === 'pi') {
@@ -71,15 +200,19 @@ export function effortsForAgent(agent: AgentName, model?: string | null): readon
     if (!config) return [];
     return PI_EFFORT_IDS.filter((id) => config.efforts.includes(id)).map((id) => ({ id, label: PI_EFFORT_LABELS[id] ?? id }));
   }
-  if (agent === 'codex') return CODEX_EFFORTS;
-  if (agent !== 'claude') return [];
-  return resolveModelForAgent('claude', model) === 'haiku' ? CLAUDE_EFFORTS_COMPACT : CLAUDE_EFFORTS_FULL;
+  if (!isCatalogAgent(agent)) return [];
+  const id = model ? concreteModelForAgent(agent, model) : defaultModelForAgent(agent);
+  const supported = availableModelsForAgent(agent).find((entry) => entry.id === id)?.supportedEfforts;
+  const all = agent === 'codex' ? CODEX_EFFORTS : CLAUDE_EFFORTS_FULL;
+  if (supported) return all.filter((effort) => supported.includes(effort.id));
+  if (agent === 'codex') return CODEX_EFFORTS.filter((effort) => effort.id !== 'ultra');
+  return legacyLineup('claude', id) === 'haiku' ? CLAUDE_EFFORTS_COMPACT : CLAUDE_EFFORTS_FULL;
 }
 export function defaultEffortForAgent(agent: AgentName, model?: string | null): string {
   const allowed = effortsForAgent(agent, model);
   if (allowed.length === 0) return '';
   if (agent === 'pi') return findPiModel(resolveModelForAgent('pi', model))?.defaultEffort ?? allowed[0]!.id;
-  const preferred = isSupportedAgent(agent) ? DEFAULT_AGENT_EFFORT[agent] : '';
+  const preferred = isCatalogAgent(agent) ? DEFAULT_AGENT_EFFORT[agent] : '';
   return allowed.some((effort) => effort.id === preferred) ? preferred : allowed[0]!.id;
 }
 export function isEffortForAgent(agent: AgentName, effort: string, model?: string | null): boolean { return effortsForAgent(agent, model).some((option) => option.id === effort); }

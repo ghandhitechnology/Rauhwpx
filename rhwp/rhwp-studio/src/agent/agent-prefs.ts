@@ -5,13 +5,18 @@
  * 대화 중 입력기 셀렉터로 바꾸는 값은 그 대화만의 덮어쓰기이므로 여기에
  * 저장되지 않는다(설정 탭만 저장한다).
  *
- * 읽을 때 models.ts 기준으로 정규화한다 — 저장된 버전 ID는 해당 계열로,
- * 모르는 값은 프로바이더 기본값으로 접힌다.
+ * 읽을 때 models.ts 기준으로 정규화한다. 카탈로그를 받은 뒤에는 저장된
+ * 레거시 계열 선택을 실제 모델 ID로 옮긴다.
  */
 import {
-  defaultModelForAgent,
+  availableModelsForAgent,
+  concreteModelForAgent,
+  hasLiveModelCatalog,
+  normalizeSelectedModels,
   resolveEffortForAgent,
   resolveModelForAgent,
+  setSelectedModels,
+  type SelectedModels,
 } from './models.ts';
 import type { AgentName, PermissionProfile } from './types.ts';
 
@@ -22,6 +27,7 @@ export interface AgentPrefs {
   defaultModel: string;
   defaultEffort: string;
   defaultPermissionProfile: PermissionProfile;
+  selectedModels: SelectedModels;
 }
 
 /** localStorage 최소 계약 — 테스트가 자기 저장소를 넣을 수 있게 뺐다. */
@@ -56,12 +62,15 @@ function resolveStorage(storage?: AgentPrefsStorage | null): AgentPrefsStorage |
 
 export function defaultAgentPrefs(): AgentPrefs {
   const agent: AgentName = DEFAULT_CHAT_AGENT;
-  const model = defaultModelForAgent(agent);
+  const selectedModels = normalizeSelectedModels(null);
+  const preferred = concreteModelForAgent('claude', 'sonnet');
+  const model = selectedModels.claude.includes(preferred) ? preferred : selectedModels.claude[0]!;
   return {
     defaultAgent: agent,
     defaultModel: model,
     defaultEffort: resolveEffortForAgent(agent, null, model),
     defaultPermissionProfile: 'safe',
+    selectedModels,
   };
 }
 
@@ -69,10 +78,24 @@ export function defaultAgentPrefs(): AgentPrefs {
 export function normalizeAgentPrefs(raw: unknown): AgentPrefs {
   const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   const agent: AgentName = isAgentName(src['defaultAgent']) ? src['defaultAgent'] : DEFAULT_CHAT_AGENT;
-  const model = resolveModelForAgent(
-    agent,
-    typeof src['defaultModel'] === 'string' ? src['defaultModel'] : null,
-  );
+  const selectedModels = normalizeSelectedModels(src['selectedModels']);
+  const requested = typeof src['defaultModel'] === 'string' ? src['defaultModel'] : null;
+  let model: string;
+  if (agent === 'claude' || agent === 'codex') {
+    const concrete = requested ? concreteModelForAgent(agent, requested) : null;
+    // Profiles created before model selection may hold an explicit version ID.
+    // Keep it usable until the live catalog can confirm or replace it.
+    if (src['selectedModels'] === undefined && concrete &&
+      (agent === 'codex' ? /^gpt-[\w.-]+$/.test(concrete) : /^claude-[\w.-]+$/.test(concrete)) &&
+      (!hasLiveModelCatalog(agent) || availableModelsForAgent(agent).some((entry) => entry.id === concrete)) &&
+      !selectedModels[agent].includes(concrete)) selectedModels[agent].push(concrete);
+    const preferred = concreteModelForAgent(agent, agent === 'claude' ? 'sonnet' : 'sol');
+    model = concrete && selectedModels[agent].includes(concrete)
+      ? concrete
+      : selectedModels[agent].find((id) => id === preferred) ?? selectedModels[agent][0]!;
+  } else {
+    model = resolveModelForAgent(agent, requested);
+  }
   const effort = resolveEffortForAgent(
     agent,
     typeof src['defaultEffort'] === 'string' ? src['defaultEffort'] : null,
@@ -85,18 +108,26 @@ export function normalizeAgentPrefs(raw: unknown): AgentPrefs {
     defaultPermissionProfile: isPermissionProfile(src['defaultPermissionProfile'])
       ? src['defaultPermissionProfile']
       : 'safe',
+    selectedModels,
   };
 }
 
 export function loadAgentPrefs(storage?: AgentPrefsStorage | null): AgentPrefs {
   const store = resolveStorage(storage);
-  if (!store) return defaultAgentPrefs();
+  if (!store) {
+    const prefs = defaultAgentPrefs();
+    setSelectedModels(prefs.selectedModels);
+    return prefs;
+  }
   try {
     const raw = store.getItem(STORAGE_KEY);
-    if (!raw) return defaultAgentPrefs();
-    return normalizeAgentPrefs(JSON.parse(raw));
+    const prefs = raw ? normalizeAgentPrefs(JSON.parse(raw)) : defaultAgentPrefs();
+    setSelectedModels(prefs.selectedModels);
+    return prefs;
   } catch {
-    return defaultAgentPrefs();
+    const prefs = defaultAgentPrefs();
+    setSelectedModels(prefs.selectedModels);
+    return prefs;
   }
 }
 
@@ -122,6 +153,7 @@ export function trySaveAgentPrefs(
   if (!store) return { ok: false, value: next, error: '설정을 저장할 수 있는 저장소가 없습니다.' };
   try {
     store.setItem(STORAGE_KEY, JSON.stringify(next));
+    setSelectedModels(next.selectedModels);
   } catch (err) {
     console.warn('[agent-prefs] localStorage 저장 실패:', err);
     return {

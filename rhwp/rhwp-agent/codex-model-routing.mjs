@@ -16,6 +16,7 @@ const PROBE_TIMEOUT_MS = 12_000;
 const REQUEST_TIMEOUT_MS = 4_000;
 const PAGE_LIMIT = 100;
 const MAX_PAGES = 10;
+const CODEX_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 
 export function codexLineup(model) {
   if (LINEUPS.has(model)) return model;
@@ -113,6 +114,50 @@ export async function discoverCodexModels({
     });
     if (!cleaned) throw new Error('Codex model discovery process cleanup failed');
   }
+}
+
+export function normalizeCodexModels(models) {
+  const seen = new Set();
+  const catalog = [];
+  for (const entry of models) {
+    const id = entry?.model ?? entry?.id;
+    if (entry?.hidden === true || typeof id !== 'string' || !id || seen.has(id)) continue;
+    seen.add(id);
+    catalog.push({
+      id,
+      label: typeof entry.displayName === 'string' && entry.displayName.trim()
+        ? entry.displayName : id,
+      ...(typeof entry.description === 'string' && entry.description.trim()
+        ? { description: entry.description.trim() } : {}),
+      ...(Array.isArray(entry.supportedReasoningEfforts)
+        ? { supportedEfforts: entry.supportedReasoningEfforts
+          .map((effort) => effort?.reasoningEffort)
+          .filter((effort) => CODEX_EFFORTS.has(effort)) } : {}),
+    });
+  }
+  return catalog;
+}
+
+export function createCodexModelCatalog({ discover = discoverCodexModels, now = Date.now } = {}) {
+  const cache = new Map();
+  return async function codexModelCatalog(options = {}, { refresh = false } = {}) {
+    const key = `${options.bin ?? 'codex'}\0${options.codexHome ?? ''}`;
+    let entry = cache.get(key);
+    if (refresh || !entry || entry.expiresAt <= now()) {
+      const pending = Promise.resolve().then(() => discover(options)).then((models) => {
+        const catalog = normalizeCodexModels(models);
+        if (!catalog.length) throw new Error('Codex returned an empty model catalog');
+        return catalog;
+      });
+      entry = { pending, expiresAt: Number.POSITIVE_INFINITY };
+      cache.set(key, entry);
+      pending.then(
+        (models) => { if (cache.get(key) === entry) cache.set(key, { models, expiresAt: now() + CACHE_MS }); },
+        () => { if (cache.get(key) === entry) cache.delete(key); },
+      );
+    }
+    return entry.pending ?? entry.models;
+  };
 }
 
 export function createCodexModelResolver({ discover = discoverCodexModels, now = Date.now } = {}) {

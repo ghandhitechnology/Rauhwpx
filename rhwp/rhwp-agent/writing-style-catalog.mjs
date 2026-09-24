@@ -20,6 +20,26 @@ function currentLineup(agent, model) {
   return model;
 }
 
+function catalogModels(entries, fallback, defaultEffort) {
+  if (!Array.isArray(entries)) return fallback.map((model) => ({ ...model, efforts: [...model.efforts] }));
+  return entries.map((entry) => {
+    const efforts = Array.isArray(entry.supportedEfforts)
+      ? [...entry.supportedEfforts]
+      : ['low', 'medium', 'high', 'xhigh', 'max'];
+    return {
+      id: entry.id,
+      name: entry.label || entry.id,
+      efforts,
+      defaultEffort: efforts.includes(defaultEffort) ? defaultEffort : efforts[0] ?? null,
+    };
+  });
+}
+
+function findCatalogModel(provider, requested) {
+  return provider.models.find((entry) => entry.id === requested)
+    ?? provider.models.find((entry) => entry.id === currentLineup(provider.id, requested));
+}
+
 function piModels(piStatus) {
   return (Array.isArray(piStatus?.models) ? piStatus.models : []).map((model) => ({
     id: String(model.id),
@@ -36,16 +56,16 @@ function providerAvailable(id, health, piStatus) {
 }
 
 export function buildWritingStyleCatalog({
-  health = null, piStatus = null, currentSelection = null,
+  health = null, piStatus = null, currentSelection = null, codexModels, claudeModels,
 } = {}) {
   const providers = [
     {
       id: 'codex', name: 'Codex', available: providerAvailable('codex', health, piStatus),
-      error: health?.codex?.error ?? null, models: CODEX_MODELS.map((model) => ({ ...model, efforts: [...model.efforts] })),
+      error: health?.codex?.error ?? null, models: catalogModels(codexModels, CODEX_MODELS, 'medium'),
     },
     {
       id: 'claude', name: 'Claude', available: providerAvailable('claude', health, piStatus),
-      error: health?.claude?.error ?? null, models: CLAUDE_MODELS.map((model) => ({ ...model, efforts: [...model.efforts] })),
+      error: health?.claude?.error ?? null, models: catalogModels(claudeModels, CLAUDE_MODELS, 'high'),
     },
     {
       id: 'pi', name: 'Pi · OpenRouter', available: providerAvailable('pi', health, piStatus),
@@ -56,7 +76,7 @@ export function buildWritingStyleCatalog({
   let selection = null;
   if (currentSelection?.agent && currentSelection?.model) {
     const provider = providers.find((entry) => entry.id === currentSelection.agent && entry.available);
-    const model = provider?.models.find((entry) => entry.id === currentLineup(provider.id, currentSelection.model));
+    const model = provider && findCatalogModel(provider, currentSelection.model);
     if (provider && model) selection = { agent: provider.id, model: model.id, effort: currentSelection.effort ?? model.defaultEffort };
   }
   if (!selection) {
@@ -78,8 +98,8 @@ export function resolveWritingStyleSelection(request, options = {}) {
   const provider = catalog.providers.find((entry) => entry.id === agent);
   if (!provider) throw new StyleCalibrationError('PROVIDER_UNAVAILABLE', `Unknown calibration provider: ${agent || '(none)'}.`);
   if (!provider.available) throw new StyleCalibrationError('PROVIDER_UNAVAILABLE', provider.error || `${provider.name} is unavailable.`);
-  const modelId = explicitModel ? currentLineup(agent, String(request.model)) : (catalog.defaultSelection?.agent === agent ? catalog.defaultSelection.model : null);
-  const model = provider.models.find((entry) => entry.id === modelId);
+  const modelId = explicitModel ? String(request.model) : (catalog.defaultSelection?.agent === agent ? catalog.defaultSelection.model : null);
+  const model = modelId ? findCatalogModel(provider, modelId) : null;
   if (!model) throw new StyleCalibrationError('MODEL_UNAVAILABLE', `The selected ${provider.name} model is unavailable: ${modelId || '(none)'}.`);
   const requestedEffort = typeof request?.effort === 'string' && request.effort ? request.effort : null;
   if (requestedEffort && !model.efforts.includes(requestedEffort)) {

@@ -4,6 +4,7 @@ import './settings.css';
 import { confirmSheet } from './sheet.ts';
 
 import {
+  availableModelsForAgent,
   effortsForAgent,
   labelForModel,
   modelGroupsForAgent,
@@ -359,8 +360,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   let disposed = false;
   let prefs: AgentPrefs = loadAgentPrefs();
-  let prefsBaseline: AgentPrefs = { ...prefs };
-  let prefsDraft: AgentPrefs = { ...prefs };
+  let prefsBaseline: AgentPrefs = clonePrefs(prefs);
+  let prefsDraft: AgentPrefs = clonePrefs(prefs);
+  let modelCatalogAgent: PlanAgent = 'claude';
+  const modelCatalogLoading = new Set<PlanAgent>();
+  const modelCatalogErrors = new Set<PlanAgent>();
   let connectionState: ConnectionState = bridge.getConnectionState();
   let accountStatus: AccountSessionStatus | null = null;
   let accountBusy = false;
@@ -1116,6 +1120,81 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     stagePrefs({ defaultPermissionProfile: next });
   });
 
+  const modelCatalogSection = createSection('사용할 모델');
+  modelCatalogSection.root.classList.add('ag-settings-model-catalog-section');
+  const modelCatalogCard = el('div', 'ag-settings-model-catalog-card');
+  const modelCatalogTop = el('div', 'ag-settings-model-catalog-top');
+  const modelCatalogTabs = el('div', 'ag-settings-model-tabs');
+  modelCatalogTabs.setAttribute('role', 'tablist');
+  modelCatalogTabs.setAttribute('aria-label', '모델 제공자');
+  const catalogTabs = new Map<PlanAgent, HTMLButtonElement>();
+  for (const agent of PLAN_AGENTS) {
+    const tab = el('button', 'ag-settings-model-tab');
+    tab.type = 'button';
+    tab.id = `ag-settings-model-tab-${agent}`;
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-controls', 'ag-settings-model-list');
+    tab.dataset.agent = agent;
+    tab.append(createProviderIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
+    tab.addEventListener('click', () => {
+      modelCatalogAgent = agent;
+      modelCatalogSearch.value = '';
+      renderModelCatalog();
+      if (availableModelsForAgent(agent).length === 0) void loadModelCatalog(agent);
+    });
+    tab.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const target = event.key === 'Home' ? PLAN_AGENTS[0]
+        : event.key === 'End' ? PLAN_AGENTS[PLAN_AGENTS.length - 1]
+        : PLAN_AGENTS[(PLAN_AGENTS.indexOf(agent) + (event.key === 'ArrowRight' ? 1 : -1) + PLAN_AGENTS.length) % PLAN_AGENTS.length];
+      const next = target && catalogTabs.get(target);
+      next?.click();
+      next?.focus();
+    });
+    catalogTabs.set(agent, tab);
+    modelCatalogTabs.append(tab);
+  }
+  const modelCatalogCount = el('span', 'ag-settings-model-count');
+  modelCatalogTop.append(modelCatalogTabs, modelCatalogCount);
+  const modelCatalogTools = el('div', 'ag-settings-model-tools');
+  const modelCatalogSearchWrap = el('label', 'ag-settings-model-search');
+  modelCatalogSearchWrap.append(createIcon('search'));
+  const modelCatalogSearch = el('input', 'ag-settings-model-search-input') as HTMLInputElement;
+  modelCatalogSearch.type = 'search';
+  modelCatalogSearch.placeholder = '모델 검색';
+  modelCatalogSearch.setAttribute('aria-label', '모델 검색');
+  modelCatalogSearch.autocomplete = 'off';
+  modelCatalogSearch.spellcheck = false;
+  modelCatalogSearch.addEventListener('input', renderModelCatalog);
+  modelCatalogSearchWrap.append(modelCatalogSearch);
+  const modelCatalogRefresh = el('button', 'ag-settings-model-refresh');
+  modelCatalogRefresh.type = 'button';
+  modelCatalogRefresh.title = '모델 목록 새로고침';
+  modelCatalogRefresh.setAttribute('aria-label', '모델 목록 새로고침');
+  modelCatalogRefresh.append(createIcon('refresh'));
+  modelCatalogRefresh.addEventListener('click', () => void loadModelCatalog(modelCatalogAgent, true));
+  modelCatalogTools.append(modelCatalogSearchWrap, modelCatalogRefresh);
+  const modelCatalogList = el('div', 'ag-settings-model-list');
+  modelCatalogList.id = 'ag-settings-model-list';
+  modelCatalogList.setAttribute('role', 'tabpanel');
+  modelCatalogList.setAttribute('aria-label', '사용할 모델 선택');
+  modelCatalogList.addEventListener('keydown', (event) => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const rows = [...modelCatalogList.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+    const current = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+      : event.key === 'ArrowDown' ? Math.min(rows.length - 1, current + 1) : Math.max(0, current - 1);
+    if (rows[next]) {
+      event.preventDefault();
+      rows[next].focus();
+    }
+  });
+  const modelCatalogStatus = el('div', 'ag-settings-model-status');
+  modelCatalogStatus.setAttribute('role', 'status');
+  modelCatalogCard.append(modelCatalogTop, modelCatalogTools, modelCatalogList, modelCatalogStatus);
+  modelCatalogSection.body.append(modelCatalogCard);
+
   // ── 4. 지시 ──────────────────────────────────────────
   const instructionsSection = createSection('지시');
   const instructionsEditor = document.createElement('textarea');
@@ -1346,10 +1425,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   aiCancel.type = 'button';
   const aiApply = el('button', 'ag-settings-primary', '적용');
   aiApply.type = 'button';
-  const aiFooter = el('div', 'ag-settings-apply-footer');
+  const aiFooter = el('div', 'ag-settings-apply-footer ag-settings-ai-footer');
   aiFooter.append(aiStatus, aiCancel, aiApply);
   const aiContent = el('div', 'ag-settings-destination-content');
-  aiContent.append(defaults.root, calibration.root, instructionsSection.root, templatesSection.root, aiFooter);
+  aiContent.append(defaults.root, modelCatalogSection.root, calibration.root, instructionsSection.root, templatesSection.root, aiFooter);
   panes.get('ai')?.appendChild(aiContent);
 
   const connectionContent = el('div', 'ag-settings-destination-content');
@@ -1400,7 +1479,18 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     return left.defaultAgent === right.defaultAgent
       && left.defaultModel === right.defaultModel
       && left.defaultEffort === right.defaultEffort
-      && left.defaultPermissionProfile === right.defaultPermissionProfile;
+      && left.defaultPermissionProfile === right.defaultPermissionProfile
+      && PLAN_AGENTS.every((agent) => left.selectedModels[agent].join('\u0000') === right.selectedModels[agent].join('\u0000'));
+  }
+
+  function clonePrefs(value: AgentPrefs): AgentPrefs {
+    return {
+      ...value,
+      selectedModels: {
+        claude: [...value.selectedModels.claude],
+        codex: [...value.selectedModels.codex],
+      },
+    };
   }
 
   function isAiDirty(): boolean {
@@ -1443,6 +1533,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     modelField.select.disabled = aiPrefsSaving;
     effortField.select.disabled = aiPrefsSaving;
     permissionField.select.disabled = aiPrefsSaving;
+    modelCatalogList.inert = aiPrefsSaving;
+    modelCatalogRefresh.disabled = aiPrefsSaving || modelCatalogLoading.has(modelCatalogAgent);
   }
 
   function selectDestination(destination: SettingsDestination): void {
@@ -1462,6 +1554,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   function stagePrefs(partial: Partial<AgentPrefs>): void {
     prefsDraft = normalizeAgentPrefs({ ...prefsDraft, ...partial });
     syncPrefsInputs();
+    renderModelCatalog();
     aiStatus.hidden = true;
     renderDestinationState();
   }
@@ -1474,14 +1567,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const result = trySaveAgentPrefs(nextPrefs);
     if (result.ok) {
       prefs = result.value;
-      prefsBaseline = { ...result.value };
+      prefsBaseline = clonePrefs(result.value);
       prefsDraft = preserveDraft
         ? {
           ...previousDraft,
           defaultAgent: result.value.defaultAgent,
           defaultModel: result.value.defaultModel,
         }
-        : { ...result.value };
+        : clonePrefs(result.value);
       applyDefaults(result.value);
     }
     return result;
@@ -1528,12 +1621,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     aiStatus.textContent = 'AI 설정을 적용했습니다.';
     aiStatus.hidden = false;
     syncPrefsInputs();
+    renderModelCatalog();
     renderDestinationState();
     return true;
   }
 
   function cancelAiDraft(): void {
-    prefsDraft = { ...prefsBaseline };
+    prefsDraft = clonePrefs(prefsBaseline);
     if (agentInstructions) {
       instructionsEditor.value = agentInstructions.content;
       instructionsDraftRevision = agentInstructions.revision;
@@ -1542,6 +1636,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     instructionsMessage = '';
     aiStatus.hidden = true;
     syncPrefsInputs();
+    renderModelCatalog();
     renderAgentInstructions();
     renderDestinationState();
   }
@@ -1779,14 +1874,110 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     });
   }
 
+  function renderModelCatalog(): void {
+    modelCatalogList.setAttribute('aria-labelledby', `ag-settings-model-tab-${modelCatalogAgent}`);
+    for (const [agent, tab] of catalogTabs) {
+      const active = agent === modelCatalogAgent;
+      tab.classList.toggle('ag-active', active);
+      tab.setAttribute('aria-selected', String(active));
+      tab.tabIndex = active ? 0 : -1;
+    }
+    const agent = modelCatalogAgent;
+    const selected = new Set(prefsDraft.selectedModels[agent]);
+    const entries = availableModelsForAgent(agent);
+    const terms = modelCatalogSearch.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const matches = entries.filter((entry) => terms.every((term) =>
+      `${entry.label} ${entry.id} ${entry.description ?? ''}`.toLocaleLowerCase().includes(term)));
+    const focusedId = modelCatalogList.contains(document.activeElement)
+      ? (document.activeElement as HTMLElement).dataset.modelId : null;
+    const scrollTop = modelCatalogList.scrollTop;
+    modelCatalogList.replaceChildren();
+    if (matches.length === 0) {
+      const message = modelCatalogLoading.has(agent) ? '모델을 불러오는 중…'
+        : terms.length ? '검색 결과가 없습니다.' : '사용 가능한 모델이 없습니다.';
+      modelCatalogList.append(el('div', 'ag-settings-model-empty', message));
+    }
+    for (const entry of matches) {
+      const active = selected.has(entry.id);
+      const row = el('button', 'ag-settings-model-row');
+      row.type = 'button';
+      row.dataset.modelId = entry.id;
+      row.classList.toggle('ag-active', active);
+      row.setAttribute('aria-pressed', String(active));
+      row.setAttribute('aria-label', `${entry.label}, ${active ? '선택됨' : '선택 안 됨'}`);
+      row.disabled = aiPrefsSaving;
+      const text = el('span', 'ag-settings-model-row-text');
+      const name = el('span', 'ag-settings-model-row-name', entry.label);
+      const id = el('span', 'ag-settings-model-row-id', entry.id);
+      text.append(name, id);
+      if (entry.description) text.append(el('span', 'ag-settings-model-row-description', entry.description));
+      const trailing = el('span', 'ag-settings-model-row-trailing');
+      if (prefsDraft.defaultAgent === agent && prefsDraft.defaultModel === entry.id) {
+        trailing.append(el('span', 'ag-settings-model-default', '기본값'));
+      }
+      const check = el('span', 'ag-settings-model-check');
+      check.append(createIcon('check'));
+      check.setAttribute('aria-hidden', 'true');
+      trailing.append(check);
+      row.append(text, trailing);
+      row.addEventListener('click', () => {
+        const current = prefsDraft.selectedModels[agent];
+        if (current.includes(entry.id) && current.length === 1) return;
+        const next = current.includes(entry.id)
+          ? current.filter((id) => id !== entry.id)
+          : [...current, entry.id];
+        const selectedModels = { ...prefsDraft.selectedModels, [agent]: next };
+        const defaultModel = prefsDraft.defaultAgent === agent && !next.includes(prefsDraft.defaultModel)
+          ? next[0] ?? '' : prefsDraft.defaultModel;
+        stagePrefs({ selectedModels, defaultModel });
+      });
+      modelCatalogList.append(row);
+    }
+    modelCatalogList.scrollTop = scrollTop;
+    if (focusedId) {
+      [...modelCatalogList.querySelectorAll<HTMLButtonElement>('button')]
+        .find((row) => row.dataset.modelId === focusedId)?.focus({ preventScroll: true });
+    }
+    modelCatalogCount.textContent = `${selected.size}개 선택`;
+    modelCatalogStatus.textContent = modelCatalogLoading.has(agent) ? '목록을 불러오는 중…'
+      : modelCatalogErrors.has(agent) ? '목록을 불러오지 못했습니다. 새로고침을 눌러 다시 시도하세요.'
+      : terms.length ? `${matches.length}개 결과` : `${entries.length}개 모델`;
+    modelCatalogRefresh.disabled = aiPrefsSaving || modelCatalogLoading.has(agent) || connectionState !== 'connected';
+  }
+
+  async function loadModelCatalog(agent: PlanAgent, refresh = false): Promise<void> {
+    if (modelCatalogLoading.has(agent) || connectionState !== 'connected') return;
+    modelCatalogLoading.add(agent);
+    modelCatalogErrors.delete(agent);
+    renderModelCatalog();
+    const result = await bridge.requestModelCatalog(agent, refresh);
+    if (disposed) return;
+    modelCatalogLoading.delete(agent);
+    if (!result) modelCatalogErrors.add(agent);
+    else {
+      prefsBaseline = normalizeAgentPrefs(prefsBaseline);
+      prefsDraft = normalizeAgentPrefs(prefsDraft);
+      syncPrefsInputs();
+    }
+    renderModelCatalog();
+    renderDestinationState();
+  }
+
   function syncPrefsInputs(): void {
     fillSelect(
       agentField.select,
       selectableAgents().map((agent) => ({ id: agent, label: AGENT_LABEL[agent] })),
     );
     agentField.select.value = prefsDraft.defaultAgent;
-    fillSelectGrouped(modelField.select, modelGroupsForAgent(prefsDraft.defaultAgent));
-    modelField.select.value = resolveModelForAgent(prefsDraft.defaultAgent, prefsDraft.defaultModel);
+    if (prefsDraft.defaultAgent === 'claude' || prefsDraft.defaultAgent === 'codex') {
+      const selected = new Set(prefsDraft.selectedModels[prefsDraft.defaultAgent]);
+      fillSelect(modelField.select, availableModelsForAgent(prefsDraft.defaultAgent)
+        .filter((model) => selected.has(model.id))
+        .map((model) => ({ id: model.id, label: model.label })));
+    } else {
+      fillSelectGrouped(modelField.select, modelGroupsForAgent(prefsDraft.defaultAgent));
+    }
+    modelField.select.value = prefsDraft.defaultModel;
     const effortOptions = effortsForAgent(prefsDraft.defaultAgent, prefsDraft.defaultModel);
     // 추론 강도가 없는 프로바이더(cursor, opencode 등)에서는 줄 자체를 접는다.
     effortField.field.hidden = effortOptions.length === 0;
@@ -3214,6 +3405,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   }
 
   syncPrefsInputs();
+  renderModelCatalog();
   renderAccount();
   renderConnection();
   renderProviders();
@@ -3230,14 +3422,15 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       settingsOpen = true;
       if (!isAiDirty()) {
         prefs = loadAgentPrefs();
-        prefsBaseline = { ...prefs };
-        prefsDraft = { ...prefs };
+        prefsBaseline = clonePrefs(prefs);
+        prefsDraft = clonePrefs(prefs);
       }
       connectionState = bridge.getConnectionState();
       editingSettings.open();
       if (destination) selectDestination(destination);
       else selectDestination(lastDestination);
       syncPrefsInputs();
+      renderModelCatalog();
       renderConnection();
       renderBrowserbase();
       if (connectionState === 'connected') void refreshBrowserbase();
@@ -3253,6 +3446,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       void refreshPiStatus();
       void refreshSetupStatuses();
       void refreshTemplates();
+      if (connectionState === 'connected') {
+        for (const agent of PLAN_AGENTS) void loadModelCatalog(agent);
+      }
       refreshCloudSettings?.();
     },
     close(): void {
@@ -3284,6 +3480,16 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           if (ev.state === 'connected' && !accountStatus) void refreshAccount();
           if (ev.state === 'connected' && !agentInstructions) void refreshAgentInstructions(false);
           if (ev.state === 'connected') void refreshBrowserbase();
+          if (ev.state === 'connected' && settingsOpen) {
+            for (const agent of PLAN_AGENTS) void loadModelCatalog(agent);
+          }
+          renderModelCatalog();
+          break;
+        case 'model-catalog':
+          if (ev.agent === 'claude' || ev.agent === 'codex') {
+            renderModelCatalog();
+            syncPrefsInputs();
+          }
           break;
         case 'account-status':
           accountStatus = ev.status;

@@ -2450,6 +2450,55 @@ button.ag-skill-copy {
   font-weight: 600;
 }
 
+/* User-selected models form a scrollable list inside the composer settings. */
+.ag-config-panel .ag-llm-menu {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 2px;
+  max-height: min(208px, 29vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 3px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ag-text) 5%, transparent);
+}
+
+.ag-config-panel .ag-llm-menu .ag-llm-group-label { padding: 6px 8px 3px; }
+.ag-config-panel .ag-llm-menu .ag-llm-item {
+  flex: 0 0 auto;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 31px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background 130ms ease-out;
+}
+.ag-config-panel .ag-llm-menu .ag-llm-item.ag-active {
+  background: var(--ag-bg);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--ag-text) 10%, transparent);
+}
+.ag-config-panel .ag-llm-menu .ag-llm-item.ag-active::after {
+  content: '✓';
+  flex: 0 0 auto;
+  margin-left: 6px;
+  color: var(--ag-accent);
+  font-size: 12px;
+}
+.ag-config-panel .ag-llm-menu .ag-llm-item:active { background: var(--ag-selected); }
+.ag-config-panel .ag-llm-menu .ag-llm-item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-config-panel .ag-llm-menu .ag-llm-item { transition: none; }
+}
+
 /* ─── 메시지 목록 ─────────────────────────────────────── */
 
 /* Conversation is prose-first; operational detail is available by disclosure. */

@@ -881,6 +881,23 @@ try {
     assert(await page.$eval('.ag-versions-page', (el) => el.scrollWidth <= el.clientWidth), 'Narrow panel overflows');
     await open('width=480');
   });
+  await step('AI model choices stage, cancel, save, and filter the composer', async () => {
+    await open('page=settings&destination=ai&reset=1&width=360');
+    await page.waitForSelector('.ag-settings-model-row[data-model-id="claude-haiku-4-5"]');
+    await page.type('.ag-settings-model-search-input', 'haiku');
+    assert.equal(await page.$$eval('.ag-settings-model-row', (rows) => rows.length), 1);
+    await page.click('.ag-settings-model-row');
+    assert.equal(await page.$eval('.ag-settings-ai-footer .ag-settings-primary', (button) => button.disabled), false);
+    await clickText('.ag-settings-ai-footer button', '취소');
+    assert.equal(await page.$eval('.ag-settings-model-row', (row) => row.getAttribute('aria-pressed')), 'true');
+    await page.click('.ag-settings-model-row');
+    await clickText('.ag-settings-ai-footer button', '적용');
+    assert.equal(await page.$eval('.ag-settings-ai-footer .ag-settings-primary', (button) => button.disabled), true);
+    await page.click('.ag-settings-close');
+    await page.click('.ag-llm-trigger');
+    assert.deepEqual(await page.$$eval('.ag-llm-item', (rows) => rows.map((row) => row.dataset.model)),
+      ['claude-opus-4-6', 'claude-sonnet-4-6']);
+  });
   await step(
     'Document context, reset, clean canvas, and backend isolation',
     async () => {

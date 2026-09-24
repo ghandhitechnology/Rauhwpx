@@ -26,7 +26,10 @@ import { PendingRequestRegistry } from './pending-requests.ts';
 import { AgentTypewriterReveal } from './typewriter-reveal.ts';
 import { deriveAgentEditingLease, planModeAllowsUserEditing } from './editing-lease.ts';
 import {
+  setModelCatalog,
   setPiModels as setPiModelRegistry,
+  type CatalogAgent,
+  type ModelCatalogEntry,
 } from './models.ts';
 import {
   AGENT_PROTOCOL_VERSION,
@@ -238,6 +241,8 @@ export interface AgentBridge {
   reconnectNow(): Promise<void>;
   /** 로컬 CLI 설치 상태. refresh=true 면 허브가 새로 프로브한다. */
   requestProviderStatus(refresh?: boolean): Promise<ProviderStatusMap | null>;
+  /** Available concrete models from the local provider. */
+  requestModelCatalog(agent: CatalogAgent, refresh?: boolean): Promise<ModelCatalogEntry[] | null>;
   requestAgentSetupStatus(refresh?: boolean): Promise<AgentSetupStatusMap | null>;
   requestAccountStatus(): Promise<AccountSessionStatus | null>;
   loginAccount(): Promise<AccountLoginStart | null>;
@@ -1164,6 +1169,27 @@ function readPiCatalog(value: unknown): PiCatalogModel[] {
     if (model) out.push(model);
   }
   return out;
+}
+
+function readModelCatalog(value: unknown): ModelCatalogEntry[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const models: ModelCatalogEntry[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const model = raw as Record<string, unknown>;
+    if (typeof model.id !== 'string' || !model.id.trim() || seen.has(model.id)) continue;
+    seen.add(model.id);
+    models.push({
+      id: model.id,
+      label: typeof model.label === 'string' && model.label.trim() ? model.label : model.id,
+      ...(typeof model.description === 'string' ? { description: model.description } : {}),
+      ...(Array.isArray(model.supportedEfforts)
+        ? { supportedEfforts: model.supportedEfforts.filter((effort): effort is string => typeof effort === 'string') }
+        : {}),
+    });
+  }
+  return models;
 }
 
 function readCheckpointTitleResult(value: unknown): CheckpointTitleResult | null {
@@ -2390,6 +2416,25 @@ export class AgentBridgeImpl implements AgentBridge {
         this.emit({ type: 'provider-status', providers });
         break;
       }
+      case 'model-catalog': {
+        if (msg.agent !== 'claude' && msg.agent !== 'codex') break;
+        const models = readModelCatalog(msg.models);
+        setModelCatalog(msg.agent, models);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, models);
+        this.emit({ type: 'model-catalog', agent: msg.agent,
+          requestId: typeof msg.requestId === 'string' ? msg.requestId : '', models });
+        break;
+      }
+      case 'model-catalog-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        if (msg.agent === 'claude' || msg.agent === 'codex') {
+          this.emit({ type: 'model-catalog-error', agent: msg.agent,
+            requestId: typeof msg.requestId === 'string' ? msg.requestId : '',
+            code: typeof msg.code === 'string' ? msg.code : 'CATALOG_FAILED',
+            message: typeof msg.message === 'string' ? msg.message : 'Could not load models' });
+        }
+        break;
+      }
       case 'agent-setup-status': {
         const statuses = readAgentSetupStatuses(msg.statuses);
         if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, statuses);
@@ -3596,6 +3641,14 @@ export class AgentBridgeImpl implements AgentBridge {
     return this.request<ProviderStatusMap>(
       { type: 'provider-status-request', ...(refresh ? { refresh: true } : {}) },
       'provider-status',
+    );
+  }
+
+  requestModelCatalog(agent: CatalogAgent, refresh = false): Promise<ModelCatalogEntry[] | null> {
+    return this.request<ModelCatalogEntry[]>(
+      { type: 'model-catalog-request', agent, ...(refresh ? { refresh: true } : {}) },
+      'model-catalog',
+      30_000,
     );
   }
 

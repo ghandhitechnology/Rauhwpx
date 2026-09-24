@@ -3,10 +3,40 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import {
   codexLineup,
+  createCodexModelCatalog,
   createCodexModelResolver,
   discoverCodexModels,
   latestCodexModel,
+  normalizeCodexModels,
 } from '../codex-model-routing.mjs';
+
+test('catalog includes every visible Codex model with its supported effort levels', () => {
+  assert.deepEqual(normalizeCodexModels([
+    { model: 'gpt-6.1-sol', displayName: 'GPT-6.1-Sol', description: 'Coding',
+      supportedReasoningEfforts: [{ reasoningEffort: 'medium' }, { reasoningEffort: 'ultra' }] },
+    { model: 'gpt-5.5', displayName: 'GPT-5.5' },
+    { model: 'gpt-6.1-sol', displayName: 'Duplicate' },
+    { model: 'hidden', hidden: true },
+  ]), [
+    { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', description: 'Coding', supportedEfforts: ['medium', 'ultra'] },
+    { id: 'gpt-5.5', label: 'GPT-5.5' },
+  ]);
+});
+
+test('catalog caches per profile and refresh bypasses its cache', async () => {
+  let calls = 0;
+  const catalog = createCodexModelCatalog({ discover: async () => [{ model: `gpt-${++calls}` }] });
+  const options = { bin: 'codex', codexHome: '/test' };
+  assert.deepEqual((await catalog(options)).map((entry) => entry.id), ['gpt-1']);
+  assert.deepEqual((await catalog(options)).map((entry) => entry.id), ['gpt-1']);
+  assert.deepEqual((await catalog(options, { refresh: true })).map((entry) => entry.id), ['gpt-2']);
+  assert.equal(calls, 2);
+});
+
+test('an empty Codex response is a catalog error', async () => {
+  const catalog = createCodexModelCatalog({ discover: async () => [] });
+  await assert.rejects(catalog(), /empty model catalog/);
+});
 
 test('legacy version IDs retain their lineup and numeric versions determine the latest model', () => {
   assert.equal(codexLineup('gpt-6-sol'), 'sol');

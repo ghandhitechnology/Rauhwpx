@@ -56,6 +56,24 @@ test('old model IDs keep their lineup in calibration', () => {
   );
 });
 
+test('live provider catalogs retain exact model IDs for calibration', () => {
+  const options = {
+    codexModels: [
+      { id: 'gpt-5.5', label: 'GPT-5.5', supportedEfforts: ['low', 'medium', 'high'] },
+      { id: 'gpt-6-sol', label: 'GPT-6 Sol', supportedEfforts: ['low', 'medium', 'high', 'max'] },
+    ],
+    claudeModels: [{ id: 'claude-sonnet-5', label: 'Claude Sonnet 5' }],
+  };
+  assert.deepEqual(
+    buildWritingStyleCatalog(options).providers.find((provider) => provider.id === 'codex').models.map((model) => model.id),
+    ['gpt-5.5', 'gpt-6-sol'],
+  );
+  assert.deepEqual(resolveWritingStyleSelection({ agent: 'codex', model: 'gpt-5.5', effort: 'high' }, options),
+    { agent: 'codex', model: 'gpt-5.5', effort: 'high' });
+  assert.deepEqual(resolveWritingStyleSelection({ agent: 'claude', model: 'claude-sonnet-5', effort: 'high' }, options),
+    { agent: 'claude', model: 'claude-sonnet-5', effort: 'high' });
+});
+
 test('calibration selection rejects unavailable providers and stale models without fallback', () => {
   assert.throws(
     () => resolveWritingStyleSelection({ agent: 'codex', model: 'gpt-5.6-sol' }, { health, piStatus }),
