@@ -22,8 +22,8 @@ import { toolDefinitionChars } from '../tool-telemetry.mjs';
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 86개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 86);
+test('도구는 정확히 87개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 87);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -127,7 +127,7 @@ test('anchor 내부 필드는 validate 훅이 모양을 고정한다', () => {
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 74);
+  assert.equal(direct.size, 75);
   assert.equal(byName.get('commit_product_skill')?.category, 'instruction-write');
   assert.equal(byName.get('list_harness_skills')?.category, 'instruction-read');
   assert.ok(direct.has('commit_product_skill'));
@@ -305,6 +305,42 @@ test('reference tools are read-only and carry bounded schemas', () => {
   assert.ok(!byName.get('search_reference_files').shape.maxResults.safeParse(21).success);
   assert.ok(byName.get('read_reference_chunk').shape.maxChars.safeParse(20_000).success);
   assert.ok(!byName.get('read_reference_chunk').shape.chunkId.safeParse('../secret').success);
+});
+
+// ─── 읽기 배치·증분 읽기 (P2.3) ───────────────────────────
+// read_batch 는 한 왕복에 읽기를 묶고, get_structure 는 sinceRevision/range 로
+// 전체 재읽기를 줄인다. 항목 실행·오류 분리·저널 델타 조립은 스튜디오의
+// agent-cheap-reads.test.ts 가 본다 — 여기서는 스키마/프로필 계약만 잠근다.
+
+test('read_batch: 읽기 전용 도구 1-16개의 {tool, args} 배열', () => {
+  const def = byName.get('read_batch');
+  assert.ok(def, 'missing tool: read_batch');
+  assert.equal(def.category, 'document-read');
+  assert.ok(!def.shape.expectedRevision, 'read_batch 는 쓰기가 아니라 expectedRevision 이 없다');
+  const reads = def.shape.reads;
+  assert.ok(reads.safeParse([{ tool: 'get_structure' }]).success);
+  assert.ok(reads.safeParse([{ tool: 'find_text', args: { query: 'x' } }]).success);
+  assert.ok(!reads.safeParse([]).success, '빈 배치는 거절');
+  assert.ok(!reads.safeParse(Array.from({ length: 17 }, () => ({ tool: 'get_fields' }))).success, '17개는 거절');
+  // 쓰기 도구·배치 도구·바이너리 읽기는 스키마 enum 이 자체 거절한다.
+  for (const tool of ['insert_text', 'apply_edits', 'read_batch', 'render_page',
+    'materialize_document_snapshot', 'template_get_structure', 'bogus']) {
+    assert.ok(!reads.safeParse([{ tool }]).success, `${tool} must be rejected by the enum`);
+  }
+  for (const profile of ['direct', 'planning', 'question', 'implementing']) {
+    assert.ok(filterToolDefinitions(profile).some((d) => d.name === 'read_batch'), `${profile} profile needs read_batch`);
+  }
+});
+
+test('get_structure: sinceRevision·range·compact 기본값 계약', () => {
+  const { shape } = byName.get('get_structure');
+  assert.equal(shape.format._def.innerType._def.defaultValue(), 'text', 'compact text 가 기본');
+  assert.ok(shape.sinceRevision.safeParse(3).success);
+  assert.ok(!shape.sinceRevision.safeParse(-1).success);
+  assert.ok(!shape.sinceRevision.safeParse(1.5).success);
+  assert.ok(shape.range.safeParse({ sectionIdx: 0, fromPara: 2, toPara: 5 }).success);
+  assert.ok(!shape.range.safeParse({ sectionIdx: 0, fromPara: 2 }).success, 'range 는 세 필드가 모두 필수');
+  assert.ok(!shape.range.safeParse({ sectionIdx: 0, fromPara: 2, toPara: 5, extra: 1 }).success, 'strict — 모르는 키 거절');
 });
 
 test('document snapshots are a read-only, argument-free current-document export', () => {
