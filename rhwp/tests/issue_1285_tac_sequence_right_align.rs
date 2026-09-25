@@ -143,17 +143,17 @@ fn answer_sheet_two_tac_tables_keep_inline_sequence() {
         number_table.bbox.x
     );
     // [Issue #3396] 오른쪽 정렬의 실제 불변량은 "마지막 TAC 표 우단(om_r=0)이
-    // 부모 셀 inner 우단에 붙는다"이다. 저장 lineseg 시작 x(295.67)가
-    // inner_right - (콘텐츠 폭 + 성명 표 outMargin 좌/우 7.54px)와 일치해
-    // 한컴 자신도 outMargin 포함 폭으로 정렬했음을 증명한다. 종전 기준이던
-    // parent_line bbox 폭은 outMargin 미포함 추정치라 프록시로 부적합.
+    // 부모 셀 inner 우단 - 문단 오른쪽 여백(300HU)에 붙는다"이다. 한컴 저장
+    // segment_width(46692HU)가 셀 inner 폭(46992HU)에서 이 여백을 뺀 값이고,
+    // 한컴 2022 PDF의 수험번호 표 우측 괘선(798.8px)도 이 위치와 맞는다.
     let cell_pad = 141.0 / 7200.0 * 96.0;
+    let para_margin_right = 300.0 / 7200.0 * 96.0;
     let cell_inner_right = outer_cell.bbox.x + outer_cell.bbox.width - cell_pad;
-    let _ = parent_line_right;
+    let text_right = cell_inner_right - para_margin_right;
     assert!(
-        (cell_inner_right - number_right).abs() <= 1.0,
-        "부모 셀 오른쪽 정렬: 수험번호 TAC 표 우단이 셀 inner 우단에 붙어야 함: \
-         cell_inner_right={cell_inner_right:.2}, number_right={number_right:.2}, \
+        (text_right - number_right).abs() <= 1.0 && (parent_line_right - number_right).abs() <= 1.0,
+        "부모 셀 오른쪽 정렬: 수험번호 TAC 표 우단이 셀 inner 우단 - 문단 오른쪽 여백에 붙어야 함: \
+         text_right={text_right:.2}, number_right={number_right:.2}, \
          outer_cell={:?}, parent_line={:?}, number_table={:?}",
         outer_cell.bbox,
         parent_line.bbox,

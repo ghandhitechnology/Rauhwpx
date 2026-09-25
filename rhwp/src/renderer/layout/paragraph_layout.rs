@@ -4242,12 +4242,18 @@ impl LayoutEngine {
                 && comp_line.column_start > 0
                 && comp_line.segment_width > 0
                 && comp_line.segment_width < col_area_w_hu;
+            // 한컴 LINE_SEG.segment_width 는 문단 오른쪽 여백을 이미 뺀 폭이다. 오른쪽
+            // 여백만큼만 좁은 줄을 저장 geometry 로 잡으면 아래 available_width 에서
+            // margin_right 를 한 번 더 빼게 된다 (#1285 답안지 `수험번호` 표가 4px 안쪽으로
+            // 밀림). 좁음 판정은 오른쪽 여백을 되돌린 폭으로 한다.
+            let para_margin_right_hu = px_to_hwpunit(margin_right, self.dpi);
             let uses_stored_segment_geometry = (has_picture_shape_side_wrap
                 || line_has_inline_tac_table
                 || precomputed_body_wrap_line
                 || empty_stored_wrap_line)
                 && comp_line.segment_width > 0
-                && (line_avail_hu < col_area_w_hu - 200 || cs_significant);
+                && (line_avail_hu.saturating_add(para_margin_right_hu) < col_area_w_hu - 200
+                    || cs_significant);
             let (effective_col_x, effective_col_w) = if uses_stored_segment_geometry {
                 let cs_px = hwpunit_to_px(comp_line.column_start, self.dpi);
                 let sw_px = hwpunit_to_px(comp_line.segment_width, self.dpi);
