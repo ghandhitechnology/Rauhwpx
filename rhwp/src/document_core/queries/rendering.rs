@@ -5553,14 +5553,8 @@ impl DocumentCore {
     pub(crate) fn build_page_tree_cached(&self, page_num: u32) -> Result<PageRenderTree, HwpError> {
         let idx = page_num as usize;
 
-        // 캐시 크기 확보 + 히트 확인
-        let cached = {
-            let mut cache = self.page_tree_cache.borrow_mut();
-            if cache.len() <= idx {
-                cache.resize_with(idx + 1, || None);
-            }
-            cache[idx].clone()
-        };
+        // 히트 확인. 범위 밖 페이지가 캐시를 키우지 않도록 빌드 성공 후에만 슬롯을 만든다.
+        let cached = self.page_tree_cache.borrow().get(idx).cloned().flatten();
         if let Some(tree) = cached {
             self.touch_page_render_cache(idx);
             return Ok(tree);
@@ -6914,6 +6908,19 @@ mod tests {
             core.page_tree_cache_order.borrow().len(),
             PAGE_RENDER_CACHE_CAPACITY
         );
+    }
+
+    #[test]
+    fn out_of_range_page_does_not_grow_render_cache() {
+        let bytes = include_bytes!("../../../samples/hwp-multi-001.hwp");
+        let core = DocumentCore::from_bytes(bytes).expect("fixture parses");
+        let invalid_page = core.page_count() + 4096;
+
+        assert!(core.build_page_tree_cached(invalid_page).is_err());
+        assert!(core
+            .with_page_tree_cached(invalid_page, |_| Ok(()))
+            .is_err());
+        assert!(core.page_tree_cache.borrow().len() <= core.page_count() as usize);
     }
 
     #[test]

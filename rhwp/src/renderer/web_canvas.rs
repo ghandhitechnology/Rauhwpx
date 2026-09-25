@@ -272,7 +272,7 @@ thread_local! {
 #[cfg(target_arch = "wasm32")]
 fn decode_image_to_canvas(data: &[u8]) -> Option<HtmlCanvasElement> {
     let dynimg = image::load_from_memory(data).ok()?;
-    let rgba = dynimg.to_rgba8();
+    let rgba = dynimg.into_rgba8();
     let (iw, ih) = (rgba.width(), rgba.height());
     if iw == 0 || ih == 0 {
         return None;
@@ -311,9 +311,48 @@ fn get_or_decode_image_canvas(key: u64, data: &[u8]) -> Option<HtmlCanvasElement
     canvas
 }
 
+/// 캐시된 HtmlImageElement를 반환하고, 없으면 새로 만들어 로드를 시작한다.
+///
+/// 로드 중인 요소도 캐시에 남아 있으므로 같은 이미지를 다시 변환·인코딩하지 않는다.
+/// 로드에 실패한 요소도 그대로 두어, 같은 바이트로 반복 재시도하지 않는다.
 #[cfg(target_arch = "wasm32")]
-fn get_cached_html_image(key: u64) -> Option<HtmlImageElement> {
-    IMAGE_CACHE.with(|cache| cache.borrow_mut().get(key))
+fn get_or_load_html_image(key: u64, data: &[u8]) -> Option<HtmlImageElement> {
+    if let Some(img) = IMAGE_CACHE.with(|cache| cache.borrow_mut().get(key)) {
+        return Some(img);
+    }
+
+    let mime_type = detect_image_mime_type(data);
+
+    // WMF → SVG 변환 (브라우저는 WMF를 렌더링할 수 없으므로 SVG로 변환)
+    // PCX → PNG 변환 (브라우저는 PCX 포맷을 native 렌더링하지 못함, Task #514)
+    let (render_data, render_mime): (std::borrow::Cow<[u8]>, &str) = if mime_type == "image/x-wmf" {
+        match crate::renderer::svg::convert_wmf_to_svg(data) {
+            Some(svg_bytes) => (std::borrow::Cow::Owned(svg_bytes), "image/svg+xml"),
+            None => (std::borrow::Cow::Borrowed(data), mime_type),
+        }
+    } else if mime_type == "image/x-pcx" {
+        match crate::renderer::image_resolver::pcx_bytes_to_png_bytes(data) {
+            Some(png_bytes) => (std::borrow::Cow::Owned(png_bytes), "image/png"),
+            None => (std::borrow::Cow::Borrowed(data), mime_type),
+        }
+    } else {
+        (std::borrow::Cow::Borrowed(data), mime_type)
+    };
+
+    let base64_data = base64::engine::general_purpose::STANDARD.encode(&*render_data);
+    let data_url = format!("data:{};base64,{}", render_mime, base64_data);
+
+    let img = HtmlImageElement::new().ok()?;
+    img.set_src(&data_url);
+    IMAGE_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, img.clone(), data_url.len());
+    });
+    Some(img)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn html_image_ready(img: &HtmlImageElement) -> bool {
+    img.complete() && img.natural_width() > 0
 }
 
 pub(crate) fn image_cache_stats_json() -> String {
@@ -2924,64 +2963,22 @@ impl Renderer for WebCanvasRenderer {
             return;
         }
 
-        // 캐시에서 이미 로드된 이미지를 찾는다
-        let cached = get_cached_html_image(key);
-
-        if let Some(img) = cached {
-            if img.complete() && img.natural_width() > 0 {
-                let _ = self
-                    .ctx
-                    .draw_image_with_html_image_element_and_dw_and_dh(&img, x, y, w, h);
-                return;
-            }
-        }
-
-        // 캐시 미스: 새 HtmlImageElement 생성
-        let mime_type = detect_image_mime_type(data);
-
-        // WMF → SVG 변환 (브라우저는 WMF를 렌더링할 수 없으므로 SVG로 변환)
-        // PCX → PNG 변환 (브라우저는 PCX 포맷을 native 렌더링하지 못함, Task #514)
-        let (render_data, render_mime): (std::borrow::Cow<[u8]>, &str) =
-            if mime_type == "image/x-wmf" {
-                match crate::renderer::svg::convert_wmf_to_svg(data) {
-                    Some(svg_bytes) => (std::borrow::Cow::Owned(svg_bytes), "image/svg+xml"),
-                    None => (std::borrow::Cow::Borrowed(data), mime_type),
+        // 로드 중인 이미지는 그대로 두고, 로드가 끝난 이미지만 그린다.
+        match get_or_load_html_image(key, data) {
+            Some(img) => {
+                if html_image_ready(&img) {
+                    let _ = self
+                        .ctx
+                        .draw_image_with_html_image_element_and_dw_and_dh(&img, x, y, w, h);
                 }
-            } else if mime_type == "image/x-pcx" {
-                match crate::renderer::image_resolver::pcx_bytes_to_png_bytes(data) {
-                    Some(png_bytes) => (std::borrow::Cow::Owned(png_bytes), "image/png"),
-                    None => (std::borrow::Cow::Borrowed(data), mime_type),
-                }
-            } else {
-                (std::borrow::Cow::Borrowed(data), mime_type)
-            };
-
-        // Base64 인코딩 및 data URL 생성
-        let base64_data = base64::engine::general_purpose::STANDARD.encode(&*render_data);
-        let data_url = format!("data:{};base64,{}", render_mime, base64_data);
-
-        if let Ok(img) = HtmlImageElement::new() {
-            img.set_src(&data_url);
-
-            // 캐시에 저장 (로드 전이라도 저장 — 다음 렌더링에서 재사용)
-            IMAGE_CACHE.with(|cache| {
-                cache.borrow_mut().insert(key, img.clone(), data_url.len());
-            });
-
-            // 이미지가 즉시 사용 가능하면 그리기
-            if img.complete() && img.natural_width() > 0 {
-                let _ = self
-                    .ctx
-                    .draw_image_with_html_image_element_and_dw_and_dh(&img, x, y, w, h);
             }
-            // 아직 로드되지 않은 경우: 캐시에 저장되었으므로
-            // 재렌더링 시 캐시에서 로드 완료된 이미지를 즉시 사용한다.
-        } else {
-            // Image 생성 실패 시 플레이스홀더
-            self.ctx.set_fill_style_str("#eeeeee");
-            self.ctx.fill_rect(x, y, w, h);
-            self.ctx.set_stroke_style_str("#cccccc");
-            self.ctx.stroke_rect(x, y, w, h);
+            None => {
+                // Image 생성 실패 시 플레이스홀더
+                self.ctx.set_fill_style_str("#eeeeee");
+                self.ctx.fill_rect(x, y, w, h);
+                self.ctx.set_stroke_style_str("#cccccc");
+                self.ctx.stroke_rect(x, y, w, h);
+            }
         }
     }
 
@@ -3017,21 +3014,16 @@ impl WebCanvasRenderer {
             return;
         }
 
-        let cached = get_cached_html_image(key);
-
-        if let Some(img) = cached {
-            if img.complete() && img.natural_width() > 0 {
+        // 로드가 끝나기 전에는 그리지 않는다. crop 없는 원본이 한 프레임 그려지는 것을 막는다.
+        if let Some(img) = get_or_load_html_image(key, data) {
+            if html_image_ready(&img) {
                 let _ = self
                     .ctx
                     .draw_image_with_html_image_element_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
                         &img, sx, sy, sw, sh, dx, dy, dw, dh,
                     );
-                return;
             }
         }
-
-        // 캐시 미스: draw_image로 로드 시작 (다음 렌더에서 crop 적용)
-        self.draw_image(data, dx, dy, dw, dh);
     }
 
     /// 텍스트 변형 효과 렌더링 (외곽선/그림자/양각/음각)
