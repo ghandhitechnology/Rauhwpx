@@ -27,7 +27,8 @@ import { createPiSession } from './agents/pi.mjs';
 import { generateChatTitle } from './agents/title.mjs';
 import {
   CHECKPOINT_TITLE_OVERALL_TIMEOUT_MS,
-  findDeepSeekV4FlashModel,
+  codexQuotaAllowsTitle,
+  resolveOpenRouterTitleModel,
   generateCheckpointTitle,
   resolveCheckpointTitleCliRoute,
 } from './agents/checkpoint-title.mjs';
@@ -1712,7 +1713,6 @@ function cancelCheckpointTitleJobs(record) {
 }
 
 function checkpointTitleDeps(record, health, signal) {
-  const deepSeek = findDeepSeekV4FlashModel(piStatus.models);
   const codex = resolveCheckpointTitleCliRoute(
     'codex', health?.codex, cliSetupStatus.codex, cliSetup.binPath('codex'),
   );
@@ -1721,17 +1721,12 @@ function checkpointTitleDeps(record, health, signal) {
   );
   return {
     readiness: {
-      pi: {
-        ready: Boolean(
-          deepSeek
-          && health?.pi?.available === true
-          && piStatus.installed
-          && piStatus.keyConfigured,
-        ),
-        model: deepSeek?.id ?? '',
+      codex: {
+        ready: codex.ready && codexQuotaAllowsTitle(providerLimits.snapshot().codex),
+        model: 'luna',
       },
-      codex: { ready: codex.ready, model: 'luna' },
-      claude: { ready: claude.ready, model: 'haiku' },
+      pi: { ready: Boolean(piManager.apiKey()), model: 'openrouter' },
+      claude: { ready: claude.ready, model: 'claude-haiku-4-5' },
     },
     piManager,
     openRouter,
@@ -1747,6 +1742,9 @@ function checkpointTitleDeps(record, health, signal) {
       claude: claudeRuntimeEnv(record.isolatedHome),
     },
     resolveCodexTitleModel: () => resolveModel('codex', 'luna', record),
+    resolvePiTitleModel: () => resolveOpenRouterTitleModel(
+      () => openRouter.catalog(false, piManager.apiKey()),
+    ),
     spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
     terminateProcess: terminateProcessTree,
     cleanupProcessOutcome: (child) => beginAuxiliaryProcessCleanupOutcome(record, child),
