@@ -51,3 +51,26 @@ test('formatting and object edits remain visible as non-text changes', () => {
   assert.equal(summary.additions, 0);
   assert.equal(summary.deletions, 0);
 });
+
+test('object removals count their captured text as deletions', () => {
+  const summary = summarizePendingDiffs([changeSet([
+    {
+      kind: 'object', id: 'r', agent: 'codex',
+      obj: {
+        type: 'tableStructure', sectionIdx: 0, tableParaIdx: 1, controlIdx: 0,
+        op: 'delete_row', rowIdx: 1, removedText: 'a | b',
+      },
+    },
+    {
+      kind: 'object', id: 'm', agent: 'codex',
+      obj: {
+        type: 'setCellProps', sectionIdx: 0, tableParaIdx: 1, controlIdx: 0,
+        cellIdx: 0, props: {}, dims: { rowCount: 2, colCount: 2 },
+      },
+    },
+  ])]);
+
+  assert.equal(summary.opCount, 2);
+  assert.equal(summary.nonTextChanges, 2);
+  assert.equal(summary.deletions, 5);
+});

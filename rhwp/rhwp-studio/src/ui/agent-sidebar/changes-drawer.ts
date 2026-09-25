@@ -221,12 +221,19 @@ function pendingObjectDetail(op: PendingOp): string {
     case 'applyFormula': return `표 계산식 · ${obj.formula}`;
     case 'setCaption': return `표 캡션 · ${obj.text}`;
     case 'paraFormat': return '문단 서식 변경';
-    case 'applyStyle': return `문단 스타일 적용 · ${obj.styleId}`;
+    case 'applyStyle': return '문단 스타일 적용';
     case 'pageLayout': return '쪽 설정 변경';
-    case 'headerFooter': return `${obj.isHeader ? '머리말' : '꼬리말'} 변경 · ${obj.text}`;
+    case 'headerFooter': {
+      const kind = obj.isHeader ? '머리말' : '꼬리말';
+      return `${kind} ${obj.existedBefore ? '변경' : '삽입'}${obj.text ? ` · ${obj.text}` : ''}`;
+    }
     case 'insertNote': return `${obj.noteKind === 'endnote' ? '미주' : '각주'} 삽입 · ${obj.text}`;
     case 'setNoteText': return `각주/미주 변경 · ${obj.text}`;
-    case 'bookmark': return `책갈피 ${obj.op}${obj.name ? ` · ${obj.name}` : ''}`;
+    case 'bookmark': {
+      const label = ({ add: '추가', delete: '삭제', rename: '이름 변경' } as const)[obj.op];
+      const name = obj.name ?? obj.prev?.name;
+      return `책갈피 ${label}${name ? ` · ${name}` : ''}`;
+    }
     default: return '개체 변경';
   }
 }
@@ -247,6 +254,10 @@ export function renderPendingOpDiff(op: PendingOp, imageUrls?: Map<string, strin
     lines.append(diffLine('−', parts.before, `${op.id}:del`), diffLine('+', parts.after, `${op.id}:add`));
   } else {
     lines.append(diffLine('·', [{ text: pendingObjectDetail(op), changed: false }], `${op.id}:ctx`));
+    // 행/열/표 삭제 — 지워진 내용을 삭제 줄로 보여 준다.
+    if (op.kind === 'object' && 'removedText' in op.obj && op.obj.removedText?.trim()) {
+      lines.append(diffLine('−', [{ text: op.obj.removedText, changed: true }], `${op.id}:del`));
+    }
     if (op.kind === 'object' && op.obj.type === 'insertImage' && imageUrls) {
       const preview = el('div', 'ag-object-preview ag-image-preview');
       const image = el('img', '');

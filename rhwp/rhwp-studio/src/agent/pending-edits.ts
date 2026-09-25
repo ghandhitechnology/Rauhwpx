@@ -10,7 +10,7 @@ import type {
   ObjectAnchor, ObjectOp, ParagraphCaptureRef, PendingAppliedAt, PendingChangeSet,
   PendingDrop, PendingDropCause, PendingEditsChangeEvent, PendingOp,
 } from './types.ts';
-import { AgentToolError, sameCell } from './types.ts';
+import { AgentToolError, objectOverlayKind, sameCell } from './types.ts';
 import type { OverlayOp, PendingOverlayRenderer } from './pending-overlay.ts';
 import type { AgentTextInsertedEvent } from './agent-edit-follow.ts';
 
@@ -586,6 +586,20 @@ export class PendingEditManager {
       this.deps.inputHandler.retainExternalSnapshot?.();
     }
     const dimsBefore = this.tableDims(obj);
+    // 지워지는 행/열/표는 적용 후엔 읽을 수 없다 — 앵커 팝오버와 diff 에 쓸
+    // 내용과 위치를 먼저 보관한다 (표시용, best-effort).
+    if (obj.type === 'deleteTable'
+      || (obj.type === 'tableStructure' && (obj.op === 'delete_row' || obj.op === 'delete_col'))) {
+      try {
+        obj.removedText = this.removedTargetText(obj);
+        if (obj.type === 'deleteTable') {
+          const positions = typeof wasm.getControlTextPositions === 'function'
+            ? wasm.getControlTextPositions(obj.sectionIdx, obj.tableParaIdx)
+            : undefined;
+          obj.removedOffset = positions?.[obj.controlIdx] ?? 0;
+        }
+      } catch { /* 보관 실패 시 앵커만 놓는다 */ }
+    }
     try {
       this.applyObjectOp(obj);
     } catch (error) {
@@ -1172,7 +1186,14 @@ export class PendingEditManager {
         if (op.kind === 'field' || op.kind === 'template') continue;
         if (op.kind === 'object') {
           const ref = this.objectOverlayRef(op.obj);
-          if (ref) ops.push({ kind: 'insert', agent: op.agent, objRef: ref });
+          if (ref) {
+            ops.push({
+              kind: objectOverlayKind(op.obj),
+              agent: op.agent,
+              objRef: ref,
+              removedText: 'removedText' in op.obj ? op.obj.removedText : undefined,
+            });
+          }
           continue;
         }
         if (op.kind === 'replace') {
@@ -1192,7 +1213,7 @@ export class PendingEditManager {
     this.deps.overlay.setOps(ops);
   }
 
-  /** 객체 op → overlay 좌표 해석 참조 (pageLayout/headerFooter 는 사이드바 전용) */
+  /** 객체 op → overlay 좌표 해석 참조 (bookmark 처럼 시각 위치가 애매한 것은 null) */
   private objectOverlayRef(obj: ObjectOp): import('./pending-overlay.ts').ObjectOverlayRef | null {
     switch (obj.type) {
       case 'createTable':
@@ -1217,7 +1238,11 @@ export class PendingEditManager {
           ? { sort: 'agentObject', kind: 'equation', sectionIdx: obj.sectionIdx, paraIdx: obj.anchor.paraIdx, controlIdx: obj.anchor.controlIdx }
           : null;
       case 'deleteTable':
-        return null; // 표가 이미 없다 — 사이드바 목록에만 남는다
+        // 표는 이미 없다 — 삭제 전에 보관한 문단 오프셋에 빨간 앵커를 놓는다.
+        return {
+          sort: 'removed', what: 'table', sectionIdx: obj.sectionIdx,
+          paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx, offset: obj.removedOffset,
+        };
       case 'setTableProps':
       case 'setColumnWidths':
       case 'fitToPage':
@@ -1236,16 +1261,22 @@ export class PendingEditManager {
             rect: { startRow: obj.row, startCol: obj.col, endRow: obj.row, endCol: obj.col },
           };
       case 'tableStructure': {
-        // 적용 후 표 기준 — 지워진 행/열은 표 전체, 병합/나눔은 결과 셀을 표시한다
-        const table = { sort: 'table' as const, sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx };
+        // 적용 후 표 기준 — 지워진 행/열 자리는 앵커, 삽입된 행/열은 새 셀,
+        // 병합/나눔은 결과 셀을 표시한다
         const base = { sort: 'cells' as const, sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx };
+        if (obj.op === 'delete_row' || obj.op === 'delete_col') {
+          return {
+            sort: 'removed', what: obj.op === 'delete_row' ? 'row' : 'col',
+            sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx,
+            rowIdx: obj.rowIdx, colIdx: obj.colIdx,
+          };
+        }
+        if (obj.op === 'insert_row') return { ...base, rowIdx: obj.insertedIndex ?? obj.index };
+        if (obj.op === 'insert_col') return { ...base, colIdx: obj.insertedIndex ?? obj.index };
         if (obj.op === 'merge_cells') {
           return { ...base, rect: { startRow: obj.startRow!, startCol: obj.startCol!, endRow: obj.startRow!, endCol: obj.startCol! } };
         }
-        if (obj.op === 'split_cell') {
-          return { ...base, rect: { startRow: obj.rowIdx!, startCol: obj.colIdx!, endRow: obj.rowIdx!, endCol: obj.colIdx! } };
-        }
-        return table;
+        return { ...base, rect: { startRow: obj.rowIdx!, startCol: obj.colIdx!, endRow: obj.rowIdx!, endCol: obj.colIdx! } };
       }
       case 'setCellProps':
         return { sort: 'cells', sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx, cellIdx: obj.cellIdx };
@@ -1259,6 +1290,10 @@ export class PendingEditManager {
           : null;
       case 'setNoteText':
         return { sort: 'para', sectionIdx: obj.sectionIdx, paraIdx: obj.paraIdx };
+      case 'headerFooter':
+        return { sort: 'hf', sectionIdx: obj.sectionIdx, isHeader: obj.isHeader, applyTo: obj.applyTo };
+      case 'pageLayout':
+        return { sort: 'page', sectionIdx: obj.sectionIdx };
       default:
         return null;
     }
@@ -2002,6 +2037,42 @@ export class PendingEditManager {
       }
     }
     return touched;
+  }
+
+  /**
+   * 삭제될 표/행/열의 내용을 읽어 둔다 — 지워진 뒤에는 엔진에 물어볼 수 없다.
+   * 행 안 셀은 ' | ', 행 사이는 줄바꿈으로 잇는다. 팝오버·diff 표시용이라
+   * 큰 표는 일부만 읽는다.
+   */
+  private removedTargetText(
+    obj: Extract<ObjectOp, { type: 'tableStructure' | 'deleteTable' }>,
+  ): string {
+    const wasm = this.deps.wasm;
+    if (typeof wasm.getTableCellBboxes !== 'function') return '';
+    const boxes = wasm.getTableCellBboxes(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx);
+    const at = obj.type === 'tableStructure'
+      ? ((obj.op === 'delete_row' ? obj.rowIdx : obj.colIdx) ?? -1)
+      : -1;
+    const picked = boxes
+      .filter((c) => obj.type === 'deleteTable'
+        || (obj.op === 'delete_row' ? c.row <= at && at < c.row + c.rowSpan
+          : c.col <= at && at < c.col + c.colSpan))
+      .sort((a, b) => a.row - b.row || a.col - b.col);
+    const anchor = { paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx, charOffset: 0 };
+    const rows = new Map<number, string[]>();
+    let total = 0;
+    for (const c of picked) {
+      let text = '';
+      try {
+        text = this.cellFullText(obj.sectionIdx, anchor, c.cellIdx);
+      } catch { /* 셀 하나의 실패는 건너뛴다 */ }
+      const row = rows.get(c.row) ?? [];
+      row.push(text);
+      rows.set(c.row, row);
+      total += text.length;
+      if (total > 640) break;
+    }
+    return [...rows.values()].map((cells) => cells.join(' | ')).join('\n');
   }
 
   /** 셀 전체 텍스트(문단 \n 결합) — createTable 내용 지문용 */

@@ -1072,6 +1072,8 @@ export type ObjectOp =
       splitRows?: number; splitCols?: number;
       /** 적용 직후 크기 — 드리프트 프로브 (같은 표의 나중 구조 op 이 갱신) */
       dims?: { rowCount: number; colCount: number };
+      /** delete_row/delete_col: 삭제 전에 보관한 대상의 텍스트 (오버레이 팝오버·diff) */
+      removedText?: string;
     }
   | {
       /** 표 전체 삭제 — 문단 보관본으로 되돌린다 */
@@ -1081,6 +1083,10 @@ export type ObjectOp =
       controlIdx: number;
       /** 삭제 직전 크기 (요약용) */
       dims: { rowCount: number; colCount: number };
+      /** 삭제 전에 보관한 표 텍스트 (오버레이 팝오버·diff) */
+      removedText?: string;
+      /** 삭제된 컨트롤의 문단 내 텍스트 오프셋 — 삭제 후 표는 없으므로 마커 위치로 쓴다 */
+      removedOffset?: number;
     }
   | {
       type: 'setCellProps';
@@ -1211,6 +1217,34 @@ export type ObjectOp =
 
 export type TableStructureOpName =
   | 'insert_row' | 'insert_col' | 'delete_row' | 'delete_col' | 'merge_cells' | 'split_cell';
+
+/**
+ * 객체 op 의 오버레이 분류 — 편집이 실제로 한 일을 말한다:
+ * - insert: 새로 생긴 것 (표·그림·수식·주석·책갈피·새 행/열·새 머리말/꼬리말)
+ * - modify: 속성·스타일·너비·계산식·캡션·머리말/꼬리말 내용·쪽 설정 변경
+ * - remove: 지워진 것 (행·열·표·책갈피)
+ */
+export function objectOverlayKind(obj: ObjectOp): 'insert' | 'modify' | 'remove' {
+  switch (obj.type) {
+    case 'deleteTable':
+      return 'remove';
+    case 'tableStructure':
+      return obj.op === 'delete_row' || obj.op === 'delete_col' ? 'remove'
+        : obj.op === 'merge_cells' || obj.op === 'split_cell' ? 'modify'
+        : 'insert';
+    case 'createTable':
+    case 'insertImage':
+    case 'insertEquation':
+    case 'insertNote':
+      return 'insert';
+    case 'headerFooter':
+      return obj.existedBefore ? 'modify' : 'insert';
+    case 'bookmark':
+      return obj.op === 'delete' ? 'remove' : obj.op === 'rename' ? 'modify' : 'insert';
+    default:
+      return 'modify';
+  }
+}
 
 /** 문단 보관본 — 적용 직전 본문 문단과, 적용 직후 그 문단의 내용 지문 */
 export interface ParagraphCaptureRef {
