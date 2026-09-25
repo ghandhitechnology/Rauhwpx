@@ -1,4 +1,4 @@
-import { existsSync, promises as fs } from 'node:fs';
+import { existsSync, promises as fs, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -17,7 +17,7 @@ import {
 } from './claude-credentials.mjs';
 import { cleanupStaleOAuthCredentialStaging, prepareStagedOAuthCredential } from './oauth-credential-transaction.mjs';
 import { createSetupTerminal } from './setup-terminal.mjs';
-import { replaceFileAtomically } from './harness-update.mjs';
+import { fetchLatestPackage, replaceFileAtomically } from './harness-update.mjs';
 
 const require = createRequire(import.meta.url);
 let crossSpawn = null;
@@ -41,8 +41,24 @@ function setupError(code, message) { const error = new Error(message); error.cod
 function keyTail(value) { const text = String(value ?? '').trim(); return text ? text.slice(-4) : null; }
 function cleanOutput(value) { return redactDiagnosticText(String(value ?? '')).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').trim().slice(-1600); }
 
+/** 앱에 번들된 Agent SDK 가 쓰는 Claude Code 버전. 관리형 CLI 가 없을 때 실제로 실행되는 런타임이다. */
+export function bundledClaudeCodeVersion(resolve = (id) => require.resolve(id)) {
+  try {
+    const manifest = JSON.parse(readFileSync(path.join(path.dirname(resolve('@anthropic-ai/claude-agent-sdk')), 'package.json'), 'utf8'));
+    return typeof manifest.claudeCodeVersion === 'string' ? manifest.claudeCodeVersion : null;
+  } catch { return null; }
+}
+
+/** `candidate` 가 `current` 보다 새 버전이면 true. 프리릴리스 꼬리표는 비교하지 않는다. */
+export function isNewerVersion(candidate, current) {
+  const parts = (value) => String(value ?? '').replace(/^v/, '').split(/[-+]/)[0].split('.').map((n) => Number.parseInt(n, 10) || 0);
+  const a = parts(candidate); const b = parts(current);
+  for (let i = 0; i < 3; i += 1) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  return false;
+}
+
 /** Create the app-managed Claude/Codex CLI setup service. */
-export function createCliSetupManager({ rootDir = defaultCliSetupRoot(), spawnProcess = spawn, createTerminal = createSetupTerminal, npmCommand = null, nodeCommand = process.execPath, platform = process.platform, baseEnv = process.env, homeDir = os.homedir(), secretStore = null, prepareOAuthCredential = prepareStagedOAuthCredential, readClaudeKeychain = readClaudeKeychainCredential } = {}) {
+export function createCliSetupManager({ rootDir = defaultCliSetupRoot(), spawnProcess = spawn, createTerminal = createSetupTerminal, npmCommand = null, nodeCommand = process.execPath, platform = process.platform, baseEnv = process.env, homeDir = os.homedir(), secretStore = null, prepareOAuthCredential = prepareStagedOAuthCredential, readClaudeKeychain = readClaudeKeychainCredential, fetchImpl = globalThis.fetch, bundledClaudeVersion = bundledClaudeCodeVersion() } = {}) {
   const prefixDir = path.join(rootDir, 'prefix');
   const binDir = path.join(prefixDir, 'node_modules', '.bin');
   const configPath = path.join(rootDir, 'config.json');
@@ -59,6 +75,7 @@ export function createCliSetupManager({ rootDir = defaultCliSetupRoot(), spawnPr
   const npmLaunch = bundledNpmLaunch({ nodeCommand, npmCommand });
   const ensureNodeHost = createNodeHost({ rootDir, nodeCommand, platform });
   const apiKeys = { claude: null, codex: null };
+  const latestVersions = { claude: null, codex: null };
   const authProcesses = new Map();
   const authTerminals = new Map();
   let nodeHostShimDir = null;
@@ -118,7 +135,11 @@ export function createCliSetupManager({ rootDir = defaultCliSetupRoot(), spawnPr
       authenticated = Boolean(parsed && !expired);
       authMethod = authenticated ? 'oauth' : null;
     }
-    return { installed: Boolean(version || existsSync(bin)), installing: false, version, authenticated, authMethod, keyTail: keyTail(apiKeys[agent]), latestVersion: null, updateRequired: false, error: null };
+    // 관리형 CLI 가 없으면 Claude 는 SDK 번들 런타임으로 실행되므로 그 버전을 기준으로 삼는다.
+    const runtimeVersion = version ?? (agent === 'claude' ? bundledClaudeVersion : null);
+    const latestVersion = latestVersions[agent];
+    const updateRequired = Boolean(runtimeVersion && latestVersion && isNewerVersion(latestVersion, runtimeVersion));
+    return { installed: Boolean(version || existsSync(bin)), installing: false, version: runtimeVersion, authenticated, authMethod, keyTail: keyTail(apiKeys[agent]), latestVersion, updateRequired, error: null };
   }
   async function install(agent, onProgress) {
     const item = assertAgent(agent); await load(); onProgress?.({ state: 'installing', phase: 'install', activity: true }); await fs.mkdir(rootDir, { recursive: true, mode: 0o700 });
@@ -218,6 +239,13 @@ export function createCliSetupManager({ rootDir = defaultCliSetupRoot(), spawnPr
     async submitAuthCode(agent, code) { assertAgent(agent); if (typeof code !== 'string' || Buffer.byteLength(code) > AUTH_CODE_MAX_BYTES) throw setupError('AGENT_AUTH_CODE_INVALID', '인증 코드가 올바르지 않아요.'); if (authTerminals.has(agent)) authTerminals.get(agent).write(`${code.trim()}\n`); else authProcesses.get(agent)?.stdin?.write?.(`${code.trim()}\n`); },
     terminalSnapshot(agent) { return authTerminals.get(agent)?.snapshot() ?? null; }, terminalInput(agent, data) { authTerminals.get(agent)?.write(String(data ?? '')); }, terminalResize(agent, cols, rows) { authTerminals.get(agent)?.resize(cols, rows); },
     async cancel(agent) { const terminal = authTerminals.get(agent); if (terminal) return terminal.cancel().catch(() => false); const proc = authProcesses.get(agent); if (!proc) return false; proc.kill?.(); authProcesses.delete(agent); return true; },
-    async automaticUpdate(agent) { return status(agent); },
+    /** registry 최신 버전만 확인한다. 설치는 사용자가 업데이트를 누를 때 install() 로 진행한다. */
+    async automaticUpdate(agent) {
+      const item = assertAgent(agent);
+      const current = await status(agent);
+      if (!current.version) return current;
+      try { latestVersions[agent] = (await fetchLatestPackage(fetchImpl, item.package)).version; } catch { return current; }
+      return status(agent);
+    },
   };
 }

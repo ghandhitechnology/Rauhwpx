@@ -623,11 +623,11 @@
   --ag-r-chip: var(--n-radius-chip);
   --ag-r-field: var(--n-radius-field);
   --ag-r-panel: var(--n-radius-panel);
-  width: min(520px, calc(100vw - 32px));
+  width: min(440px, calc(100vw - 32px));
   max-height: min(720px, calc(100vh - 48px));
   overflow: hidden;
   border: 1px solid var(--ag-border-strong);
-  border-radius: 18px;
+  border-radius: 14px;
   background: var(--n-surface);
   color: var(--n-text);
   box-shadow: var(--n-elev-3);
@@ -639,36 +639,61 @@
   transform: translateY(0) scale(1);
 }
 
+/* 대화상자 자체는 포커스 받침일 뿐이라 테두리를 그리지 않는다. */
+.ag-agent-setup-dialog:focus {
+  outline: none;
+}
+
 .ag-agent-setup-chrome {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  min-height: 72px;
-  padding: 16px 18px;
+  gap: 11px;
+  padding: 14px 12px 14px 16px;
   border-bottom: 1px solid var(--ag-border);
 }
 
-.ag-agent-setup-title-wrap,
-.ag-agent-setup-hero-copy {
+.ag-agent-setup-title-wrap {
   display: flex;
+  flex: 1 1 auto;
   min-width: 0;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
 }
 
 .ag-agent-setup-title {
   margin: 0;
-  font-size: 18px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.ag-agent-setup-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-agent-setup-state[hidden] {
+  display: none;
+}
+
+.ag-agent-setup-state .ag-settings-dot {
+  width: 6px;
+  height: 6px;
 }
 
 .ag-agent-setup-close {
   display: grid;
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  align-self: flex-start;
   place-items: center;
   border: 0;
-  border-radius: 50%;
+  border-radius: 8px;
   background: transparent;
   color: var(--ag-text-secondary);
   cursor: pointer;
@@ -680,9 +705,9 @@
 }
 
 .ag-agent-setup-body {
-  max-height: calc(min(720px, 100vh - 48px) - 72px);
+  max-height: calc(min(720px, 100vh - 48px) - 64px);
   overflow-y: auto;
-  padding: 18px;
+  padding: 16px;
 }
 
 .ag-agent-setup-generic,
@@ -692,11 +717,38 @@
   gap: 12px;
 }
 
-.ag-agent-setup-hero[hidden],
 .ag-agent-setup-pane[hidden],
+.ag-agent-setup-card[hidden],
+.ag-agent-setup-row[hidden],
+.ag-agent-auth-list[hidden],
 .ag-agent-key-box[hidden],
 .ag-agent-setup-progress[hidden],
 .ag-agent-auth-card[hidden] {
+  display: none;
+}
+
+.ag-agent-setup-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--ag-border);
+  border-radius: 8px;
+  background: var(--ag-bg-2);
+}
+
+.ag-agent-setup-icon[hidden] {
+  display: none;
+}
+
+.ag-agent-setup-icon .ag-provider-icon {
+  width: 18px;
+  height: 18px;
+}
+
+/* Pi 카드 머리 — Pi 흐름만 쓴다. */
+.ag-agent-setup-hero[hidden] {
   display: none;
 }
 
@@ -708,6 +760,13 @@
   border: 1px solid var(--ag-border);
   border-radius: 12px;
   background: var(--ag-bg-2);
+}
+
+.ag-agent-setup-hero-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
 }
 
 .ag-agent-setup-hero-icon {
@@ -728,6 +787,71 @@
 .ag-agent-setup-hero-title {
   font-size: 22px;
   line-height: 1.15;
+}
+
+/* 연결 상태 카드 — 설정 목록과 같은 한 장 카드, 행 사이는 머리선. */
+.ag-agent-setup-card,
+.ag-agent-auth-list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--ag-border);
+  border-radius: 10px;
+  background: var(--ag-bg-2);
+}
+
+.ag-agent-setup-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 7px 8px 7px 12px;
+}
+
+.ag-agent-setup-row + .ag-agent-setup-row:not([hidden]),
+.ag-agent-auth-list > .ag-agent-auth-card + .ag-agent-auth-card:not([hidden]) {
+  border-top: 1px solid var(--ag-border);
+}
+
+.ag-agent-setup-row-label {
+  flex: 0 0 36px;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-agent-setup-row-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ag-text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-agent-setup-row-note {
+  margin-left: 8px;
+  color: var(--ag-text-muted);
+}
+
+.ag-agent-setup-row .ag-settings-btn {
+  flex: 0 0 auto;
+}
+
+/* 보조 동작은 테두리 없이 두고, 업데이트만 강조 색 테두리로 세운다. */
+.ag-agent-setup-row .ag-settings-btn:not(.ag-agent-setup-update) {
+  border-color: transparent;
+  background: transparent;
+}
+
+.ag-agent-setup-update:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent-primary) 55%, var(--ag-border-strong));
+  color: var(--accent-primary);
+}
+
+.ag-agent-setup-update:hover:not(:disabled) {
+  color: var(--accent-primary);
 }
 
 /* Rau OAuth 완료는 계정 카드 위에서 잠깐만 알린다. */
@@ -875,23 +999,76 @@
 
 .ag-agent-setup-primary {
   align-self: stretch;
-  min-height: 40px;
+  min-height: 36px;
   border: 1px solid var(--accent-primary);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--accent-primary);
   color: var(--n-on-accent);
   font: inherit;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
 }
 
-.ag-agent-setup-section-title {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: var(--ag-text-secondary);
+.ag-agent-setup-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
-.ag-agent-auth-card,
+.ag-agent-setup-section-title {
+  margin: 0 0 -4px;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 600;
+}
+
+/* 로그인 방법 행: 제목과 설명은 왼쪽, 오른쪽에는 목록과 같은 꺾쇠. */
+.ag-agent-auth-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 2px;
+  min-height: 52px;
+  padding: 9px 14px 9px 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ag-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-agent-auth-card strong {
+  grid-column: 1;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ag-agent-auth-card::after {
+  content: '';
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  width: 6px;
+  height: 6px;
+  border-top: 1.5px solid var(--ag-text-muted);
+  border-right: 1.5px solid var(--ag-text-muted);
+  transform: rotate(45deg);
+}
+
+.ag-agent-auth-card:hover:not(:disabled),
+.ag-agent-auth-card:focus-visible {
+  outline: none;
+  background: var(--ag-hover);
+}
+
+.ag-agent-auth-card:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .ag-agent-auth-choice {
   display: flex;
   align-items: flex-start;
@@ -907,23 +1084,52 @@
   cursor: pointer;
 }
 
-.ag-agent-auth-card:hover:not(:disabled) {
-  border-color: var(--accent-primary);
-  background: var(--ag-hover);
-}
-
 .ag-agent-auth-card span,
 .ag-agent-auth-choice span {
+  grid-column: 1;
   color: var(--ag-text-muted);
   font-size: var(--font-size-sm, 11px);
   font-weight: 400;
 }
 
+/* 키·코드 입력은 입력칸과 확인 버튼을 한 줄에 둔다. 안내 문구는 윗줄 전체. */
 .ag-agent-key-box {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding-top: 2px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.ag-agent-key-box > .ag-agent-setup-copy {
+  grid-column: 1 / -1;
+  font-size: 12px;
+}
+
+.ag-agent-key-box > .ag-settings-field {
+  min-width: 0;
+}
+
+.ag-agent-key-box .ag-settings-field-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.ag-agent-key-box .ag-settings-input {
+  width: 100%;
+  max-width: none;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+}
+
+.ag-agent-key-box > .ag-agent-setup-primary {
+  min-height: 34px;
+  padding-inline: 14px;
+  white-space: nowrap;
 }
 
 /* 브라우저 로그인 상자 — 인증 주소와 기기 코드를 카드 안에서 그대로 보여준다. */
@@ -1034,23 +1240,7 @@
   background: var(--ag-border);
 }
 
-.ag-agent-setup-done {
-  align-items: center;
-  padding: 14px 0 2px;
-  text-align: center;
-}
-
-.ag-agent-setup-done-mark {
-  display: grid;
-  width: 44px;
-  height: 44px;
-  place-items: center;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--ag-ok) 16%, transparent);
-  color: var(--ag-ok);
-  font-size: 22px;
-}
-
+/* Rau 완료 줄: 오른쪽 끝에 로그아웃 · 완료(계속). */
 .ag-agent-setup-done.ag-agent-setup-rau-actions {
   align-items: center;
   flex-direction: row;
@@ -1060,17 +1250,11 @@
   text-align: left;
 }
 
-.ag-agent-setup-rau-actions .ag-agent-setup-done-mark,
-.ag-agent-setup-rau-actions > strong,
-.ag-agent-setup-rau-actions > .ag-agent-setup-copy {
-  display: none;
-}
-
 .ag-agent-setup-rau-actions .ag-settings-btn,
 .ag-agent-setup-rau-actions .ag-agent-setup-primary {
   width: auto;
-  height: 34px;
-  min-height: 34px;
+  height: 32px;
+  min-height: 32px;
   align-self: auto;
   padding-inline: 13px;
   white-space: nowrap;
@@ -2193,7 +2377,7 @@
   .ag-setup-terminal { animation: none; }
 }
 
-.ag-agent-setup-pane:has(.ag-setup-terminal:not([hidden])) > .ag-agent-auth-card,
+.ag-agent-setup-pane:has(.ag-setup-terminal:not([hidden])) > .ag-agent-auth-list,
 .ag-agent-setup-pane:has(.ag-setup-terminal:not([hidden])) > .ag-agent-setup-section-title,
 .ag-agent-setup-pane:has(.ag-setup-terminal:not([hidden])) > .ag-agent-key-box {
   display: none;
