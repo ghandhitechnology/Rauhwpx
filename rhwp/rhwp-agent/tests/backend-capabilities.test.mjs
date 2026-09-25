@@ -501,7 +501,8 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(implementing, /completed, blocked, and deferred plan items/);
   assert.match(implementing, /Never call partial work complete/);
   assert.match(implementing, /Higher-level document writes commit only after an explicitly successful turn/);
-  assert.match(implementing, /failed, interrupted, and unknown outcomes roll back staged changes/);
+  assert.match(implementing, /unsuccessful turn leaves them in review/);
+  assert.doesNotMatch(implementing, /roll back staged changes|roll them back/);
   assert.match(implementing, /apply_engine_edits commits one atomic undoable batch/);
   assert.doesNotMatch(implementing, /present_implementation_plan/);
 });
@@ -1350,6 +1351,24 @@ test('Claude turns result usage into a usage event before the turn ends', async 
     events.indexOf(usage[0]) < events.findIndex((event) => event.type === 'turn-end'),
     'usage must precede turn-end',
   );
+});
+
+test('Claude permission denials surface as failed tool results, not a turn error', async () => {
+  const events = await runClaudeResult({
+    permission_denials: [
+      { tool_name: 'mcp__rhwp__replace_range', tool_use_id: 'toolu-denied-1' },
+      { tool_name: 'mcp__rhwp__insert_text', tool_use_id: 'toolu-denied-2' },
+    ],
+  });
+  // 도구 거부는 모델이 이미 본 실패 결과다 — 턴을 더럽히지 않고 행만 닫는다.
+  assert.equal(events.some((event) => event.type === 'error'), false);
+  const denied = events.filter((event) => event.type === 'tool-result');
+  assert.deepEqual(denied.map((event) => event.callId), ['toolu-denied-1', 'toolu-denied-2']);
+  assert.equal(denied.every((event) => event.ok === false), true);
+  assert.match(denied[0].resultPreview, /permission denied for: mcp__rhwp__replace_range/);
+  const end = events.find((event) => event.type === 'turn-end');
+  assert.equal(end?.stopReason, 'end_turn');
+  assert.equal(end?.errorMessage, undefined);
 });
 
 test('Claude usage adopts the model reported by the CLI', async () => {
