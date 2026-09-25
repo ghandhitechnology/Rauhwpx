@@ -11,7 +11,7 @@ import './agent-sidebar.css';
 import './plan-presentation.css';
 import { confirmSheet } from './sheet.ts';
 import { createChangesDrawer, createJumpButton, renderPendingOpDiff, renderPendingOpsDiff, summarizeDiffItems } from './changes-drawer.ts';
-import { TurnChanges } from './turn-changes.ts';
+import { TurnChanges, invalidatedMessage } from './turn-changes.ts';
 import type { DiffItem } from '../../compare/types.ts';
 import type { DocumentPosition } from '../../core/types.ts';
 
@@ -8508,9 +8508,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     turnChanges.capture(e, bridge.pendingEdits.getChangeSets(), turnOwnerThreadId ?? currentThread.id,
       currentDocumentId, deps.getAgentUndoEntry?.() ?? null);
     scheduleChangesRefresh();
-    if (e.type === 'invalidated') {
-      systemMessage(`대기 중인 에이전트 편집이 해제되었습니다 (${e.reason})`);
-    }
+    if (e.type === 'invalidated') systemMessage(invalidatedMessage(e));
     rebuildReview();
   });
   const unsubEditingLease = bridge.onEditingLeaseChange(() => {

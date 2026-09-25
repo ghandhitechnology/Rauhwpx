@@ -12,7 +12,7 @@ import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 import type { CellPathEntry, DocumentPosition } from '../core/types.ts';
 import type { RevisionTracker } from './revision.ts';
 import type { PendingEditManager } from './pending-edits.ts';
-import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, DocumentTemplate, ObjectOp, PendingStructureOpInfo, PermissionProfile } from './types.ts';
+import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, DocumentTemplate, ObjectOp, PermissionProfile } from './types.ts';
 import { AgentToolError } from './types.ts';
 import { EditJournal } from './edit-journal.ts';
 import { renderChartPng, validateChartSpec } from './chart-render.ts';
@@ -1278,7 +1278,7 @@ export class AgentToolExecutor {
     const maxMatches = Math.min(Math.max(optInt(args, 'maxMatches', 100), 1), 200);
     const { matches, truncated } = this.collectTextMatches(query, caseSensitive, maxMatches);
     if (matches.length === 0) {
-      return { revision: this.revision, replacedCount: 0, skippedPendingDelete: 0, truncated: false };
+      return { revision: this.revision, replacedCount: 0, truncated: false };
     }
     // 컨테이너(본문/셀)별 문서 좌표 내림차순 — 같은 컨테이너 안에서 뒤부터 교체한다
     const cellKey = (c?: CellAddr): string => (c ? `${c.paraIdx}/${c.controlIdx}/${c.cellIdx}` : 'body');
@@ -1287,23 +1287,15 @@ export class AgentToolExecutor {
       || cellKey(a.cell).localeCompare(cellKey(b.cell))
       || b.paraIdx - a.paraIdx
       || b.charOffset - a.charOffset);
-    let skippedPendingDelete = 0;
-    const items: Array<{ range: DocRange; text: string }> = [];
-    for (const m of ordered) {
+    const items: Array<{ range: DocRange; text: string }> = ordered.map((m) => {
       const range: DocRange = {
         sectionIdx: m.sectionIdx,
         startParaIdx: m.paraIdx, startCharOffset: m.charOffset,
         endParaIdx: m.paraIdx, endCharOffset: m.charOffset + m.length,
       };
       if (m.cell) range.cell = m.cell;
-      // 삭제 마크와 겹치는 매치는 건너뛴다 — 일부만 겹쳐도 마크가 드리프트하거나
-      // 승인 시 교체 텍스트가 함께 지워진다 (시작점만 보면 부분 겹침을 놓친다)
-      if (this.deps.pending.findDeleteMarkOverlapping?.(range)) {
-        skippedPendingDelete++;
-        continue;
-      }
-      items.push({ range, text: replacement });
-    }
+      return { range, text: replacement };
+    });
     // 전부-또는-전무: 중간 실패 시 pending/문서가 배치 이전으로 복원되고 에러가 난다 —
     // 부분 적용된 배치가 리뷰 카드에 남지 않는다.
     let replacedCount = 0;
@@ -1316,7 +1308,6 @@ export class AgentToolExecutor {
       revision: this.revision,
       ...(changeSetId !== null ? { changeSetId } : {}),
       replacedCount,
-      skippedPendingDelete,
       truncated,
       ...(truncated ? { note: `only the first ${maxMatches} matches were replaced — call replace_all again with the returned revision to continue. ${PENDING_NOTE}` } : { note: PENDING_NOTE }),
     };
@@ -1425,13 +1416,8 @@ export class AgentToolExecutor {
       throw new AgentToolError('INVALID_ARGS', 'footnote text must be a single paragraph (no newlines)');
     }
     this.validateAddress(sectionIdx, paraIdx, charOffset);
-    const mark = this.deps.pending.findDeleteMarkContaining?.(sectionIdx, paraIdx, charOffset);
-    if (mark) {
-      throw new AgentToolError('PENDING_DELETE_OVERLAP',
-        'insertion point is inside a range already marked for deletion — the marker would be deleted at turn commit');
-    }
     const obj: ObjectOp = { type: 'insertNote', noteKind: kind, sectionIdx, paraIdx, charOffset, text };
-    const r = this.deps.pending.addObjectOp(agent, obj);
+    const r = this.stageObjectOp(agent, obj, sectionIdx, paraIdx);
     const applied = r.obj as Extract<ObjectOp, { type: 'insertNote' }>;
     return {
       revision: this.revision,
@@ -1457,7 +1443,7 @@ export class AgentToolExecutor {
       throw new AgentToolError('INVALID_ARGS', 'footnote text must be a single paragraph (no newlines)');
     }
     const obj: ObjectOp = { type: 'setNoteText', sectionIdx, paraIdx, controlIdx, text };
-    const r = this.deps.pending.addObjectOp(agent, obj);
+    const r = this.stageObjectOp(agent, obj, sectionIdx, paraIdx);
     return { revision: this.revision, changeSetId: r.changeSetId, note: PENDING_NOTE };
   }
 
@@ -1488,7 +1474,7 @@ export class AgentToolExecutor {
         throw new AgentToolError('BOOKMARK_FAILED', `a bookmark named "${name}" already exists — bookmark names must be unique`);
       }
       const obj: ObjectOp = { type: 'bookmark', op: 'add', sectionIdx, paraIdx, charOffset, name };
-      const r = this.deps.pending.addObjectOp(agent, obj);
+      const r = this.stageObjectOp(agent, obj, sectionIdx, paraIdx);
       return { revision: this.revision, changeSetId: r.changeSetId, note: PENDING_NOTE };
     }
     // delete / rename — 이름으로 대상 해석
@@ -1508,14 +1494,14 @@ export class AgentToolExecutor {
         type: 'bookmark', op: 'rename',
         sectionIdx: target.sec, paraIdx: target.para, ctrlIdx: target.ctrlIdx, name: newName,
       };
-      const r = this.deps.pending.addObjectOp(agent, obj);
+      const r = this.stageObjectOp(agent, obj, target.sec, target.para);
       return { revision: this.revision, changeSetId: r.changeSetId, note: PENDING_NOTE };
     }
     const obj: ObjectOp = {
       type: 'bookmark', op: 'delete',
       sectionIdx: target.sec, paraIdx: target.para, ctrlIdx: target.ctrlIdx,
     };
-    const r = this.deps.pending.addObjectOp(agent, obj);
+    const r = this.stageObjectOp(agent, obj, target.sec, target.para);
     return { revision: this.revision, changeSetId: r.changeSetId, note: PENDING_NOTE };
   }
 
@@ -1840,8 +1826,8 @@ export class AgentToolExecutor {
 
   /**
    * verify_changes — 에이전트 셀프체크. change set 요약 + 영향 문단의 편집 후 텍스트
-   * 다이제스트 + 경고를 반환한다. includeImage 면 첫 영향 페이지를 mark-only op 까지
-   * 적용한 상태(승인 후 모습)로 PNG 렌더한다 (withMarkedOpsApplied — 문서에는 흔적 없음).
+   * 다이제스트 + 경고를 반환한다. 모든 op 이 이미 적용돼 있으므로 includeImage 는
+   * 첫 영향 페이지를 지금 그대로 PNG 렌더한다 (= 승인 후 모습).
    */
   private async verifyChanges(args: Record<string, unknown>): Promise<unknown> {
     this.requireDocLoaded();
@@ -1867,8 +1853,6 @@ export class AgentToolExecutor {
     interface AffectedPara { sectionIdx: number; paraIdx: number; cell?: CellAddr }
     const affected: AffectedPara[] = [];
     const seenPara = new Set<string>();
-    let hasDeleteMark = false;
-    let hasTableStructure = false;
     const templateTransfers: Array<{ label: string; templateRevision: number; affectedSections: number[]; skippedFeatures: string[] }> = [];
     const pushPara = (sectionIdx: number, paraIdx: number, cell?: CellAddr): void => {
       const key = cell
@@ -1879,10 +1863,6 @@ export class AgentToolExecutor {
       affected.push(cell ? { sectionIdx, paraIdx, cell } : { sectionIdx, paraIdx });
     };
     for (const op of set?.ops ?? []) {
-      if (op.kind === 'delete') hasDeleteMark = true;
-      if (op.kind === 'object' && (op.obj.type === 'tableStructure' || op.obj.type === 'tableStructureMarked' || op.obj.type === 'deleteTable')) {
-        hasTableStructure = true;
-      }
       if (op.kind === 'template') {
         warnings.push(...op.report.warnings);
         templateTransfers.push({
@@ -1892,7 +1872,7 @@ export class AgentToolExecutor {
           skippedFeatures: op.report.skippedFeatures,
         });
       }
-      if (op.kind === 'insert' || op.kind === 'delete' || op.kind === 'replace' || op.kind === 'format') {
+      if (op.kind === 'insert' || op.kind === 'replace' || op.kind === 'format') {
         const r = op.range;
         for (let p = r.startParaIdx; p <= Math.min(r.endParaIdx, r.startParaIdx + 2); p++) {
           pushPara(r.sectionIdx, p, r.cell);
@@ -1906,6 +1886,7 @@ export class AgentToolExecutor {
             break;
           case 'createTable':
           case 'insertImage':
+          case 'insertNote':
             if (o.anchor) pushPara(o.sectionIdx, o.anchor.paraIdx);
             break;
           case 'insertEquation':
@@ -1913,7 +1894,6 @@ export class AgentToolExecutor {
             else if (o.anchor) pushPara(o.sectionIdx, o.anchor.paraIdx);
             break;
           case 'tableStructure':
-          case 'tableStructureMarked':
           case 'deleteTable':
           case 'setCellProps':
           case 'setTableProps':
@@ -1928,15 +1908,6 @@ export class AgentToolExecutor {
             break; // pageLayout/headerFooter — 문단 좌표 없음
         }
       }
-    }
-    if (hasDeleteMark) {
-      warnings.push('deleted text remains visible struck-through until the turn commits — expected, do not fix');
-    }
-    if (hasTableStructure) {
-      warnings.push(
-        'a table structure op is staged: cellIdx values of that table renumber when the turn commits — '
-        + 'further edits to it are rejected (PENDING_DESTRUCTIVE_OP) until then; re-read get_structure on your next turn',
-      );
     }
 
     // 편집 후 텍스트 다이제스트 (문단당 앞 200자 — 지금 문서에 보이는 그대로)
@@ -1974,15 +1945,7 @@ export class AgentToolExecutor {
     if (includeImage) {
       const page = affectedPages[0] ?? 0;
       try {
-        // 마크 전용 op 까지 적용한 "승인 후" 상태로 렌더하고 반드시 원복된다.
-        // 스냅샷 복원으로 문서가 그대로 돌아오므로 미리보기 이벤트가 revision 을
-        // 올리지 않게 막는다 — 안 막으면 에이전트가 든 revision 이 무효가 되어
-        // 다음 write 가 불필요한 REVISION_MISMATCH 재조회 왕복을 만든다.
-        const canvas = set
-          ? this.deps.revision.holdDuring(
-            () => pending.withMarkedOpsApplied(set.id, () => this.renderPageToCanvasElement(page, 2)),
-          )
-          : this.renderPageToCanvasElement(page, 2);
+        const canvas = this.renderPageToCanvasElement(page, 2);
         const png = await canvasToPngBase64(canvas);
         result['image'] = { data: png.data, mimeType: 'image/png' };
         result['imagePageIndex'] = page;
@@ -1993,7 +1956,6 @@ export class AgentToolExecutor {
         warnings.push(`includeImage requested but the page render is unavailable here — image skipped (${msg.slice(0, 120)})`);
       }
     }
-    // 미리보기 창은 holdDuring 으로 revision 을 올리지 않지만, 방어적으로 마지막에 읽는다
     return { revision: this.revision, ...result };
   }
 
@@ -2347,18 +2309,6 @@ export class AgentToolExecutor {
       );
     }
     this.validateAddress(sectionIdx, paraIdx, charOffset, cell);
-    if (cell) this.guardDestructiveMark(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx);
-    const mark = this.deps.pending.findDeleteMarkContaining?.(sectionIdx, paraIdx, charOffset, cell);
-    if (mark) {
-      throw new AgentToolError(
-        'PENDING_DELETE_OVERLAP',
-        `insertion point p${paraIdx}:${charOffset} is inside a range already marked for deletion `
-        + `(p${mark.range.startParaIdx}:${mark.range.startCharOffset}-p${mark.range.endParaIdx}:${mark.range.endCharOffset}) — `
-        + 'text inserted there would be deleted together at turn commit. Insert at the mark start '
-        + `(p${mark.range.startParaIdx}:${mark.range.startCharOffset}) or after its end instead, `
-        + 'or use replace_range for delete+insert in one atomic op.',
-      );
-    }
     const addr: { sectionIdx: number; paraIdx: number; charOffset: number; cell?: CellAddr } =
       { sectionIdx, paraIdx, charOffset };
     if (cell) addr.cell = cell;
@@ -2454,10 +2404,7 @@ export class AgentToolExecutor {
   private deleteRange(args: Record<string, unknown>, agent: AgentName): unknown {
     const shift = this.requireRevisionRebasable(args, ...rangeRebaseAnchor(args));
     const range = this.validateRange(args, shift);
-    if (range.cell) {
-      this.guardDestructiveMark(range.sectionIdx, range.cell.paraIdx, range.cell.controlIdx, range.cell.cellIdx);
-      this.guardNestedTableInCellRange(range);
-    }
+    if (range.cell) this.guardNestedTableInCellRange(range);
     if (range.startParaIdx === range.endParaIdx && range.startCharOffset === range.endCharOffset) {
       throw new AgentToolError('INVALID_ARGS', 'Range is empty; nothing to delete');
     }
@@ -2487,10 +2434,7 @@ export class AgentToolExecutor {
   private replaceRange(args: Record<string, unknown>, agent: AgentName): unknown {
     const shift = this.requireRevisionRebasable(args, ...rangeRebaseAnchor(args));
     const range = this.validateRange(args, shift);
-    if (range.cell) {
-      this.guardDestructiveMark(range.sectionIdx, range.cell.paraIdx, range.cell.controlIdx, range.cell.cellIdx);
-      this.guardNestedTableInCellRange(range);
-    }
+    if (range.cell) this.guardNestedTableInCellRange(range);
     if (range.startParaIdx === range.endParaIdx && range.startCharOffset === range.endCharOffset) {
       throw new AgentToolError('INVALID_ARGS', 'Range is empty; use insert_text instead');
     }
@@ -2498,14 +2442,6 @@ export class AgentToolExecutor {
     const text = reqString(args, 'text');
     if (text.length < 1 || text.length > 10_000) {
       throw new AgentToolError('INVALID_ARGS', `text must be 1..10000 chars (got ${text.length})`);
-    }
-    const mark = this.deps.pending.findDeleteMarkOverlapping?.(range);
-    if (mark) {
-      throw new AgentToolError('PENDING_DELETE_OVERLAP',
-        `range overlaps a range already marked for deletion `
-        + `(p${mark.range.startParaIdx}:${mark.range.startCharOffset}-p${mark.range.endParaIdx}:${mark.range.endCharOffset}) — `
-        + 'replacing marked text corrupts the pending delete. Either replace outside the mark, '
-        + 'or skip the delete_range and use replace_range alone for that region.');
     }
     // 원자적 교체 (삭제 마크 + 끝 삽입 2-op 조합 폐기) — 서식 보존 + 스냅샷 기반 되돌림
     const revBefore = this.revision;
@@ -2593,7 +2529,6 @@ export class AgentToolExecutor {
         'At least one format key is required (bold/italic/underline/strikethrough/fontSizePt/textColor/fontFamily)',
       );
     }
-    if (cell) this.guardDestructiveMark(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx);
     const range: DocRange = {
       sectionIdx,
       startParaIdx: paraIdx,
@@ -2648,52 +2583,6 @@ export class AgentToolExecutor {
     } catch {
       return '';
     }
-  }
-
-  /**
-   * 구조 op 이 걸린 표에 대한 후속 편집 차단 (설계 리뷰 확정 가드).
-   * insert_row/col 은 적용 즉시, delete_row/col·merge 는 승인 시 cellIdx 가 재번호
-   * 매겨지므로 승인 전 편집은 대체로 모호하다. 승인은 턴 사이에서만 일어난다.
-   *
-   * 예외 — flat cellIdx 는 행 우선이라, 걸려 있는 구조 op 이 전부 행 단위이고
-   * 그 행이 대상 셀의 행보다 뒤라면 대상 셀의 번호는 그대로다. 그 경우만 통과시킨다.
-   * cellIdx 를 모르는 표 단위 호출(edit_table 등)은 종전대로 전부 막는다.
-   */
-  private guardDestructiveMark(
-    sectionIdx: number, tableParaIdx: number, controlIdx: number, cellIdx?: number,
-  ): void {
-    const pendingOps = this.deps.pending.listPendingStructureOps?.(sectionIdx, tableParaIdx, controlIdx)
-      ?? (this.deps.pending.hasPendingStructureOp(sectionIdx, tableParaIdx, controlIdx)
-        ? [{ op: 'structure edit', affectedRow: null } as PendingStructureOpInfo]
-        : []);
-    if (pendingOps.length === 0) return;
-    const blocker = cellIdx === undefined
-      ? pendingOps[0]
-      : this.firstBlockingStructureOp(pendingOps, sectionIdx, tableParaIdx, controlIdx, cellIdx);
-    if (!blocker) return;
-    const where = blocker.affectedRow !== null ? ` at row ${blocker.affectedRow}` : '';
-    const target = cellIdx !== undefined ? ` and it can renumber cellIdx ${cellIdx}` : '';
-    throw new AgentToolError(
-      'PENDING_DESTRUCTIVE_OP',
-      `This table has a staged ${blocker.op}${where} whose cellIdx renumbering becomes final at the successful turn commit${target}. `
-      + 'Finish the turn; it commits automatically, then re-read get_structure with fresh coordinates on the next turn. '
-      + 'Cells in rows entirely before a staged row op stay editable in this turn.',
-    );
-  }
-
-  /** 대상 셀을 흔드는 첫 구조 op — 없으면 null (편집 허용) */
-  private firstBlockingStructureOp(
-    ops: PendingStructureOpInfo[],
-    sectionIdx: number, tableParaIdx: number, controlIdx: number, cellIdx: number,
-  ): PendingStructureOpInfo | null {
-    let row: number;
-    try {
-      row = this.deps.wasm.getCellInfo(sectionIdx, tableParaIdx, controlIdx, cellIdx).row;
-    } catch {
-      return ops[0]; // 행을 못 읽으면 보수적으로 막는다
-    }
-    if (!Number.isInteger(row)) return ops[0];
-    return ops.find((o) => o.affectedRow === null || o.affectedRow <= row) ?? null;
   }
 
   private createTable(args: Record<string, unknown>, agent: AgentName): unknown {
@@ -2757,7 +2646,7 @@ export class AgentToolExecutor {
       ...(typeof headerFill === 'string' ? { headerFill } : {}),
       ...(cells ? { cells } : {}),
     };
-    const r = this.deps.pending.addObjectOp(agent, obj);
+    const r = this.stageObjectOp(agent, obj, sectionIdx, paraIdx);
     const anchor = (r.obj as Extract<ObjectOp, { type: 'createTable' }>).anchor!;
     return {
       revision: this.revision,
@@ -2780,7 +2669,6 @@ export class AgentToolExecutor {
     } catch {
       throw new AgentToolError('INVALID_ARGS', `No table control at section ${sectionIdx}, paragraph ${paraIdx}, controlIdx ${controlIdx} — use get_structure to list tables`);
     }
-    this.guardDestructiveMark(sectionIdx, paraIdx, controlIdx);
     const base = { sectionIdx, tableParaIdx: paraIdx, controlIdx };
     const dimsNow = { rowCount: dims.rowCount, colCount: dims.colCount };
 
@@ -2796,34 +2684,38 @@ export class AgentToolExecutor {
       return v;
     };
 
+    // 모든 표 op 은 호출 즉시 적용된다 — 결과의 행/열/셀 수가 곧 다음 호출의 좌표계다.
+    const stage = (obj: ObjectOp, note = PENDING_NOTE): Record<string, unknown> => {
+      const r = this.stageObjectOp(agent, obj, sectionIdx, paraIdx);
+      const after = wasm.getTableDimensions(sectionIdx, paraIdx, controlIdx);
+      return {
+        revision: this.revision, changeSetId: r.changeSetId,
+        rowCount: after.rowCount, colCount: after.colCount, cellCount: after.cellCount,
+        note,
+      };
+    };
+    const RENUMBERED = 'cellIdx values after the change are renumbered — use the returned counts or re-read get_structure before addressing this table\'s cells again.';
+
     switch (op) {
       case 'insert_row': {
         const rowIdx = reqIdx('rowIdx', dims.rowCount);
-        const obj: ObjectOp = { type: 'tableStructure', ...base, op: 'insert_row', index: rowIdx, after: optBool('below', true) };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        const d = (r.obj as Extract<ObjectOp, { type: 'tableStructure' }>).dims!;
-        return { revision: this.revision, changeSetId: r.changeSetId, rowCount: d.rowCount, colCount: d.colCount, note: PENDING_NOTE };
+        return stage({ type: 'tableStructure', ...base, op: 'insert_row', index: rowIdx, after: optBool('below', true) },
+          `${RENUMBERED} ${PENDING_NOTE}`);
       }
       case 'insert_col': {
         const colIdx = reqIdx('colIdx', dims.colCount);
-        const obj: ObjectOp = { type: 'tableStructure', ...base, op: 'insert_col', index: colIdx, after: optBool('right', true) };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        const d = (r.obj as Extract<ObjectOp, { type: 'tableStructure' }>).dims!;
-        return { revision: this.revision, changeSetId: r.changeSetId, rowCount: d.rowCount, colCount: d.colCount, note: PENDING_NOTE };
+        return stage({ type: 'tableStructure', ...base, op: 'insert_col', index: colIdx, after: optBool('right', true) },
+          `${RENUMBERED} ${PENDING_NOTE}`);
       }
       case 'delete_row': {
         const rowIdx = reqIdx('rowIdx', dims.rowCount);
         if (dims.rowCount <= 1) throw new AgentToolError('INVALID_ARGS', 'cannot delete the only row');
-        const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'delete_row', rowIdx, dims: dimsNow };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `row is staged for removal at the successful turn commit. ${PENDING_NOTE}` };
+        return stage({ type: 'tableStructure', ...base, op: 'delete_row', rowIdx }, `${RENUMBERED} ${PENDING_NOTE}`);
       }
       case 'delete_col': {
         const colIdx = reqIdx('colIdx', dims.colCount);
         if (dims.colCount <= 1) throw new AgentToolError('INVALID_ARGS', 'cannot delete the only column');
-        const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'delete_col', colIdx, dims: dimsNow };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `column is staged for removal at the successful turn commit. ${PENDING_NOTE}` };
+        return stage({ type: 'tableStructure', ...base, op: 'delete_col', colIdx }, `${RENUMBERED} ${PENDING_NOTE}`);
       }
       case 'merge_cells': {
         const startRow = reqIdx('startRow', dims.rowCount);
@@ -2833,9 +2725,8 @@ export class AgentToolExecutor {
         if (endRow < startRow || endCol < startCol || (startRow === endRow && startCol === endCol)) {
           throw new AgentToolError('INVALID_ARGS', 'merge range must cover at least two cells and end must not precede start');
         }
-        const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'merge_cells', startRow, startCol, endRow, endCol, dims: dimsNow };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `cells are staged for merging at the successful turn commit. Merging then renumbers cellIdx, so re-read get_structure on your next turn before editing this table again. ${PENDING_NOTE}` };
+        return stage({ type: 'tableStructure', ...base, op: 'merge_cells', startRow, startCol, endRow, endCol },
+          `${RENUMBERED} ${PENDING_NOTE}`);
       }
       case 'split_cell': {
         const rowIdx = reqIdx('rowIdx', dims.rowCount);
@@ -2858,25 +2749,17 @@ export class AgentToolExecutor {
         if (!isCellOrigin) {
           throw new AgentToolError('INVALID_ARGS', `No cell starts at row ${rowIdx}, col ${colIdx} — use row/col from get_structure cells[] (covered coordinates inside merged cells are not valid split targets)`);
         }
-        const obj: ObjectOp = {
-          type: 'tableStructureMarked', ...base, op: 'split_cell', rowIdx, colIdx,
-          splitRows, splitCols, dims: dimsNow,
-        };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `cell is staged for splitting at the successful turn commit. Splitting renumbers cellIdx, so re-read get_structure on the next turn. ${PENDING_NOTE}` };
+        return stage({ type: 'tableStructure', ...base, op: 'split_cell', rowIdx, colIdx, splitRows, splitCols },
+          `${RENUMBERED} ${PENDING_NOTE}`);
       }
       case 'set_cell_props': {
         const cellIdx = reqIdx('cellIdx', dims.cellCount);
         const props = this.parseCellProps(asRecord(args['props'] ?? {}));
-        const obj: ObjectOp = { type: 'setCellProps', ...base, cellIdx, props, dims: dimsNow };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
+        return stage({ type: 'setCellProps', ...base, cellIdx, props, dims: dimsNow });
       }
       case 'set_table_props': {
         const props = this.parseTableProps(asRecord(args['props'] ?? {}));
-        const obj: ObjectOp = { type: 'setTableProps', ...base, props, dims: dimsNow };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
+        return stage({ type: 'setTableProps', ...base, props, dims: dimsNow });
       }
       case 'set_column_widths': {
         const raw = args['columnWidthsMm'];
@@ -2892,15 +2775,11 @@ export class AgentToolExecutor {
           }
           return mmToHu(value);
         });
-        const obj: ObjectOp = { type: 'setColumnWidths', ...base, widthsHu, dims: dimsNow };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, colCount: dims.colCount, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
+        return stage({ type: 'setColumnWidths', ...base, widthsHu, dims: dimsNow });
       }
-      case 'fit_to_page': {
-        const obj: ObjectOp = { type: 'fitToPage', ...base, dims: dimsNow };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `columns shrink proportionally to the body width at the successful turn commit. ${PENDING_NOTE}` };
-      }
+      case 'fit_to_page':
+        return stage({ type: 'fitToPage', ...base, dims: dimsNow },
+          `columns shrink proportionally to the body width; a table that already fits is unchanged. ${PENDING_NOTE}`);
       case 'set_zone_borders': {
         const corner = (key: string): { row: number; col: number } => {
           const value = args[key];
@@ -2920,13 +2799,11 @@ export class AgentToolExecutor {
           throw new AgentToolError('INVALID_ARGS', 'endCell must not precede startCell');
         }
         const props = this.parseZoneProps(args);
-        const obj: ObjectOp = {
+        return stage({
           type: 'setZoneProps', ...base,
           range: { startRow: start.row, startCol: start.col, endRow: end.row, endCol: end.col },
           props, dims: dimsNow,
-        };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `borders/fill land on the zone outline at the successful turn commit. ${PENDING_NOTE}` };
+        }, `borders/fill land on the zone outline. ${PENDING_NOTE}`);
       }
       case 'apply_formula': {
         const row = reqIdx('row', dims.rowCount);
@@ -2944,26 +2821,55 @@ export class AgentToolExecutor {
             break;
           }
         }
-        const obj: ObjectOp = {
+        const result = stage({
           type: 'applyFormula', ...base, row, col, formula,
           ...(format ? { format } : {}),
           ...(cellIdx !== undefined ? { cellIdx } : {}),
           dims: dimsNow,
-        };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `the computed result is written into the cell at the successful turn commit. ${PENDING_NOTE}` };
+        });
+        return cellIdx === undefined ? result : { ...result, cellText: this.readCellText(sectionIdx, paraIdx, controlIdx, cellIdx) };
       }
       case 'set_caption': {
         const text = reqString(args, 'text');
         if (text.length > 5000) throw new AgentToolError('INVALID_ARGS', 'text must be at most 5000 chars');
         const withNumber = optBool('withNumber', true);
-        const obj: ObjectOp = { type: 'setCaption', ...base, text, withNumber, dims: dimsNow };
-        const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `the caption is created if missing and written at the successful turn commit. ${PENDING_NOTE}` };
+        return stage({ type: 'setCaption', ...base, text, withNumber, dims: dimsNow },
+          `the caption is created if missing. ${PENDING_NOTE}`);
       }
       default:
         throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|split_cell|set_cell_props|set_table_props|set_column_widths|fit_to_page|set_zone_borders|apply_formula|set_caption (got ${JSON.stringify(op)})`);
     }
+  }
+
+  /** 셀 전체 텍스트 (apply_formula 결과 보고용, 최대 200자) */
+  private readCellText(sectionIdx: number, paraIdx: number, controlIdx: number, cellIdx: number): string {
+    const { wasm } = this.deps;
+    try {
+      const parts: string[] = [];
+      const count = wasm.getCellParagraphCount(sectionIdx, paraIdx, controlIdx, cellIdx);
+      for (let p = 0; p < count; p++) {
+        const len = wasm.getCellParagraphLength(sectionIdx, paraIdx, controlIdx, cellIdx, p);
+        parts.push(len > 0 ? wasm.getTextInCell(sectionIdx, paraIdx, controlIdx, cellIdx, p, 0, len) : '');
+      }
+      return parts.join('\n').slice(0, 200);
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 객체 op 등록 + 편집 저널 기록. 문단 수 변화까지 그대로 남겨 병렬 서브에이전트의
+   * 다른 문단 쓰기가 재조회 없이 리베이스되게 한다 (anchorPara 가 없으면 기록하지 않는다).
+   */
+  private stageObjectOp(agent: AgentName, obj: ObjectOp, sectionIdx: number, anchorPara: number | null) {
+    const { wasm } = this.deps;
+    const revBefore = this.revision;
+    const parasBefore = wasm.getParagraphCount(sectionIdx);
+    const r = this.deps.pending.addObjectOp(agent, obj);
+    if (anchorPara !== null) {
+      this.recordJournal(revBefore, sectionIdx, anchorPara, anchorPara, wasm.getParagraphCount(sectionIdx) - parasBefore);
+    }
+    return r;
   }
 
   /** set_zone_borders 인자 → wasm setCellZoneProperties JSON */
@@ -3068,7 +2974,6 @@ export class AgentToolExecutor {
     } catch {
       throw new AgentToolError('INVALID_ARGS', `No table control at section ${sectionIdx}, paragraph ${paraIdx}, controlIdx ${controlIdx} — use get_structure to list tables`);
     }
-    this.guardDestructiveMark(sectionIdx, paraIdx, controlIdx);
     const obj: ObjectOp = {
       type: 'deleteTable',
       sectionIdx,
@@ -3076,16 +2981,12 @@ export class AgentToolExecutor {
       controlIdx,
       dims: { rowCount: dims.rowCount, colCount: dims.colCount },
     };
-    const r = this.deps.pending.addObjectOp(agent, obj);
+    const r = this.stageObjectOp(agent, obj, sectionIdx, paraIdx);
     return {
-      ok: true,
-      marked: true,
-      sectionIdx,
-      paraIdx,
-      controlIdx,
       revision: this.revision,
       changeSetId: r.changeSetId,
-      note: `table is staged for removal at the successful turn commit. Further edits to this table fail with PENDING_DESTRUCTIVE_OP. ${PENDING_NOTE}`,
+      deleted: { sectionIdx, paraIdx, controlIdx },
+      note: `the table is removed now; later tables in paragraph ${paraIdx} moved down one controlIdx. ${PENDING_NOTE}`,
     };
   }
 
@@ -3289,7 +3190,6 @@ export class AgentToolExecutor {
     if (cell) cell.paraIdx += paraShift;
     else paraIdx += paraShift;
     this.validateAddress(sectionIdx, paraIdx, undefined, cell);
-    if (cell) this.guardDestructiveMark(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx);
 
     const props: Record<string, unknown> = {};
     const alignment = args['alignment'];
@@ -3459,6 +3359,7 @@ export class AgentToolExecutor {
     // 문단마다 전체 재조판이 돌지 않도록 배치로 묶는다 — 조판/이벤트/오버레이는
     // 구간 종료 시 한 번씩, 중간 실패 시 문단 일부만 적용된 상태가 남지 않는다.
     let changeSetId = '';
+    const revBefore = this.revision;
     this.deps.pending.runAtomicBatch(() => {
       for (let p = startParaIdx; p <= endParaIdx; p++) {
         const obj: ObjectOp = {
@@ -3470,6 +3371,7 @@ export class AgentToolExecutor {
         changeSetId = this.deps.pending.addObjectOp(agent, obj).changeSetId;
       }
     });
+    this.recordJournal(revBefore, sectionIdx, startParaIdx, endParaIdx, 0);
     return {
       revision: this.revision,
       changeSetId,
@@ -3550,7 +3452,7 @@ export class AgentToolExecutor {
       type: 'insertImage', sectionIdx, paraIdx, charOffset,
       bytes, extension, widthHu, heightHu, naturalWidthPx, naturalHeightPx, description,
     };
-    const r = this.deps.pending.addObjectOp(agent, obj);
+    const r = this.stageObjectOp(agent, obj, sectionIdx, paraIdx);
     const anchor = (r.obj as Extract<ObjectOp, { type: 'insertImage' }>).anchor!;
     return {
       revision: this.revision,
@@ -3571,7 +3473,6 @@ export class AgentToolExecutor {
     const charOffset = reqInt(args, 'charOffset');
     const cell = optCell(args);
     this.validateAddress(sectionIdx, paraIdx, charOffset, cell);
-    if (cell) this.guardDestructiveMark(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx);
     const { script, fontSizeHu, fontSizePt, colorRef, preview } =
       this.validateEquationArgs(args, { sectionIdx, paraIdx, charOffset, ...(cell ? { cell } : {}) });
     const obj: ObjectOp = {
@@ -3579,7 +3480,7 @@ export class AgentToolExecutor {
       ...(cell ? { cell } : {}),
       script, fontSizeHu, colorRef,
     };
-    const r = this.deps.pending.addObjectOp(agent, obj);
+    const r = this.stageObjectOp(agent, obj, sectionIdx, cell ? cell.paraIdx : paraIdx);
     const anchor = (r.obj as Extract<ObjectOp, { type: 'insertEquation' }>).anchor!;
     return {
       revision: this.revision,
@@ -3720,7 +3621,7 @@ export class AgentToolExecutor {
       naturalWidthPx: widthPx * 2, naturalHeightPx: heightPx * 2,
       description: spec.title ? `차트: ${spec.title}` : '차트',
     };
-    const r = this.deps.pending.addObjectOp(agent, obj);
+    const r = this.stageObjectOp(agent, obj, sectionIdx, paraIdx);
     const anchor = (r.obj as Extract<ObjectOp, { type: 'insertImage' }>).anchor!;
     return {
       revision: this.revision,
@@ -3891,9 +3792,7 @@ export class AgentToolExecutor {
       changeSetId: r.changeSetId,
       note: (oddEvenExists
         ? `this section also has an odd/even-page-only ${which} which this tool does NOT replace — the new both-pages ${which} may render alongside it. `
-        : '') + (existedBefore
-        ? `existing ${which} will be replaced at the successful turn commit. ${PENDING_NOTE}`
-        : PENDING_NOTE),
+        : '') + (existedBefore ? `the existing ${which} text was replaced. ${PENDING_NOTE}` : PENDING_NOTE),
     };
   }
 
@@ -3912,7 +3811,7 @@ export class AgentToolExecutor {
       prevParaShapeId: -1, charOffset: 0,
       textSample: this.paraTextSample(sectionIdx, paraIdx),
     };
-    const r = this.deps.pending.addObjectOp(agent, obj);
+    const r = this.stageObjectOp(agent, obj, sectionIdx, paraIdx);
     return {
       revision: this.revision,
       changeSetId: r.changeSetId,
@@ -3938,7 +3837,6 @@ export class AgentToolExecutor {
     if (cell) cell.paraIdx += shift;
     else paraIdx += shift;
     this.validateAddress(sectionIdx, paraIdx, undefined, cell);
-    if (cell) this.guardDestructiveMark(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx);
     if (!this.deps.wasm.getStyleList().some((s) => s.id === styleId)) {
       throw new AgentToolError('INVALID_ARGS', `styleId ${styleId} not found — use list_styles`);
     }
@@ -3953,7 +3851,7 @@ export class AgentToolExecutor {
     return {
       revision: this.revision, changeSetId: r.changeSetId,
       ...(shift !== 0 ? { rebasedParaShift: shift } : {}),
-      note: `applied at the successful turn commit. ${PENDING_NOTE}`,
+      note: PENDING_NOTE,
     };
   }
 }

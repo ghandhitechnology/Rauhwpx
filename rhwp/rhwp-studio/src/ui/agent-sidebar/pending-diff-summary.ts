@@ -27,9 +27,6 @@ export function summarizePendingDiffs(changeSets: readonly PendingChangeSet[]): 
         case 'insert':
           summary.additions += characterCount(op.text);
           break;
-        case 'delete':
-          summary.deletions += characterCount(op.text);
-          break;
         case 'replace':
           summary.additions += characterCount(op.text);
           summary.deletions += characterCount(op.deletedText);

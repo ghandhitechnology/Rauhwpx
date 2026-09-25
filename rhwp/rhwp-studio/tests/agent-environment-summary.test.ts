@@ -19,7 +19,10 @@ const range = {
 test('pending diff summary counts insertions, deletions, and replacement sides', () => {
   const summary = summarizePendingDiffs([changeSet([
     { kind: 'insert', id: 'i', agent: 'claude', range, text: '가😀' },
-    { kind: 'delete', id: 'd', agent: 'claude', range, text: '나다' },
+    {
+      kind: 'replace', id: 'd', agent: 'claude', range,
+      text: '', deletedText: '나다', charShapeId: null, paraShapeIds: [], snapshotId: null,
+    },
     {
       kind: 'replace', id: 'r', agent: 'claude', range,
       text: '새 문장', deletedText: 'old', charShapeId: null,

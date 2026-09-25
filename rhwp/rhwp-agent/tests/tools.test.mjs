@@ -360,8 +360,8 @@ test('verify_changes 설명에 셀프체크 지시와 라이브 미리보기 안
   assert.match(desc, /live preview/);
   assert.match(desc, /do NOT re-insert/);
   assert.match(desc, /includeImage/);
-  // 응답의 실제 모양(describeChangeSet)은 per-op kind + applied 불리언이다
-  assert.match(desc, /applied flag/);
+  // 모든 스테이징 편집은 이미 적용돼 있다 — 읽고 렌더한 문서가 곧 커밋 결과다
+  assert.match(desc, /already applied/);
 });
 
 test('apply_list 설명에 진짜 목록/리터럴 금지/가나다 기본값/bulletChar 안내가 있다', () => {
@@ -452,8 +452,9 @@ test('delete_table: 스키마는 주소 네 값이 필수이고 document-write �
   assert.ok(def, 'missing tool: delete_table');
   assert.equal(def.category, 'document-write');
   assert.match(def.description, /get_structure tables\[\]/);
-  assert.match(def.description, /PENDING_DESTRUCTIVE_OP/);
-  assert.match(def.description, /mark-only/i);
+  // 표는 즉시 사라지고 거절/롤백이 되살린다 — 커밋 전까지 표가 잠기는 규칙은 없다
+  assert.match(def.description, /removed immediately/);
+  assert.doesNotMatch(def.description, /PENDING_DESTRUCTIVE_OP|mark-only/);
   for (const key of ['expectedRevision', 'sectionIdx', 'paraIdx', 'controlIdx']) {
     assert.ok(key in def.shape, `delete_table missing ${key}`);
   }

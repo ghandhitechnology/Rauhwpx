@@ -5,7 +5,7 @@
  * - list_numberings / get_para_format / get_char_format
  * - verify_changes: change-set 요약 + postEditText 다이제스트 + warnings + includeImage
  * - find_text: Unicode scalar 오프셋 (emoji)
- * - insert_text \r\n 정규화, PENDING_DESTRUCTIVE_OP 확장 가드, zero-length 서식 거부
+ * - insert_text \r\n 정규화, 구조 op 뒤 같은 표 편집, zero-length 서식 거부
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -485,15 +485,14 @@ test('verify_changes: change-set 요약 + postEditText + 즉시 적용 삭제', 
   assert.deepEqual(d.collapsedAt, { paraIdx: 1, charOffset: 0 });
   const r = (await call('verify_changes', {})) as {
     changeSetId: string; status: string;
-    ops: Array<{ kind: string; applied: boolean }>;
+    ops: Array<{ kind: string; summary: string }>;
     postEditText: Array<{ sectionIdx: number; paraIdx: number; text: string }>;
     warnings: string[]; revision: number;
   };
   assert.equal(r.changeSetId, d.changeSetId);
   assert.equal(r.ops.length, 2);
   assert.deepEqual(r.ops.map((o) => o.kind), ['insert', 'delete']);
-  assert.equal(r.ops[0].applied, true);  // insert — 즉시 적용
-  assert.equal(r.ops[1].applied, true);  // delete — 빈 교체로 즉시 적용 (미리보기 = 승인 후 상태)
+  assert.ok(r.ops.every((o) => !('applied' in o)), '모든 op 이 적용돼 있어 applied 플래그가 없다');
   // 삭제가 라이브 미리보기에 이미 반영되어 있다
   const p0 = r.postEditText.find((p) => p.paraIdx === 0)!;
   const p1 = r.postEditText.find((p) => p.paraIdx === 1)!;
@@ -504,7 +503,7 @@ test('verify_changes: change-set 요약 + postEditText + 즉시 적용 삭제', 
   assert.equal(typeof r.revision, 'number');
 });
 
-test('verify_changes: 표 구조 op 경고 + 영향 페이지', async () => {
+test('verify_changes: 표 구조 op 은 영향 페이지에 잡히고 잠금 경고가 없다', async () => {
   const { call, tables } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 3, charOffset: 0, cells: [['a'], ['b']],
@@ -517,7 +516,7 @@ test('verify_changes: 표 구조 op 경고 + 영향 페이지', async () => {
     ops: Array<{ kind: string }>; warnings: string[]; affectedPages: number[];
   };
   assert.ok(r.ops.some((o) => o.kind === 'object:tableStructure'));
-  assert.ok(r.warnings.some((w) => w.includes('cellIdx')));
+  assert.ok(!r.warnings.some((w) => w.includes('PENDING_DESTRUCTIVE_OP')));
   assert.deepEqual(r.affectedPages, [0]);
 });
 
@@ -536,16 +535,12 @@ test('verify_changes includeImage: 캔버스가 없으면 이미지 없이 경�
   assert.ok((r['warnings'] as string[]).some((w) => w.includes('image skipped')));
 });
 
-test('verify_changes includeImage: withMarkedOpsApplied 로 승인 후 상태를 렌더한다', async () => {
-  const { call, pending, body, calls } = makeEnv();
+test('verify_changes includeImage: 적용된 현재 문서를 그대로 렌더하고 revision 을 바꾸지 않는다', async () => {
+  const { call, body, calls, revision } = makeEnv();
   // 삭제는 즉시 적용된다 — 미리보기가 곧 승인 후 상태
   await call('delete_range', {
     sectionIdx: 0, startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 5,
   });
-  let speculative = 0;
-  const orig = pending.withMarkedOpsApplied.bind(pending);
-  (pending as { withMarkedOpsApplied: unknown }).withMarkedOpsApplied =
-    (id: string, fn: () => unknown) => { speculative++; return orig(id, fn); };
   class FakeOffscreenCanvas {
     width: number;
     height: number;
@@ -556,17 +551,18 @@ test('verify_changes includeImage: withMarkedOpsApplied 로 승인 후 상태를
   }
   (globalThis as Record<string, unknown>)['OffscreenCanvas'] = FakeOffscreenCanvas;
   try {
+    const before = revision.revision;
     const r = (await call('verify_changes', { includeImage: true })) as {
-      image: { data: string; mimeType: string }; imagePageIndex: number;
+      image: { data: string; mimeType: string }; imagePageIndex: number; revision: number;
     };
-    assert.equal(speculative, 1); // 승인 후 상태 래퍼를 거쳤다
     assert.equal(r.image.mimeType, 'image/png');
     assert.equal(r.image.data, 'AQIDBA=='); // [1,2,3,4] base64
     assert.equal(r.imagePageIndex, 0);
+    assert.equal(r.revision, before, '렌더는 문서를 바꾸지 않는다');
     // 렌더 시점의 본문은 삭제가 적용된('First' 제거) 상태 — 라이브 미리보기와 동일
     const render = calls.find((c) => c.m === 'renderPageToCanvas')!;
     assert.equal(render.a[1], ' item');
-    assert.equal(body[0], ' item'); // 삭제는 즉시 적용 — 렌더 전후 동일
+    assert.equal(body[0], ' item');
   } finally {
     delete (globalThis as Record<string, unknown>)['OffscreenCanvas'];
   }
@@ -606,31 +602,25 @@ test('insert_text: 10000자 초과 오류는 분할 호출을 안내한다', asy
   assert.match(err.message, /multiple insert_text calls/);
 });
 
-test('PENDING_DESTRUCTIVE_OP: insert_row pending 중 같은 표의 셀 편집도 차단된다', async () => {
+test('insert_row 뒤에도 같은 표를 새 셀 번호로 바로 편집한다', async () => {
   const { call, tables } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 3, charOffset: 0, cells: [['a'], ['b']],
   })) as { table: { paraIdx: number; controlIdx: number } };
-  await call('edit_table', {
+  const ins = (await call('edit_table', {
     sectionIdx: 0, paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, op: 'insert_row', rowIdx: 0,
-  });
-  assert.equal(tables[0].rows, 3); // insert_row 는 즉시 적용됐다
-  // applied-now 구조 op 도 삽입 행부터 아래로 cellIdx 를 밀므로 그 행의 셀 편집은 차단된다
-  const err = await expectErr(call('insert_text', {
-    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-    cell: { paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, cellIdx: 1 },
-  }), 'PENDING_DESTRUCTIVE_OP');
-  assert.match(err.message, /next turn/);
-  assert.match(err.message, /insert_row at row 1/);
-  // 삽입 행보다 앞선 행 0 의 셀은 번호가 그대로라 통과한다
+  })) as { rowCount: number; cellCount: number };
+  assert.deepEqual([ins.rowCount, ins.cellCount], [3, 3]);
+  assert.equal(tables[0].rows, 3);
+  // 새 행(1) 과 밀려난 행(2) 모두 결과 좌표로 곧바로 편집된다
   await call('insert_text', {
     sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-    cell: { paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, cellIdx: 0 },
+    cell: { paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, cellIdx: 2 },
   });
-  // 구조 op 이 있는 동안은 후속 구조 op 도 차단된다
-  await expectErr(call('edit_table', {
+  await call('edit_table', {
     sectionIdx: 0, paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, op: 'insert_col', colIdx: 0,
-  }), 'PENDING_DESTRUCTIVE_OP');
+  });
+  assert.equal(tables[0].cols, 2);
 });
 
 test('apply_char_format: startOffset === endOffset (zero-length) → INVALID_ARGS', async () => {

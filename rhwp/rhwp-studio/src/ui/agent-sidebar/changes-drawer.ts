@@ -208,8 +208,10 @@ function pendingObjectDetail(op: PendingOp): string {
     case 'createTable': return `표 삽입 · ${obj.rows}행 × ${obj.cols}열`;
     case 'insertImage': return `그림 삽입${obj.description ? ` · ${obj.description}` : ''}`;
     case 'insertEquation': return `수식 삽입 · ${obj.script}`;
-    case 'tableStructure': return `표 ${obj.op === 'insert_row' ? '행' : '열'} 삽입`;
-    case 'tableStructureMarked': return `표 ${({ delete_row: '행 삭제', delete_col: '열 삭제', merge_cells: '셀 병합', split_cell: '셀 나누기' } as const)[obj.op]}`;
+    case 'tableStructure': return `표 ${({
+      insert_row: '행 삽입', insert_col: '열 삽입', delete_row: '행 삭제',
+      delete_col: '열 삭제', merge_cells: '셀 병합', split_cell: '셀 나누기',
+    } as const)[obj.op]}`;
     case 'deleteTable': return `표 삭제 · ${obj.dims.rowCount}행 × ${obj.dims.colCount}열`;
     case 'setCellProps': return '셀 속성 변경';
     case 'setTableProps': return '표 속성 변경';
@@ -236,7 +238,6 @@ export function renderPendingOpDiff(op: PendingOp, imageUrls?: Map<string, strin
   item.dataset.location = pendingAddress(op);
   const lines = el('div', 'ag-changes-lines');
   if (op.kind === 'insert') lines.append(diffLine('+', [{ text: op.text, changed: false }], `${op.id}:add`));
-  else if (op.kind === 'delete') lines.append(diffLine('−', [{ text: op.text, changed: false }], `${op.id}:del`));
   else if (op.kind === 'replace') {
     const parts = inlineParts(op.deletedText, op.text);
     lines.append(diffLine('−', parts.before, `${op.id}:del`));

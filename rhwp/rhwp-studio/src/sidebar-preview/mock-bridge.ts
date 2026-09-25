@@ -1242,8 +1242,9 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
       },
       { kind: 'insert', id: crypto.randomUUID(), agent, range: range(2),
         text: '현장 인터뷰 결과를 실행 계획에 반영합니다.' },
-      { kind: 'delete', id: crypto.randomUUID(), agent, range: range(4),
-        text: '시범 운영은 3월 첫째 주에 시작합니다.' },
+      { kind: 'replace', id: crypto.randomUUID(), agent, range: range(4),
+        deletedText: '시범 운영은 3월 첫째 주에 시작합니다.', text: '',
+        charShapeId: null, paraShapeIds: [], snapshotId: null },
     ] : [
       { kind: 'insert', id: crypto.randomUUID(), agent, range: range(0),
         text: '이번 사업은 업무 효율을 높이는 것을 목표로 합니다.' },

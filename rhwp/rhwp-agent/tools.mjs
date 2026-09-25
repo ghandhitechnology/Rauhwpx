@@ -651,7 +651,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'create_table',
-    description: `Create a table at (sectionIdx, paraIdx, charOffset) and optionally fill every cell in the same call — one atomic pending change. cells is a full row-major grid (rows/cols are inferred from it; short rows leave trailing cells empty; "\\n" inside a cell makes multiple paragraphs). headerRow:true marks row 0 as a repeating header (bold by default, optional headerFill shading). To merge cells afterwards call edit_table op:merge_cells — merging renumbers cellIdx when the successful turn auto-commits, so re-read get_structure on your next turn before editing that table again. Returns the table address {paraIdx, controlIdx} for follow-up calls. Example: 4 equal columns on A4: colWidthsMm [37.5, 37.5, 37.5, 37.5]. ${UNIT_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    description: `Create a table at (sectionIdx, paraIdx, charOffset) and optionally fill every cell in the same call — one atomic pending change. cells is a full row-major grid (rows/cols are inferred from it; short rows leave trailing cells empty; "\\n" inside a cell makes multiple paragraphs). headerRow:true marks row 0 as a repeating header (bold by default, optional headerFill shading). To merge cells afterwards call edit_table op:merge_cells — it applies immediately, renumbers cellIdx and returns the new counts. Returns the table address {paraIdx, controlIdx} for follow-up calls. Example: 4 equal columns on A4: colWidthsMm [37.5, 37.5, 37.5, 37.5]. ${UNIT_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -670,7 +670,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'edit_table',
-    description: `Restructure or format an existing table at (sectionIdx, paraIdx, controlIdx) — copy the address from get_structure tables[] and call get_table_properties first when changing layout. Operations: insert_row(rowIdx, below?=true) · insert_col(colIdx, right?=true) · delete_row(rowIdx) · delete_col(colIdx) · merge_cells(startRow,startCol,endRow,endCol) · split_cell(rowIdx,colIdx,splitRows,splitCols) · set_cell_props(cellIdx,props) · set_table_props(props) · set_column_widths(columnWidthsMm) · fit_to_page() · set_zone_borders(startCell,endCell,+border/fill args) · apply_formula(row,col,formula,format?) · set_caption(text,withNumber?). set_column_widths takes columnWidthsMm, one width per column (length must equal the column count) and resizes the whole table to their sum. fit_to_page shrinks the columns proportionally until the table fits the page body width; it never widens a table that already fits — use it after get_table_layout reports overflowsBody:true. set_zone_borders treats the rectangle startCell{row,col}..endCell{row,col} as one zone and applies borderLeft/borderRight/borderTop/borderBottom (each {type,width,color}: type 0 none/1 solid/2 dashed/3 dotted/8 double, width 0-6, color "#RRGGBB"), fillColor "#RRGGBB", and optionally diagonalLine/diagonalSlash/diagonalBackSlash/diagonalWidth/diagonalColor and centerLine("NONE"|"VERTICAL"|"HORIZONTAL"|"CROSS") — borders land on the zone outline, not on every inner cell edge. apply_formula computes an HWP table formula ("=SUM(A1:B3)", "=AVG(left)", "=A1*1.1") and writes the result into the cell at (row,col); format{decimalPlaces,thousandsSeparator,prefix,suffix} controls how the number is written (e.g. {decimalPlaces:0,thousandsSeparator:true,suffix:"원"} → "1,234원"). set_caption writes the table caption below the table, creating it when the table has none; withNumber (default true) keeps the auto "표 N" numbering prefix. set_cell_props supports fillColor, verticalAlign, isHeader, widthMm/heightMm, paddingMm{left/right/top/bottom}, applyInnerMargin, textDirection("horizontal"|"vertical"), protected, editableInForm and fieldName. set_table_props supports repeatHeader; pageBreak("none"|"cell"|"row"); cellSpacingMm; cellPaddingMm; outerMarginMm; positionMode("inline"|"floating"); textWrap("square"|"topAndBottom"|"behindText"|"inFrontOfText"); horizontalRelativeTo("paper"|"page"|"column"|"paragraph"), horizontalAlign and horizontalOffsetMm; verticalRelativeTo("paper"|"page"|"paragraph"), verticalAlign and verticalOffsetMm; restrictInPage; allowOverlap; keepWithAnchor; and captionEnabled, captionDirection, captionWidthMm, captionSpacingMm, captionVerticalAlign. EASY CENTERING: set_table_props with {horizontalAlign:"center"}; it automatically makes the table floating, column-relative and zero-offset unless overridden. Calls missing required params fail fast. To append a row/col, target the last index with below/right:true. delete/merge/split and props operations execute when the successful turn auto-commits; structural operations renumber cellIdx, so edit content/props first and re-read get_structure on the next turn. ${UNIT_NOTE} ${WRITE_NOTE}`,
+    description: `Restructure or format an existing table at (sectionIdx, paraIdx, controlIdx) — copy the address from get_structure tables[] and call get_table_properties first when changing layout. Operations: insert_row(rowIdx, below?=true) · insert_col(colIdx, right?=true) · delete_row(rowIdx) · delete_col(colIdx) · merge_cells(startRow,startCol,endRow,endCol) · split_cell(rowIdx,colIdx,splitRows,splitCols) · set_cell_props(cellIdx,props) · set_table_props(props) · set_column_widths(columnWidthsMm) · fit_to_page() · set_zone_borders(startCell,endCell,+border/fill args) · apply_formula(row,col,formula,format?) · set_caption(text,withNumber?). set_column_widths takes columnWidthsMm, one width per column (length must equal the column count) and resizes the whole table to their sum. fit_to_page shrinks the columns proportionally until the table fits the page body width; it never widens a table that already fits — use it after get_table_layout reports overflowsBody:true. set_zone_borders treats the rectangle startCell{row,col}..endCell{row,col} as one zone and applies borderLeft/borderRight/borderTop/borderBottom (each {type,width,color}: type 0 none/1 solid/2 dashed/3 dotted/8 double, width 0-6, color "#RRGGBB"), fillColor "#RRGGBB", and optionally diagonalLine/diagonalSlash/diagonalBackSlash/diagonalWidth/diagonalColor and centerLine("NONE"|"VERTICAL"|"HORIZONTAL"|"CROSS") — borders land on the zone outline, not on every inner cell edge. apply_formula computes an HWP table formula ("=SUM(A1:B3)", "=AVG(left)", "=A1*1.1") and writes the result into the cell at (row,col); format{decimalPlaces,thousandsSeparator,prefix,suffix} controls how the number is written (e.g. {decimalPlaces:0,thousandsSeparator:true,suffix:"원"} → "1,234원"). set_caption writes the table caption below the table, creating it when the table has none; withNumber (default true) keeps the auto "표 N" numbering prefix. set_cell_props supports fillColor, verticalAlign, isHeader, widthMm/heightMm, paddingMm{left/right/top/bottom}, applyInnerMargin, textDirection("horizontal"|"vertical"), protected, editableInForm and fieldName. set_table_props supports repeatHeader; pageBreak("none"|"cell"|"row"); cellSpacingMm; cellPaddingMm; outerMarginMm; positionMode("inline"|"floating"); textWrap("square"|"topAndBottom"|"behindText"|"inFrontOfText"); horizontalRelativeTo("paper"|"page"|"column"|"paragraph"), horizontalAlign and horizontalOffsetMm; verticalRelativeTo("paper"|"page"|"paragraph"), verticalAlign and verticalOffsetMm; restrictInPage; allowOverlap; keepWithAnchor; and captionEnabled, captionDirection, captionWidthMm, captionSpacingMm, captionVerticalAlign. EASY CENTERING: set_table_props with {horizontalAlign:"center"}; it automatically makes the table floating, column-relative and zero-offset unless overridden. Calls missing required params fail fast. To append a row/col, target the last index with below/right:true. Every operation applies immediately and returns rowCount/colCount/cellCount; structural operations renumber cellIdx after the change, so address cells from those counts or a fresh get_structure. ${UNIT_NOTE} ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -729,7 +729,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'delete_table',
-    description: `Delete an entire existing table at (sectionIdx, paraIdx, controlIdx) — the address comes verbatim from get_structure tables[]. This remains mark-only while staged and executes when the successful turn auto-commits. Until then further edits to the same table fail with PENDING_DESTRUCTIVE_OP. A failed turn leaves the table untouched. ${WRITE_NOTE}`,
+    description: `Delete an entire existing table at (sectionIdx, paraIdx, controlIdx) — the address comes verbatim from get_structure tables[]. The table is removed immediately; later tables in the same paragraph move down one controlIdx. Rejecting or rolling back the turn restores it. ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -789,7 +789,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'apply_style',
-    description: `Apply a named document style (from list_styles) to one paragraph. It auto-commits at the end of a successful turn. ${CELL_NOTE} ${WRITE_NOTE}`,
+    description: `Apply a named document style (from list_styles) to one paragraph. ${CELL_NOTE} ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -868,7 +868,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'set_page_layout',
-    description: `Set the section's page geometry: paper size (named or custom mm), orientation, margins, and/or column count. Applied immediately (the whole document re-paginates) and auto-committed at the end of a successful turn. ${UNIT_NOTE} ${WRITE_NOTE}`,
+    description: `Set the section's page geometry: paper size (named or custom mm), orientation, margins, and/or column count. Applied immediately (the whole document re-paginates). ${UNIT_NOTE} ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -893,7 +893,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'edit_header_footer',
-    description: `Create or replace the section's header or footer (applies to all pages). text is one line; pageNumber adds an automatic page-number field aligned left/center/right. A brand-new header/footer shows immediately; replacing an existing one is applied when the successful turn auto-commits. Replacing discards the current header/footer content; inspect the affected pages with render_page before changing it. ${WRITE_NOTE}`,
+    description: `Create or replace the section's header or footer (applies to all pages). text is one line; pageNumber adds an automatic page-number field aligned left/center/right. The change shows immediately. Replacing discards the current header/footer content; inspect the affected pages with render_page before changing it. ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -913,7 +913,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'replace_all',
-    description: `Find-and-replace every occurrence of a string across the document body and table cells in ONE call — far better than looping find_text + replace_range yourself (each write shifts coordinates; this tool handles that internally by replacing back-to-front). Each occurrence is staged in one batch that auto-commits at the end of a successful turn. Matches inside ranges already marked for deletion are skipped (reported as skippedPendingDelete). Up to maxMatches (default 100, max 200) per call; if truncated, call again with the returned revision. ${WRITE_NOTE}`,
+    description: `Find-and-replace every occurrence of a string across the document body and table cells in ONE call — far better than looping find_text + replace_range yourself (each write shifts coordinates; this tool handles that internally by replacing back-to-front). Each occurrence is staged in one batch. Up to maxMatches (default 100, max 200) per call; if truncated, call again with the returned revision. ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       query: z.string().min(1),
@@ -996,7 +996,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'verify_changes',
-    description: `Self-check your work after a batch of edits: returns the current/open change set — per-op kind and an applied flag (true = already visible in the document, false = applies at commit: automatic on turn success in 전체 접근, after the user approves in 안전), post-edit text digests, affected pages and warnings. With includeImage:true the response also carries a PNG render (image block) of the first affected page showing the committed state. ALWAYS call this after completing a batch of edits, fix any problems you find, and only then end your turn. Note: delete_range/replace_range already show their result in the live preview; the removed text is gone from re-reads after the write — do NOT re-insert it. ${REVISION_NOTE}`,
+    description: `Self-check your work after a batch of edits: returns the current/open change set — per-op kind and summary, post-edit text digests, affected pages and warnings. Every staged edit is already applied, so the document you read or render is what gets committed. With includeImage:true the response also carries a PNG render (image block) of the first affected page. ALWAYS call this after completing a batch of edits, fix any problems you find, and only then end your turn. Note: delete_range/replace_range already show their result in the live preview; the removed text is gone from re-reads after the write — do NOT re-insert it. ${REVISION_NOTE}`,
     shape: {
       changeSetId: z.string().min(1).optional().describe('Specific change set id (default: the current open change set)'),
       includeImage: z.boolean().default(false).optional()

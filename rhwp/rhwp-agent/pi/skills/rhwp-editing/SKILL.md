@@ -26,7 +26,7 @@ description: Pending-edit and revision workflow for changing the live HWP/HWPX d
 
 ## 대기 편집
 
-- 편집은 승인 전까지 색이 입혀진 대기 변경으로만 보인다. 삭제는 취소선으로 표시된다.
+- 편집은 호출 즉시 문서에 적용되고, 승인 전까지 대기 변경으로 강조된다. 읽거나 렌더한 문서가 곧 승인 결과다.
 - **안전** 프로필: 자기 편집을 스스로 승인할 수 없다. 승인은 턴과 턴 사이에 사용자가 한다.
 - **전체 접근** 프로필: 성공한 턴이 끝나면 대기 편집이 자동 확정된다.
 - 승인을 기다리며 폴링·대기·재시도하지 않는다. 할 일을 끝내고 턴을 마친다.
@@ -38,8 +38,10 @@ description: Pending-edit and revision workflow for changing the live HWP/HWPX d
   `replace_range` 가 원자적이고 서식을 보존한다.
 - 수식은 `preview_equation` 을 먼저 부르고 경고를 오류로 취급해 고친 뒤 `insert_equation` 한다.
   스크립트는 LaTeX 가 아니라 한컴 수식 문법이다.
-- 표 구조 변경(`insert_row`/`insert_col`/`merge_cells`)은 마지막에 몰아서 한다. 호출한 순간부터
-  그 표는 사용자가 승인할 때까지 잠긴다. 표 작업은 `rhwp-tables` 스킬을 참고한다.
+- 표 구조 변경(`insert_row`/`delete_row`/`merge_cells` 등)은 즉시 적용되고 `cellIdx` 를 다시 매긴다.
+  이후 셀은 돌려받은 개수나 새 `get_structure` 로 주소를 잡는다. 표 작업은 `rhwp-tables` 스킬을 참고한다.
+- 도구 결과에 `editReport` 가 있거나 턴이 `staged_edit_report` 블록으로 시작하면, 대기 편집 일부가 버려졌거나
+  거절 뒤에도 문서에 남은 것이다. 그 부분을 다시 읽은 뒤 편집한다.
 
 ## 마무리
 

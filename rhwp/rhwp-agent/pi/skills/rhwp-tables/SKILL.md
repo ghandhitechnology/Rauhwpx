@@ -71,17 +71,17 @@ description: Address table cells and change table structure in the live HWP/HWPX
 ## delete_table
 
 - 표 전체를 지운다. 주소는 `get_structure` 의 `tables[]` 에서 온 `sectionIdx`/`paraIdx`/`controlIdx` 다.
-- mark-only: 승인 전까지 표는 그대로 있고 하이라이트만 된다. 거절하면 아무 것도 지우지 않는다.
-- 같은 표에 대한 후속 편집은 승인/거절 전까지 `PENDING_DESTRUCTIVE_OP` 로 거절된다.
+- 표는 호출 즉시 사라진다. 같은 문단의 뒤쪽 표는 `controlIdx` 가 하나씩 당겨진다. 거절하면 표가 되살아난다.
 - 셀 텍스트를 고치려는 작업에는 `delete_table` 을 사용하지 않는다. 셀 주소가 거절되면
   `get_selection` 으로 주소를 다시 확인한다. 표를 가로지르는 본문 `delete_range`/`replace_range`
   도 표가 사라질 수 있어 거절된다.
 
 ## 순서
 
-- 셀 텍스트를 먼저 채우고 구조 변경을 뒤로 미룬다. `insert_row`/`insert_col`/`merge_cells`/`delete_table` 를
-  부르면 그 표는 사용자가 승인할 때까지 잠겨 추가 편집을 받지 않는다.
+- 모든 `edit_table` op 은 호출 즉시 적용되고 `rowCount`/`colCount`/`cellCount` 를 돌려준다.
+  행·열 삽입/삭제, 병합, 나누기 뒤에는 `cellIdx` 가 다시 매겨지므로 돌려받은 개수나 새 `get_structure` 로
+  셀 주소를 잡는다. 표는 잠기지 않는다.
 - 모든 호출은 `expectedRevision` 이 필요하다. 편집을 여러 개 알고 있으면 `apply_edits` 로 묶는다 (`rhwp-editing` 참고).
-- 폭·테두리·계산식·캡션 op 도 mark-only 다. 승인(또는 턴 자동 확정) 전까지는 문서가 바뀌지 않는다.
+- 폭·테두리·계산식·캡션 op 도 즉시 적용된다. 읽거나 렌더한 문서가 곧 승인 결과다.
 - 표 작업이 끝나면 `verify_changes` 를 `includeImage: true` 로 불러 레이아웃을 확인하고,
   쪽 넘침이 의심되면 `get_table_layout` 으로 확인한다.
