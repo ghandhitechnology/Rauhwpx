@@ -6,8 +6,8 @@
  *   1. 왕복 지연: 도구 종류별 ms/op (p50/p95/평균)
  *   2. 작업 스크립트: 샘플 문서 위 여섯 작업을 턴 하나씩 실행하고, 허브가 턴마다 남기는
  *      도구 텔레메트리 행(RHWP_WORK_DIR/tool-telemetry.jsonl)에서 호출 수, 결과 글자 수,
- *      이미지 수, 도구 ms 를 읽는다. 작업마다 "today"(현재 도구) 스크립트가 있고, 이후
- *      슬라이스가 같은 작업의 "target" 스크립트를 더해 비교한다.
+ *      이미지 수, 도구 ms 를 읽는다. 작업마다 "today"(예전 JSON 구조 읽기)와 "target"
+ *      (essentials-first 기본 결과) 변형을 돌려 비교한다.
  *   3. 도구 정의 크기: 모델이 매 요청 읽는 direct 프로필 설명 + 입력 스키마 글자 수와
  *      MCP 서버 instructions(공유 규칙) 글자 수.
  *
@@ -179,6 +179,42 @@ function solidPngBase64(width, height, [r, g, b]) {
 }
 
 const bodyParagraphs = (structure) => structure.sections[0].paragraphs;
+
+/**
+ * get_structure 기본(compact 텍스트) 결과를 스크립트가 쓰는 모양으로 되읽는다 — 에이전트가 줄 형식을
+ * 읽는 것과 같은 정보만 쓴다. 첫 섹션의 문단(빈 문단 연속은 펼친다)과 표 그리드를 돌려준다.
+ */
+function parseCompactStructure(result) {
+  const text = result.mcpContent?.[0]?.text;
+  if (typeof text !== 'string') throw new Error('get_structure 결과에 compact 텍스트가 없음');
+  const paragraphs = [];
+  const tables = [];
+  for (const line of text.split('\n')) {
+    let m = /^s0 p(\d+) \((\d+)\)(?: (.*))?$/.exec(line);
+    if (m) {
+      paragraphs.push({ paraIdx: Number(m[1]), length: Number(m[2]), text: (m[3] ?? '').replace(/…$/, '') });
+      continue;
+    }
+    m = /^s0 p(\d+)(?:-p(\d+))? empty$/.exec(line);
+    if (m) {
+      for (let p = Number(m[1]); p <= Number(m[2] ?? m[1]); p += 1) paragraphs.push({ paraIdx: p, length: 0, text: '' });
+      continue;
+    }
+    m = /^ {2}table s0 p(\d+) c(\d+) (\d+)x(\d+)/.exec(line);
+    if (m) {
+      tables.push({ paraIdx: Number(m[1]), controlIdx: Number(m[2]), rowCount: Number(m[3]), colCount: Number(m[4]), cells: [] });
+      continue;
+    }
+    m = /^ {2}r(\d+) (.*)$/.exec(line);
+    if (m && tables.length > 0) {
+      for (const cell of m[2].split(' | ')) {
+        const c = /^\[(\d+)[^\]]*\](?: (.*))?$/.exec(cell);
+        if (c) tables.at(-1).cells.push({ cellIdx: Number(c[1]), row: Number(m[1]), text: c[2] ?? '' });
+      }
+    }
+  }
+  return { paragraphs, tables };
+}
 const cellArgs = (match) => ({
   ...(match.cell ? { cell: match.cell } : {}),
   ...(match.cellPath ? { cellPath: match.cellPath } : {}),
@@ -187,14 +223,33 @@ const cellArgs = (match) => ({
 // ─── 작업 스크립트 ─────────────────────────────────────────
 // 각 스크립트는 에이전트가 한 턴에 하는 도구 호출 순서를 그대로 적는다.
 // t.read(tool, args) / t.write(tool, args) — write 는 expectedRevision 을 채운다. t.nextTurn() 은 턴 경계.
-// "today" = 현재 도구로 할 수 있는 가장 짧은 합리적 경로 (apply_edits 배치 포함).
+// "today" = 예전 결과 모양(get_structure format:'json')으로 가는 가장 짧은 합리적 경로 (apply_edits 배치 포함).
+// "target" = 같은 작업을 essentials-first 기본 결과(compact get_structure, 증분 verify_changes,
+// 필요한 타입만 싣는 capability 조회 등)로 한다. 두 변형은 같은 작업 본문을 공유하고 구조 읽기만 다르다.
+
+/** 구조 읽기 — 스크립트가 쓰는 공통 모양 { paragraphs[], tables[{paraIdx, controlIdx, rowCount, colCount, cells[{cellIdx,row,text}]}] } */
+const STRUCTURE_READERS = {
+  today: async (t) => {
+    const structure = await t.read('get_structure', { format: 'json' });
+    return {
+      paragraphs: bodyParagraphs(structure),
+      tables: (structure.sections[0].tables ?? []).map((table) => ({
+        ...table,
+        cells: table.cells.map((cell) => ({
+          cellIdx: cell.cellIdx, row: cell.row, text: cell.paragraphs.map((p) => p.text).join('⏎'),
+        })),
+      })),
+    };
+  },
+  target: async (t) => parseCompactStructure(await t.read('get_structure', {})),
+};
 
 const TASKS = [
   {
     name: 'typo-fixes',
     sample: 'biz_plan.hwp',
-    today: async (t) => {
-      await t.read('get_structure', {});
+    run: async (t, readStructure) => {
+      await readStructure(t);
       const fixes = [
         ['하여야  한다', '하여야 한다'],
         ['운용중인', '운용 중인'],
@@ -219,12 +274,11 @@ const TASKS = [
   {
     name: 'heading-restyle-list',
     sample: 'biz_plan.hwp',
-    today: async (t) => {
-      const structure = await t.read('get_structure', {});
+    run: async (t, readStructure) => {
+      const { paragraphs } = await readStructure(t);
       const { styles } = await t.read('list_styles', {});
       const heading = styles.find((s) => s.name === '개요 1') ?? styles.find((s) => /개요/.test(s.name));
       if (!heading) throw new Error('개요 스타일 없음');
-      const paragraphs = bodyParagraphs(structure);
       const headings = paragraphs.filter((p) => /^\s*\d+\.\s*\S/.test(p.text) && !p.text.includes('·'));
       if (headings.length < 3) throw new Error(`제목 문단 부족 (${headings.length})`);
       await t.read('get_para_format', { sectionIdx: 0, paraIdx: headings[0].paraIdx });
@@ -253,17 +307,16 @@ const TASKS = [
   {
     name: 'table-fill-widths',
     sample: 'biz_plan.hwp',
-    today: async (t) => {
-      const findTable = (structure) => structure.sections[0].tables
-        .find((table) => table.cells.some((cell) => cell.paragraphs.some((p) => p.text.includes('성명'))));
-      const table = findTable(await t.read('get_structure', {}));
+    run: async (t, readStructure) => {
+      const findTable = ({ tables }) => tables.find((table) => table.cells.some((cell) => cell.text.includes('성명')));
+      const table = findTable(await readStructure(t));
       if (!table) throw new Error('인력투입 표 없음');
       const addr = { sectionIdx: 0, paraIdx: table.paraIdx, controlIdx: table.controlIdx };
       const layout = await t.read('get_table_layout', addr);
       await t.write('edit_table', { ...addr, op: 'insert_row', rowIdx: table.rowCount - 1, below: true });
       // 스테이징된 행 삽입은 턴 커밋 뒤에야 셀 번호가 확정된다 — 새 턴에서 다시 읽고 채운다.
       await t.nextTurn();
-      const grown = findTable(await t.read('get_structure', {}));
+      const grown = findTable(await readStructure(t));
       const newRow = grown.cells.filter((cell) => cell.row === grown.rowCount - 1);
       const values = ['개발자', '백엔드', '김O민', '중급', '6년', '정보처리기사'];
       const tableWidthMm = layout.fragments?.[0]?.widthMm ?? 160;
@@ -285,8 +338,8 @@ const TASKS = [
   {
     name: 'two-positioned-images',
     sample: 'footnote-01.hwp',
-    today: async (t) => {
-      const paragraphs = bodyParagraphs(await t.read('get_structure', {}));
+    run: async (t, readStructure) => {
+      const { paragraphs } = await readStructure(t);
       const anchors = paragraphs.filter((p) => p.length > 10).slice(2, 4);
       if (anchors.length < 2) throw new Error('그림 앵커 문단 부족');
       const inserted = [];
@@ -315,7 +368,7 @@ const TASKS = [
   {
     name: 'odd-even-page-numbers',
     sample: 'biz_plan.hwp',
-    today: async (t) => {
+    run: async (t) => {
       await t.read('get_document_info', {});
       await t.read('get_engine_edit_capabilities', { query: 'HeaderFooter' });
       // applyTo: 1 짝수 쪽, 2 홀수 쪽. 필드 1 = 현재 쪽 번호.
@@ -332,9 +385,9 @@ const TASKS = [
   {
     name: 'figure-page-layout-copy',
     sample: 'ta-pic-001-r-쪽영역안제한.hwp',
-    today: async (t) => {
+    run: async (t, readStructure) => {
       await t.read('get_document_info', {});
-      const paragraphs = bodyParagraphs(await t.read('get_structure', {}));
+      const { paragraphs } = await readStructure(t);
       await t.read('render_page', { pageIndex: 0, format: 'png' });
       // 원본 그림/캡션 위치는 SVG 좌표로 잰다 — 배치를 읽는 전용 도구가 아직 없다.
       await t.read('render_page', { pageIndex: 0, format: 'svg' });
@@ -585,7 +638,7 @@ try {
         (latency[bucket] ??= []).push(performance.now() - t0);
         return r;
       };
-      const s0 = await read('get_structure', {});
+      const s0 = await read('get_structure', { format: 'json' });
       const paraCount = s0.sections[0].paragraphCount;
       const lastParaLen = s0.sections[0].paragraphs[paraCount - 1]?.length ?? 0;
       // 시드: 벤치 대상 문단들을 문서 끝에 추가
@@ -644,13 +697,11 @@ try {
     for (const task of TASKS) {
       if (TASK_FILTER && task.name !== TASK_FILTER) continue;
       for (const variant of ['today', 'target']) {
-        const script = task[variant];
-        if (!script) continue;
         await openSample(task.sample);
         await ensurePiChat();
         const api = scriptApi(await beginTurn());
         try {
-          await script(api);
+          await task.run(api, STRUCTURE_READERS[variant]);
         } finally {
           const rows = await api.finish();
           const sum = (key) => rows.reduce((total, row) => total + row[key], 0);
