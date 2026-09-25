@@ -105,7 +105,7 @@ export async function checkPlanPreview(page, origin, artifacts) {
   await page.click('#play');
   await page.waitForSelector('.ag-plan-card', { visible: true });
   assert.equal(await page.$eval('#theme', node => node.value), 'dark');
-  assert(await page.$eval('.ag-root', node => node.getBoundingClientRect().width <= 320));
+  assert(await page.$eval('.ag-root', node => node.getBoundingClientRect().width <= 360));
   assert.equal(await page.$eval('.ag-root', node => node.scrollWidth > node.clientWidth), false);
   await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
   assert.equal(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), true);

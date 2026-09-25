@@ -886,6 +886,18 @@ test('concurrent spawns share one sandbox and the choice survives a restart', as
   assert.equal(resumed.profile.mode, 'app-hosted');
 });
 
+test('an unsupported Cloud agent is rejected before a sandbox is allocated', async () => {
+  const { coordinator, provider } = sandboxCoordinator();
+  await coordinator.start();
+
+  await assert.rejects(
+    coordinator.spawnAppServer({ selectedProvider: 'rau' }),
+    /Unsupported cloud provider: rau/,
+  );
+  assert.equal(provider.calls.spawn, 0, 'invalid input must not allocate a paid sandbox');
+  assert.equal(provider.calls.teardown, 0, 'there is no sandbox to clean up');
+});
+
 test('a second managed run on the same warm worker reuses the paired device credentials', async () => {
   const vault = memoryVault();
   let redeemCalls = 0;

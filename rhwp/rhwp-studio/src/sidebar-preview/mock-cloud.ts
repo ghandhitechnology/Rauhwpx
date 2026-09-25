@@ -393,12 +393,17 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       }
       listener?.({ type: 'session-stream-error', sessionId: state.session.sessionId, retryable, error });
     },
-    finishReply(text: string) {
+    refreshTimeline() {
+      if (!state.timeline) return;
+      state.timeline.exportedAt = new Date(Date.parse(state.timeline.exportedAt) + 1).toISOString();
+      publish();
+    },
+    finishReply(text: string, alreadyStreamed = false) {
       if (!state.timeline) throw new Error('Start a Cloud conversation first');
       state.timeline.thread.messages.push({ role: 'assistant', text, agent: state.timeline.thread.agent });
       state.timeline.thread.updatedAt = Date.now();
       state.timeline.exportedAt = new Date().toISOString();
-      emitAgentEvent({ type: 'text-delta', agent: state.timeline.thread.agent, text });
+      if (!alreadyStreamed) emitAgentEvent({ type: 'text-delta', agent: state.timeline.thread.agent, text });
       emitAgentEvent({ type: 'turn-end', agent: state.timeline.thread.agent, stopReason: 'completed' });
       publish();
     },

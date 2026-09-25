@@ -217,7 +217,6 @@ For a design review, also inspect keyboard focus, scroll behavior with long
 content, and popovers at the sidebar width you plan to ship. Backend correctness
 and document-renderer behavior remain covered by their application tests.
 
-
 ### OpenCode login terminal
 
 Open the **OpenCode login terminal** audit scene to review the expanding login panel. The preview uses local terminal output: press Enter twice to finish the sample login, or cancel and choose API-key entry. The app uses the same UI with an owned PTY running `opencode auth login`; completion refreshes provider status automatically. Restart the desktop app after updating the hub to test the real login.
@@ -226,3 +225,13 @@ The terminal supports keyboard input, paste, resizing, browser links, cancellati
 
 
 New Claude, Codex, Grok, Cursor, and OpenCode installs continue into the embedded login terminal. The hub advertises platform support; every provider including Claude on macOS can complete its login there, because Claude Code writes the staged profile's `.credentials.json` and a Keychain-only login is read back into it. Rau and Pi retain their browser account flows. Provider connection status still refreshes automatically after login, and API-key entry remains available as a fallback.
+
+Cloud streaming has a focused replay check:
+
+```sh
+node rhwp/rhwp-studio/sidebar-preview/cloud-streaming.check.mjs
+```
+
+It interleaves live text chunks with refreshed timeline snapshots, checks that
+message and Markdown nodes stay mounted, and verifies a single arrival animation
+through completion. It also runs as part of `npm run test:sidebar`.
