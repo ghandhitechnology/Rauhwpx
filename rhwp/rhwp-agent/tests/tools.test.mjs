@@ -457,6 +457,52 @@ test('apply_para_format 에 목록 속성(headType/numberingId/paraLevel/bulletC
   }
 });
 
+test('apply_char_format: 장평/자간은 스칼라 또는 7슬롯 배열', () => {
+  const { shape } = byName.get('apply_char_format');
+  for (const key of ['widthPercent', 'letterSpacingPercent']) {
+    assert.ok(key in shape, `apply_char_format missing ${key}`);
+  }
+  assert.ok(shape.widthPercent.safeParse(120).success);
+  assert.ok(shape.widthPercent.safeParse([100, 100, 100, 100, 100, 100, 90]).success);
+  assert.ok(!shape.widthPercent.safeParse(49).success);
+  assert.ok(!shape.widthPercent.safeParse(201).success);
+  assert.ok(!shape.widthPercent.safeParse([100, 100]).success); // 7슬롯 아님
+  assert.ok(shape.letterSpacingPercent.safeParse(-10).success);
+  assert.ok(shape.letterSpacingPercent.safeParse(0).success);
+  assert.ok(!shape.letterSpacingPercent.safeParse(-51).success);
+  assert.ok(!shape.letterSpacingPercent.safeParse(51).success);
+});
+
+test('apply_para_format: 줄간격 유형/탭/테두리/한글 줄나눔 + cellPath 필드', () => {
+  const { shape } = byName.get('apply_para_format');
+  for (const key of [
+    'cellPath', 'lineSpacingType', 'lineSpacingPt', 'tabStops',
+    'borders', 'borderSpacingMm', 'koreanBreakUnit',
+  ]) {
+    assert.ok(key in shape, `apply_para_format missing ${key}`);
+  }
+  assert.ok(shape.lineSpacingType.safeParse('atLeast').success);
+  assert.ok(shape.lineSpacingType.safeParse('spaceOnly').success);
+  assert.ok(!shape.lineSpacingType.safeParse('exact').success);
+  assert.ok(shape.koreanBreakUnit.safeParse('word').success);
+  assert.ok(shape.koreanBreakUnit.safeParse('char').success);
+  assert.ok(!shape.koreanBreakUnit.safeParse('syllable').success);
+  // 탭 정지: 위치 mm 필수, type/fill 생략 가능
+  assert.ok(shape.tabStops.safeParse([{ positionMm: 20 }]).success);
+  assert.ok(shape.tabStops.safeParse([{ positionMm: 20, type: 'decimal', fill: 1 }]).success);
+  assert.ok(!shape.tabStops.safeParse([{ positionMm: 0 }]).success);
+  assert.ok(!shape.tabStops.safeParse([{ positionMm: 10, type: 'middle' }]).success);
+  // 테두리: side 키 left|right|top|bottom, widthMm/color 생략 가능 (범위 검증은 executor 몫)
+  assert.ok(shape.borders.safeParse({ top: { type: 1, widthMm: 0.5, color: '#FF0000' } }).success);
+  assert.ok(shape.borders.safeParse({ left: { type: 0 }, bottom: { type: 3 } }).success);
+  assert.ok(!shape.borders.safeParse({ middle: { type: 1 } }).success);
+  assert.ok(!shape.borders.safeParse({ top: { type: 1.5 } }).success);
+  assert.ok(shape.borderSpacingMm.safeParse({ left: 2, right: 2 }).success);
+  // cellPath: 1..8개의 {controlIndex, cellIndex, cellParaIndex}
+  assert.ok(shape.cellPath.safeParse([{ controlIndex: 0, cellIndex: 0, cellParaIndex: 0 }]).success);
+  assert.ok(!shape.cellPath.safeParse([]).success);
+});
+
 test('toToolContent: image 필드가 있으면 image 블록 + 나머지 JSON', () => {
   const blocks = toToolContent({ image: { data: 'aGVsbG8=', mimeType: 'image/png' }, revision: 7, pages: [2] });
   assert.equal(blocks.length, 2);
