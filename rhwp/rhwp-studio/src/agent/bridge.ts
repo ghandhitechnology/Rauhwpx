@@ -3695,7 +3695,7 @@ export class AgentBridgeImpl implements AgentBridge {
 
   authenticateAgent(agent: AgentName, method: AgentAuthMethod, key?: string): Promise<AgentSetupAuthStart | null> {
     return this.request<AgentSetupAuthStart>(
-      { type: 'agent-setup-auth', agent, method, terminal: method === 'oauth' && agent === 'claude', ...(key ? { key } : {}) },
+      { type: 'agent-setup-auth', agent, method, terminal: method === 'oauth' && (agent === 'claude' || agent === 'codex'), ...(key ? { key } : {}) },
       'agent-setup-auth',
       30_000,
     );

@@ -226,3 +226,31 @@ test('bundled Claude runtime reports a newer registry release as an update', asy
   const codex = await manager.automaticUpdate('codex');
   assert.equal(codex.updateRequired, false);
 });
+
+test('Codex terminal login streams CLI output and falls back to the PATH binary', async (t) => {
+  const launches = [];
+  const manager = await createCliSetupManager({
+    rootDir: await tmpRoot(t),
+    createTerminal(options) {
+      launches.push(options);
+      options.onOutput('Enter this one-time code');
+      return { done: Promise.resolve({ code: 0 }), cancel: async () => true, snapshot: () => '', write() {}, resize() {} };
+    },
+  }).init();
+  const frames = [];
+  await manager.authenticate('codex', 'oauth', undefined, (entry) => frames.push(entry), { terminal: true });
+  assert.equal(launches[0].command, 'codex');
+  assert.deepEqual(launches[0].argv, ['login', '--device-auth']);
+  assert.ok(frames.some((entry) => entry.terminalReady));
+  assert.ok(frames.some((entry) => entry.terminalData === 'Enter this one-time code'));
+});
+
+test('Codex ChatGPT login in auth.json counts as signed in', async (t) => {
+  const codexHome = await tmpRoot(t);
+  const manager = await createCliSetupManager({ rootDir: await tmpRoot(t), baseEnv: { CODEX_HOME: codexHome } }).init();
+  assert.equal((await manager.status('codex')).authenticated, false);
+  await fs.writeFile(path.join(codexHome, 'auth.json'), JSON.stringify({ tokens: { refresh_token: 'r' } }));
+  const signedIn = await manager.status('codex');
+  assert.equal(signedIn.authenticated, true);
+  assert.equal(signedIn.authMethod, 'oauth');
+});

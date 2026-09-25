@@ -3767,6 +3767,11 @@ async function handleStudioMessage(record, sock, msg) {
         if (agent === 'pi') void piManager.cancelSetup();
         else if (CLI_SETUP_AGENTS.includes(agent)) void cliSetup.cancel(agent);
       };
+      // 같은 세션이 다시 로그인을 시작하면 남아 있던 이전 시도를 취소하고 처음부터 시작한다.
+      const previousRun = authRuns.get(agent);
+      if (previousRun?.ownerSessionId === record.sessionId) {
+        authRuns.cancelOwned({ agent, runId: previousRun.runId, ownerSessionId: record.sessionId, reason: 'restarted' });
+      }
       try {
         authRun = authRuns.begin({
           agent,
