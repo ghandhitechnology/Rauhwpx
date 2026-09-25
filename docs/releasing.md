@@ -8,7 +8,7 @@ Set the same release version in the root and `cloud/` package metadata before ta
 
 - Update `package.json` and both version fields in `package-lock.json`.
 - Update `cloud/package.json` and both version fields in `cloud/package-lock.json`.
-- Set `RAILWAY_DEFAULT_IMAGE` in both `desktop/cloud-railway.mjs` and `rhwp/rau-credits/cloud-provisioner.mjs` to `ghcr.io/ghandhitechnology/rauhwpx-cloud:<version>`.
+- Set `RAILWAY_DEFAULT_IMAGE` in both `desktop/cloud-railway.mjs` and `rhwp/rau-credits/cloud-provisioner.mjs` to `ghcr.io/heemangstudio/rauhwpx-cloud:<version>`.
 
 Run `node --test scripts/release-cloud-contracts.test.mjs tests/desktop-app-servers.test.mjs` and `npm run check:docs`, commit the changes, then push the matching `v<version>` tag. The workflow rejects mismatched tags, cloud metadata, or default image versions before building.
 
@@ -44,7 +44,7 @@ For conversation continuity, deploy the compatible broker before changing the wo
 
 [Nightly verification](../.github/workflows/nightly.yml) starts daily at 03:00 Asia/Seoul, `0 18 * * *` UTC, and also supports manual dispatch. Verification, packaging and publishing share one workflow and commit SHA. Publishing waits for successful verification and both platform packages. A manual run publishes only from `main`.
 
-Each successful publication replaces the [nightly pre-release](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly) and moves its tag. The app version and artifact names use `<version>-nightly.<date>.<sha>`, where the date is UTC `YYYYMMDD` and the SHA is the first seven commit characters. The publication time depends on verification and build duration.
+Each successful publication replaces the [nightly pre-release](https://github.com/heemangstudio/Rauhwpx/releases/tag/nightly) and moves its tag. The app version and artifact names use `<version>-nightly.<date>.<sha>`, where the date is UTC `YYYYMMDD` and the SHA is the first seven commit characters. The publication time depends on verification and build duration.
 
 ## Installing desktop updates
 

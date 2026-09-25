@@ -96,15 +96,15 @@ test('releases depend on verification within the same workflow run', () => {
   assert.ok(ancestors(workflows['release.yml'], 'publish').has('verification'));
 });
 
-test('consolidated checks retain Cloud contracts and browser handoff', () => {
-  const checks = workflows['checks.yml'];
-  const cloudSteps = checks.jobs['cloud-contracts'].steps;
-  assert.equal(cloudSteps.find((step) => step.uses?.startsWith('actions/setup-node@')).with['node-version'], 24);
-  assert.ok(cloudSteps.some((step) => step.run?.includes('npm run test:cloud')));
-  const browserCommands = checks.jobs.browser.steps.map((step) => step.run ?? '').join('\n');
-  assert.match(browserCommands, /e2e:cloud-onboarding/);
-  assert.match(browserCommands, /e2e:cloud-workspace/);
-  assert.match(browserCommands, /e2e:cloud-display/);
+test('PR checks retain Cloud contracts and nightly keeps the browser handoff', () => {
+  const appSteps = workflows['checks.yml'].jobs.app.steps;
+  assert.equal(appSteps.find((step) => step.uses?.startsWith('actions/setup-node@')).with['node-version'], 24);
+  assert.ok(appSteps.some((step) => step.run?.includes('npm run test:cloud')));
+  const nightlyCommands = workflows['nightly.yml'].jobs.app.steps.map((step) => step.run ?? '').join('\n');
+  assert.match(nightlyCommands, /e2e:cloud-onboarding/);
+  assert.match(nightlyCommands, /e2e:cloud-workspace/);
+  assert.match(nightlyCommands, /e2e:cloud-display/);
+  assert.match(nightlyCommands, /npm run test:sidebar/);
 });
 
 test('only release, image publishing, and GitHub Pages receive write permissions', () => {

@@ -77,6 +77,20 @@ jobs:
 
   app:
     needs: engine
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: rau_test
+          POSTGRES_PASSWORD: rau_test
+          POSTGRES_DB: rau_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
@@ -99,6 +113,7 @@ jobs:
             package-lock.json
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
+            rhwp/rau-credits/package-lock.json
 
       - name: Use tested WASM build
         uses: actions/download-artifact@v4
@@ -127,24 +142,61 @@ jobs:
           "$PUPPETEER_EXECUTABLE_PATH" --version
           npm --prefix rhwp/rhwp-studio run test:browser
 
-      - name: Check desktop and hub syntax
-        run: |
-          node --check desktop/main.mjs
-          node --check desktop/agent-hub.mjs
-          node --check desktop/session-manager.mjs
-          node --check rhwp/rhwp-agent/server.mjs
-
       - name: Test agent hub and process lifecycle
         run: node --test --test-concurrency=1 rhwp/rhwp-agent/tests/*.test.mjs
 
       - name: Test hosted Rau authorization service
-        run: npm --prefix rhwp/rau-credits test
+        env:
+          RAU_TEST_POSTGRES_URL: postgresql://rau_test:rau_test@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/rau_test
+        run: |
+          npm --prefix rhwp/rau-credits ci
+          npm --prefix rhwp/rau-credits test
 
       - name: Test Studio
         run: npm --prefix rhwp/rhwp-studio test
 
       - name: Build Studio
         run: npm --prefix rhwp/rhwp-studio run build
+
+      - name: Test sidebar server setup and recovery
+        run: npm run test:sidebar
+
+      - name: Upload sidebar preview evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidebar-preview-evidence
+          path: rhwp/rhwp-studio/sidebar-preview/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Test document shortcuts, deletion, and agent table reveal
+        working-directory: rhwp/rhwp-studio
+        env:
+          VITE_URL: http://127.0.0.1:7700
+          RHWP_SKIP_AGENT_HUB: '1'
+        run: |
+          node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 7700 --strictPort > "$RUNNER_TEMP/editor-vite.log" 2>&1 &
+          editor_pid=$!
+          trap 'kill "$editor_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..60}; do
+            if curl --fail --silent "$VITE_URL" > /dev/null; then break; fi
+            if ! kill -0 "$editor_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/editor-vite.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent "$VITE_URL" > /dev/null
+          node e2e/global-shortcut.test.mjs --mode=headless
+          node e2e/deletion-caret.test.mjs --mode=headless
+          node e2e/agent-table-reveal.test.mjs --mode=headless
+
+      - name: Test Cloud onboarding, conversation handoff, and display interaction
+        run: |
+          npm --prefix rhwp/rhwp-studio run e2e:cloud-onboarding
+          npm --prefix rhwp/rhwp-studio run e2e:cloud-workspace
+          npm --prefix rhwp/rhwp-studio run e2e:cloud-display
 
   prepare:
     name: Prepare nightly identity

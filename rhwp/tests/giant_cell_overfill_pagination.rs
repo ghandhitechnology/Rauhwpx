@@ -4,9 +4,8 @@
 //! The official Hancom 2024 PDF paired with the corpus HWPX has 48 pages. Losing the saved
 //! 71822->0 page reset removes one page; flattening the inner table into anonymous mixed fragments
 //! and omitting its repeated two-row header removes another. The separately converted native-HWP
-//! fixture has a different saved-line boundary (the reset is already the first unit of its next
-//! fragment), so its evidence-backed non-regression count is 47; there is no native-specific
-//! Hancom oracle that would justify manufacturing an empty sliver page.
+//! fixture carries the same authored empty line boxes after the terminal note, so it must follow
+//! the HWPX fragment chain page for page.
 
 use std::fs;
 use std::path::Path;
@@ -193,14 +192,24 @@ fn giant_cell_page_40_renders_only_the_terminal_note_row() {
 }
 
 #[test]
-fn giant_cell_native_conversion_preserves_its_saved_reset_boundary() {
+fn giant_cell_native_conversion_follows_the_hwpx_fragment_chain() {
+    let hwpx = load_doc("samples/table_giant_cell_overfill.hwpx");
     let source = "samples/task1718/table_giant_cell_overfill.hwp";
-    let doc = load_doc(source);
-    assert_eq!(
-        doc.page_count(),
-        47,
-        "{source}: native saved-line reset lands directly on the next fragment boundary"
-    );
+    let native = load_doc(source);
+    assert_eq!(native.page_count(), 48, "{source}: page count");
+    for page in 0..hwpx.page_count() {
+        let cuts = |dump: String| {
+            dump.lines()
+                .filter_map(|line| line.find("start_cut=").map(|at| line[at..].to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            cuts(native.dump_page_items(Some(page))),
+            cuts(hwpx.dump_page_items(Some(page))),
+            "{source}: human page {} fragment cuts",
+            page + 1,
+        );
+    }
 }
 
 #[test]

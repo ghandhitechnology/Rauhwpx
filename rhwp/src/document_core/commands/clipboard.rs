@@ -74,6 +74,13 @@ fn recompute_clipboard_control_mask(para: &Paragraph) -> u32 {
     if para.text.contains('\n') {
         mask |= 1u32 << 0x000A;
     }
+    // 하이픈(코드 24)·고정폭 빈칸(코드 31)은 리터럴 U+00AD/U+2007 과 같은 문자로 실리므로
+    // 직렬화기가 원본 마스크 비트로 코드 유닛을 고른다. 문자가 남아 있으면 출처 비트를 잇는다.
+    for (bit, ch) in [(0x0018, '\u{00AD}'), (0x001F, '\u{2007}')] {
+        if para.control_mask & (1u32 << bit) != 0 && para.text.contains(ch) {
+            mask |= 1u32 << bit;
+        }
+    }
     mask
 }
 
