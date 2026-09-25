@@ -424,6 +424,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let setupProgressResetTimer: ReturnType<typeof setTimeout> | null = null;
   const openedAuthUrls = new Set<string>();
   const announcedUpdates = new Set<string>();
+  /** 사용자가 닫거나 취소한 로그인. 늦게 도착한 상태로 다시 붙지 않게 한다. */
+  const abandonedAuthRunIds = new Set<string>();
+  /** 닫기마다 올라간다. 닫기 전에 보낸 시작 요청의 응답을 버리는 데 쓴다. */
+  let authAttempt = 0;
 
   // Browserbase — 앱에서 입력한 키는 이 탭이 사는 동안만 허브 환경 변수를 덮는다.
   let browserbaseStatus: BrowserbaseStatus | null = null;
@@ -1002,7 +1006,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   });
   setupAuthPane.append(setupTerminal.root);
   setupLoginCancel.addEventListener('click', () => {
-    if (setupAgent && setupAuthRunId) bridge.cancelAgentSetup(setupAgent, setupAuthRunId);
+    if (setupAgent && setupAuthRunId) {
+      abandonedAuthRunIds.add(setupAuthRunId);
+      bridge.cancelAgentSetup(setupAgent, setupAuthRunId);
+    }
+    authAttempt += 1;
     setupBusy = false;
     setupCodePending = false;
     resetRauAuthFeedback();
@@ -2513,12 +2521,24 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (agent === 'pi') void refreshPiStatus();
   }
 
+  function isSetupOpen(): boolean {
+    return setupOverlay.isConnected && setupOverlay.getAttribute('aria-hidden') !== 'true';
+  }
+
   function closeAgentSetup(): void {
     const dismissingRau = setupOverlay.isConnected && setupAgent === 'rau' && !isAgentLoggedIn('rau');
     if (!setupOverlay.isConnected) return;
-    if (setupBusy && setupAgent && setupAuthRunId) {
-      bridge.cancelAgentSetup(setupAgent, setupAuthRunId);
+    // 창을 닫으면 진행 중인 로그인을 취소한다. 시작 응답 전이면 startSetupAuth 가 받은 뒤 취소한다.
+    if (setupAgent) {
+      const owned = setupStatuses?.[setupAgent];
+      const runId = setupAuthRunId ?? (owned?.authOwnedByThisSession ? owned.authRunId : null);
+      if (runId) {
+        abandonedAuthRunIds.add(runId);
+        bridge.cancelAgentSetup(setupAgent, runId);
+      }
     }
+    authAttempt += 1;
+    setupCodePending = false;
     setupBusy = false;
     resetRauAuthFeedback();
     clearSetupAuthPrompt();
@@ -2825,9 +2845,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (setupAgent === 'pi') piMessage = '';
     renderAgentSetup();
     const authenticatingAgent = setupAgent;
+    const attempt = authAttempt;
     const started = await bridge.authenticateAgent(authenticatingAgent, method, key || undefined);
-    if (disposed || setupAgent !== authenticatingAgent || !setupOverlay.isConnected) {
-      if (started?.authRunId) bridge.cancelAgentSetup(authenticatingAgent, started.authRunId);
+    if (disposed || attempt !== authAttempt || setupAgent !== authenticatingAgent || !isSetupOpen()) {
+      if (started?.authRunId) {
+        abandonedAuthRunIds.add(started.authRunId);
+        bridge.cancelAgentSetup(authenticatingAgent, started.authRunId);
+      }
       return;
     }
     if (!started) {
@@ -3727,7 +3751,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           setupStatuses = ev.statuses;
           announceProviderUpdates(ev.statuses);
           const selectedStatus = setupAgent ? ev.statuses[setupAgent] : null;
-          if (setupAgent && selectedStatus?.authOwnedByThisSession && selectedStatus.authRunId) {
+          if (setupAgent && isSetupOpen() && selectedStatus?.authOwnedByThisSession && selectedStatus.authRunId
+            && !abandonedAuthRunIds.has(selectedStatus.authRunId)) {
             const resumeTerminal = supportsTerminalSetup(setupAgent) && setupAuthRunId !== selectedStatus.authRunId;
             setupAuthRunId = selectedStatus.authRunId;
             setupBusy = true;

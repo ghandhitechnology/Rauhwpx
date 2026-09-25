@@ -339,7 +339,7 @@ test('브라우저 로그인은 인증 주소와 기기 코드를 카드 안에 
   assert.match(settings, /el\('button', 'ag-settings-btn ag-agent-login-cancel', '로그인 취소'\)/);
   assert.match(
     settings,
-    /setupLoginCancel\.addEventListener\('click', \(\) => \{\s*if \(setupAgent && setupAuthRunId\) bridge\.cancelAgentSetup\(setupAgent, setupAuthRunId\);/,
+    /setupLoginCancel\.addEventListener\('click', \(\) => \{\s*if \(setupAgent && setupAuthRunId\) \{\s*abandonedAuthRunIds\.add\(setupAuthRunId\);\s*bridge\.cancelAgentSetup\(setupAgent, setupAuthRunId\);/,
   );
   // 취소하면 방금 누른 버튼이 사라져 포커스가 <body> 로 떨어지고, Esc 를 받는
   // 덮개 밖이라 키보드로 카드를 닫을 수 없게 된다 — 다시 그릴 때 되돌린다.

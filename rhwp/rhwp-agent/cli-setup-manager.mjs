@@ -119,11 +119,25 @@ export function createCliSetupManager({ rootDir = defaultCliSetupRoot(), spawnPr
     child.stdout?.on('data', (chunk) => { stdout += String(chunk); }); child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
     return await new Promise((resolve) => { const timer = setTimeout(() => { child.kill?.(); resolve({ code: null, stdout, stderr: `${stderr}\ntimeout` }); }, options.timeoutMs ?? STATUS_TIMEOUT_MS); child.once('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal, stdout, stderr }); }); });
   }
+  /** `codex login` 이 남긴 auth.json 을 확인한다. 허브도 같은 파일을 세션에 연결해 쓴다. */
+  async function readCodexLogin() {
+    const codexHome = typeof baseEnv.CODEX_HOME === 'string' && baseEnv.CODEX_HOME.trim()
+      ? platformPath.resolve(baseEnv.CODEX_HOME)
+      : platformPath.join(hostProfileHome, '.codex');
+    try {
+      const auth = JSON.parse(await fs.readFile(platformPath.join(codexHome, 'auth.json'), 'utf8'));
+      return Boolean(auth?.tokens?.refresh_token || auth?.tokens?.access_token || auth?.OPENAI_API_KEY);
+    } catch { return false; }
+  }
   async function status(agent) {
     assertAgent(agent); await load(); const bin = binPath(agent); let version = null;
     if (existsSync(bin)) { const result = await run(bin, ['--version'], { env: envFor(agent) }); if (result.code === 0) version = cleanOutput(result.stdout).split(/\s+/)[0] || null; }
     let authenticated = Boolean(apiKeys[agent]);
     let authMethod = authenticated ? 'api-key' : null;
+    if (agent === 'codex' && !authenticated && await readCodexLogin()) {
+      authenticated = true;
+      authMethod = 'oauth';
+    }
     if (agent === 'claude' && !authenticated) {
       const credential = await readClaudeOAuthCredential({
         homeDir: hostProfileHome,
@@ -152,9 +166,46 @@ export function createCliSetupManager({ rootDir = defaultCliSetupRoot(), spawnPr
     if (!['oauth', 'login'].includes(method)) throw setupError('AGENT_AUTH_INVALID', '지원하지 않는 로그인 방식이에요.');
     if (agent !== 'claude') {
       const argv = agent === 'codex' ? ['login', '--device-auth'] : ['login'];
-      const proc = spawnProcess(binPath(agent), argv, { env: envFor(agent), cwd: rootDir, stdio: ['pipe', 'pipe', 'pipe'] }); authProcesses.set(agent, proc); onProgress?.({ state: 'authorizing', activity: true });
-      await new Promise((resolve, reject) => { const abort = () => { proc.kill?.(); reject(setupError('AGENT_AUTH_CANCELLED', '로그인을 취소했어요.')); }; signal?.addEventListener('abort', abort, { once: true }); proc.once('close', (code) => { signal?.removeEventListener('abort', abort); code === 0 ? resolve() : reject(setupError('AGENT_AUTH_FAILED', 'CLI 로그인을 완료하지 못했어요.')); }); });
-      authProcesses.delete(agent); onCommitted?.(); onProgress?.({ state: 'done' }); return status(agent);
+      // 앱이 설치한 CLI 가 없으면 PATH 의 CLI 로 로그인한다. 없는 경로를 실행하면 아무 출력 없이 멈춘다.
+      const command = existsSync(binPath(agent)) ? binPath(agent) : CONFIG[agent].bin;
+      onProgress?.({ state: 'authorizing', activity: true });
+      let code;
+      if (terminal) {
+        // Studio 는 로그인 터미널을 열고 출력만 기다리므로 CLI 출력(기기 코드·주소)을 그대로 넘긴다.
+        const session = createTerminal({
+          command,
+          argv,
+          env: envFor(agent),
+          cwd: rootDir,
+          signal,
+          timeoutMs: AUTH_TIMEOUT_MS,
+          onOutput: (data) => onProgress?.({ state: 'authorizing', terminalData: data }),
+        });
+        authTerminals.set(agent, session);
+        onProgress?.({ state: 'authorizing', terminalReady: true });
+        try { ({ code } = await session.done); } finally { if (authTerminals.get(agent) === session) authTerminals.delete(agent); }
+      } else {
+        const proc = spawnProcess(command, argv, { env: envFor(agent), cwd: rootDir, stdio: ['pipe', 'pipe', 'pipe'] }); authProcesses.set(agent, proc);
+        let output = '';
+        const collect = (chunk) => {
+          output = `${output}${String(chunk)}`.slice(-16_000);
+          const clean = redactDiagnosticText(output).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
+          const authUrl = clean.match(/https?:\/\/[^\s<>"'\x07\]]+/)?.[0];
+          const userCode = clean.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4,5}\b/)?.[0];
+          onProgress?.({ state: 'authorizing', ...(authUrl ? { authUrl } : {}), ...(userCode ? { userCode } : {}) });
+        };
+        proc.stdout?.on('data', collect); proc.stderr?.on('data', collect);
+        try {
+          code = await new Promise((resolve, reject) => {
+            const abort = () => { proc.kill?.(); reject(setupError('AGENT_AUTH_CANCELLED', '로그인을 취소했어요.')); };
+            signal?.addEventListener('abort', abort, { once: true });
+            proc.once('error', (error) => { signal?.removeEventListener('abort', abort); reject(setupError('AGENT_AUTH_FAILED', `${command} 을 실행하지 못했어요: ${error?.message ?? error}`)); });
+            proc.once('close', (exitCode) => { signal?.removeEventListener('abort', abort); resolve(exitCode); });
+          });
+        } finally { if (authProcesses.get(agent) === proc) authProcesses.delete(agent); }
+      }
+      if (code !== 0) throw setupError('AGENT_AUTH_FAILED', 'CLI 로그인을 완료하지 못했어요.');
+      onCommitted?.(); onProgress?.({ state: 'done' }); return status(agent);
     }
 
     const transaction = await prepareOAuthCredential({
@@ -187,7 +238,7 @@ export function createCliSetupManager({ rootDir = defaultCliSetupRoot(), spawnPr
         });
         authTerminals.set(agent, session);
         onProgress?.({ state: 'authorizing', terminalReady: true });
-        try { result = await session.done; } finally { authTerminals.delete(agent); }
+        try { result = await session.done; } finally { if (authTerminals.get(agent) === session) authTerminals.delete(agent); }
       } else {
         let output = '';
         const proc = spawnProcess(command, ['auth', 'login'], { env: loginEnv, cwd: transaction.homeDir, stdio: ['pipe', 'pipe', 'pipe'] });
