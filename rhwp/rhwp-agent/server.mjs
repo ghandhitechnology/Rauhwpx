@@ -39,6 +39,7 @@ import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS } from './tools.mjs';
 import { takeEnvironmentScreenshot } from './environment-screenshot.mjs';
+import { resolveRenderSavePath, writeRenderPng } from './render-save.mjs';
 import { replayMissedTurnEnd } from './turn-outcome-replay.mjs';
 import {
   PlanningState,
@@ -4320,6 +4321,13 @@ async function handleStudioMessage(record, sock, msg) {
               } finally {
                 if (snapshotJob?.snapshotPromise === materialization) snapshotJob.snapshotPromise = null;
               }
+            } else if (entry.renderSavePath) {
+              const saved = await writeRenderPng({
+                workDir: record.workDir,
+                target: entry.renderSavePath,
+                data: msg.result?.image?.data,
+              });
+              result = { ...msg.result, ...saved };
             } else {
               result = msg.result;
             }
@@ -5111,6 +5119,16 @@ function handleMcpMessage(record, sock, msg) {
           return;
         }
       }
+      // render_page savePath 는 스튜디오 렌더 전에 경로부터 검증한다 (쓰기는 응답 때 허브가 한다).
+      let renderSavePath = null;
+      if (tool === 'render_page' && args.savePath !== undefined) {
+        try {
+          renderSavePath = resolveRenderSavePath(record.workDir, args.savePath);
+        } catch (error) {
+          sendError(error, 'INVALID_ARGS');
+          return;
+        }
+      }
       const hubId = record.nextHubId++;
       if (workerJob && tool === 'materialize_document_snapshot') {
         try {
@@ -5157,6 +5175,7 @@ function handleMcpMessage(record, sock, msg) {
           ?? record.sessionId,
         copyLayoutJobId: workerJob?.jobId ?? null,
         sessionGeneration: record.agentSession?.generation ?? null,
+        renderSavePath,
       });
       const forwarded = sendJson(record.studioSocket, {
         v: 1, type: 'tool-request', id: hubId,

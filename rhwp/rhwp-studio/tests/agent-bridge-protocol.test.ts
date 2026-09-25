@@ -573,7 +573,7 @@ test('executor: set_field_value 응답 형태', async () => {
 
 test('executor: render_page 범위 검증 + RESULT_TOO_LARGE 대신 정상 SVG', async () => {
   const { executor } = makeExecutor();
-  const r = (await executor.execute('render_page', { pageIndex: 0 }, 'claude')) as any;
+  const r = (await executor.execute('render_page', { pageIndex: 0, format: 'svg' }, 'claude')) as any;
   assert.equal(r.svg, '<svg/>');
   await expectToolError(executor.execute('render_page', { pageIndex: 3 }, 'claude'), 'INVALID_ARGS');
 });

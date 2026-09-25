@@ -9,7 +9,7 @@
 import type { WasmBridge } from '../core/wasm-bridge.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
-import type { CellPathEntry, DocumentPosition } from '../core/types.ts';
+import type { CellPathEntry, ControlLayoutItem, DocumentPosition, LineLayoutItem } from '../core/types.ts';
 import type { RevisionTracker } from './revision.ts';
 import type { PendingEditManager } from './pending-edits.ts';
 import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, DocumentTemplate, ObjectOp, PendingStructureOpInfo, PermissionProfile } from './types.ts';
@@ -195,6 +195,39 @@ const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 function pxToMm(px: number): number {
   return Math.round((px * 25.4) / 96 * 100) / 100;
 }
+
+/** 96dpi 기준 px → mm, 0.1mm 반올림 (get_page_geometry 의 압축 좌표용) */
+function pxToMm1(px: number): number {
+  return Math.round((px * 25.4) / 96 * 10) / 10;
+}
+
+/** mm 사각형 {x,y,width,height} (regionMm) */
+interface MmRect { x: number; y: number; width: number; height: number }
+
+/** 선택적 regionMm 파싱 — 폭/높이는 양수여야 한다 */
+function optRegionMm(args: Record<string, unknown>): MmRect | undefined {
+  const v = args['regionMm'];
+  if (v === undefined || v === null) return undefined;
+  const r = v as Record<string, unknown>;
+  const nums = ['x', 'y', 'width', 'height'].map((k) => r?.[k]);
+  if (typeof v !== 'object' || nums.some((n) => typeof n !== 'number' || !Number.isFinite(n))) {
+    throw new AgentToolError('INVALID_ARGS', 'regionMm must be {x, y, width, height} in mm');
+  }
+  const [x, y, width, height] = nums as number[];
+  if (width <= 0 || height <= 0) {
+    throw new AgentToolError('INVALID_ARGS', 'regionMm width and height must be positive');
+  }
+  return { x, y, width, height };
+}
+
+const GEOMETRY_PARTS = ['lines', 'runs', 'objects'] as const;
+type GeometryPart = typeof GEOMETRY_PARTS[number];
+
+/** getPageControlLayout 항목에서 그대로 옮기는 주소 필드 */
+const GEOMETRY_OBJECT_ADDRESS_KEYS = [
+  'secIdx', 'paraIdx', 'controlIdx', 'parentParaIdx', 'cellIdx', 'cellParaIdx',
+  'innerControlIdx', 'outerTableControlIdx', 'cellPath',
+] as const;
 
 /**
  * renderEquationPreview 의 JSON 계약 파서.
@@ -461,6 +494,7 @@ export class AgentToolExecutor {
       }
       case 'find_text': return this.findText(args);
       case 'render_page': return this.renderPage(args);
+      case 'get_page_geometry': return this.getPageGeometry(args);
       case 'get_para_format': return this.getParaFormat(args);
       case 'get_char_format': return this.getCharFormat(args);
       case 'get_table_properties': return this.getTableProperties(args);
@@ -1529,32 +1563,173 @@ export class AgentToolExecutor {
     if (pageIndex < 0 || pageIndex >= pageCount) {
       throw new AgentToolError('INVALID_ARGS', `pageIndex ${pageIndex} out of range (0..${pageCount - 1})`);
     }
-    const format = args['format'] === undefined || args['format'] === null ? 'svg' : reqString(args, 'format');
+    const format = args['format'] === undefined || args['format'] === null ? 'png' : reqString(args, 'format');
     if (format !== 'svg' && format !== 'png') {
       throw new AgentToolError('INVALID_ARGS', `format must be "svg" or "png" (got ${JSON.stringify(format)})`);
     }
-    if (format === 'png') {
-      const rawScale = args['scale'];
-      if (rawScale !== undefined && rawScale !== null && (typeof rawScale !== 'number' || !Number.isFinite(rawScale))) {
-        throw new AgentToolError('INVALID_ARGS', 'scale must be a number (clamped to 0.5..3)');
+    const region = optRegionMm(args);
+    if (format === 'svg') {
+      // savePath 는 허브가 PNG 바이트를 쓰는 경로라 svg 와 함께 쓸 수 없다
+      if (region || args['savePath'] !== undefined) {
+        throw new AgentToolError('INVALID_ARGS', 'regionMm and savePath need format "png"');
       }
-      const scale = Math.min(3, Math.max(0.5, typeof rawScale === 'number' ? rawScale : 2));
-      // 래스터화는 동기(wasm 렌더) — blob 변환만 비동기다
-      const canvas = this.renderPageToCanvasElement(pageIndex, scale);
-      const png = await canvasToPngBase64(canvas);
-      return {
-        revision: this.revision,
-        pageIndex,
-        image: { data: png.data, mimeType: 'image/png' },
-        widthPx: png.widthPx,
-        heightPx: png.heightPx,
-      };
+      const svg = wasm.renderPageSvg(pageIndex);
+      if (svg.length > MAX_SVG_BYTES) {
+        throw new AgentToolError('RESULT_TOO_LARGE', `SVG is ${svg.length} bytes; page too complex to return`);
+      }
+      return { revision: this.revision, pageIndex, svg };
     }
-    const svg = wasm.renderPageSvg(pageIndex);
-    if (svg.length > MAX_SVG_BYTES) {
-      throw new AgentToolError('RESULT_TOO_LARGE', `SVG is ${svg.length} bytes; page too complex to return`);
+    const rawScale = args['scale'];
+    if (rawScale !== undefined && rawScale !== null && (typeof rawScale !== 'number' || !Number.isFinite(rawScale))) {
+      throw new AgentToolError('INVALID_ARGS', 'scale must be a number (clamped to 0.5..3)');
     }
-    return { revision: this.revision, pageIndex, svg };
+    const scale = Math.min(3, Math.max(0.5, typeof rawScale === 'number' ? rawScale : 1.25));
+    // 래스터화는 동기(wasm 렌더) — blob 변환만 비동기다
+    let canvas = this.renderPageToCanvasElement(pageIndex, scale);
+    let regionOut: { x: number; y: number; width: number; height: number } | undefined;
+    if (region) {
+      // mm → 캔버스 px (쪽 px × scale). 쪽 밖은 잘라낸다.
+      const k = (96 / 25.4) * scale;
+      const x0 = Math.max(0, Math.floor(region.x * k));
+      const y0 = Math.max(0, Math.floor(region.y * k));
+      const x1 = Math.min(canvas.width, Math.ceil((region.x + region.width) * k));
+      const y1 = Math.min(canvas.height, Math.ceil((region.y + region.height) * k));
+      if (x1 - x0 < 1 || y1 - y0 < 1) {
+        throw new AgentToolError('INVALID_ARGS', 'regionMm lies outside the page');
+      }
+      const crop = this.createRenderCanvas();
+      crop.width = x1 - x0;
+      crop.height = y1 - y0;
+      const ctx = crop.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+      if (!ctx) throw new AgentToolError('RENDER_UNAVAILABLE', 'Canvas 2D context is unavailable');
+      ctx.drawImage(canvas as CanvasImageSource, x0, y0, crop.width, crop.height, 0, 0, crop.width, crop.height);
+      canvas = crop;
+      const mm = (px: number) => Math.round((px / k) * 10) / 10;
+      regionOut = { x: mm(x0), y: mm(y0), width: mm(crop.width), height: mm(crop.height) };
+    }
+    const png = await canvasToPngBase64(canvas);
+    return {
+      revision: this.revision,
+      pageIndex,
+      image: { data: png.data, mimeType: 'image/png' },
+      widthPx: png.widthPx,
+      heightPx: png.heightPx,
+      scale,
+      ...(regionOut ? { regionMm: regionOut } : {}),
+    };
+  }
+
+  /**
+   * 쪽 측정 — 줄 상자·베이스라인·런 x 범위·개체 상자를 mm 로 돌려준다.
+   * 줄/런은 반복 키 없이 배열로 압축하고 lineFields/runFields 로 열 순서를 한 번만 알린다.
+   */
+  private getPageGeometry(args: Record<string, unknown>): unknown {
+    const pageIndex = reqInt(args, 'pageIndex');
+    const { wasm } = this.deps;
+    const pageCount = wasm.pageCount;
+    if (pageCount === 0) {
+      throw new AgentToolError('DOC_NOT_LOADED', 'No document is loaded in the studio; ask the user to open one.');
+    }
+    if (pageIndex < 0 || pageIndex >= pageCount) {
+      throw new AgentToolError('INVALID_ARGS', `pageIndex ${pageIndex} out of range (0..${pageCount - 1})`);
+    }
+    const rawInclude = args['include'];
+    let include: Set<GeometryPart>;
+    if (rawInclude === undefined || rawInclude === null) {
+      include = new Set<GeometryPart>(['lines', 'objects']);
+    } else {
+      if (!Array.isArray(rawInclude) || rawInclude.some((p) => !GEOMETRY_PARTS.includes(p as GeometryPart))) {
+        throw new AgentToolError('INVALID_ARGS', `include must list any of ${GEOMETRY_PARTS.join(', ')}`);
+      }
+      include = new Set(rawInclude as GeometryPart[]);
+      // 런은 lines[] 인덱스를 가리키므로 줄도 함께 싣는다
+      if (include.has('runs')) include.add('lines');
+    }
+    const region = optRegionMm(args);
+    const mm = pxToMm1;
+    const hits = (x: number, y: number, w: number, h: number): boolean => !region || (
+      mm(x) < region.x + region.width && mm(x + w) > region.x
+      && mm(y) < region.y + region.height && mm(y + h) > region.y
+    );
+
+    const result: Record<string, unknown> = { revision: this.revision, pageIndex };
+    try {
+      const info = wasm.getPageInfo(pageIndex);
+      result['pageMm'] = [mm(info.width), mm(info.height)];
+      const top = info.marginTop + info.marginHeader;
+      const bottom = info.height - info.marginBottom - info.marginFooter;
+      result['bodyMm'] = [mm(info.marginLeft), mm(top), mm(info.width - info.marginLeft - info.marginRight), mm(bottom - top)];
+    } catch { /* 쪽 정보 실패 시 생략 */ }
+    if (region) result['regionMm'] = region;
+
+    if (include.has('lines')) {
+      let raw: LineLayoutItem[];
+      try {
+        raw = wasm.getPageLineLayout(pageIndex).lines ?? [];
+      } catch {
+        throw new AgentToolError('RENDER_UNAVAILABLE', 'Line layout is unavailable in this engine build');
+      }
+      const lines: unknown[] = [];
+      const runs: unknown[] = [];
+      for (const line of raw) {
+        if (!hits(line.x, line.y, line.w, line.h)) continue;
+        const path = line.cell?.path ?? [];
+        const paraIdx = path.length > 0 ? path[path.length - 1][2] : line.para ?? null;
+        const row: unknown[] = [
+          mm(line.x), mm(line.y), mm(line.w), mm(line.h), mm(line.bl),
+          line.tx0 !== undefined ? mm(line.tx0) : null,
+          line.tx1 !== undefined ? mm(line.tx1) : null,
+          line.sec ?? null, paraIdx, line.cs ?? null, line.ce ?? null,
+        ];
+        const extra: Record<string, unknown> = {};
+        if (line.cell && path.length > 0) {
+          extra['cell'] = { paraIdx: line.cell.pp, controlIdx: path[0][0], cellIdx: path[0][1] };
+          if (path.length > 1) {
+            extra['cellPath'] = path.map(([controlIndex, cellIndex, cellParaIndex]) => ({ controlIndex, cellIndex, cellParaIndex }));
+          }
+        }
+        if (line.area) extra['area'] = line.area;
+        if (Object.keys(extra).length > 0) row.push(extra);
+        if (include.has('runs')) {
+          for (const [x, w, cs, ce] of line.runs ?? []) runs.push([lines.length, mm(x), mm(x + w), cs, ce]);
+        }
+        lines.push(row);
+      }
+      result['lineFields'] = 'x,y,w,h,baseline,textX0,textX1,sectionIdx,paraIdx,charStart,charEnd[,{cell,cellPath,area}]';
+      result['lines'] = lines;
+      if (include.has('runs')) {
+        result['runFields'] = 'line,x0,x1,charStart,charEnd';
+        result['runs'] = runs;
+      }
+    }
+
+    if (include.has('objects')) {
+      let controls: ControlLayoutItem[] = [];
+      try {
+        controls = wasm.getPageControlLayout(pageIndex).controls ?? [];
+      } catch { /* 개체 레이아웃 실패 시 빈 목록 */ }
+      const objects: unknown[] = [];
+      for (const c of controls) {
+        if (!hits(c.x, c.y, c.w, c.h)) continue;
+        const item = c as unknown as Record<string, unknown>;
+        const obj: Record<string, unknown> = { type: c.type, box: [mm(c.x), mm(c.y), mm(c.w), mm(c.h)] };
+        for (const key of GEOMETRY_OBJECT_ADDRESS_KEYS) {
+          if (item[key] !== undefined) obj[key] = item[key];
+        }
+        if (c.type === 'table') {
+          obj['rows'] = item['rowCount'];
+          obj['cols'] = item['colCount'];
+        }
+        if (c.wrap) obj['wrap'] = c.wrap;
+        if (typeof c.zOrder === 'number') obj['z'] = c.zOrder;
+        if (c.headerFooter) obj['area'] = c.headerFooter.kind;
+        else if (c.noteRef) obj['area'] = 'note';
+        if (c.missing) obj['missing'] = true;
+        objects.push(obj);
+      }
+      result['objects'] = objects;
+    }
+    return result;
   }
 
   /** 래스터화용 캔버스 생성 — 브라우저 document 우선, 아니면 OffscreenCanvas (테스트/비브라우저는 RENDER_UNAVAILABLE) */

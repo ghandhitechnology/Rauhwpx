@@ -628,7 +628,7 @@ try {
       // verify 이미지는 첫 영향 문단(시드 삽입 = 원본 마지막 문단) 페이지를 그리므로
       // 내 콘텐츠 페이지가 아닐 수 있다 → 콘텐츠 페이지를 직접 렌더해 잉크를 확인한다.
       const rp = must(
-        await call('render_page', { pageIndex: listPage, format: 'png' }),
+        await call('render_page', { pageIndex: listPage, format: 'png', scale: 2 }),
         'render_page(png)',
       );
       const rpPng = Buffer.from(rp.image?.data ?? '', 'base64');
@@ -644,6 +644,35 @@ try {
         rp.image?.mimeType === 'image/png' && rpPng.length > 4096 && inkPixels > 5000,
         `콘텐츠 페이지 PNG 렌더 (page=${listPage}, ${rpPng.length}B, 잉크 ${inkPixels}px)`,
       );
+
+      // ── e2. 측정 배치: get_page_geometry + render_page regionMm/savePath ──
+      setTestCase('e2. get_page_geometry / render_page regionMm+savePath');
+      const geo = must(
+        await call('get_page_geometry', { pageIndex: listPage, include: ['runs', 'objects'] }),
+        'get_page_geometry',
+      );
+      const bodyLines = (geo.lines ?? []).filter((l) => Number.isInteger(l[8]) && l[10] > l[9] && !l[11]);
+      const geoLine = bodyLines[0];
+      assert(
+        geo.revision === rp.revision && bodyLines.length > 0 && Array.isArray(geo.runs) && geo.runs.length > 0
+          && bodyLines.every((l) => l[4] >= l[1] - 0.2 && l[4] <= l[1] + l[3] + 0.2),
+        `get_page_geometry 줄/런 (lines=${geo.lines?.length}, runs=${geo.runs?.length}, first=${JSON.stringify(geoLine)})`,
+      );
+      const crop = must(await call('render_page', {
+        pageIndex: listPage,
+        regionMm: { x: geoLine[0], y: geoLine[1], width: geoLine[2], height: geoLine[3] },
+        savePath: 'renders/geometry-line.png',
+      }), 'render_page(regionMm+savePath)');
+      const saved = crop.imagePath ? fs.readFileSync(crop.imagePath) : Buffer.alloc(0);
+      const savedPng = saved.length ? PNG.sync.read(saved) : null;
+      const expectW = Math.round(geoLine[2] * (96 / 25.4) * 1.25);
+      assert(
+        path.isAbsolute(crop.imagePath ?? '') && crop.imagePath.endsWith(path.join('renders', 'geometry-line.png'))
+          && savedPng && Math.abs(savedPng.width - expectW) <= 3 && crop.scale === 1.25,
+        `regionMm 자르기 PNG 가 세션 작업 폴더에 저장됨 (${crop.imagePath}, ${savedPng?.width}x${savedPng?.height}, 기대 폭 ${expectW})`,
+      );
+      const escape = await call('render_page', { pageIndex: listPage, savePath: '../escape.png' });
+      assert(escape.ok === false && escape.error?.code === 'INVALID_ARGS', `savePath 작업 폴더 탈출 거부 (${JSON.stringify(escape.error)})`);
       await screenshot(page, 'agent-edit-loop-pending');
 
       // ── f. 인라인 수식 줄바꿈 overflow ──────────────────────

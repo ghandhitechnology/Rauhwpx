@@ -2219,6 +2219,12 @@ export class WasmBridge {
     return JSON.parse(this.doc.getPageControlLayout(pageNum));
   }
 
+  /** 쪽의 줄 상자·베이스라인·런 x 범위 (에이전트 get_page_geometry 용, px) */
+  getPageLineLayout(pageNum: number): { lines: import('./types').LineLayoutItem[] } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(this.doc.getPageLineLayout(pageNum));
+  }
+
   getPictureProperties(sec: number, para: number, ci: number): import('./types').PictureProperties {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.getPictureProperties(sec, para, ci));

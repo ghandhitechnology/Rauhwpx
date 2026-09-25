@@ -280,7 +280,7 @@ function makeEnv() {
   });
   const call = (tool: string, args: Record<string, unknown> = {}) =>
     executor.execute(tool, { expectedRevision: revision.revision, ...args }, 'claude');
-  return { call, pending, revision, body, tables, numberings, bullets, calls, executor };
+  return { call, pending, revision, body, tables, numberings, bullets, calls, executor, wasm };
 }
 
 async function expectErr(p: Promise<unknown>, code: string): Promise<AgentToolError> {
@@ -654,14 +654,62 @@ test('apply_para_format: 목록 키(headType/numberingId/paraLevel/bulletChar) �
   await expectErr(call('apply_para_format', { sectionIdx: 0, paraIdx: 0, headType: 'weird' }), 'INVALID_ARGS');
 });
 
-test('render_page: format png 는 캔버스 없는 환경에서 RENDER_UNAVAILABLE', async () => {
+test('render_page: 기본 png 는 캔버스 없는 환경에서 RENDER_UNAVAILABLE', async () => {
   const { executor, revision } = makeEnv();
-  await expectErr(
-    executor.execute('render_page', { pageIndex: 0, format: 'png' }, 'claude'),
-    'RENDER_UNAVAILABLE',
-  );
-  // svg 는 여전히 동작한다
-  const r = (await executor.execute('render_page', { pageIndex: 0 }, 'claude')) as { svg: string; revision: number };
+  await expectErr(executor.execute('render_page', { pageIndex: 0 }, 'claude'), 'RENDER_UNAVAILABLE');
+  // svg 는 명시하면 여전히 동작하고, 자르기·저장은 png 전용이다
+  const r = (await executor.execute('render_page', { pageIndex: 0, format: 'svg' }, 'claude')) as { svg: string; revision: number };
   assert.equal(r.svg, '<svg/>');
   assert.equal(r.revision, revision.revision);
+  await expectErr(executor.execute('render_page', {
+    pageIndex: 0, format: 'svg', regionMm: { x: 0, y: 0, width: 10, height: 10 },
+  }, 'claude'), 'INVALID_ARGS');
+});
+
+test('get_page_geometry: 줄·런·개체를 mm 배열로 압축하고 regionMm 으로 거른다', async () => {
+  const { executor, wasm } = makeEnv();
+  const mmPx = 96 / 25.4;
+  Object.assign(wasm, {
+    getPageInfo: () => ({
+      pageIndex: 0, width: 210 * mmPx, height: 297 * mmPx, sectionIndex: 0,
+      marginLeft: 30 * mmPx, marginRight: 30 * mmPx, marginTop: 20 * mmPx, marginBottom: 15 * mmPx,
+      marginHeader: 15 * mmPx, marginFooter: 15 * mmPx,
+    }),
+    getPageLineLayout: () => ({
+      lines: [
+        { x: 30 * mmPx, y: 35 * mmPx, w: 150 * mmPx, h: 5 * mmPx, bl: 39 * mmPx, sec: 0, para: 2, cs: 0, ce: 12,
+          tx0: 30 * mmPx, tx1: 80 * mmPx, runs: [[30 * mmPx, 50 * mmPx, 0, 12]] },
+        { x: 40 * mmPx, y: 100 * mmPx, w: 40 * mmPx, h: 5 * mmPx, bl: 104 * mmPx, sec: 0, para: 5, cs: 0, ce: 3,
+          cell: { pp: 4, path: [[0, 3, 1], [1, 0, 2]] }, runs: [] },
+      ],
+    }),
+    getPageControlLayout: () => ({
+      controls: [
+        { type: 'image', x: 30 * mmPx, y: 200 * mmPx, w: 40 * mmPx, h: 30 * mmPx, secIdx: 0, paraIdx: 7, controlIdx: 0,
+          wrap: 'Square', zOrder: 3 },
+      ],
+    }),
+  });
+
+  const all = (await executor.execute('get_page_geometry', { pageIndex: 0, include: ['runs', 'objects'] }, 'claude')) as any;
+  assert.deepEqual(all.pageMm, [210, 297]);
+  assert.deepEqual(all.bodyMm, [30, 35, 150, 232]);
+  assert.deepEqual(all.lines[0], [30, 35, 150, 5, 39, 30, 80, 0, 2, 0, 12]);
+  // 셀 줄: paraIdx 는 최내곽 셀 문단, cell 은 최외곽 셀 주소, 중첩이면 cellPath
+  assert.deepEqual(all.lines[1].slice(7, 9), [0, 2]);
+  assert.deepEqual(all.lines[1][11].cell, { paraIdx: 4, controlIdx: 0, cellIdx: 3 });
+  assert.equal(all.lines[1][11].cellPath.length, 2);
+  assert.deepEqual(all.runs, [[0, 30, 80, 0, 12]]);
+  assert.deepEqual(all.objects, [{ type: 'image', box: [30, 200, 40, 30], secIdx: 0, paraIdx: 7, controlIdx: 0, wrap: 'Square', z: 3 }]);
+
+  const cropped = (await executor.execute('get_page_geometry', {
+    pageIndex: 0, regionMm: { x: 0, y: 90, width: 210, height: 20 },
+  }, 'claude')) as any;
+  assert.equal(cropped.lines.length, 1);
+  assert.equal(cropped.lines[0][8], 2);
+  assert.deepEqual(cropped.objects, []);
+  assert.equal(cropped.runs, undefined);
+
+  await expectErr(executor.execute('get_page_geometry', { pageIndex: 5 }, 'claude'), 'INVALID_ARGS');
+  await expectErr(executor.execute('get_page_geometry', { pageIndex: 0, include: ['cells'] }, 'claude'), 'INVALID_ARGS');
 });

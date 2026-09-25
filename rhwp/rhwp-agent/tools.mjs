@@ -63,6 +63,16 @@ function borderSpec(description) {
   }).strict().optional().describe(description);
 }
 
+/** render_page / get_page_geometry 의 쪽 영역 (mm, 쪽 왼쪽 위 기준). */
+function regionMmParam(description) {
+  return z.object({
+    x: z.number().min(0),
+    y: z.number().min(0),
+    width: z.number().positive(),
+    height: z.number().positive(),
+  }).strict().optional().describe(description);
+}
+
 /** edit_table set_zone_borders 의 범위 모서리 좌표. */
 function zoneCorner(description) {
   return z.object({
@@ -393,8 +403,8 @@ const BASE_TOOL_DEFINITIONS = [
     shape: {
       templateRevision: z.number().int().min(1),
       pageIndex: z.number().int().min(0),
-      format: z.enum(['svg', 'png']).default('svg').optional(),
-      scale: z.number().min(0.5).max(3).default(2).optional(),
+      format: z.enum(['png', 'svg']).default('png').optional(),
+      scale: z.number().min(0.5).max(3).default(1.25).optional(),
     },
   },
   {
@@ -455,13 +465,23 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'render_page',
-    description: `Render one page of the document (0-based pageIndex). format 'svg' (default) returns raw SVG markup — up to ~800KB, so use it sparingly and prefer get_structure/get_text_range for reading text; format 'png' returns an image block you can visually inspect, rasterized at scale (0.5-3, default 2). Fails with RESULT_TOO_LARGE for very complex pages. ${REVISION_NOTE}`,
+    description: `Render one page (0-based pageIndex) as a PNG image block (scale 0.5-3, default 1.25). regionMm crops it. savePath writes the PNG under the session workspace and returns its absolute imagePath, e.g. for comparing against a reference in Python. format 'svg' returns raw markup (up to ~800KB). For positions, use get_page_geometry instead of reading pixels. ${REVISION_NOTE}`,
     shape: {
       pageIndex: z.number().int().min(0).describe('0-based page index'),
-      format: z.enum(['svg', 'png']).default('svg').optional()
-        .describe("Output format: 'svg' markup (default) or 'png' image block"),
-      scale: z.number().min(0.5).max(3).default(2).optional()
-        .describe('Raster scale for png (0.5-3, default 2; ignored for svg)'),
+      format: z.enum(['png', 'svg']).default('png').optional(),
+      scale: z.number().min(0.5).max(3).default(1.25).optional().describe('PNG scale (1 = 96dpi)'),
+      regionMm: regionMmParam('PNG crop area'),
+      savePath: z.string().min(1).max(200).optional().describe('Relative .png path in the session workspace'),
+    },
+  },
+  {
+    name: 'get_page_geometry',
+    description: `Measure one page (0-based pageIndex) in mm from its top-left. lines follow lineFields: box, drawn baseline, text x-extent, sectionIdx/paraIdx/charStart/charEnd, then cell/cellPath inside table cells or text boxes. objects give box, control address, wrap and z-order. include 'runs' adds per-run x ranges; regionMm keeps items overlapping that area. Use it instead of estimating positions from render_page. ${REVISION_NOTE}`,
+    shape: {
+      pageIndex: z.number().int().min(0),
+      include: z.array(z.enum(['lines', 'runs', 'objects'])).min(1).max(3).optional()
+        .describe("Default ['lines','objects']"),
+      regionMm: regionMmParam('Only items overlapping this area'),
     },
   },
   {
@@ -1212,6 +1232,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   publish_cloud_document: 'document-write',
   find_text: 'document-read',
   render_page: 'document-read',
+  get_page_geometry: 'document-read',
   get_para_format: 'document-read',
   get_char_format: 'document-read',
   get_table_properties: 'document-read',
