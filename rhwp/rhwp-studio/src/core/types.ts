@@ -1148,6 +1148,8 @@ export interface LayerTextRunOp {
   placement?: { runToPage?: LayerAffineTransform; baselineY?: number };
   positions?: number[];
   displayPositions?: number[];
+  /** 반각 칸에 전각 glyph 를 그리는 구두점의 `[replay 글자 index, glyph x 오프셋]` (엔진 halt 규칙). */
+  glyphOffsets?: Array<[number, number]>;
   legacyVisuals?: LayerTextLegacyVisuals;
   controlMarks?: LayerTextControlMark[];
   controlMarksComplete?: boolean;
@@ -1219,6 +1221,7 @@ export interface LayerEllipseOp {
   bbox: LayerBounds;
   style?: LayerShapeStyle;
   gradient?: LayerGradientFill;
+  transform?: LayerPathTransform;
 }
 
 export type LayerPathCommand =

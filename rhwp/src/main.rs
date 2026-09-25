@@ -675,6 +675,9 @@ fn print_help() {
     println!("      --embed-fonts           폰트 서브셋 임베딩 (사용 글자만 base64)");
     println!("      --embed-fonts=full      폰트 전체 임베딩 (base64)");
     println!("      --font-path <경로>      폰트 파일 또는 디렉토리 (여러 번 지정 가능)");
+    println!(
+        "      --font-metrics <정책>   글자 폭 정책: mac (기본) | windows (Windows 한글 치환)"
+    );
     println!("      --json                  산출물 매니페스트를 JSON으로 stdout에 출력");
     println!();
     println!("  export-render-tree <파일.hwp> [옵션]");
@@ -701,6 +704,9 @@ fn print_help() {
         "      --profile <프로필>      출력 프로필: screen|print|high-quality|fast-preview (기본: high-quality)"
     );
     println!("      --font-path <경로>      폰트 파일 또는 디렉토리 (여러 번 지정 가능)");
+    println!(
+        "      --font-metrics <정책>   글자 폭 정책: mac (기본) | windows (Windows 한글 치환)"
+    );
     println!("                              한컴 전용 폰트 (HY견명조 등) 가 시스템에 없을 때 ttfs 디렉토리 지정");
     println!("      --scale <배율>          렌더링 배율 (기본: 1.0)");
     println!("      --max-dimension <픽셀>  한 변 최대 픽셀 (longest edge). VLM 입력 한도용.");
@@ -757,6 +763,9 @@ fn print_help() {
     );
     println!("      --raster-dpi <DPI>      direct backend fallback raster DPI (기본값: 144)");
     println!("      --font-path <경로>      폰트 파일 또는 디렉토리 (여러 번 지정 가능)");
+    println!(
+        "      --font-metrics <정책>   글자 폭 정책: mac (기본) | windows (Windows 한글 치환)"
+    );
     println!("      --fallback-serif <명>   PDF serif generic fallback family");
     println!("      --fallback-sans <명>    PDF sans-serif generic fallback family");
     println!("      --fallback-mono <명>    PDF monospace generic fallback family");
@@ -930,6 +939,7 @@ fn export_svg(args: &[String]) -> i32 {
     let mut respect_vpos_reset = false;
     let mut font_embed_mode = rhwp::renderer::svg::FontEmbedMode::None;
     let mut font_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut font_metrics = rhwp::model::provenance::FontMetricsPolicy::default();
     let mut render_profile: Option<rhwp::paint::RenderProfile> = None;
     let mut json_mode = false;
 
@@ -1052,6 +1062,21 @@ fn export_svg(args: &[String]) -> i32 {
                 font_embed_mode = rhwp::renderer::svg::FontEmbedMode::Full;
                 i += 1;
             }
+            "--font-metrics" => {
+                match args
+                    .get(i + 1)
+                    .and_then(|v| rhwp::model::provenance::FontMetricsPolicy::parse(v))
+                {
+                    Some(policy) => {
+                        font_metrics = policy;
+                        i += 2;
+                    }
+                    None => {
+                        eprintln!("오류: --font-metrics 값은 mac 또는 windows 여야 합니다.");
+                        return EXIT_USAGE;
+                    }
+                }
+            }
             "--font-path" => {
                 if i + 1 < args.len() {
                     font_paths.push(std::path::PathBuf::from(&args[i + 1]));
@@ -1106,7 +1131,10 @@ fn export_svg(args: &[String]) -> i32 {
     let source_format = rhwp::parser::detect_format(&data);
 
     // 문서 로드
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
+    let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes_with_font_metrics(
+        &data,
+        font_metrics,
+    ) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 문서 파싱 실패 - {}", e);
@@ -1686,6 +1714,7 @@ fn export_png(args: &[String]) -> i32 {
     let mut output_dir = "output".to_string();
     let mut target_page: Option<u32> = None;
     let mut font_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut font_metrics = rhwp::model::provenance::FontMetricsPolicy::default();
     let mut scale: Option<f64> = None;
     let mut max_dimension: Option<i32> = None;
     let mut vlm_target: Option<VlmTarget> = None;
@@ -1733,6 +1762,21 @@ fn export_png(args: &[String]) -> i32 {
                 } else {
                     eprintln!("오류: --profile 뒤에 프로필 이름이 필요합니다.");
                     return EXIT_USAGE;
+                }
+            }
+            "--font-metrics" => {
+                match args
+                    .get(i + 1)
+                    .and_then(|v| rhwp::model::provenance::FontMetricsPolicy::parse(v))
+                {
+                    Some(policy) => {
+                        font_metrics = policy;
+                        i += 2;
+                    }
+                    None => {
+                        eprintln!("오류: --font-metrics 값은 mac 또는 windows 여야 합니다.");
+                        return EXIT_USAGE;
+                    }
                 }
             }
             "--font-path" => {
@@ -1845,7 +1889,10 @@ fn export_png(args: &[String]) -> i32 {
         }
     };
 
-    let mut core = match rhwp::document_core::DocumentCore::from_local_file_bytes(&data) {
+    let mut core = match rhwp::document_core::DocumentCore::from_local_file_bytes_with_font_metrics(
+        &data,
+        font_metrics,
+    ) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {:?}", e);
@@ -1972,6 +2019,7 @@ fn export_pdf(args: &[String]) -> i32 {
         let mut target_page: Option<u32> = None;
         let mut pdf_backend = rhwp::renderer::pdf::PdfBackend::default();
         let mut pdf_options = rhwp::renderer::pdf::PdfExportOptions::default();
+        let mut font_metrics = rhwp::model::provenance::FontMetricsPolicy::default();
         let mut direct_pdf_options = rhwp::renderer::pdf::DirectPdfExportOptions::default();
         let mut render_profile: Option<rhwp::paint::RenderProfile> = None;
         let mut compatibility_only_options = Vec::new();
@@ -2074,6 +2122,21 @@ fn export_pdf(args: &[String]) -> i32 {
                     direct_pdf_options.raster_dpi = raster_dpi;
                     direct_raster_dpi_was_set = true;
                     i += 1;
+                }
+                "--font-metrics" => {
+                    match args
+                        .get(i + 1)
+                        .and_then(|v| rhwp::model::provenance::FontMetricsPolicy::parse(v))
+                    {
+                        Some(policy) => {
+                            font_metrics = policy;
+                            i += 2;
+                        }
+                        None => {
+                            eprintln!("오류: --font-metrics 값은 mac 또는 windows 여야 합니다.");
+                            return 2;
+                        }
+                    }
                 }
                 "--font-path" => {
                     if i + 1 < args.len() {
@@ -2230,7 +2293,10 @@ fn export_pdf(args: &[String]) -> i32 {
             }
         };
 
-        let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
+        let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes_with_font_metrics(
+            &data,
+            font_metrics,
+        ) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("오류: 문서 파싱 실패 - {}", e);
@@ -2340,6 +2406,7 @@ fn print_export_pdf_usage() {
     );
     eprintln!("      --raster-dpi <DPI>    direct backend fallback raster DPI (기본값: 144)");
     eprintln!("      --font-path <경로>   폰트 파일 또는 디렉토리 (여러 번 지정 가능)");
+    eprintln!("      --font-metrics <mac|windows> 글자 폭 정책 (기본값: mac)");
     eprintln!("      --fallback-serif <명>");
     eprintln!("      --fallback-sans <명>");
     eprintln!("      --fallback-mono <명>");

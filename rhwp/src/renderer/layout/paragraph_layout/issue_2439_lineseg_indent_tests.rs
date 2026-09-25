@@ -84,6 +84,7 @@ fn synthetic_lineseg_indent_tree() -> crate::renderer::render_tree::PageRenderTr
     let composed: Vec<_> = paragraphs.iter().map(compose_paragraph).collect();
     let styles = ResolvedStyleSet {
         hwp3_variant: false,
+        page_number_char_shape: None,
         char_styles: vec![ResolvedCharStyle::default(), ResolvedCharStyle::default()],
         para_styles: vec![
             ResolvedParaStyle {

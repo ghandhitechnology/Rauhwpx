@@ -287,6 +287,14 @@ impl HwpDocument {
         DocumentCore::from_local_file_bytes(data).map(|core| HwpDocument { core })
     }
 
+    pub fn from_local_file_bytes_with_font_metrics(
+        data: &[u8],
+        font_metrics: crate::model::provenance::FontMetricsPolicy,
+    ) -> Result<HwpDocument, HwpError> {
+        DocumentCore::from_local_file_bytes_with_font_metrics(data, font_metrics)
+            .map(|core| HwpDocument { core })
+    }
+
     pub(crate) fn from_regenerated_bytes(data: &[u8]) -> Result<HwpDocument, HwpError> {
         DocumentCore::from_regenerated_bytes(data).map(|core| HwpDocument { core })
     }
@@ -417,31 +425,17 @@ fn source_format_name(format: crate::parser::FileFormat) -> &'static str {
 fn parse_font_metrics_policy(
     policy: &str,
 ) -> Result<crate::model::provenance::FontMetricsPolicy, crate::error::HwpError> {
-    use crate::model::provenance::FontMetricsPolicy;
-    match policy {
-        "hancom-windows" => Ok(FontMetricsPolicy::HancomWindows),
-        "hcr-declared" => Ok(FontMetricsPolicy::HcrDeclared),
-        _ => Err(crate::error::HwpError::RenderError(
-            "Unknown font metrics policy".into(),
-        )),
-    }
+    crate::model::provenance::FontMetricsPolicy::parse(policy)
+        .ok_or_else(|| crate::error::HwpError::RenderError("Unknown font metrics policy".into()))
 }
 
-fn open_with_hwpx_font_metrics(
+fn open_with_font_metrics(
     data: &[u8],
     input_policy: crate::parser::limits::InputPolicy,
     font_policy: &str,
 ) -> Result<HwpDocument, crate::error::HwpError> {
-    let requested = parse_font_metrics_policy(font_policy)?;
-    let effective = if matches!(
-        crate::parser::detect_format(data),
-        crate::parser::FileFormat::Hwpx
-    ) {
-        requested
-    } else {
-        Default::default()
-    };
-    DocumentCore::from_bytes_with_policies(data, input_policy, effective)
+    let font_metrics = parse_font_metrics_policy(font_policy)?;
+    DocumentCore::from_bytes_with_policies(data, input_policy, font_metrics)
         .map(|core| HwpDocument { core })
 }
 
@@ -469,14 +463,13 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
-    /// Select HWPX font metrics before parsing constructs missing line data.
-    /// Other input formats retain their existing measurement policy.
+    /// Select font metrics before parsing constructs missing line data.
     #[wasm_bindgen(js_name = fromBytesWithFontMetrics)]
     pub fn from_bytes_with_font_metrics(
         data: &[u8],
         font_policy: &str,
     ) -> Result<HwpDocument, JsValue> {
-        open_with_hwpx_font_metrics(
+        open_with_font_metrics(
             data,
             crate::parser::limits::InputPolicy::Untrusted,
             font_policy,
@@ -499,7 +492,7 @@ impl HwpDocument {
         data: &[u8],
         font_policy: &str,
     ) -> Result<HwpDocument, JsValue> {
-        open_with_hwpx_font_metrics(
+        open_with_font_metrics(
             data,
             crate::parser::limits::InputPolicy::LocalFileOnce,
             font_policy,
@@ -1099,8 +1092,8 @@ impl HwpDocument {
         self.core.set_dpi(dpi);
     }
 
-    /// Session-only font measurement. HCR declared metrics match the captured
-    /// Mac Hancom environment; the default retains Windows substitution rules.
+    /// Session-only font measurement. HCR declared metrics (the default) match
+    /// Mac Hancom; `hancom-windows` applies the Windows substitution rules.
     #[wasm_bindgen(js_name = setFontMetricsPolicy)]
     pub fn set_font_metrics_policy(&mut self, policy: &str) -> Result<(), JsValue> {
         let policy = parse_font_metrics_policy(policy).map_err(JsValue::from)?;
@@ -1110,11 +1103,12 @@ impl HwpDocument {
 
     #[wasm_bindgen(js_name = getFontMetricsPolicy)]
     pub fn get_font_metrics_policy(&self) -> String {
-        match self.core.document.doc_info.font_metrics_policy {
-            crate::model::provenance::FontMetricsPolicy::HancomWindows => "hancom-windows",
-            crate::model::provenance::FontMetricsPolicy::HcrDeclared => "hcr-declared",
-        }
-        .to_string()
+        self.core
+            .document
+            .doc_info
+            .font_metrics_policy
+            .as_str()
+            .to_string()
     }
 
     /// 파일 이름을 설정한다 (머리말/꼬리말 필드 치환용).

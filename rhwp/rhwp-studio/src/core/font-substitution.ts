@@ -11,7 +11,7 @@
  */
 
 import { REGISTERED_FONTS } from './font-loader.ts';
-import { resolveLocalFont } from './local-fonts.ts';
+import { repairedLocalFontFamily, resolveLocalFont } from './local-fonts.ts';
 import { equationFontFamilies } from './equation-font.ts';
 
 // 치환 엔트리: [원본폰트, 원본타입, 대체폰트, 대체타입]
@@ -220,6 +220,10 @@ function pushUniqueFontFamily(families: string[], fontName: string): void {
   families.push(name);
 }
 
+const HFT_SUBSTITUTE_FACES = new Map<string, readonly string[]>([
+  ['HCI Poppy', ['Palatino', 'Palatino Linotype', 'Book Antiqua']],
+]);
+
 function systemFallbackFamilies(fontName: string): string[] {
   if (GENERIC_FONTS.has(fontName)) return [fontName];
   // 수식 글꼴을 일반 미등록 서체로 처리하면 Canvas font 치환이 엔진의
@@ -235,6 +239,12 @@ function systemFallbackFamilies(fontName: string): string[] {
   // 고정폭 '고딕' (굴림체/코딩 서체)
   if (/굴림체|gulimche|coding|courier/i.test(fontName)) {
     return ['GulimChe', 'D2Coding', 'Noto Sans Mono', 'monospace'];
+  }
+  // 한컴 HFT 영문 글꼴: 엔진 `hft_substitute_faces` 와 같은 설치 서체를 먼저 찾는다.
+  // HCI Poppy 는 Palatino 복제라 macOS Palatino → Windows Palatino Linotype 순이다.
+  const hftFaces = HFT_SUBSTITUTE_FACES.get(fontName.trim());
+  if (hftFaces) {
+    return [...hftFaces, 'Batang', 'AppleMyungjo', 'Noto Serif KR', 'serif'];
   }
   // Serif 판별 — 문자 클래스가 아니라 실제 서체명 토큰으로 검사한다.
   // (기존 `[바탕명조궁서]` 는 '서울남산체'·'고딕서체' 처럼 해당 글자가 스치기만 해도
@@ -346,7 +356,10 @@ export function fontFamilyChainForDisplay(
     confirmedLocalFontSet.has(fontName.toLocaleLowerCase('en-US'));
 
   if (localRecord) {
-    pushUniqueFontFamily(families, localRecord.runtimeFamily ?? localRecord.family);
+    pushUniqueFontFamily(
+      families,
+      localRecord.runtimeFamily ?? repairedLocalFontFamily(localRecord) ?? localRecord.family,
+    );
   } else if (originalAllowed) {
     pushUniqueFontFamily(families, fontName);
   }

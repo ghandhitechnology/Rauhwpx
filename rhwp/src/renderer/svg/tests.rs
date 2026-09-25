@@ -86,10 +86,13 @@ fn test_svg_draw_text_gulimche_faux_bold_uses_stroke() {
         },
     );
     let output = renderer.output();
-    let want = format!("stroke-width=\"{:.3}\"", font_size * 0.02);
+    let want = format!(
+        "stroke-width=\"{:.3}\"",
+        font_size * crate::renderer::FAUX_BOLD_STROKE_EM
+    );
     assert!(
         output.contains(&want),
-        "굴림체 볼드는 0.02em 획이어야 함 — {want} 없음: {output}"
+        "굴림체 볼드는 한컴 합성 획(1/40em)이어야 함 — {want} 없음: {output}"
     );
     assert!(
         !output.contains("font-weight=\"bold\""),
@@ -190,12 +193,21 @@ fn test_svg_draw_text_superscript_adjusts_baseline_and_size() {
         },
     );
     let output = renderer.output();
-    assert!(output.contains("font-size=\"14\""));
-    assert!(output.contains("y=\"94\""));
+    // 한컴 PDF 실측: 64% 크기, 기준선 0.44em 상승.
+    assert!(
+        output.contains(&format!("font-size=\"{}\"", 20.0 * 0.64)),
+        "{output}"
+    );
+    assert!(
+        output.contains(&format!("y=\"{}\"", 100.0 - 20.0 * 0.44)),
+        "{output}"
+    );
 }
 
+/// 전각 `「` 는 반각 칸을 받지만 glyph 는 찌그러뜨리지 않고 칸 오른쪽 끝에 맞춘다
+/// (한컴 macOS PDF, `renderer::halfwidth_punct_glyph_offset`).
 #[test]
-fn test_svg_draw_text_corner_quote_uses_halfwidth_text_length() {
+fn test_svg_draw_text_corner_quote_keeps_full_glyph_in_halfwidth_slot() {
     let mut renderer = SvgRenderer::new();
     renderer.begin_page(800.0, 600.0);
     renderer.draw_text(
@@ -219,8 +231,19 @@ fn test_svg_draw_text_corner_quote_uses_halfwidth_text_length() {
         .expect("SVG must emit the following Hangul character");
 
     assert!(
-        quote_line.contains("textLength="),
-        "`「` glyph 는 반각 advance 에 맞춰 textLength 를 가져야 함: {quote_line}"
+        !quote_line.contains("textLength="),
+        "`「` glyph 를 반각 칸에 찌그러뜨리면 안 됨: {quote_line}"
+    );
+    // 돋움체 `「` = 전각 13.333px, 칸 = 반각(HWPUNIT 양자화) → glyph 원점은 칸보다 반각만큼 왼쪽.
+    let quote_x: f64 = quote_line
+        .split("x=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .and_then(|v| v.parse().ok())
+        .expect("quote x");
+    assert!(
+        (quote_x - (10.0 - 13.333 / 2.0)).abs() < 0.05,
+        "여는 낫표는 칸 오른쪽 끝에 맞춰야 함: {quote_line}"
     );
     assert!(
         !hangul_line.contains("textLength="),

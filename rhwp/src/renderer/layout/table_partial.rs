@@ -30,6 +30,7 @@ use crate::model::style::{Alignment, BorderLine};
 use crate::renderer::float_placement::{
     native_single_cell_rowbreak_saved_residual_split_hu,
     para_square_rowbreak_first_fragment_top_offset_px,
+    reflowed_rowbreak_fragment_repeats_outer_margin,
 };
 
 // 표 수평 정렬 보조 타입은 table_layout.rs에 통합됨
@@ -1710,15 +1711,19 @@ impl LayoutEngine {
             para_index,
             control_index,
         );
+        // 새로 조판되는 셀을 가진 문단 기준 자리차지 RowBreak 표는 조각마다 바깥 여백
+        // 위를 다시 연다 — typeset `partial_rowbreak_fragment_spacing_px` 와 같은 조건.
+        let reflowed_fragment_outer_margin = reflowed_rowbreak_fragment_repeats_outer_margin(table);
         let repeat_rowbreak_outer_top = is_continuation
             // The render-only picture-stack projection adds this inset before
             // calling layout_partial_table; reopening it here would double it.
             && projected_cell_stack_continuation_outer_top_hu(table, true) == 0
-            && native_rowbreak_para_float_uses_outer_margin_box(
-                table,
-                self.profile.get().native_hwp5_layout(),
-                0,
-            );
+            && (reflowed_fragment_outer_margin
+                || native_rowbreak_para_float_uses_outer_margin_box(
+                    table,
+                    self.profile.get().native_hwp5_layout(),
+                    0,
+                ));
         let saved_residual_split_hu = native_single_cell_rowbreak_saved_residual_split_hu(
             self.profile.get().native_hwp5_layout(),
             para,
@@ -1848,12 +1853,21 @@ impl LayoutEngine {
                     y_start + effective_vertical_offset
                 };
                 flow_base + hwpunit_to_px(outer_top, self.dpi)
-            } else if prev_table_end.is_finite()
-                && y_start + effective_vertical_offset < prev_table_end - 0.5
-            {
-                prev_table_end
             } else {
-                y_start + effective_vertical_offset
+                // 첫 조각도 typeset 예산(host_spacing.before 의 outer_margin_top)과 같은
+                // 자리에 그린다 (86712 p18 법령 인용 표: 앵커 줄 + 283HU, 한컴 PDF 실측).
+                let first_fragment_outer_top = if !is_continuation && reflowed_fragment_outer_margin
+                {
+                    hwpunit_to_px(table.outer_margin_top as i32, self.dpi)
+                } else {
+                    0.0
+                };
+                let top = y_start + effective_vertical_offset + first_fragment_outer_top;
+                if prev_table_end.is_finite() && top < prev_table_end - 0.5 {
+                    prev_table_end
+                } else {
+                    top
+                }
             }
         } else {
             y_start + effective_vertical_offset

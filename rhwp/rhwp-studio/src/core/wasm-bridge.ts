@@ -8,7 +8,7 @@ import { blake3 } from '@noble/hashes/blake3.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import type { DocumentInfo, PageInfo, PageDef, SectionDef, PageBorderFillSettings, EndnoteShapeSettings, NoteEditInfo, CursorRect, HitTestResult, BodyFootnoteMarkerHit, FootnoteAtCursorResult, DeleteFootnoteResult, LineInfo, TableDimensions, CellInfo, TableCellTarget, CellBbox, CellProperties, TableProperties, DocumentPosition, MoveVerticalResult, SelectionRect, CharProperties, ParaProperties, CellPathEntry, CellPathLike, NavContextEntry, FieldInfoResult, BookmarkInfo, LayerRenderProfile, PageLayerTree, CanvasKitDocumentPreflight } from './types';
 import { parseCanvasKitDocumentPreflight } from './canvaskit-document-preflight';
-import { fontMetricsPolicyForEnvironment } from './font-metrics-policy';
+import { DEFAULT_FONT_METRICS_POLICY } from './font-metrics-policy';
 import {
   normalizeHmlSaveState,
   parseHmlSaveState,
@@ -445,7 +445,7 @@ export class WasmBridge {
 
   loadDocument(data: Uint8Array, fileName?: string): DocumentInfo {
     return this.loadDocumentFromFactory(data, fileName,
-      (bytes) => HwpDocument.fromBytesWithFontMetrics(bytes, this.requestedHwpxFontMetrics()));
+      (bytes) => HwpDocument.fromBytesWithFontMetrics(bytes, DEFAULT_FONT_METRICS_POLICY));
   }
 
   /**
@@ -458,7 +458,7 @@ export class WasmBridge {
     const nextDocumentDigest = `blake3:${bytesToHex(blake3(data))}`;
     let nextDoc: HwpDocument | null = null;
     try {
-      nextDoc = HwpDocument.fromBytesWithFontMetrics(data, this.requestedHwpxFontMetrics());
+      nextDoc = HwpDocument.fromBytesWithFontMetrics(data, DEFAULT_FONT_METRICS_POLICY);
       nextDoc.convertToEditable();
       this.ensureParagraphStableIdsFor(nextDoc);
       nextDoc.setFileName(nextFileName);
@@ -510,7 +510,7 @@ export class WasmBridge {
     return this.loadDocumentFromFactory(
       data,
       fileName,
-      (bytes) => HwpDocument.fromTrustedLocalFileBytesWithFontMetrics(bytes, this.requestedHwpxFontMetrics()),
+      (bytes) => HwpDocument.fromTrustedLocalFileBytesWithFontMetrics(bytes, DEFAULT_FONT_METRICS_POLICY),
     );
   }
 
@@ -573,14 +573,8 @@ export class WasmBridge {
     return JSON.parse(raw) as DocumentInfo;
   }
 
-  private requestedHwpxFontMetrics(): string {
-    const platform = typeof navigator === 'undefined' ? '' : navigator.platform;
-    // The WASM factory detects the real format and limits this choice to HWPX.
-    return fontMetricsPolicyForEnvironment(platform, 'hwpx');
-  }
-
   getFontMetricsPolicy(): string {
-    return this.doc?.getFontMetricsPolicy() ?? 'hancom-windows';
+    return this.doc?.getFontMetricsPolicy() ?? DEFAULT_FONT_METRICS_POLICY;
   }
 
   /** [Task #741 후속] 외부 file path 그림을 dev 서버에서 fetch + inject. */

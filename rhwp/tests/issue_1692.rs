@@ -851,7 +851,8 @@ fn issue_1692_so_sueop_hwp3_page22_relationship_box_uses_table_flow() {
         );
     }
 
-    let hwp3_follow = text_bbox_in_tree(&hwp3_tree, " 그와 유사한 인물은?")
+    // 구두점 '?' 는 영문 글꼴 슬롯이라 별도 run 으로 분리된다 — 한글 부분 run 으로 찾는다.
+    let hwp3_follow = text_bbox_containing_in_tree(&hwp3_tree, "그와 유사한 인물은")
         .expect("HWP3 page 22 follow-up question bbox");
     // [Task #1841] 기준값 재측정: SO-SUEOP-2024.pdf p22 를 PyMuPDF line bbox 로
     // 재측정한 y0=366.72pt(=489.0px). 종전 pdftotext -bbox-layout yMin=359.796pt

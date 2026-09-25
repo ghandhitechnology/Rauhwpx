@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { normalizeMalformedCmapSentinels } from '../src/core/sfnt-repair.ts';
+import { normalizeMalformedCmapSentinels, repairUnderstatedCompositeBounds } from '../src/core/sfnt-repair.ts';
 
 function fontWithFormat4Sentinel(delta: number, rangeOffset = 0): ArrayBuffer {
   const buffer = new ArrayBuffer(116);
@@ -61,4 +61,61 @@ test('repairs only an out-of-range format-4 final sentinel and keeps valid font 
   assert.equal(normalizeMalformedCmapSentinels(valid), valid);
   const glyphArraySentinel = fontWithFormat4Sentinel(0, 2);
   assert.equal(normalizeMalformedCmapSentinels(glyphArraySentinel), glyphArraySentinel);
+});
+
+/** glyph 0: 단순 글리프 (0,300)-(500,700), glyph 1·2: glyph 0 을 쓰는 합성 글리프. */
+function fontWithCompositeHeader(compositeYMax: number, pointMatched = false): ArrayBuffer {
+  const buffer = new ArrayBuffer(192);
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  view.setUint32(0, 0x00010000, false);
+  view.setUint16(4, 4, false);
+  const records = [
+    { tag: 'glyf', offset: 148, length: 44 },
+    { tag: 'head', offset: 76, length: 54 },
+    { tag: 'loca', offset: 140, length: 8 },
+    { tag: 'maxp', offset: 132, length: 6 },
+  ];
+  records.forEach(({ tag, offset, length }, index) => {
+    const record = 12 + index * 16;
+    bytes.set(new TextEncoder().encode(tag), record);
+    view.setUint32(record + 8, offset, false);
+    view.setUint32(record + 12, length, false);
+  });
+  const bounds = (at: number, box: number[]) => box.forEach((value, index) => view.setInt16(at + 2 + index * 2, value, false));
+  bounds(76 + 34, [0, 0, 500, 400]); // head 글꼴 bbox
+  view.setUint16(132 + 4, 3, false); // maxp.numGlyphs
+  [0, 12, 28, 44].forEach((offset, index) => view.setUint16(140 + index * 2, offset / 2, false));
+  view.setInt16(148, 1, false);
+  bounds(148, [0, 300, 500, 700]);
+  for (const [at, flags] of [[160, 0x0002], [176, pointMatched ? 0x0000 : 0x0002]] as const) {
+    view.setInt16(at, -1, false);
+    bounds(at, [0, 0, 500, compositeYMax]);
+    view.setUint16(at + 10, flags, false);
+    view.setUint16(at + 12, 0, false); // component glyph 0, 인자 (0, 0)
+  }
+  return buffer;
+}
+
+test('widens understated composite glyph headers to the component union and keeps checksums valid', () => {
+  const understated = fontWithCompositeHeader(400);
+  const repaired = repairUnderstatedCompositeBounds(understated);
+  assert.notEqual(repaired, understated);
+  const view = new DataView(repaired);
+  assert.equal(view.getInt16(160 + 8, false), 700);
+  assert.equal(view.getInt16(176 + 8, false), 700);
+  assert.equal(view.getInt16(76 + 42, false), 700, 'head.yMax');
+  assert.equal(new DataView(understated).getInt16(160 + 8, false), 400);
+  assert.equal(view.getUint32(12 + 4, false), wholeFontChecksum(repaired.slice(148, 192)));
+  assert.equal(wholeFontChecksum(repaired), 0xb1b0afba);
+
+  const correct = fontWithCompositeHeader(700);
+  assert.equal(repairUnderstatedCompositeBounds(correct), correct);
+});
+
+test('leaves point-matched composites untouched', () => {
+  const repaired = repairUnderstatedCompositeBounds(fontWithCompositeHeader(400, true));
+  const view = new DataView(repaired);
+  assert.equal(view.getInt16(160 + 8, false), 700);
+  assert.equal(view.getInt16(176 + 8, false), 400);
 });

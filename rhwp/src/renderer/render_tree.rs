@@ -917,6 +917,19 @@ impl ShapeTransform {
         self.rotation != 0.0 || self.horz_flip || self.vert_flip
     }
 
+    /// [Task #1067] 중심 기준 "대칭(scale) → 회전" 순서로 변환을 쌓는 렌더러가 쓸 회전각(도).
+    ///
+    /// 한컴은 도형을 먼저 대칭한 뒤 `rotation` 만큼 회전한 모습으로 그린다.
+    /// `scale(flip) · rotate(-θ) = rotate(θ) · scale(flip)` 이므로 한쪽만 대칭일 때는
+    /// 회전 부호를 반전해야 같은 결과가 된다. 양쪽 대칭(180° 회전과 동치)은 그대로 둔다.
+    pub fn rotation_after_flip(&self) -> f64 {
+        if self.horz_flip ^ self.vert_flip {
+            -self.rotation
+        } else {
+            self.rotation
+        }
+    }
+
     /// 그림 노드 한정: 회전각 90°/270° (±1° 톨러런스) 일 때 bbox extent 만 swap.
     /// 그 외 각도(0/45/180 등)는 입력 bbox 그대로 반환.
     ///

@@ -31,7 +31,7 @@ use super::font_lookup::{
     SystemFontFamilies,
 };
 use super::image_conv::{draw_image_bytes, draw_svg_fragment, ImageSampling};
-use super::text_replay::SkiaTextReplay;
+use super::text_replay::{draw_text_run, SkiaTextReplay};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NativeGlyphRunReplayProofReason {
@@ -698,7 +698,8 @@ impl SkiaLayerRenderer {
             let mut text = Paint::default();
             text.set_anti_alias(true);
             text.set_color(Color::from_argb(220, 64, 64, 64));
-            canvas.draw_str(
+            draw_text_run(
+                canvas,
                 label,
                 (bbox.x as f32 + 4.0, (bbox.y + bbox.height / 2.0) as f32),
                 &font,
@@ -749,8 +750,12 @@ impl SkiaLayerRenderer {
                     canvas.translate((0.0, cy * 2.0));
                     canvas.scale((1.0, -1.0));
                 }
+                // [Task #1067] svg/web_canvas 와 동일 — 한쪽만 대칭이면 회전 부호 반전.
                 if transform.rotation != 0.0 {
-                    canvas.rotate(transform.rotation as f32, Some((cx, cy).into()));
+                    canvas.rotate(
+                        transform.rotation_after_flip() as f32,
+                        Some((cx, cy).into()),
+                    );
                 }
             };
 
@@ -1400,7 +1405,7 @@ impl SkiaLayerRenderer {
                     let text_w = font.measure_str(label.as_ref(), Some(&tp)).0;
                     let tx = x + (w - text_w) / 2.0;
                     let ty = y + h / 2.0 + font.size() * 0.35;
-                    canvas.draw_str(label.as_ref(), (tx, ty), &font, &tp);
+                    draw_text_run(canvas, label.as_ref(), (tx, ty), &font, &tp);
                 }
             }
             FormType::CheckBox => {
@@ -1451,7 +1456,7 @@ impl SkiaLayerRenderer {
                     tp.set_color(fg_color);
                     let tx = bx + box_size + 4.0;
                     let ty = y + h / 2.0 + font.size() * 0.35;
-                    canvas.draw_str(caption.as_ref(), (tx, ty), &font, &tp);
+                    draw_text_run(canvas, caption.as_ref(), (tx, ty), &font, &tp);
                 }
             }
             FormType::RadioButton => {
@@ -1488,7 +1493,7 @@ impl SkiaLayerRenderer {
                     tp.set_color(fg_color);
                     let tx = cx + r + 4.0;
                     let ty = y + h / 2.0 + font.size() * 0.35;
-                    canvas.draw_str(caption.as_ref(), (tx, ty), &font, &tp);
+                    draw_text_run(canvas, caption.as_ref(), (tx, ty), &font, &tp);
                 }
             }
             FormType::ComboBox => {
@@ -1539,7 +1544,7 @@ impl SkiaLayerRenderer {
                     tp.set_color(fg_color);
                     let tx = x + 4.0;
                     let ty = y + h / 2.0 + font.size() * 0.35;
-                    canvas.draw_str(&form.text, (tx, ty), &font, &tp);
+                    draw_text_run(canvas, &form.text, (tx, ty), &font, &tp);
                 }
             }
             FormType::Edit => {
@@ -1563,7 +1568,7 @@ impl SkiaLayerRenderer {
                     tp.set_color(fg_color);
                     let tx = x + 4.0;
                     let ty = y + h / 2.0 + font.size() * 0.35;
-                    canvas.draw_str(&form.text, (tx, ty), &font, &tp);
+                    draw_text_run(canvas, &form.text, (tx, ty), &font, &tp);
                 }
             }
         }
@@ -2661,6 +2666,49 @@ mod tests {
             bottom[0] > top[0] + 50 && bottom[1] > top[1] + 30,
             "gradient must vary across the path instead of flattening to its first color: top={top:?}, bottom={bottom:?}"
         );
+    }
+
+    #[test]
+    fn flipped_rotated_path_flips_before_rotating_like_svg() {
+        // 좌상단 삼각형 + 좌우 대칭 + 90° 회전: 한컴/SVG 는 대칭(→우상단) 후 시계 방향
+        // 회전(→우하단)으로 그린다. 회전 부호를 반전하지 않으면 좌상단에 남는다.
+        let mut path = PathNode::new(
+            vec![
+                PathCommand::MoveTo(0.0, 0.0),
+                PathCommand::LineTo(10.0, 0.0),
+                PathCommand::LineTo(0.0, 10.0),
+                PathCommand::ClosePath,
+            ],
+            ShapeStyle {
+                fill_color: Some(0x00000000),
+                ..Default::default()
+            },
+            None,
+        );
+        path.transform = crate::renderer::render_tree::ShapeTransform {
+            rotation: 90.0,
+            horz_flip: true,
+            vert_flip: false,
+        };
+        let tree = PageLayerTree::new(
+            20.0,
+            20.0,
+            LayerNode::leaf(
+                BoundingBox::new(0.0, 0.0, 20.0, 20.0),
+                None,
+                vec![PaintOp::path(BoundingBox::new(0.0, 0.0, 20.0, 20.0), path)],
+            ),
+        );
+        let output = SkiaLayerRenderer::new()
+            .render_raster_with_options(&tree, RasterRenderOptions::default())
+            .expect("render flipped rotated path");
+        let image = decode_rgba(&output.bytes);
+
+        assert!(
+            image.get_pixel(17, 17)[3] > 200,
+            "대칭 후 회전하면 우하단에 그려져야 함"
+        );
+        assert_eq!(image.get_pixel(2, 2)[3], 0);
     }
 
     #[test]

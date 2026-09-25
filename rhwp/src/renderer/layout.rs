@@ -2276,9 +2276,9 @@ pub(crate) use table_layout::border_style_has_diagonal;
 pub(crate) use text_measurement::{
     compute_char_positions, compute_glyph_positions, enter_resolved_shaping_fonts,
     estimate_text_width, estimate_text_width_unrounded, extract_tab_leaders_with_extended,
-    find_next_tab_stop, is_cjk_char, is_halfwidth_cjk_quote, resolved_to_text_style,
-    split_into_clusters, with_resolved_shaping_fonts, ResolvedShapingFont,
-    ResolvedShapingFontScope,
+    find_next_tab_stop, is_cjk_char, is_halfwidth_cjk_quote, is_halfwidth_forced_punct,
+    registered_glyph_advance, resolved_to_text_style, split_into_clusters,
+    with_resolved_shaping_fonts, ResolvedShapingFont, ResolvedShapingFontScope,
 };
 // [Task #826] map_pua_bullet_char 는 통합 테스트 (tests/issue_826.rs) 에서 직접 검증
 // (PUA substitution 매핑 정합) — pub 노출.
@@ -3066,6 +3066,7 @@ impl LayoutEngine {
             &mut tree,
             &mut footer_node,
             page_content,
+            styles,
             layout,
             page_border_fill,
         );
@@ -3758,19 +3759,25 @@ impl LayoutEngine {
         footer_area: &LayoutRect,
         font_size: f64,
     ) -> f64 {
-        // [Task #1728] 자동 쪽번호 세로 위치: HWP 실측상 glyph 은 body_bottom(footer_area.y) 에서
-        // margin_footer/2 + ~10px 아래에 온다(gc/ktx/aift 3문서 1~2px 정합). 종전 공식은
-        // footer_area.height(= margin_bottom)/2 를 써서, margin_footer ≠ margin_bottom 인 문서
-        // (margin_footer=0 인 giant cell, margin_footer≠margin_bottom 인 KTX)를 7~18px 낮게 놓았다.
-        // margin_footer = page_height - footer_area.bottom.
-        let center_y = if footer_area.height > 0.5 {
-            let margin_footer =
-                (layout.page_height - (footer_area.y + footer_area.height)).max(0.0);
-            footer_area.y + margin_footer / 2.0
-        } else {
-            (footer_area.y + layout.page_height) / 2.0
-        };
-        center_y + font_size / 3.0
+        // 자동 쪽 번호 줄은 꼬리말 영역 *바닥* 에 붙고, 영역이 줄보다 낮으면 영역 위쪽에
+        // 맞춘다. 기준선 = max(영역 위 + 1.176em, 영역 바닥 − 0.234em).
+        // 한컴 PDF 실측 (10pt 쪽 번호, 기준선 pt):
+        // - 영역 바닥 기준: hy-001(macOS, 아래 10/꼬리말 10mm) 바닥 −2.34pt,
+        //   aift/hwpx-01/sungeo/pic-in-head-02(아래 10~15/꼬리말 10~15mm) −2.2~2.4pt.
+        //   꼬리말 높이·아래 여백과 무관하다 (종전 `영역 위 + 아래 여백/2 + em/3` 공식은
+        //   꼬리말 15mm 문서를 5~6pt 높게 놓았다).
+        // - 꼬리말 0mm(table_giant_cell_overfill): 영역 위(= 바닥) + 11.76pt.
+        // 참고 문서 12건 모두 ±1pt 이내 (한컴 Windows 의 함초롬돋움 쪽 번호는 +0.8pt).
+        const PAGE_NUMBER_TOP_BASELINE_EM: f64 = 1.176;
+        const PAGE_NUMBER_BOTTOM_DESCENT_EM: f64 = 0.234;
+        // 한컴 꼬리말 칸 = [footer_area.y, footer_area.y + margin_footer],
+        // margin_footer = page_height - footer_area.bottom (용지 아래 − 아래 여백 위치).
+        let margin_footer = (layout.page_height - (footer_area.y + footer_area.height)).max(0.0);
+        let area_bottom = footer_area.y + margin_footer;
+        let baseline = (footer_area.y + font_size * PAGE_NUMBER_TOP_BASELINE_EM)
+            .max(area_bottom - font_size * PAGE_NUMBER_BOTTOM_DESCENT_EM);
+        // 호출부는 줄 상단을 받아 run baseline(= font_size)을 더한다.
+        baseline - font_size
     }
 
     fn page_number_baseline_y(
@@ -4543,6 +4550,7 @@ impl LayoutEngine {
         tree: &mut PageRenderTree,
         footer_node: &mut RenderNode,
         page_content: &PageContent,
+        styles: &ResolvedStyleSet,
         layout: &PageLayoutInfo,
         page_border_fill: Option<&PageBorderFill>,
     ) {
@@ -4572,9 +4580,26 @@ impl LayoutEngine {
             // 문서 8건 오라클 실측 전건 일치(7건 직접 10.0pt, 1건은 2-up 내보내기로
             // 0.707배 축소된 7.07pt 로 설명됨). 종전 값 10.0 은 pt 로 의도된 값이
             // px 필드에 들어가 96dpi 에서 7.5pt 로 렌더되던 단위 혼동이었다.
+            // 글꼴·크기는 문서의 '쪽 번호' 스타일 글자 모양을 따르고(기본 10pt), 스타일이
+            // 없는 문서만 종전 바탕 10pt 로 그린다. 번호·기호는 영문 글꼴로 그린다.
             const PAGE_NUMBER_PT: f64 = 10.0;
-            let font_size = PAGE_NUMBER_PT * self.dpi / 72.0;
-            let text_width = page_num_text.chars().count() as f64 * font_size * 0.6;
+            let style = match styles.page_number_char_shape {
+                Some(id) => {
+                    let mut style = resolved_to_text_style(styles, id, 1);
+                    if style.font_size <= 0.0 {
+                        style.font_size = PAGE_NUMBER_PT * self.dpi / 72.0;
+                    }
+                    style
+                }
+                None => TextStyle {
+                    font_family: "바탕".to_string(),
+                    font_size: PAGE_NUMBER_PT * self.dpi / 72.0,
+                    color: 0x000000,
+                    ..Default::default()
+                },
+            };
+            let font_size = style.font_size;
+            let text_width = estimate_text_width(&page_num_text, &style);
 
             let is_odd_page = page_content.page_number % 2 == 1;
             let x = match pnp.position {
@@ -4640,12 +4665,7 @@ impl LayoutEngine {
                 run_id,
                 RenderNodeType::TextRun(TextRunNode {
                     text: page_num_text,
-                    style: TextStyle {
-                        font_family: "바탕".to_string(),
-                        font_size,
-                        color: 0x000000,
-                        ..Default::default()
-                    },
+                    style,
                     char_shape_id: None,
                     para_shape_id: None,
                     section_index: None,
@@ -8213,6 +8233,9 @@ impl LayoutEngine {
             .and_then(|p| p.controls.get(control_index))
             .map(|c| matches!(c, Control::Table(t) if t.common.treat_as_char))
             .unwrap_or(false);
+        // 직전 TAC 표가 같은 문단의 앞 줄인지 — 다른 문단이면 커서는 이미 이 문단의
+        // 줄 상단(직전 표 하단 + om_bottom + 줄간격)에 있으므로 표 위 간격을 새로 적용한다.
+        let para_already_started = para_start_y.contains_key(&para_index);
         if let Some(existing_y) = para_start_y.get(&para_index) {
             if is_current_tac && y_offset > *existing_y + 1.0 {
                 para_start_y.insert(para_index, y_offset);
@@ -8267,7 +8290,10 @@ impl LayoutEngine {
                     .unwrap_or(para.para_shape_id as usize);
                 let is_column_top = (y_offset - col_area.y).abs() < 1.0;
                 if is_tac {
-                    if !prev_tac_seg_applied {
+                    // 같은 문단 안 연속 TAC 표는 줄 간격(vpos 차)으로 이미 진행했다.
+                    // 앞 문단의 TAC 표 뒤라도 이 표는 새 줄 상단 + om_top 에 놓인다
+                    // (hy-001 p1: 연속 TAC 표 문단 3개, 각 표가 줄 상단 + 283HU).
+                    if !(*prev_tac_seg_applied && para_already_started) {
                         let outer_margin_top_px =
                             if let Some(Control::Table(t)) = para.controls.get(control_index) {
                                 hwpunit_to_px(t.outer_margin_top as i32, self.dpi)
@@ -9025,8 +9051,11 @@ impl LayoutEngine {
                     // the repeated outer-top inset this is one fragment boundary reserve, not a
                     // per-row height adjustment.
                     y_offset += hwpunit_to_px(trailing, self.dpi);
-                } else if repeat_fragment_outer_margin {
-                    if let Some(Control::Table(table)) = para.controls.get(control_index) {
+                } else if let Some(Control::Table(table)) = para.controls.get(control_index) {
+                    // 새로 조판되는 셀의 RowBreak 조각도 typeset 이 바깥 여백 아래를 예약한다.
+                    if repeat_fragment_outer_margin
+                        || crate::renderer::float_placement::reflowed_rowbreak_fragment_repeats_outer_margin(table)
+                    {
                         y_offset += hwpunit_to_px(table.outer_margin_bottom as i32, self.dpi);
                     }
                 }
@@ -10021,7 +10050,22 @@ impl LayoutEngine {
                             } else if has_full_para_item {
                                 para_start
                             } else {
-                                y_offset
+                                // 같은 문단의 비-TAC TopAndBottom 개체가 줄을 밀어낸 경우
+                                // 줄 상단은 개체 하단 + outer_margin_bottom 이다(TAC 그림
+                                // 경로의 sibling_reserved 와 동일). 표 항목은 여백 없이 표
+                                // 하단까지만 진행하므로 그 여백만큼 하한을 둔다
+                                // (hy-001 p2 pi=27: 표 아래 283HU 뒤 로고 글상자).
+                                let sibling_reserved_px = hwpunit_to_px(
+                                    super::layout::paragraph_layout::calc_sibling_topandbottom_reserved_hu(
+                                        &para.controls,
+                                    ),
+                                    self.dpi,
+                                );
+                                if sibling_reserved_px > 0.0 {
+                                    y_offset.max(para_start + sibling_reserved_px)
+                                } else {
+                                    y_offset
+                                }
                             };
 
                             if !already_registered {

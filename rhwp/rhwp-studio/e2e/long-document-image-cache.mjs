@@ -50,7 +50,8 @@ try {
     };
   }, loaded.pageCount);
 
-  assert.equal(result.pageCount, 390);
+  // 한컴 PDF(pdf/2025 행정업무운영 편람(최종)-2024.pdf)는 383쪽이다. 현재 조판은 387쪽.
+  assert.equal(result.pageCount, 387);
   assert.ok(result.activeCanvases > 0);
   assert.ok(
     result.stats.decodedCanvasPixels <= MAX_DECODED_PIXELS

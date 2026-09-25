@@ -371,7 +371,9 @@ fn note_number_format_from_hwp_code(code: u8) -> RenderNumberFormat {
     }
 }
 
-fn empty_paragraph_fallback_line_metrics(
+/// 저장 LINE_SEG 없는 순수 빈 문단의 (줄 높이, 줄간격). typeset 과 본문 렌더
+/// (`paragraph_layout`) 가 같은 값으로 흐름을 진행해야 쪽 배정과 그리기 좌표가 맞는다.
+pub(crate) fn empty_paragraph_fallback_line_metrics(
     para: &Paragraph,
     styles: &ResolvedStyleSet,
     para_style: Option<&crate::renderer::style_resolver::ResolvedParaStyle>,
@@ -631,13 +633,14 @@ fn partial_rowbreak_fragment_spacing_px(
         };
         return (before, hwpunit_to_px(trailing, dpi));
     }
-    let repeats_outer_margin = repeat_outer_margin
+    let repeats_outer_margin = (repeat_outer_margin
         && !table.common.treat_as_char
         && is_para_topbottom_float(&table.common)
         && matches!(
             table.page_break,
             crate::model::table::TablePageBreak::RowBreak
-        );
+        ))
+        || crate::renderer::float_placement::reflowed_rowbreak_fragment_repeats_outer_margin(table);
     let projected_stack_outer_top = hwpunit_to_px(
         projected_cell_stack_continuation_outer_top_hu(table, is_continuation),
         dpi,

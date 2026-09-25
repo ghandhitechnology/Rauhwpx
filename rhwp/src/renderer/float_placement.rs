@@ -77,6 +77,21 @@ pub(crate) fn following_fixed_picture_wrap_band(
 }
 
 /// A non-TAC `TopAndBottom` object positioned from its host paragraph.
+/// 저장 LINE_SEG 없는 문단이 섞인 셀. 한컴은 이런 셀 내용을 저장 줄 위치 없이 새로
+/// 조판하므로, 저장 vpos 에 기댄 호환 규칙(빈 문단 겹침, 저장 쪽 경계)을 적용하지 않는다.
+pub(crate) fn cell_is_reflowed(cell: &crate::model::table::Cell) -> bool {
+    cell.paragraphs.iter().any(|p| p.line_segs.is_empty())
+}
+
+/// 문단 기준 자리차지 RowBreak 표가 새로 조판되는 셀을 가지면 한컴은 쪽마다 조각을
+/// 바깥 여백 상자로 닫는다: 조각마다 위 여백을 다시 열고 아래 여백을 쪽 예산에서 뺀다
+/// (86712 법령 인용 표: 연속 쪽 표 상단 = 본문 상단 + 283HU, 첫 조각 34줄).
+pub(crate) fn reflowed_rowbreak_fragment_repeats_outer_margin(table: &Table) -> bool {
+    is_para_topbottom_float(&table.common)
+        && matches!(table.page_break, TablePageBreak::RowBreak)
+        && table.cells.iter().any(cell_is_reflowed)
+}
+
 pub(crate) fn is_para_topbottom_float(common: &CommonObjAttr) -> bool {
     !common.treat_as_char
         && matches!(common.text_wrap, TextWrap::TopAndBottom)

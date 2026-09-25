@@ -286,6 +286,12 @@ impl Default for TextStyle {
     }
 }
 
+/// 합성 진하게 획 두께 (글자 크기 대비, 획 중심 기준 전체 폭).
+///
+/// 한컴(macOS) PDF 는 Bold 글꼴이 없는 서체를 `2 Tr`(fill+stroke) 로 그리고
+/// 선 굵기를 글자 크기의 1/40 로 준다 (돋움체 10pt 2.075/83, HY견고딕 12pt 2.5/100).
+pub(crate) const FAUX_BOLD_STROKE_EM: f64 = 0.025;
+
 /// 실제 Bold 메트릭이 없을 때만 한/글과 같은 가는 합성 획을 추가한다.
 /// Bold 서체에 획까지 겹치면 글자가 과하게 두꺼워진다.
 pub(crate) fn faux_bold_stroke_width(style: &TextStyle, font_size: f64) -> Option<f64> {
@@ -295,7 +301,106 @@ pub(crate) fn faux_bold_stroke_width(style: &TextStyle, font_size: f64) -> Optio
     let primary = style_resolver::primary_font_name(&style.font_family);
     font_metrics_data::find_metric(primary, true, style.italic)?
         .bold_fallback
-        .then_some(font_size * 0.02)
+        .then_some(font_size * FAUX_BOLD_STROKE_EM)
+}
+
+/// 위/아래 첨자 glyph 크기 비율. 한컴(macOS) PDF 실측: 15pt 본문 → 9.6pt (80/125 장치 단위).
+pub(crate) const SCRIPT_GLYPH_SCALE: f64 = 0.64;
+/// 위첨자 기준선 상승량 (기본 글자 크기 대비). 한컴 PDF 실측: 15pt → 6.6pt.
+pub(crate) const SUPERSCRIPT_RAISE_EM: f64 = 0.44;
+/// 아래첨자 기준선 하강량 (기본 글자 크기 대비). 한컴 PDF 실측: 15pt → 1.8pt.
+pub(crate) const SUBSCRIPT_DROP_EM: f64 = 0.12;
+
+/// 위/아래 첨자의 (glyph 크기, 기준선 y 이동량). 모든 렌더러(SVG/Canvas/Skia/HTML)가 공유한다.
+/// 진행폭도 같은 비율로 줄어들며, 이는 측정 단계(`text_measurement::script_measure_style`)가
+/// 맡으므로 렌더러는 레이아웃 글자 위치를 그대로 쓴다.
+pub(crate) fn script_glyph_size_and_shift(style: &TextStyle, base_font_size: f64) -> (f64, f64) {
+    if style.superscript {
+        (
+            base_font_size * SCRIPT_GLYPH_SCALE,
+            -base_font_size * SUPERSCRIPT_RAISE_EM,
+        )
+    } else if style.subscript {
+        (
+            base_font_size * SCRIPT_GLYPH_SCALE,
+            base_font_size * SUBSCRIPT_DROP_EM,
+        )
+    } else {
+        (base_font_size, 0.0)
+    }
+}
+
+/// 반각 advance 로 줄인 전각 구두점의 glyph x 오프셋 (슬롯 시작 기준, OpenType `halt` 규칙).
+///
+/// 한컴(macOS)은 레이아웃에서 전각 `「` 에 반각 칸만 주되 glyph 는 줄이지 않고 그린다.
+/// 잉크가 전각 칸 오른쪽 반에 있는 여는 괄호·따옴표는 glyph 를 칸 오른쪽 끝에 맞추고
+/// (왼쪽으로 전각−반각 만큼 이동), 잉크가 왼쪽 반에 있는 닫는 쪽은 칸 시작에 둔다.
+/// PDF 실측(el-school-001 제목, HY헤드라인M 16pt·자간 -13%): `「` glyph 원점 141.12pt,
+/// 다음 글자 155.04pt — 전각 폭에도 슬롯과 같은 자간 비율(0.87)이 적용된 13.92pt.
+///
+/// `natural` 은 실제로 그릴 glyph 의 advance(장평 반영), `glyph_advance` 는 레이아웃이 준
+/// glyph advance(자간 제외, `compute_glyph_positions`). glyph 가 이미 칸에 맞으면 `None` —
+/// 렌더러는 기존 배치를 그대로 쓴다. SVG/Canvas/Skia 가 공유한다.
+pub(crate) fn halfwidth_punct_glyph_offset(
+    cluster: &str,
+    natural: f64,
+    glyph_advance: f64,
+    style: &TextStyle,
+) -> Option<f64> {
+    let mut chars = cluster.chars();
+    let (Some(ch), None) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    if !layout::is_halfwidth_forced_punct(ch)
+        || !natural.is_finite()
+        || glyph_advance <= 0.0
+        || natural <= glyph_advance * 1.2
+    {
+        return None;
+    }
+    // 여는 쪽(Unicode Ps/Pi): 잉크가 전각 칸의 오른쪽 반에 있다.
+    let opening = matches!(
+        ch,
+        '\u{2018}' | '\u{201B}' | '\u{201C}' | '\u{201F}' | '\u{300C}'
+    );
+    if !opening {
+        return Some(0.0);
+    }
+    // 자간(%)은 glyph 진행폭에 비례하므로 전각 폭에도 같은 비율을 적용한다.
+    let font_size = if style.font_size > 0.0 {
+        style.font_size
+    } else {
+        12.0
+    };
+    let spacing_scale = (1.0 + style.letter_spacing / font_size).max(0.0);
+    Some(-(natural - glyph_advance) * spacing_scale)
+}
+
+/// run 전체에 `halfwidth_punct_glyph_offset` 을 적용한 (글자 index, glyph x 오프셋) 목록.
+///
+/// 레이어 트리 JSON 으로 글자를 재생하는 backend(CanvasKit)가 규칙을 복제하지 않도록
+/// 엔진이 계산해 내보낸다. natural 폭은 SVG 와 같이 등록 글꼴 메트릭 기준이며,
+/// 0 이 아닌 오프셋(여는 괄호·따옴표)만 담는다.
+pub(crate) fn halfwidth_punct_glyph_offsets(text: &str, style: &TextStyle) -> Vec<(usize, f64)> {
+    if !text.chars().any(layout::is_halfwidth_forced_punct) {
+        return Vec::new();
+    }
+    let glyph_positions = layout::compute_glyph_positions(text, style);
+    let ratio = if style.ratio > 0.0 { style.ratio } else { 1.0 };
+    let mut utf8 = [0u8; 4];
+    text.chars()
+        .enumerate()
+        .filter_map(|(idx, ch)| {
+            if !layout::is_halfwidth_forced_punct(ch) {
+                return None;
+            }
+            let natural = layout::registered_glyph_advance(ch, style)? * ratio;
+            let advance = glyph_positions.get(idx + 1)? - glyph_positions.get(idx)?;
+            let offset =
+                halfwidth_punct_glyph_offset(ch.encode_utf8(&mut utf8), natural, advance, style)?;
+            (offset != 0.0).then_some((idx, offset))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -312,7 +417,7 @@ mod faux_bold_tests {
         assert_eq!(faux_bold_stroke_width(&style, 17.3), None);
 
         style.font_family = "굴림체".into();
-        assert_eq!(faux_bold_stroke_width(&style, 16.0), Some(0.32));
+        assert_eq!(faux_bold_stroke_width(&style, 16.0), Some(0.4));
 
         style.bold = false;
         assert_eq!(faux_bold_stroke_width(&style, 16.0), None);
@@ -1127,6 +1232,34 @@ pub fn canvas_font_family_chain(font_family: &str) -> String {
     }
 }
 
+/// 한컴 전용 HFT 영문 글꼴 대신 글리프를 그릴 설치 서체 (선호 순서).
+///
+/// HCI Poppy(HMEPO*.HFT)는 Palatino 복제 서체다. 폭 테이블이 macOS Palatino 와
+/// 같고, Palatino Linotype 과는 `# + / < = > @ ^ | ~` 폭(0.605em vs 0.5em)이 다르다.
+/// 레이아웃은 HFT 자체 폭(font_metrics_data "HCI Poppy")으로 재므로 호스트와
+/// 무관하게 같다. 글리프만 설치된 첫 서체로 그린다: macOS Palatino(4 스타일) →
+/// Windows Palatino Linotype(4 스타일) → Book Antiqua (한컴 FontMap.dat
+/// `mapAllFont=Palatino,Palatino Linotype` / `Palatino,Book Antiqua`).
+pub(crate) fn hft_substitute_faces(font_family: &str) -> &'static [&'static str] {
+    match font_family.trim() {
+        "HCI Poppy" => &["Palatino", "Palatino Linotype", "Book Antiqua"],
+        _ => &[],
+    }
+}
+
+/// HFT 폭 테이블에 없는 글자(0x7F 이후)를 잴 글꼴.
+///
+/// 한컴 FontMap.dat `mapFont=HCI Poppy,Palatino Linotype`: HFT 에 없는 글자는
+/// 한컴 번들 pala.ttf 로 그린다 (hy-001 PDF 의 `·` = PalatinoLinotype-Roman).
+pub(crate) fn hft_metric_fallback(font_family: &str) -> Option<&'static str> {
+    match font_family.trim() {
+        "HCI Poppy" => Some("Palatino Linotype"),
+        _ => None,
+    }
+}
+
+const HCI_POPPY_FALLBACK: &str = "'Palatino','Palatino Linotype','Book Antiqua','Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+
 /// CSS generic fallback 반환 (serif 또는 sans-serif)
 ///
 /// 폰트 이름에 명조/바탕/궁서 등 세리프 계열 키워드가 포함되면 "serif",
@@ -1170,6 +1303,9 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
     {
         // Monospace: Windows → 오픈소스 → generic
         return "'GulimChe','굴림체','D2Coding','Noto Sans Mono',monospace";
+    }
+    if !hft_substitute_faces(font_family).is_empty() {
+        return HCI_POPPY_FALLBACK;
     }
     // 세리프 키워드 (한글)
     if font_family.contains("바탕") || font_family.contains("명조") || font_family.contains("궁서")
@@ -1857,6 +1993,9 @@ mod tests {
         assert_eq!(generic_fallback("HY견명조"), serif);
         assert_eq!(generic_fallback("Times New Roman"), serif);
         assert_eq!(generic_fallback("Palatino Linotype"), serif);
+        // HFT HCI Poppy: Palatino 대체 서체 → 세리프 체인
+        assert!(generic_fallback("HCI Poppy").starts_with("'Palatino','Palatino Linotype',"));
+        assert!(generic_fallback("HCI Poppy").ends_with(serif));
         // KoPub바탕체는 이름에 "바탕체"가 들어가지만 고정폭 BatangChe가 아니라
         // 비례폭 본문/제목용 세리프 계열이다.
         assert_eq!(generic_fallback("KoPub바탕체 Light"), serif);

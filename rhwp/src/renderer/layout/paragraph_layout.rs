@@ -1097,6 +1097,8 @@ struct RunEmitVars {
     extra_char_sp: f64,
     extra_dash_sp: f64,
     extra_word_sp: f64,
+    /// 줄 머리 공백 run 수 — 이 run 들은 extra_word_sp 를 받지 않는다.
+    natural_leading_space_runs: usize,
     has_tabs: bool,
     is_last_line_of_para: bool,
     line_height: f64,
@@ -1735,7 +1737,105 @@ pub(crate) fn right_tab_block_width(
     w
 }
 
-/// [Task #2067] 정렬(양쪽/배분/나눔)·오버플로우·셀 underflow 에 따른 여분 간격 계산.
+/// 줄 머리 공백을 별도 run 으로 떼어 낸 줄과 그 공백 run 수.
+///
+/// 양쪽 정렬 여유를 받지 않는 줄 머리 공백을 렌더에서 구분하기 위한 것으로, 문자 순서와
+/// 스타일은 그대로다. 머리 공백이 없거나 줄 전체가 공백이면 `None`.
+fn split_line_leading_spaces(comp_line: &ComposedLine) -> Option<(ComposedLine, usize)> {
+    let mut runs = Vec::with_capacity(comp_line.runs.len() + 1);
+    let mut leading_runs = 0;
+    let mut rest = comp_line.runs.iter();
+    for run in rest.by_ref() {
+        let spaces = run.text.chars().take_while(|c| *c == ' ').count();
+        if spaces == 0 {
+            runs.push(run.clone());
+            break;
+        }
+        if run.display_text.is_some() || run.char_overlap.is_some() || run.footnote_marker.is_some()
+        {
+            return None;
+        }
+        leading_runs += 1;
+        if spaces == run.text.chars().count() {
+            runs.push(run.clone());
+            continue;
+        }
+        let (head, tail) = run.text.split_at(spaces);
+        runs.push(ComposedTextRun {
+            text: head.to_string(),
+            ..run.clone()
+        });
+        runs.push(ComposedTextRun {
+            text: tail.to_string(),
+            ..run.clone()
+        });
+        break;
+    }
+    if leading_runs == 0 || leading_runs == runs.len() {
+        return None;
+    }
+    runs.extend(rest.cloned());
+    Some((
+        ComposedLine {
+            runs,
+            ..comp_line.clone()
+        },
+        leading_runs,
+    ))
+}
+
+/// 마지막 가시 글자 뒤에 붙는 자간(px, 음수 자간이면 음수).
+///
+/// 한컴은 줄의 마지막 글자 뒤 자간을 줄 폭에 넣지 않는다 — 정렬 기준은 눈에 보이는
+/// 글자 끝이다 (el-school-001 자간 +36% 가운데 줄, hy-001 자간 +7% 양쪽 정렬 줄 실측).
+/// 자간은 글자 진행폭 비례이므로 마지막 글자 1자 폭을 자간 유무로 재어 차이를 구한다.
+fn line_trailing_letter_spacing(
+    comp_line: &ComposedLine,
+    styles: &ResolvedStyleSet,
+    tab_width: f64,
+) -> f64 {
+    for run in comp_line.runs.iter().rev() {
+        let text = effective_text_for_metrics(run);
+        let Some(last) = text.chars().rev().find(|c| *c != ' ') else {
+            continue;
+        };
+        if last == '\t' || last == '\u{FFFC}' || run.char_overlap.is_some() {
+            return 0.0;
+        }
+        let mut ts = resolved_to_text_style(styles, run.char_style_id, run.lang_index);
+        ts.default_tab_width = tab_width;
+        let glyph = last.to_string();
+        let spaced = estimate_text_width(&glyph, &ts);
+        ts.letter_spacing = 0.0;
+        return spaced - estimate_text_width(&glyph, &ts);
+    }
+    0.0
+}
+
+/// 가운데/오른쪽 정렬 폭에서 제외할 줄 끝 여분 폭(px) — 줄 끝 공백과 마지막 글자 뒤
+/// 자간. 한컴은 둘 다 정렬 폭에 넣지 않는다 (hy-001 `과  장 ` 오른쪽 정렬 셀 실측).
+fn line_trailing_alignment_excess(
+    comp_line: &ComposedLine,
+    styles: &ResolvedStyleSet,
+    tab_width: f64,
+) -> f64 {
+    let mut spaces_width = 0.0;
+    for run in comp_line.runs.iter().rev() {
+        let text = effective_text_for_metrics(run);
+        let spaces = text.chars().rev().take_while(|c| *c == ' ').count();
+        if spaces > 0 {
+            let mut ts = resolved_to_text_style(styles, run.char_style_id, run.lang_index);
+            ts.default_tab_width = tab_width;
+            spaces_width += estimate_text_width(&" ".repeat(spaces), &ts);
+        }
+        if spaces < text.chars().count() {
+            break;
+        }
+    }
+    spaces_width + line_trailing_letter_spacing(comp_line, styles, tab_width)
+}
+
+/// [Task #2067] 정렬(양쪽/배분/나눔)·오버플로우에 따른 여분 간격 계산.
 /// 반환 = (extra_word_sp, extra_char_sp, extra_dash_sp).
 #[allow(clippy::too_many_arguments)]
 fn compute_line_extra_spacing(
@@ -1751,32 +1851,8 @@ fn compute_line_extra_spacing(
     total_text_width: f64,
     available_width: f64,
     tab_width: f64,
+    natural_leading_spaces: usize,
 ) -> (f64, f64, f64) {
-    // 음수 자간은 마지막 글자의 advance도 줄이지만 실제 glyph 잉크 폭은 줄이지 않는다.
-    // 나눔정렬에서 advance만 셀 끝에 맞추면 정상 폭으로 그린 마지막 glyph가 clip을
-    // 넘어가므로, 마지막 가시 글자의 음수 자간만 시각 점유 폭에 되돌린다.
-    let trailing_glyph_ink_overhang = || -> f64 {
-        for run in comp_line.runs.iter().rev() {
-            if let Some(last_visible) = run.text.chars().rev().find(|c| *c != ' ') {
-                if last_visible == '\t' || last_visible == '\u{FFFC}' {
-                    return 0.0;
-                }
-                let mut with_spacing =
-                    resolved_to_text_style(styles, run.char_style_id, run.lang_index);
-                with_spacing.default_tab_width = tab_width;
-                if with_spacing.letter_spacing >= 0.0 {
-                    return 0.0;
-                }
-                let glyph = last_visible.to_string();
-                let spaced_width = estimate_text_width(&glyph, &with_spacing);
-                with_spacing.letter_spacing = 0.0;
-                let ink_advance = estimate_text_width(&glyph, &with_spacing);
-                return (ink_advance - spaced_width).max(0.0);
-            }
-        }
-        0.0
-    };
-
     // 양쪽 정렬 안전장치: 가득 찬 자동 줄바꿈 줄의 여유는 다음 줄 첫 어절보다 작으므로
     // 간격 하나에 글자 두 개 폭 넘게, 글자 하나에 반 글자 폭 넘게 붙지 않는다. 그보다
     // 크면 실제로 찬 줄이 아니므로(낡은 줄 정보 등) 늘리지 않고 앞쪽 정렬로 둔다.
@@ -1799,7 +1875,8 @@ fn compute_line_extra_spacing(
         let all_chars: Vec<char> = comp_line.runs.iter().flat_map(|r| r.text.chars()).collect();
         let trailing_spaces = all_chars.iter().rev().take_while(|c| **c == ' ').count();
         let visible_count = all_chars.len() - trailing_spaces;
-        let interior_spaces = all_chars[..visible_count]
+        // 줄 머리 공백(natural_leading_spaces)은 자연 폭 그대로 두고 여유를 받지 않는다.
+        let interior_spaces = all_chars[natural_leading_spaces.min(visible_count)..visible_count]
             .iter()
             .filter(|c| **c == ' ')
             .count();
@@ -1824,12 +1901,11 @@ fn compute_line_extra_spacing(
         };
         if interior_spaces > 0 {
             let trailing_width = measure_trailing_spaces(0.0, 0.0);
-            let split_ink_overhang = if alignment == Alignment::Split {
-                trailing_glyph_ink_overhang()
-            } else {
-                0.0
-            };
-            let effective_used = total_text_width - trailing_width + split_ink_overhang;
+            // 마지막 글자 뒤 자간도 줄 폭에서 뺀다 — 음수 자간이면 마지막 glyph 가 advance
+            // 보다 넓게 그려져 셀 끝을 넘지 않도록 되돌리는 효과도 같다 (나눔 정렬 셀).
+            let effective_used = total_text_width
+                - trailing_width
+                - line_trailing_letter_spacing(comp_line, styles, tab_width);
             let slack = available_width - effective_used;
             if suppress_cell_overflow_spacing && slack < 0.0 {
                 // 셀 내부 폭이 글자 자연 폭보다 작아도 한컴처럼 글자를 압축하지 않는다.
@@ -1929,56 +2005,6 @@ fn compute_line_extra_spacing(
             let min_sp = -avg_char_w * 0.5;
             (0.0, raw.max(min_sp), 0.0)
         }
-    } else if in_cell
-        && total_char_count > 1
-        && !has_tabs
-        && alignment != Alignment::Left
-        && total_text_width < available_width
-        && total_text_width > 0.0
-        && comp_line.runs.iter().any(|r| {
-            let ts = resolved_to_text_style(styles, r.char_style_id, r.lang_index);
-            ts.letter_spacing < -0.01
-        })
-        && {
-            // 자연 폭(letter_spacing=0)이 셀 inner 폭보다 커야만 "문서가
-            // 셀에 맞추기 위해 음수 자간으로 압축했던" 케이스로 간주. 그렇지
-            // 않으면 음수 자간은 장식적 의도이므로 기존 동작(natural width
-            // 그대로, 좌우 여백 유지)을 유지한다.
-            let natural_w: f64 = comp_line
-                .runs
-                .iter()
-                .map(|r| {
-                    let mut ts = resolved_to_text_style(styles, r.char_style_id, r.lang_index);
-                    ts.default_tab_width = tab_width;
-                    ts.letter_spacing = 0.0;
-                    estimate_text_width(&r.text, &ts)
-                })
-                .sum();
-            natural_w > available_width
-        }
-    {
-        // 표 셀 내부 underflow: HWP 편집기가 자연 폭이 셀을 넘는 텍스트를
-        // 음수 자간으로 셀 폭에 맞춰 저장했으므로, 재렌더 시 우리 폰트
-        // 메트릭으로 좁게 측정되더라도 셀 폭을 채우도록 자간을 양수로 보정.
-        //
-        // narrow glyph per-char 클램프가 개입하면 선형 분배와 실제 렌더 폭이
-        // 어긋나므로 수렴 반복으로 보정한다.
-        let mut extra = (available_width - total_text_width) / total_char_count as f64;
-        for _ in 0..3 {
-            let mut measured = 0.0f64;
-            for r in &comp_line.runs {
-                let mut ts = resolved_to_text_style(styles, r.char_style_id, r.lang_index);
-                ts.default_tab_width = tab_width;
-                ts.extra_char_spacing = extra;
-                measured += estimate_text_width(&r.text, &ts);
-            }
-            let delta = available_width - measured;
-            if delta.abs() < 0.5 {
-                break;
-            }
-            extra += delta / total_char_count as f64;
-        }
-        (0.0, extra, 0.0)
     } else {
         (0.0, 0.0, 0.0)
     }
@@ -4590,6 +4616,20 @@ impl LayoutEngine {
                 .sum();
             let suppress_cell_overflow_spacing =
                 cell_ctx.is_some() && total_text_width > available_width * 1.15;
+            // 양쪽 정렬 줄 머리 공백은 한컴처럼 자연 폭으로 두고 줄 안 공백에만 여유를
+            // 나눈다 (hy-001 ` ㅇ ` 줄 실측). 렌더에서 그 공백만 여유를 빼도록 run 을 나눈다.
+            let leading_space_split = if alignment == Alignment::Justify
+                && needs_justify
+                && line_tac_offsets_for_width.is_empty()
+            {
+                split_line_leading_spaces(comp_line)
+            } else {
+                None
+            };
+            let natural_leading_spaces = leading_space_split
+                .as_ref()
+                .map(|(line, runs)| line.runs[..*runs].iter().map(|r| r.text.len()).sum())
+                .unwrap_or(0);
 
             let (extra_word_sp, extra_char_sp, extra_dash_sp) = compute_line_extra_spacing(
                 comp_line,
@@ -4604,6 +4644,7 @@ impl LayoutEngine {
                 total_text_width,
                 spacing_width,
                 tab_width,
+                natural_leading_spaces,
             );
 
             let line_plain_text: String = comp_line.runs.iter().map(|r| r.text.as_str()).collect();
@@ -4622,7 +4663,7 @@ impl LayoutEngine {
                     is_treat_as_char_equation_control(para.and_then(|p| p.controls.get(*ci)))
                 });
 
-            // 셀 overflow/underflow 분기로 자간 보정된 경우 정렬 기준 폭은 실제 렌더 폭이어야 함.
+            // 셀 overflow 분기로 자간 보정된 경우 정렬 기준 폭은 실제 렌더 폭이어야 함.
             // 특히 #1285 답안지 `수험번호` 라벨은 음수 자간으로 압축된 텍스트를 자연 폭 기준으로
             // 정렬하면 압축 후 남은 폭만큼 왼쪽에 붙는다. 일반 셀은 기존 단순 보정 경로를 유지한다.
             let effective_text_width = if is_answer_sheet_number_label
@@ -4659,15 +4700,12 @@ impl LayoutEngine {
                         }
                     })
                     .sum()
-            } else if extra_char_sp > 0.0
-                && cell_ctx.is_some()
-                && !needs_justify
-                && !needs_distribute
-                && total_char_count > 1
-            {
-                total_text_width + extra_char_sp * total_char_count as f64
-            } else {
+            } else if needs_justify || needs_distribute || !line_tac_offsets_for_width.is_empty() {
                 total_text_width
+            } else {
+                // 가운데/오른쪽 정렬은 줄 끝 공백과 마지막 글자 뒤 자간을 폭에서 뺀다
+                // (한컴 기준 — 눈에 보이는 글자 끝이 정렬 기준).
+                total_text_width - line_trailing_alignment_excess(comp_line, styles, tab_width)
             };
 
             // [Task #1285] 답안지 머리말의 `수험번호` 라벨은
@@ -4784,7 +4822,9 @@ impl LayoutEngine {
                 tree,
                 &mut line_node,
                 col_node,
-                comp_line,
+                leading_space_split
+                    .as_ref()
+                    .map_or(comp_line, |(line, _)| line),
                 composed,
                 para,
                 bin_data_content,
@@ -4811,6 +4851,9 @@ impl LayoutEngine {
                     extra_char_sp,
                     extra_dash_sp,
                     extra_word_sp,
+                    natural_leading_space_runs: leading_space_split
+                        .as_ref()
+                        .map_or(0, |(_, runs)| *runs),
                     has_tabs,
                     is_last_line_of_para,
                     line_height,
@@ -5251,7 +5294,22 @@ impl LayoutEngine {
 
         // ComposedLine이 없으면 기본 높이 + 빈 TextRun 생성 (편집용)
         if composed.lines.is_empty() && start_line == 0 {
-            let default_height = hwpunit_to_px(400, self.dpi);
+            // 본문의 저장 LINE_SEG 없는 빈 문단은 typeset 과 같은 em 줄박스로 진행한다
+            // (종전 400HU 고정 → 쪽 배정보다 위로 당겨져 그려졌다).
+            let body_empty_metrics = if cell_ctx.is_none() {
+                para.and_then(|p| {
+                    crate::renderer::typeset::empty_paragraph_fallback_line_metrics(
+                        p,
+                        styles,
+                        para_style,
+                        self.profile.get().hwp3_layout(),
+                    )
+                })
+            } else {
+                None
+            };
+            let (default_height, empty_line_spacing) =
+                body_empty_metrics.unwrap_or((hwpunit_to_px(400, self.dpi), 0.0));
             let line_id = tree.next_id();
             let mut line_node = RenderNode::new(
                 line_id,
@@ -5294,7 +5352,7 @@ impl LayoutEngine {
             line_node.children.push(run_node);
 
             col_node.children.push(line_node);
-            y += default_height;
+            y += default_height + empty_line_spacing;
         }
 
         y
@@ -5339,6 +5397,7 @@ impl LayoutEngine {
             extra_char_sp,
             extra_dash_sp,
             extra_word_sp,
+            natural_leading_space_runs,
             has_tabs,
             is_last_line_of_para,
             line_height,
@@ -5545,7 +5604,11 @@ impl LayoutEngine {
                 } // end else (non-blank run)
             }
             text_style.line_x_offset = x - col_area.x;
-            text_style.extra_word_spacing = extra_word_sp;
+            text_style.extra_word_spacing = if run_idx < natural_leading_space_runs {
+                0.0
+            } else {
+                extra_word_sp
+            };
             text_style.extra_char_spacing = extra_char_sp;
             text_style.extra_dash_advance = extra_dash_sp;
             // [Task #874 #2] composer lang split (예: "F3→Alt+I" → "F3"/"→"/"Alt+I")
@@ -7845,6 +7908,7 @@ mod issue_2809_split_alignment_tests {
             30.0,
             90.0,
             40.0,
+            0,
         );
 
         assert!((extra_word - 30.0).abs() < 0.001);
@@ -7907,6 +7971,7 @@ mod issue_2809_split_alignment_tests {
                 total_width,
                 visible_width + 8.0,
                 40.0,
+                0,
             );
             assert!((word - 4.0).abs() < 0.001,
                 "in_cell={in_cell}: only the 8px of visible slack belongs to the two word gaps, got {word}");
@@ -7937,6 +8002,7 @@ mod issue_2809_split_alignment_tests {
                     total + object_width,
                     visible + object_width + 4.0,
                     40.0,
+                    0,
                 );
                 assert!((character - 2.0).abs() < 0.001,
                     "in_cell={in_cell}, object_width={object_width}: expected 2px per visible character, got {character}");
@@ -7971,6 +8037,7 @@ mod issue_2809_split_alignment_tests {
             total_text_width,
             90.0,
             40.0,
+            0,
         );
 
         let mut distributed_style = text_style.clone();

@@ -6,7 +6,9 @@ use rhwp::document_core::DocumentCore;
 use rhwp::renderer::font_metrics_data::find_metric;
 use rhwp::renderer::style_resolver::primary_font_name;
 
-const STROKE_EM: f64 = 0.02;
+// 기준은 한컴 macOS PDF 의 `2 Tr` 선 굵기(글자 크기의 1/40)다.
+// 이 표본의 Windows 한/글 2022 PDF 는 1/50(83 → 1.66)이지만 macOS 동작을 따른다.
+const STROKE_EM: f64 = 0.025;
 const HANCOM_36382471_PAGE0_TR2_GLYPHS: usize = 55;
 
 fn page_svg(rel: &str, page: u32) -> String {
@@ -36,7 +38,7 @@ fn text_elements(svg: &str) -> Vec<(f64, Option<f64>, Option<String>)> {
 }
 
 #[test]
-fn issue_7151_faux_bold_becomes_a_two_percent_em_stroke() {
+fn issue_7151_faux_bold_becomes_a_fortieth_em_stroke() {
     let svg = page_svg("samples/issue2470/36382471_masked.hwpx", 0);
     let stroked: Vec<_> = text_elements(&svg)
         .into_iter()

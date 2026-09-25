@@ -1885,14 +1885,19 @@ impl DocumentCore {
             None,
         );
 
+        // 본문 그림을 별도 정적 layer 로 깔아도 그리기 순서가 유지되는지 (Studio 분리 합성 조건).
+        let flow_static_split_safe = flow_image_count + flow_raw_svg_count == 0
+            || crate::paint::flow_static_split_preserves_order(&tree.root);
+
         Ok(format!(
-            "{{\"behind\":[{}],\"front\":[{}],\"imageCount\":{},\"rawSvgCount\":{},\"flowImageCount\":{},\"flowRawSvgCount\":{},\"hasBehind\":{},\"hasFront\":{}}}",
+            "{{\"behind\":[{}],\"front\":[{}],\"imageCount\":{},\"rawSvgCount\":{},\"flowImageCount\":{},\"flowRawSvgCount\":{},\"flowStaticSplitSafe\":{},\"hasBehind\":{},\"hasFront\":{}}}",
             behind,
             front,
             image_count,
             raw_svg_count,
             flow_image_count,
             flow_raw_svg_count,
+            flow_static_split_safe,
             has_behind,
             has_front
         ))
