@@ -16,7 +16,8 @@ use web_sys::HtmlCanvasElement;
 
 use crate::document_core::helpers::parse_removed_para_meta;
 use crate::document_core::{
-    DeferredPaginationJobState, DeferredPaginationStepResult, DocumentCore, DEFAULT_FALLBACK_FONT,
+    CaretParagraph, DeferredPaginationJobState, DeferredPaginationStepResult, DocumentCore,
+    DEFAULT_FALLBACK_FONT,
 };
 use crate::error::HwpError;
 use crate::model::control::Control;
@@ -1147,6 +1148,7 @@ impl HwpDocument {
     ///
     /// 삽입 후 구역을 재구성하고 재페이지네이션한다.
     /// 반환값: JSON `{"ok":true,"charOffset":<new_offset>}`
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = insertText)]
     pub fn insert_text(
         &mut self,
@@ -1154,14 +1156,18 @@ impl HwpDocument {
         para_idx: u32,
         char_offset: u32,
         text: &str,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
-        self.insert_text_native(
-            section_idx as usize,
-            para_idx as usize,
-            char_offset as usize,
-            text,
-        )
-        .map_err(|e| e.into())
+        let target = CaretParagraph::Body {
+            section: section_idx as usize,
+            para: para_idx as usize,
+        };
+        let range =
+            self.prepare_caret_insert(target, char_offset as usize, 0, logical == Some(true))?;
+        let result =
+            self.insert_text_native(section_idx as usize, para_idx as usize, range.start, text);
+        self.finish_caret_insert();
+        result.map_err(|e| e.into())
     }
 
     /// 논리적 오프셋으로 텍스트를 삽입한다.
@@ -1257,6 +1263,7 @@ impl HwpDocument {
     ///
     /// 삭제 후 구역을 재구성하고 재페이지네이션한다.
     /// 반환값: JSON `{"ok":true,"charOffset":<offset_after_delete>}`
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = deleteText)]
     pub fn delete_text(
         &mut self,
@@ -1264,16 +1271,28 @@ impl HwpDocument {
         para_idx: u32,
         char_offset: u32,
         count: u32,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
+        let target = CaretParagraph::Body {
+            section: section_idx as usize,
+            para: para_idx as usize,
+        };
+        let range = self.caret_text_range_native(
+            target,
+            char_offset as usize,
+            count as usize,
+            logical == Some(true),
+        )?;
         self.delete_text_native(
             section_idx as usize,
             para_idx as usize,
-            char_offset as usize,
-            count as usize,
+            range.start,
+            range.end - range.start,
         )
         .map_err(|e| e.into())
     }
 
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = replaceBodyTextLocal)]
     pub fn replace_body_text_local(
         &mut self,
@@ -1282,20 +1301,33 @@ impl HwpDocument {
         char_offset: u32,
         delete_count: u32,
         text: &str,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
-        self.replace_body_text_local_native(
-            section_idx as usize,
-            para_idx as usize,
+        let target = CaretParagraph::Body {
+            section: section_idx as usize,
+            para: para_idx as usize,
+        };
+        let range = self.prepare_caret_insert(
+            target,
             char_offset as usize,
             delete_count as usize,
+            logical == Some(true),
+        )?;
+        let result = self.replace_body_text_local_native(
+            section_idx as usize,
+            para_idx as usize,
+            range.start,
+            range.end - range.start,
             text,
-        )
-        .map_err(|e| e.into())
+        );
+        self.finish_caret_insert();
+        result.map_err(|e| e.into())
     }
 
     /// 표 셀 내부 문단에 텍스트를 삽입한다.
     ///
     /// 반환값: JSON `{"ok":true,"charOffset":<new_offset>}`
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = insertTextInCell)]
     pub fn insert_text_in_cell(
         &mut self,
@@ -1306,17 +1338,28 @@ impl HwpDocument {
         cell_para_idx: u32,
         char_offset: u32,
         text: &str,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
-        self.insert_text_in_cell_native(
+        let target = CaretParagraph::Cell {
+            section: section_idx as usize,
+            parent_para: parent_para_idx as usize,
+            control: control_idx as usize,
+            cell: cell_idx as usize,
+            cell_para: cell_para_idx as usize,
+        };
+        let range =
+            self.prepare_caret_insert(target, char_offset as usize, 0, logical == Some(true))?;
+        let result = self.insert_text_in_cell_native(
             section_idx as usize,
             parent_para_idx as usize,
             control_idx as usize,
             cell_idx as usize,
             cell_para_idx as usize,
-            char_offset as usize,
+            range.start,
             text,
-        )
-        .map_err(|e| e.into())
+        );
+        self.finish_caret_insert();
+        result.map_err(|e| e.into())
     }
 
     /// 표 셀 내부 문단에 텍스트를 삽입하되 전체 페이지네이션은 호출자가 지연한다.
@@ -1324,6 +1367,7 @@ impl HwpDocument {
     /// Studio의 page-local 단일 입력처럼 현재 페이지를 먼저 갱신하고 idle 시점에
     /// 전체 페이지네이션을 한 번만 수행하는 경로에서 사용한다.
     /// 결과 JSON은 `charOffset`과 상대 cell-flow 변화 신호 `cellFlowChanged`를 포함한다.
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = insertTextInCellDeferredPagination)]
     pub fn insert_text_in_cell_deferred_pagination(
         &mut self,
@@ -1334,22 +1378,34 @@ impl HwpDocument {
         cell_para_idx: u32,
         char_offset: u32,
         text: &str,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
-        self.insert_text_in_cell_native_deferred_pagination(
+        let target = CaretParagraph::Cell {
+            section: section_idx as usize,
+            parent_para: parent_para_idx as usize,
+            control: control_idx as usize,
+            cell: cell_idx as usize,
+            cell_para: cell_para_idx as usize,
+        };
+        let range =
+            self.prepare_caret_insert(target, char_offset as usize, 0, logical == Some(true))?;
+        let result = self.insert_text_in_cell_native_deferred_pagination(
             section_idx as usize,
             parent_para_idx as usize,
             control_idx as usize,
             cell_idx as usize,
             cell_para_idx as usize,
-            char_offset as usize,
+            range.start,
             text,
-        )
-        .map_err(|e| e.into())
+        );
+        self.finish_caret_insert();
+        result.map_err(|e| e.into())
     }
 
     /// 표 셀 내부 문단에서 텍스트를 삭제하되 전체 페이지네이션은 호출자가 지연한다.
     ///
     /// 결과 JSON은 `charOffset`과 상대 cell-flow 변화 신호 `cellFlowChanged`를 포함한다.
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = deleteTextInCellDeferredPagination)]
     pub fn delete_text_in_cell_deferred_pagination(
         &mut self,
@@ -1360,20 +1416,35 @@ impl HwpDocument {
         cell_para_idx: u32,
         char_offset: u32,
         count: u32,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
+        let target = CaretParagraph::Cell {
+            section: section_idx as usize,
+            parent_para: parent_para_idx as usize,
+            control: control_idx as usize,
+            cell: cell_idx as usize,
+            cell_para: cell_para_idx as usize,
+        };
+        let range = self.caret_text_range_native(
+            target,
+            char_offset as usize,
+            count as usize,
+            logical == Some(true),
+        )?;
         self.delete_text_in_cell_native_deferred_pagination(
             section_idx as usize,
             parent_para_idx as usize,
             control_idx as usize,
             cell_idx as usize,
             cell_para_idx as usize,
-            char_offset as usize,
-            count as usize,
+            range.start,
+            range.end - range.start,
         )
         .map_err(|e| e.into())
     }
 
     /// 표 셀 내부의 짧은 IME 조합 문자열을 원자적으로 교체하고 전체 페이지네이션은 지연한다.
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = replaceTextInCellDeferredPagination)]
     pub fn replace_text_in_cell_deferred_pagination(
         &mut self,
@@ -1385,18 +1456,33 @@ impl HwpDocument {
         char_offset: u32,
         delete_count: u32,
         text: &str,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
-        self.replace_text_in_cell_native_deferred_pagination(
+        let target = CaretParagraph::Cell {
+            section: section_idx as usize,
+            parent_para: parent_para_idx as usize,
+            control: control_idx as usize,
+            cell: cell_idx as usize,
+            cell_para: cell_para_idx as usize,
+        };
+        let range = self.prepare_caret_insert(
+            target,
+            char_offset as usize,
+            delete_count as usize,
+            logical == Some(true),
+        )?;
+        let result = self.replace_text_in_cell_native_deferred_pagination(
             section_idx as usize,
             parent_para_idx as usize,
             control_idx as usize,
             cell_idx as usize,
             cell_para_idx as usize,
-            char_offset as usize,
-            delete_count as usize,
+            range.start,
+            range.end - range.start,
             text,
-        )
-        .map_err(|e| e.into())
+        );
+        self.finish_caret_insert();
+        result.map_err(|e| e.into())
     }
 
     /// 대형 표 continuation shadow job을 시작한다. 공개 페이지는 완료 전까지 유지된다.
@@ -1452,6 +1538,7 @@ impl HwpDocument {
     /// 표 셀 내부 문단에서 텍스트를 삭제한다.
     ///
     /// 반환값: JSON `{"ok":true,"charOffset":<offset_after_delete>}`
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = deleteTextInCell)]
     pub fn delete_text_in_cell(
         &mut self,
@@ -1462,15 +1549,29 @@ impl HwpDocument {
         cell_para_idx: u32,
         char_offset: u32,
         count: u32,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
+        let target = CaretParagraph::Cell {
+            section: section_idx as usize,
+            parent_para: parent_para_idx as usize,
+            control: control_idx as usize,
+            cell: cell_idx as usize,
+            cell_para: cell_para_idx as usize,
+        };
+        let range = self.caret_text_range_native(
+            target,
+            char_offset as usize,
+            count as usize,
+            logical == Some(true),
+        )?;
         self.delete_text_in_cell_native(
             section_idx as usize,
             parent_para_idx as usize,
             control_idx as usize,
             cell_idx as usize,
             cell_para_idx as usize,
-            char_offset as usize,
-            count as usize,
+            range.start,
+            range.end - range.start,
         )
         .map_err(|e| e.into())
     }
@@ -1571,6 +1672,7 @@ impl HwpDocument {
 
     // ─── 중첩 표 path 기반 편집 API ──────────────────────────
 
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = insertTextInCellByPath)]
     pub fn insert_text_in_cell_by_path_api(
         &mut self,
@@ -1579,18 +1681,28 @@ impl HwpDocument {
         path_json: &str,
         char_offset: u32,
         text: &str,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
         let path = DocumentCore::parse_cell_path(path_json)?;
-        self.insert_text_in_cell_by_path(
+        let target = CaretParagraph::Path {
+            section: section_idx as usize,
+            parent_para: parent_para_idx as usize,
+            path: &path,
+        };
+        let range =
+            self.prepare_caret_insert(target, char_offset as usize, 0, logical == Some(true))?;
+        let result = self.insert_text_in_cell_by_path(
             section_idx as usize,
             parent_para_idx as usize,
             &path,
-            char_offset as usize,
+            range.start,
             text,
-        )
-        .map_err(|e| e.into())
+        );
+        self.finish_caret_insert();
+        result.map_err(|e| e.into())
     }
 
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = deleteTextInCellByPath)]
     pub fn delete_text_in_cell_by_path_api(
         &mut self,
@@ -1599,18 +1711,31 @@ impl HwpDocument {
         path_json: &str,
         char_offset: u32,
         count: u32,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
         let path = DocumentCore::parse_cell_path(path_json)?;
+        let target = CaretParagraph::Path {
+            section: section_idx as usize,
+            parent_para: parent_para_idx as usize,
+            path: &path,
+        };
+        let range = self.caret_text_range_native(
+            target,
+            char_offset as usize,
+            count as usize,
+            logical == Some(true),
+        )?;
         self.delete_text_in_cell_by_path(
             section_idx as usize,
             parent_para_idx as usize,
             &path,
-            char_offset as usize,
-            count as usize,
+            range.start,
+            range.end - range.start,
         )
         .map_err(|e| e.into())
     }
 
+    /// `logical`: 오프셋이 편집 캐럿 좌표이면 true. 범위 안의 글자처럼 취급 개체도 함께 지운다.
     #[wasm_bindgen(js_name = deleteRangeInCellByPath)]
     #[allow(clippy::too_many_arguments)]
     pub fn delete_range_in_cell_by_path_api(
@@ -1622,18 +1747,22 @@ impl HwpDocument {
         start_offset: u32,
         end_para: u32,
         end_offset: u32,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
         let path = DocumentCore::parse_cell_path(path_json)?;
-        self.delete_range_in_cell_by_path(
-            section_idx as usize,
-            parent_para_idx as usize,
-            &path,
+        let (sec, ppi) = (section_idx as usize, parent_para_idx as usize);
+        let (sp, so, ep, eo) = (
             start_para as usize,
             start_offset as usize,
             end_para as usize,
             end_offset as usize,
-        )
-        .map_err(|e| e.into())
+        );
+        let result = if logical == Some(true) {
+            self.delete_caret_range_native(sec, Some((ppi, &path)), sp, so, ep, eo)
+        } else {
+            self.delete_range_in_cell_by_path(sec, ppi, &path, sp, so, ep, eo)
+        };
+        result.map_err(|e| e.into())
     }
 
     #[wasm_bindgen(js_name = splitParagraphInCellByPath)]
@@ -1668,6 +1797,7 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = getTextInCellByPath)]
     pub fn get_text_in_cell_by_path_api(
         &self,
@@ -1676,14 +1806,26 @@ impl HwpDocument {
         path_json: &str,
         char_offset: u32,
         count: u32,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
         let path = DocumentCore::parse_cell_path(path_json)?;
+        let target = CaretParagraph::Path {
+            section: section_idx as usize,
+            parent_para: parent_para_idx as usize,
+            path: &path,
+        };
+        let range = self.caret_text_range_native(
+            target,
+            char_offset as usize,
+            count as usize,
+            logical == Some(true),
+        )?;
         self.get_text_in_cell_by_path(
             section_idx as usize,
             parent_para_idx as usize,
             &path,
-            char_offset as usize,
-            count as usize,
+            range.start,
+            range.end - range.start,
         )
         .map_err(|e| e.into())
     }
@@ -1704,6 +1846,25 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 셀(중첩 포함) 문단의 텍스트 오프셋 → 편집 캐럿 좌표(인라인 개체 = 1칸).
+    #[wasm_bindgen(js_name = textToLogicalOffsetInCellByPath)]
+    pub fn text_to_logical_offset_in_cell_by_path_api(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        text_offset: u32,
+    ) -> Result<u32, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        let para = self
+            .resolve_paragraph_by_path(section_idx as usize, parent_para_idx as usize, &path)
+            .map_err(|e| -> JsValue { e.into() })?;
+        Ok(
+            crate::document_core::helpers::text_to_logical_offset(para, text_offset as usize)
+                as u32,
+        )
+    }
+
     #[wasm_bindgen(js_name = logicalToTextOffsetInCellByPath)]
     pub fn logical_to_text_offset_in_cell_by_path_api(
         &self,
@@ -1716,11 +1877,10 @@ impl HwpDocument {
         let para = self
             .resolve_paragraph_by_path(section_idx as usize, parent_para_idx as usize, &path)
             .map_err(|e| -> JsValue { e.into() })?;
-        Ok(crate::document_core::helpers::logical_to_text_offset(
-            para,
-            logical_offset as usize,
+        Ok(
+            crate::document_core::helpers::logical_to_text_offset(para, logical_offset as usize).0
+                as u32,
         )
-        .0 as u32)
     }
 
     /// 머리말/꼬리말 생성 (빈 문단 1개 포함)
@@ -2385,6 +2545,74 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    #[wasm_bindgen(js_name = copyTableCellRange)]
+    pub fn copy_table_cell_range(
+        &mut self,
+        section: u32,
+        parent: u32,
+        path_json: &str,
+        start_row: u32,
+        start_col: u32,
+        end_row: u32,
+        end_col: u32,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.copy_table_cell_range_native(
+            section as usize,
+            parent as usize,
+            &path,
+            start_row as u16,
+            start_col as u16,
+            end_row as u16,
+            end_col as u16,
+        )
+        .map_err(Into::into)
+    }
+
+    #[wasm_bindgen(js_name = clearTableCellRange)]
+    pub fn clear_table_cell_range(
+        &mut self,
+        section: u32,
+        parent: u32,
+        path_json: &str,
+        start_row: u32,
+        start_col: u32,
+        end_row: u32,
+        end_col: u32,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.clear_table_cell_range_native(
+            section as usize,
+            parent as usize,
+            &path,
+            start_row as u16,
+            start_col as u16,
+            end_row as u16,
+            end_col as u16,
+        )
+        .map_err(Into::into)
+    }
+
+    #[wasm_bindgen(js_name = pasteTableCellRange)]
+    pub fn paste_table_cell_range(
+        &mut self,
+        section: u32,
+        parent: u32,
+        path_json: &str,
+        start_row: u32,
+        start_col: u32,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.paste_table_cell_range_native(
+            section as usize,
+            parent as usize,
+            &path,
+            start_row as u16,
+            start_col as u16,
+        )
+        .map_err(Into::into)
+    }
+
     /// 선택된 표 셀 범위를 행/열 바꿈 복사용 내부 버퍼에 저장한다.
     ///
     /// 반환값: JSON `{"ok":true,"sourceRows":N,"sourceCols":N,"targetRows":N,"targetCols":N}`
@@ -2759,6 +2987,7 @@ impl HwpDocument {
     }
 
     /// 문단에서 텍스트 부분 문자열을 반환한다 (Undo용 텍스트 보존).
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = getTextRange)]
     pub fn get_text_range(
         &self,
@@ -2766,12 +2995,23 @@ impl HwpDocument {
         para_idx: u32,
         char_offset: u32,
         count: u32,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
+        let target = CaretParagraph::Body {
+            section: section_idx as usize,
+            para: para_idx as usize,
+        };
+        let range = self.caret_text_range_native(
+            target,
+            char_offset as usize,
+            count as usize,
+            logical == Some(true),
+        )?;
         self.get_text_range_native(
             section_idx as usize,
             para_idx as usize,
-            char_offset as usize,
-            count as usize,
+            range.start,
+            range.end - range.start,
         )
         .map_err(|e| e.into())
     }
@@ -2895,6 +3135,7 @@ impl HwpDocument {
     }
 
     /// 표 셀 내 문단에서 텍스트 부분 문자열을 반환한다.
+    /// `logical`: 오프셋이 편집 캐럿 좌표(글자처럼 취급 개체 = 1칸)이면 true.
     #[wasm_bindgen(js_name = getTextInCell)]
     pub fn get_text_in_cell(
         &self,
@@ -2905,15 +3146,29 @@ impl HwpDocument {
         cell_para_idx: u32,
         char_offset: u32,
         count: u32,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
+        let target = CaretParagraph::Cell {
+            section: section_idx as usize,
+            parent_para: parent_para_idx as usize,
+            control: control_idx as usize,
+            cell: cell_idx as usize,
+            cell_para: cell_para_idx as usize,
+        };
+        let range = self.caret_text_range_native(
+            target,
+            char_offset as usize,
+            count as usize,
+            logical == Some(true),
+        )?;
         self.get_text_in_cell_native(
             section_idx as usize,
             parent_para_idx as usize,
             control_idx as usize,
             cell_idx as usize,
             cell_para_idx as usize,
-            char_offset as usize,
-            count as usize,
+            range.start,
+            range.end - range.start,
         )
         .map_err(|e| e.into())
     }
@@ -3084,11 +3339,10 @@ impl HwpDocument {
                 cell_para_idx as usize,
             )
             .ok_or_else(|| JsValue::from_str("셀 문단 접근 실패"))?;
-        Ok(crate::document_core::helpers::logical_to_text_offset(
-            para,
-            logical_offset as usize,
+        Ok(
+            crate::document_core::helpers::logical_to_text_offset(para, logical_offset as usize).0
+                as u32,
         )
-        .0 as u32)
     }
 
     /// 이 쪽에서 머리말/꼬리말을 편집할 때 대상이 되는 (구역, applyTo) 를 반환한다.
@@ -6732,6 +6986,60 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 표를 가로지르는 선택의 끝점을 표를 품은 컨테이너 좌표로 올린다.
+    ///
+    /// `containerPathJson` 은 본문이면 `"[]"`, 셀이면 그 셀까지의 경로다.
+    /// 반환: JSON `{"paraIdx":N,"charOffset":N}`
+    #[wasm_bindgen(js_name = getTableBoundaryPosition)]
+    pub fn get_table_boundary_position(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        container_path_json: &str,
+        host_para_idx: u32,
+        control_idx: u32,
+        after: bool,
+    ) -> Result<String, JsValue> {
+        let path = parse_cell_path_arg(container_path_json)?;
+        let (para, offset) = self
+            .table_boundary_position_native(
+                section_idx as usize,
+                parent_para_idx as usize,
+                &path,
+                host_para_idx as usize,
+                control_idx as usize,
+                after,
+            )
+            .map_err(|e| -> JsValue { e.into() })?;
+        Ok(format!("{{\"paraIdx\":{para},\"charOffset\":{offset}}}"))
+    }
+
+    /// 본문 또는 셀 선택에 통째로 포함된 표 주소를 반환한다.
+    #[wasm_bindgen(js_name = getTableControlsInSelection)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_table_controls_in_selection(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        container_path_json: &str,
+        start_para_idx: u32,
+        start_char_offset: u32,
+        end_para_idx: u32,
+        end_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        let path = parse_cell_path_arg(container_path_json)?;
+        self.table_controls_in_selection_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            start_para_idx as usize,
+            start_char_offset as usize,
+            end_para_idx as usize,
+            end_char_offset as usize,
+        )
+        .map_err(|err| err.into())
+    }
+
     /// `getSelectionRectsInCell` 의 options object 변형 (#1413).
     ///
     /// options JSON 키: `{ sectionIdx, parentParaIdx, controlIdx, cellIdx, startCellParaIdx,
@@ -6781,6 +7089,7 @@ impl HwpDocument {
     /// 본문 선택 영역을 삭제한다.
     ///
     /// 반환: JSON `{"ok":true,"paraIdx":N,"charOffset":N}`
+    /// `logical`: 오프셋이 편집 캐럿 좌표이면 true. 범위 안의 글자처럼 취급 개체도 함께 지운다.
     #[wasm_bindgen(js_name = deleteRange)]
     pub fn delete_range(
         &mut self,
@@ -6789,19 +7098,26 @@ impl HwpDocument {
         start_char_offset: u32,
         end_para_idx: u32,
         end_char_offset: u32,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
-        self.delete_range_native(
+        let (sec, sp, so, ep, eo) = (
             section_idx as usize,
             start_para_idx as usize,
             start_char_offset as usize,
             end_para_idx as usize,
             end_char_offset as usize,
-            None,
-        )
-        .map_err(|e| e.into())
+        );
+        if logical == Some(true) {
+            return self
+                .delete_caret_range_native(sec, None, sp, so, ep, eo)
+                .map_err(|e| e.into());
+        }
+        self.delete_range_native(sec, sp, so, ep, eo, None)
+            .map_err(|e| e.into())
     }
 
     /// 여러 구역에 걸친 본문 선택 영역을 삭제한다. 구역 구조는 유지된다.
+    /// `logical`: 오프셋이 편집 캐럿 좌표이면 true. 범위 안의 글자처럼 취급 개체도 함께 지운다.
     #[wasm_bindgen(js_name = deleteRangeAcrossSections)]
     pub fn delete_range_across_sections(
         &mut self,
@@ -6811,16 +7127,24 @@ impl HwpDocument {
         end_section_idx: u32,
         end_para_idx: u32,
         end_char_offset: u32,
+        logical: Option<bool>,
     ) -> Result<String, JsValue> {
-        self.delete_range_across_sections_native(
+        let args = (
             start_section_idx as usize,
             start_para_idx as usize,
             start_char_offset as usize,
             end_section_idx as usize,
             end_para_idx as usize,
             end_char_offset as usize,
-        )
-        .map_err(|e| e.into())
+        );
+        let result = if logical == Some(true) {
+            self.delete_caret_range_across_sections_native(
+                args.0, args.1, args.2, args.3, args.4, args.5,
+            )
+        } else {
+            self.delete_range_across_sections_native(args.0, args.1, args.2, args.3, args.4, args.5)
+        };
+        result.map_err(|e| e.into())
     }
 
     /// 셀 내 선택 영역을 삭제한다.

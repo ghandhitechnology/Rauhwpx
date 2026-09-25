@@ -701,20 +701,21 @@ impl Paragraph {
                         )
                 });
 
-        // 바이트 삽입 위치 계산
-        let byte_offset: usize = text_chars[..effective_char_offset]
-            .iter()
-            .map(|c| c.len_utf8())
-            .sum();
-
         // 삽입 지점의 UTF-16 위치 결정
         let utf16_insert_pos: u32 = if char_offset > text_len && !self.char_offsets.is_empty() {
             // 텍스트 끝 이후 (인라인 컨트롤 뒤): 마지막 문자의 UTF-16 위치 + 폭 + 후행 갭
             let last_idx = self.char_offsets.len() - 1;
             let last_char_end =
                 self.char_offsets[last_idx] + Self::char_utf16_len(text_chars[last_idx]);
-            // 후행 컨트롤 수 = char_offset - text_len
-            let trailing_ctrl_count = (char_offset - text_len) as u32;
+            // 후행 컨트롤 수 = char_offset - text_len. 단, 실제로 마지막 글자 뒤에 있는
+            // 컨트롤 수를 넘을 수 없다. 문단 중간 인라인 수식을 1칸으로 세는 논리 오프셋이
+            // 들어오면 초과분이 생기는데, 이를 가짜 컨트롤 갭(+8)으로 두면 새 글자의
+            // char_offsets 가 문단 UTF-16 범위를 벗어나 줄 구성·렌더에서 사라진다.
+            let actual_trailing_ctrls = control_positions
+                .iter()
+                .filter(|&&pos| pos >= text_len)
+                .count();
+            let trailing_ctrl_count = (char_offset - text_len).min(actual_trailing_ctrls) as u32;
             last_char_end + trailing_ctrl_count * 8
         } else if inserts_before_inline_control {
             if effective_char_offset == 0 {
@@ -734,7 +735,34 @@ impl Paragraph {
             // 텍스트가 비어있을 때: 기존 컨트롤 뒤에 삽입 (각 컨트롤 = 8 code units)
             (self.controls.len() as u32) * 8
         };
-        let char_offset = effective_char_offset;
+        self.insert_text_at_resolved(effective_char_offset, utf16_insert_pos, new_text)
+    }
+
+    /// 같은 텍스트 위치의 인라인 개체 **뒤**처럼, 호출자가 정한 UTF-16 지점에 텍스트를 넣는다.
+    ///
+    /// 텍스트 오프셋만으로는 개체 앞/뒤를 구분할 수 없다. `insert_text_at` 은 개체 앞을
+    /// 고르므로, 편집 캐럿이 개체 바로 뒤에 있을 때는 그 개체 갭의 끝을 넘겨 이 함수를 쓴다.
+    pub(crate) fn insert_text_at_utf16(
+        &mut self,
+        char_offset: usize,
+        utf16_insert_pos: u32,
+        new_text: &str,
+    ) -> usize {
+        let text_len = self.text.chars().count();
+        if new_text.is_empty() {
+            return char_offset.min(text_len);
+        }
+        self.insert_text_at_resolved(char_offset.min(text_len), utf16_insert_pos, new_text)
+    }
+
+    fn insert_text_at_resolved(
+        &mut self,
+        char_offset: usize,
+        utf16_insert_pos: u32,
+        new_text: &str,
+    ) -> usize {
+        let text_chars: Vec<char> = self.text.chars().collect();
+        let byte_offset: usize = text_chars[..char_offset].iter().map(|c| c.len_utf8()).sum();
         let hyperlink_starts = self
             .field_ranges
             .iter()
@@ -866,7 +894,7 @@ impl Paragraph {
         // units. Selection offsets and the return value remain codepoints.
         self.char_count += utf16_delta;
 
-        effective_char_offset
+        char_offset
     }
 
     /// char_offset 위치에서 count개의 문자를 삭제한다.

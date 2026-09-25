@@ -1,4 +1,5 @@
 import type { CellBbox } from '@/core/types';
+import { cellSelectionRects, type CellRange } from './table-selection-rects';
 import { VirtualScroll } from '@/view/virtual-scroll';
 
 /** F5 셀 블록 선택 영역을 하이라이트 오버레이로 렌더링한다 */
@@ -22,7 +23,7 @@ export class CellSelectionRenderer {
   /** 선택 범위 내 셀들을 하이라이트한다 */
   render(
     cellBboxes: CellBbox[],
-    range: { startRow: number; startCol: number; endRow: number; endCol: number },
+    range: CellRange,
     zoom: number,
     excluded?: Set<string>,
   ): void {
@@ -32,30 +33,19 @@ export class CellSelectionRenderer {
     const scrollContent = this.container.querySelector('#scroll-content');
     const contentWidth = scrollContent?.clientWidth ?? 0;
 
-    for (const cell of cellBboxes) {
-      // 셀이 선택 범위에 포함되는지 확인 (병합 셀 고려)
-      const cellEndRow = cell.row + cell.rowSpan - 1;
-      const cellEndCol = cell.col + cell.colSpan - 1;
-      const overlaps =
-        cell.row <= range.endRow && cellEndRow >= range.startRow &&
-        cell.col <= range.endCol && cellEndCol >= range.startCol;
-      if (!overlaps) continue;
-
-      // Ctrl+클릭으로 제외된 셀인지 확인
-      if (excluded && excluded.has(`${cell.row},${cell.col}`)) continue;
-
+    for (const rect of cellSelectionRects(cellBboxes, range, excluded)) {
       const div = document.createElement('div');
-      const pageOffset = this.virtualScroll.getPageOffset(cell.pageIndex);
+      const pageOffset = this.virtualScroll.getPageOffset(rect.pageIndex);
       // 그리드 배치·수평 팬 대응 — 중앙 정렬 가정 대신 확정된 pageLeft 사용.
-      const pageLeft = this.virtualScroll.getPageLeftResolved(cell.pageIndex, contentWidth);
+      const pageLeft = this.virtualScroll.getPageLeftResolved(rect.pageIndex, contentWidth);
 
       div.className = 'cell-selection-highlight';
       div.style.cssText =
         `position:absolute;` +
-        `left:${pageLeft + cell.x * zoom}px;` +
-        `top:${pageOffset + cell.y * zoom}px;` +
-        `width:${cell.w * zoom}px;` +
-        `height:${cell.h * zoom}px;`;
+        `left:${pageLeft + rect.x * zoom}px;` +
+        `top:${pageOffset + rect.y * zoom}px;` +
+        `width:${rect.width * zoom}px;` +
+        `height:${rect.height * zoom}px;`;
       this.layer.appendChild(div);
       this.highlights.push(div);
     }

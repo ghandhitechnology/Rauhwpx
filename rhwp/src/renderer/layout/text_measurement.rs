@@ -1810,6 +1810,7 @@ fn measure_char_width_embedded(
 
 pub(super) fn measure_known_font_run_width(
     font_family: &str,
+    bold: bool,
     italic: bool,
     text: &str,
     font_size: f64,
@@ -1817,6 +1818,7 @@ pub(super) fn measure_known_font_run_width(
     let shaped_style = TextStyle {
         font_family: font_family.to_string(),
         font_size,
+        bold,
         italic,
         kerning: true,
         ..Default::default()
@@ -1825,7 +1827,7 @@ pub(super) fn measure_known_font_run_width(
         return positions.last().copied();
     }
     text.chars().try_fold(0.0, |width, ch| {
-        measure_char_width_embedded(font_family, false, italic, ch, font_size)
+        measure_char_width_embedded(font_family, bold, italic, ch, font_size)
             .map(|advance| width + advance)
     })
 }

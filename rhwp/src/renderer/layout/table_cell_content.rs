@@ -657,15 +657,14 @@ impl LayoutEngine {
             } else {
                 self.calc_composed_paras_content_height(&composed_paras, &cell.paragraphs, styles)
             };
-            let text_y_start = match cell.vertical_align {
-                VerticalAlign::Top => cell_y + pad_top,
-                VerticalAlign::Center => {
-                    cell_y + pad_top + (inner_height - total_content_height).max(0.0) / 2.0
-                }
-                VerticalAlign::Bottom => {
-                    cell_y + pad_top + (inner_height - total_content_height).max(0.0)
-                }
-            };
+            let text_y_start = cell_y
+                + super::table_layout::cell_valign_top_offset(
+                    cell.vertical_align,
+                    cell_h,
+                    pad_top,
+                    pad_bottom,
+                    total_content_height,
+                );
             let inner_area = LayoutRect {
                 x: inner_x,
                 y: text_y_start,

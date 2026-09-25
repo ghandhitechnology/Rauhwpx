@@ -19,6 +19,15 @@ export class HwpDocument {
   /** 빈 문서를 생성한다 (테스트/미리보기용). */
   static createEmpty(): HwpDocument;
 
+  /** 중첩 경로의 셀 블록을 일반 방향으로 복사한다. */
+  copyTableCellRange(section: number, parent: number, path: string, startRow: number, startCol: number, endRow: number, endCol: number): string;
+
+  /** 내부 클립보드의 셀 블록을 대상 격자에 붙여넣는다. */
+  pasteTableCellRange(section: number, parent: number, path: string, startRow: number, startCol: number): string;
+
+  /** 셀 구조와 서식을 유지하면서 블록 내용을 비운다. */
+  clearTableCellRange(section: number, parent: number, path: string, startRow: number, startCol: number, endRow: number, endCol: number): string;
+
   /** 총 페이지 수를 반환한다. */
   pageCount(): number;
 

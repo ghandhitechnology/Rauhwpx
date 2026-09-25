@@ -3,7 +3,7 @@ import type { DocumentPosition } from '../core/types';
 /** Read-only document shape needed to segment a body selection by section. */
 export interface BodyRangeReader {
   getParagraphCount(sectionIndex: number): number;
-  getParagraphLength(sectionIndex: number, paragraphIndex: number): number;
+  getLogicalLength(sectionIndex: number, paragraphIndex: number): number;
 }
 
 /** A single-section slice of an ordered body selection. */
@@ -62,7 +62,7 @@ export function getBodySelectionSegments(
       endParagraphIndex,
       endCharOffset: sectionIndex === end.sectionIndex
         ? end.charOffset
-        : reader.getParagraphLength(sectionIndex, endParagraphIndex),
+        : reader.getLogicalLength(sectionIndex, endParagraphIndex),
     });
   }
   return segments;

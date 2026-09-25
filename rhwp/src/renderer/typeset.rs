@@ -14432,7 +14432,11 @@ impl TypesetEngine {
                     let is_last_placed = last_placed_table == Some(ctrl_idx);
                     let grown_tac_needs_split = self.is_effective_tac_table(para, table, &fmt)
                         && table.row_count > 1
-                        && matches!(table.page_break, crate::model::table::TablePageBreak::RowBreak | crate::model::table::TablePageBreak::CellBreak)
+                        && matches!(
+                            table.page_break,
+                            crate::model::table::TablePageBreak::RowBreak
+                                | crate::model::table::TablePageBreak::CellBreak
+                        )
                         && ft.effective_height
                             > hwpunit_to_px(table.common.height as i32, self.dpi) + 0.5
                         && st.current_height + ft.effective_height > st.available_height() + 0.5;
@@ -14446,9 +14450,21 @@ impl TypesetEngine {
                         flowing_table.common.vert_rel_to = crate::model::shape::VertRelTo::Para;
                         flowing_table.common.vertical_offset = 0;
                         self.typeset_block_table(
-                            st, para_idx, ctrl_idx, para, &flowing_table, &ft, &fmt, mt,
-                            styles, issue2439_para_start_height, issue2439_para_start_height,
-                            is_first_placed, is_last_placed, paragraphs_all, composed_all,
+                            st,
+                            para_idx,
+                            ctrl_idx,
+                            para,
+                            &flowing_table,
+                            &ft,
+                            &fmt,
+                            mt,
+                            styles,
+                            issue2439_para_start_height,
+                            issue2439_para_start_height,
+                            is_first_placed,
+                            is_last_placed,
+                            paragraphs_all,
+                            composed_all,
                         );
                     } else if self.is_effective_tac_table(para, table, &fmt) {
                         self.typeset_tac_table(

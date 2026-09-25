@@ -1,7 +1,6 @@
 /** 실제 WASM 편집 버스트의 프레임/렌더 비용. 절대 시간 임계값 없이 최종 텍스트를 검증한다.
  * node e2e/preview-frame-bench.mjs --label=after
  * BENCH_STUDIO_ROOT=/path/to/baseline/rhwp/rhwp-studio 로 같은 워크로드를 비교한다.
- * BENCH_MODES=typewriter BENCH_BURSTS=10 BENCH_BURST_SIZE=10: 알림 100개.
  * BENCH_MODES=multi-local BENCH_BURSTS=1 BENCH_BURST_SIZE=1: 두 페이지 동시 무효화.
  * BENCH_SAMPLES=biz_plan.hwp: 단일 문서. VITE_PORT=7784: 독립 서버 포트.
  * output/preview-frame-bench/<label>에 결과와 PNG를 기록한다.
@@ -55,7 +54,7 @@ try {
   for (const sample of (process.env.BENCH_SAMPLES || 'biz_plan.hwp,kps-ai.hwp').split(',')) {
     const sampleSlug = sample.replaceAll('/', '_');
     for (const mode of (process.env.BENCH_MODES || 'global,page-local').split(',')) {
-      assert.ok(['global', 'page-local', 'multi-local', 'typewriter', 'engine-batch', 'pending-multiline'].includes(mode), `unknown mode: ${mode}`);
+      assert.ok(['global', 'page-local', 'multi-local', 'engine-batch', 'pending-multiline'].includes(mode), `unknown mode: ${mode}`);
       const page = await createPage(browser);
       const errors = [];
       page.on('error', e => errors.push(`crash: ${e.message}`));
@@ -64,11 +63,6 @@ try {
       const loaded = await loadHwpFile(page, sample);
       const result = await page.evaluate(async ({ mode, bursts, burstSize }) => {
         const wasm = window.__wasm, view = window.__canvasView, bus = window.__eventBus;
-        if (mode === 'typewriter') {
-          wasm.insertText(0, 0, 0, 'agent preview '.repeat(20));
-          bus.emit('document-changed');
-          await new Promise(resolve => setTimeout(resolve, 1200));
-        }
         const geometryCalls = { getCursorRect: 0, getSelectionRects: 0 };
         const geometryOriginals = {};
         for (const name of Object.keys(geometryCalls)) {
@@ -107,10 +101,6 @@ try {
                 const text = Array.from({ length: 32 }, (_, line) => `벤치마크 문단 ${line}`).join('\n');
                 window.__agentBridge.pendingEdits.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, text);
                 expectedPrefix = text + expectedPrefix;
-                return;
-              }
-              if (mode === 'typewriter') {
-                bus.emit('agent-text-inserted', { agent: 'claude', text: 'agent', range: {sectionIdx: 0, startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 5} });
                 return;
               }
               const text = `[${burst}:${index}]`;
@@ -155,7 +145,7 @@ try {
         const exportedHwpSha256 = mode === 'pending-multiline'
           ? Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', wasm.exportHwp())), byte => byte.toString(16).padStart(2, '0')).join('')
           : null;
-        return { mode, paragraphCountBefore, paragraphCountAfter: wasm.getParagraphCount(0), exportedHwpSha256, previewPng: mode === 'multi-local' ? pixelsBefore : null, freshPng: mode === 'multi-local' ? pixelsAfter : null, geometryCalls, operations: bursts * burstSize, edits: mode === 'typewriter' ? 0 : bursts * burstSize, bursts, burstSize, pageCount: wasm.pageCount, editMs: editEnd-started,
+        return { mode, paragraphCountBefore, paragraphCountAfter: wasm.getParagraphCount(0), exportedHwpSha256, previewPng: mode === 'multi-local' ? pixelsBefore : null, freshPng: mode === 'multi-local' ? pixelsAfter : null, geometryCalls, operations: bursts * burstSize, edits: bursts * burstSize, bursts, burstSize, pageCount: wasm.pageCount, editMs: editEnd-started,
           observationMs: performance.now()-started, finalPixelsMatchFreshRender: pixelsBefore === pixelsAfter, activeRaf: summarize(raf.slice(0, activeIntervalCount)), activeFps: activeFrameCount * 1000 / (editEnd-started), raf: summarize(raf), fps: 1000/(summarize(raf).mean || 1),
           framesOver33ms: raf.filter(x => x > 33.34).length, longTasks: summarize(longTasks),
           renderCalls: calls, renderMs: summarize(renderDurations), renderedPages: [...new Set(renderedPages)],

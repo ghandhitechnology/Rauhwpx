@@ -205,5 +205,9 @@ test('buildInlineElementSelection: 셀 텍스트의 경로와 논리 오프셋�
   assert.ok(built.contextBlock.includes('cellPath'));
   assert.ok(built.contextBlock.includes('cellParaIdx 1 endCellParaIdx 2'));
   assert.ok(built.contextBlock.includes('오프셋 좌표계: logical'));
+  assert.ok(built.contextBlock.includes(
+    '도구 인자: {"sectionIdx":0,"cell":{"paraIdx":3,"controlIdx":0,"cellIdx":2},'
+      + '"startParaIdx":1,"startCharOffset":2,"endParaIdx":1,"endCharOffset":6}',
+  ));
   assert.ok(built.contextBlock.includes('<<<SELECTION\n셀 내용\nSELECTION>>>'));
 });

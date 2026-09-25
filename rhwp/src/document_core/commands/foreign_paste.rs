@@ -120,10 +120,8 @@ impl crate::document_core::DocumentCore {
             self.mark_all_sections_dirty();
         }
         // 새 서식이 들어왔다. 아래 reflow/compose 가 `self.styles` 를 보므로 먼저 해소한다.
-        self.styles = crate::renderer::style_resolver::resolve_styles(
-            &self.document.doc_info,
-            self.dpi,
-        );
+        self.styles =
+            crate::renderer::style_resolver::resolve_styles(&self.document.doc_info, self.dpi);
 
         // ③ 삽입 — 이하 절차는 `paste_internal_native` 와 같다.
         self.document.sections[section_idx].raw_stream = None;

@@ -65,6 +65,8 @@ function makeHost() {
     getCellParagraphLengthByPath: () => 7,
     getCellParagraphCountByPath: () => 3,
     getCellParagraphLength: () => 7,
+    getCellLogicalLengthByPath: () => 7,
+    logicalToTextOffsetInCellByPath: (_sec, _para, _path, offset) => offset,
     getCellParagraphCount: () => 3,
     mergeParagraphInCellByPath: () => undefined,
     splitParagraphInCellByPath: () => undefined,
@@ -183,7 +185,7 @@ test('중첩 셀 안쪽 2번째 문단 시작 Backspace 는 이전 문단과 병
 
 test('같은 위치의 handleDelete 는 이미 안쪽 축(...ByPath)으로 조회한다(대조군)', () => {
   assert.ok(
-    observed.deleteSiblingWasmCalls.includes('getCellParagraphLengthByPath'),
+    observed.deleteSiblingWasmCalls.includes('getCellLogicalLengthByPath'),
     `handleDelete 는 cellPath 축 조회를 써야 한다: ${observed.deleteSiblingWasmCalls.join(', ')}`,
   );
 });

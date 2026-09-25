@@ -44,7 +44,6 @@ try {
     return {
       covers: Array.from(document.querySelectorAll('.ag-reveal-cover'))
         .filter(node => node.style.display !== 'none').length,
-      caretActive: !!document.querySelector('.ag-typewriter-caret.is-writing'),
       inkBoxes: Array.from(document.querySelectorAll('.ag-pending-ink'))
         .map(node => {
           const box = node.getBoundingClientRect();
@@ -64,7 +63,7 @@ try {
   }, fixture);
   await page.screenshot({ path: path.join(artifacts, 'after-turn.png') });
   fs.writeFileSync(path.join(artifacts, 'result.json'), JSON.stringify({ pendingResult, result }, null, 2));
-  console.log(JSON.stringify({ covers: pendingResult.covers, caretActive: pendingResult.caretActive }));
+  console.log(JSON.stringify({ covers: pendingResult.covers }));
   assert.equal(fixture.fill.ok, true);
   assert.equal(pendingResult.covers, 0, 'body edits do not mask page fills or floating objects');
   assert.equal(pendingResult.inkBoxes.length, 0, 'pending text does not blend across the page fill');
@@ -75,7 +74,6 @@ try {
   assert.deepEqual(colorAt(beforePath, 300, 291), [255, 224, 168]);
   assert.deepEqual(colorAt(duringPath, 300, 291), [255, 224, 168],
     'the background pixel inside the edited line stays the same color');
-  assert.equal(pendingResult.caretActive, true);
   assert.equal(result.hasPending, true);
   assert.equal(result.text, fixture.newText);
 } finally {

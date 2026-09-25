@@ -104,19 +104,21 @@ export function createEquationLiteralFontResolver(
   };
 }
 
-/** 수식 배치와 paint가 동일한 사용자 서체의 advance를 사용한다. 미로드 서체는 null. */
+/** 수식 배치와 paint가 같은 run의 advance와 잉크 경계를 사용한다. */
 export function createEquationTextMeasurer(
   resolveFont: (name: string) => LocalFontRecord | null,
   readBytes: (name: string) => ArrayBuffer | null,
-): (source: string, text: string, size: number, italic: boolean, hft: boolean, literal: boolean) => number | null {
+): (source: string, text: string, size: number, italic: boolean, hft: boolean, literal: boolean, bold?: boolean) => { advance: number; inkRight: number } | null {
   const exact = createEquationFontResolver(resolveFont, readBytes);
   const unicode = createEquationLiteralFontResolver(resolveFont, readBytes);
   let context: CanvasRenderingContext2D | null = null;
-  return (source, text, size, italic, hft, literal) => {
+  return (source, text, size, italic, hft, literal, bold = false) => {
     if (!Number.isFinite(size) || size <= 0 || !text) return null;
     if (!context) context = globalThis.document?.createElement('canvas').getContext('2d') ?? null;
     if (!context) return null;
-    let width = 0;
+    const runs: Array<{ text: string; font: string }> = [];
+    // HFT literal은 painter가 한 글자씩 그린다. 다른 경로는 같은 서체 run을 합쳐 커닝한다.
+    const splitLiteral = hft && literal && /[^\x00-\x7f]/u.test(text);
     for (const character of text) {
       let family: string | null = null; let glyph = character; let skew = italic; let em = size;
       if (hft && isLegacyEquationFont(source)) {
@@ -135,9 +137,20 @@ export function createEquationTextMeasurer(
         family = resolveFont(source)?.runtimeFamily ?? null;
       }
       if (!family) return null;
-      context.font = `${skew ? 'italic ' : ''}${em}px ${JSON.stringify(family)}`;
-      width += context.measureText(glyph).width;
+      const font = `${skew ? 'italic ' : ''}${bold ? 'bold ' : ''}${em.toFixed(3)}px ${JSON.stringify(family)}`;
+      const last = runs.at(-1);
+      if (!splitLiteral && last?.font === font) last.text += glyph;
+      else runs.push({ text: glyph, font });
     }
-    return width;
+    let advance = 0;
+    let inkRight = 0;
+    for (const run of runs) {
+      context.font = run.font;
+      const metrics = context.measureText(run.text);
+      if (!Number.isFinite(metrics.width) || !Number.isFinite(metrics.actualBoundingBoxRight)) return null;
+      inkRight = Math.max(inkRight, advance + metrics.actualBoundingBoxRight);
+      advance += metrics.width;
+    }
+    return { advance, inkRight };
   };
 }

@@ -35,7 +35,7 @@ export const BATCHABLE_EDIT_TOOL_NAMES = Object.freeze([
   'delete_table',
   'insert_equation',
 ]);
-export const OFFSET_CAVEAT = 'charOffset counts text characters only; paragraphs containing inline controls (tables/pictures) may have offsets that do not map 1:1 to what you see — prefer find_text to locate exact offsets.';
+export const OFFSET_CAVEAT = 'charOffset counts text characters only, in body and table cells alike: inline objects (equations, pictures, tables) take no offset, and text inserted at an object\'s offset lands before the object. find_text and get_selection report offsets this way — use them instead of counting what you see.';
 export const CELL_NOTE = "To target text INSIDE a table cell, pass cell (assemble it from the table entry's paraIdx/controlIdx in get_structure tables[] plus the cell's cellIdx, or copy a find_text match). For a nested table cell, copy BOTH cell and cellPath from get_selection. Paragraph indexes and offsets are relative to the innermost cell.";
 
 export function cellParam() {

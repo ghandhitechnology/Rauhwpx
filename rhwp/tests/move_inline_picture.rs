@@ -619,3 +619,94 @@ fn invalid_cell_move_does_not_remove_source_picture() {
         .is_err());
     assert_eq!(format!("{:?}", core.document().sections[0]), before);
 }
+
+/// 문서 마지막 문단의 표 셀에서 그림을 표 밖으로 끌어낸 경우 (스튜디오 표 밖 드롭):
+/// 표 뒤에 빈 본문 문단을 만들고 그림을 옮긴 결과가 HWP 저장·재로드 후에도 유지된다.
+#[test]
+fn move_cell_picture_below_last_table_survives_hwp_roundtrip() {
+    let mut core = load_core();
+    let last = core.document().sections[0].paragraphs.len() - 1;
+    let created: serde_json::Value =
+        serde_json::from_str(&core.create_table_native(0, last, 0, 2, 2).unwrap()).unwrap();
+    let table_para = created["paraIdx"].as_u64().unwrap() as usize;
+    let table_ctrl = created["controlIdx"].as_u64().unwrap() as usize;
+    // 표 아래 기본 빈 문단을 지워 표 문단을 구역 마지막 문단으로 만든다.
+    while core.document().sections[0].paragraphs.len() > table_para + 1 {
+        core.delete_paragraph_native(0, table_para + 1).unwrap();
+    }
+    let cell = [(table_ctrl, 0, 0)];
+    let raw = core
+        .insert_picture_with_placement_native(
+            0,
+            table_para,
+            0,
+            &cell,
+            TINY_PNG,
+            1000,
+            1000,
+            1,
+            1,
+            "png",
+            "cell picture",
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+    let pic_ctrl = serde_json::from_str::<serde_json::Value>(&raw).unwrap()["controlIdx"]
+        .as_u64()
+        .unwrap() as usize;
+    let bin = core.document().bin_data_content.last().unwrap().data.load();
+
+    core.insert_paragraph_native(0, table_para + 1).unwrap();
+    let moved: serde_json::Value = serde_json::from_str(
+        &core
+            .move_picture_control_by_path_native(
+                0,
+                table_para,
+                &cell,
+                pic_ctrl,
+                table_para + 1,
+                &[],
+                0,
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(moved["moved"], true);
+    assert_eq!(moved["paraIdx"], table_para + 1);
+    assert_eq!(moved["cellPath"], serde_json::json!([]));
+
+    let bytes = core.export_hwp_with_adapter().expect("HWP 저장");
+    let mut reloaded = DocumentCore::from_bytes(&bytes).expect("HWP 재로드");
+    let paras = &reloaded.document().sections[0].paragraphs;
+    assert_eq!(paras.len(), table_para + 2, "표 뒤 문단이 하나 생겨야 한다");
+    let Control::Table(table) = &paras[table_para].controls[table_ctrl] else {
+        panic!("표 컨트롤 위치 유지");
+    };
+    assert!(
+        table
+            .cells
+            .iter()
+            .all(|c| c.paragraphs.iter().all(|p| !has_picture(p))),
+        "원래 셀에서 그림이 빠져야 한다"
+    );
+    let body = &paras[table_para + 1];
+    let Some(Control::Picture(pic)) = body.controls.first() else {
+        panic!("표 뒤 문단에 그림이 있어야 한다: {:?}", body.controls);
+    };
+    assert!(pic.common.treat_as_char);
+    assert_eq!((pic.common.width, pic.common.height), (1000, 1000));
+    assert_eq!(
+        reloaded
+            .document()
+            .bin_data_content
+            .last()
+            .unwrap()
+            .data
+            .load(),
+        bin,
+        "그림 데이터 보존"
+    );
+    assert_picture_renders(&mut reloaded, 0, "표 밖 이동 재로드");
+}

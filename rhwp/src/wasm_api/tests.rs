@@ -25533,7 +25533,7 @@ fn task1413_insert_click_here_field_by_path_ex_equivalent() {
 #[test]
 fn task1413_insert_text_in_cell_ex_equivalent() {
     let mut a = create_doc_with_table();
-    let rp = a.insert_text_in_cell(0, 0, 0, 0, 0, 0, "텍스트");
+    let rp = a.insert_text_in_cell(0, 0, 0, 0, 0, 0, "텍스트", None);
     let mut b = create_doc_with_table();
     let re = b.insert_text_in_cell_ex(
         r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,"charOffset":0,"text":"텍스트"}"#,
@@ -25544,7 +25544,7 @@ fn task1413_insert_text_in_cell_ex_equivalent() {
 #[test]
 fn task1413_get_text_in_cell_ex_equivalent() {
     let a = create_doc_with_table();
-    let rp = a.get_text_in_cell(0, 0, 0, 0, 0, 0, 1);
+    let rp = a.get_text_in_cell(0, 0, 0, 0, 0, 0, 1, None);
     let re = a.get_text_in_cell_ex(
         r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,"charOffset":0,"count":1}"#,
     );
@@ -25554,7 +25554,7 @@ fn task1413_get_text_in_cell_ex_equivalent() {
 #[test]
 fn task1413_delete_text_in_cell_ex_equivalent() {
     let mut a = create_doc_with_table();
-    let rp = a.delete_text_in_cell(0, 0, 0, 0, 0, 0, 1);
+    let rp = a.delete_text_in_cell(0, 0, 0, 0, 0, 0, 1, None);
     let mut b = create_doc_with_table();
     let re = b.delete_text_in_cell_ex(
         r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,"charOffset":0,"count":1}"#,

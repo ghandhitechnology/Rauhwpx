@@ -251,13 +251,68 @@ function startCellSelectionDrag(this: any, e: MouseEvent, cellRC: { row: number;
   this.textarea.focus();
 }
 
+/** 커서가 있는 표의 식별자 — 셀 경로에서 마지막 셀만 뺀 표 주소. */
+function currentCellTableKey(self: any): string | null {
+  const ctx = self.cursor.getCellTableContext?.();
+  if (!ctx) return null;
+  const path = (ctx.cellPath ?? []) as Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }>;
+  const outer = path.slice(0, -1).map((entry) => [entry.controlIndex, entry.cellIndex, entry.cellParaIndex]);
+  return JSON.stringify([ctx.sec, ctx.ppi, ctx.ci, outer, path.at(-1)?.controlIndex ?? ctx.ci]);
+}
+
 function startCellSelectionDragCandidate(this: any, e: MouseEvent, cellRC: { row: number; col: number }): void {
   this.cellSelectionDragCandidate = {
     startClientX: e.clientX,
     startClientY: e.clientY,
     startRow: cellRC.row,
     startCol: cellRC.col,
+    tableKey: currentCellTableKey(this),
+    anchorPosition: this.cursor.getPosition(),
   };
+}
+
+/** hit 이 셀 블록 선택 중인 표 안쪽인지. 표 밖(본문·바깥 셀·다른 표)이면 false. */
+function hitInsideCellSelectionTable(self: any, hit: any): boolean {
+  const ctx = self.cursor.getCellTableContext?.();
+  if (!ctx || !hit || hit.parentParaIndex === undefined) return false;
+  if (hit.parentParaIndex !== ctx.ppi || hit.controlIndex !== ctx.ci) return false;
+  const tablePath = (ctx.cellPath ?? []) as Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }>;
+  if (tablePath.length <= 1) return true;
+  const hitPath = (hit.cellPath ?? []) as typeof tablePath;
+  if (hitPath.length < tablePath.length) return false;
+  const depth = tablePath.length - 1;
+  for (let i = 0; i < depth; i++) {
+    const a = tablePath[i];
+    const b = hitPath[i];
+    if (a.controlIndex !== b.controlIndex || a.cellIndex !== b.cellIndex || a.cellParaIndex !== b.cellParaIndex) {
+      return false;
+    }
+  }
+  return hitPath[depth].controlIndex === tablePath[depth].controlIndex;
+}
+
+/**
+ * 표 안에서 시작한 셀 블록 드래그가 표 밖으로 나가면 텍스트 선택으로 되돌린다.
+ * 시작 자리를 anchor 로 두고, 정렬 선택이 표를 통째로 포함하도록 올린다 (selection-table-lift).
+ */
+function demoteCellSelectionDragToText(this: any, e: MouseEvent): boolean {
+  const state = this.cellSelectionDragState;
+  if (!state?.anchorPosition) return false;
+  const hit = this.hitTestFromClientPoint?.(e.clientX, e.clientY);
+  if (!hit || hit.paragraphIndex >= 0xFFFFFF00 || hit.isTextBox) return false;
+  if (hitInsideCellSelectionTable(this, hit)) return false;
+
+  this.cellSelectionDragState = null;
+  this.cursor.exitCellSelectionMode();
+  this.cellSelectionRenderer?.clear();
+  this.cursor.clearSelection();
+  this.cursor.moveTo(state.anchorPosition);
+  this.cursor.setAnchor();
+  this.cursor.moveToHit(hit);
+  this.startTextSelectionDrag(e);
+  this.updateCaretDuringDrag();
+  this.eventBus.emit('command-state-changed');
+  return true;
 }
 
 function resolveTableResizeHit(
@@ -289,6 +344,7 @@ function updateCellSelectionDrag(this: any, e: MouseEvent): void {
   if (!state.isDragging && Math.hypot(dx, dy) < 3) return;
   state.isDragging = true;
 
+  if (demoteCellSelectionDragToText.call(this, e)) return;
   const cellRC = this.hitTestCellRowCol(e);
   if (!cellRC) return;
   if (cellRC.row === state.lastRow && cellRC.col === state.lastCol) return;
@@ -341,6 +397,9 @@ function promoteCellSelectionDragCandidate(this: any, e: MouseEvent): boolean {
   const dy = e.clientY - candidate.startClientY;
   if (Math.hypot(dx, dy) < 3) return false;
 
+  // 텍스트 드래그가 커서를 중첩 표 안으로 옮겼으면 행/열은 그 표 기준이다.
+  // 시작한 표가 아니면 셀 블록이 아니라 표를 통째로 포함하는 텍스트 선택으로 둔다.
+  if (currentCellTableKey(this) !== candidate.tableKey) return false;
   const cellRC = this.hitTestCellRowCol(e);
   if (!cellRC) return false;
   if (cellRC.row === candidate.startRow && cellRC.col === candidate.startCol) return false;
@@ -360,6 +419,7 @@ function promoteCellSelectionDragCandidate(this: any, e: MouseEvent): boolean {
     clientX: candidate.startClientX,
     clientY: candidate.startClientY,
   } as MouseEvent, { row: candidate.startRow, col: candidate.startCol });
+  this.cellSelectionDragState.anchorPosition = candidate.anchorPosition;
   updateCellSelectionDrag.call(this, e);
   return true;
 }

@@ -1777,6 +1777,23 @@ fn compute_line_extra_spacing(
         0.0
     };
 
+    // 양쪽 정렬 안전장치: 가득 찬 자동 줄바꿈 줄의 여유는 다음 줄 첫 어절보다 작으므로
+    // 간격 하나에 글자 두 개 폭 넘게, 글자 하나에 반 글자 폭 넘게 붙지 않는다. 그보다
+    // 크면 실제로 찬 줄이 아니므로(낡은 줄 정보 등) 늘리지 않고 앞쪽 정렬로 둔다.
+    // 나눔 정렬(Split)은 짧은 줄도 끝까지 배분하는 것이 정의이므로 제외한다.
+    // 기준 글자 크기는 보이는 글자가 있는 run 에서만 잡는다 (줄 끝 공백만 큰 경우 제외).
+    let line_font_size = comp_line
+        .runs
+        .iter()
+        .filter(|r| r.text.chars().any(|c| !c.is_whitespace()))
+        .map(|r| resolved_to_text_style(styles, r.char_style_id, r.lang_index).font_size)
+        .fold(0.0f64, f64::max);
+    let stretch_is_implausible = |per_gap: f64, gap_limit_em: f64| -> bool {
+        alignment == Alignment::Justify
+            && line_font_size > 0.0
+            && per_gap > line_font_size * gap_limit_em
+    };
+
     if needs_justify {
         // 양쪽 정렬: 후행 공백 제외한 내부 공백에 분배
         let all_chars: Vec<char> = comp_line.runs.iter().flat_map(|r| r.text.chars()).collect();
@@ -1817,6 +1834,8 @@ fn compute_line_extra_spacing(
             if suppress_cell_overflow_spacing && slack < 0.0 {
                 // 셀 내부 폭이 글자 자연 폭보다 작아도 한컴처럼 글자를 압축하지 않는다.
                 // 줄바꿈은 LINE_SEG/리플로우가 결정하고, 그린 글자는 셀 경계에서만 클리핑한다.
+                (0.0, 0.0, 0.0)
+            } else if stretch_is_implausible(slack / interior_spaces as f64, 2.0) {
                 (0.0, 0.0, 0.0)
             } else {
                 // 양쪽 정렬: 단어 간격 분배 (또는 음수 슬랙 시 압축)
@@ -1878,6 +1897,8 @@ fn compute_line_extra_spacing(
             let slack = available_width - visible_width;
             if suppress_cell_overflow_spacing && slack < 0.0 {
                 // 셀의 좁은 내부 폭은 줄바꿈 기준일 뿐, 숫자/문자를 수평 압축하지 않는다.
+                (0.0, 0.0, 0.0)
+            } else if stretch_is_implausible(slack / visible_char_count as f64, 0.5) {
                 (0.0, 0.0, 0.0)
             } else {
                 let raw = slack / visible_char_count as f64;
@@ -1978,6 +1999,31 @@ fn needs_word_distribution(
         Alignment::Justify => !is_last_line_of_para && !has_forced_break,
         _ => false,
     }
+}
+
+/// 다음 줄이 글자처럼 취급 그림/도형/표로 시작하는지 — 즉 이 줄이 글자로 차서가 아니라
+/// 다음 개체가 남은 폭에 들어가지 않아 끝났는지 판정한다. 수식은 글자 흐름의 일부라
+/// 한컴처럼 일반 줄바꿈으로 본다.
+fn line_ends_before_inline_block_object(
+    para: Option<&Paragraph>,
+    comp: &ComposedParagraph,
+    tac_offsets_px: &[(usize, f64, usize)],
+    line_idx: usize,
+) -> bool {
+    let (Some(para), Some(next)) = (para, comp.lines.get(line_idx + 1)) else {
+        return false;
+    };
+    tac_offsets_for_line(comp, tac_offsets_px, line_idx + 1)
+        .iter()
+        .any(|(pos, _, ci)| {
+            *pos == next.char_start
+                && match para.controls.get(*ci) {
+                    Some(Control::Picture(pic)) => pic.common.treat_as_char,
+                    Some(Control::Shape(shape)) => shape.common().treat_as_char,
+                    Some(Control::Table(table)) => table.common.treat_as_char,
+                    _ => false,
+                }
+        })
 }
 
 /// [Task #2067] 조판부호 모드의 인라인 컨트롤 마커 라벨 수집 — (논리 위치, 라벨).
@@ -4486,10 +4532,41 @@ impl LayoutEngine {
             let is_last_line_of_para = line_idx == end - 1 && end == composed.lines.len();
 
             // 정렬별 간격 분배 계산
-            let has_forced_break = comp_line.has_line_break;
+            // 양쪽 정렬은 글자로 가득 찬 자동 줄바꿈 줄만 늘린다. 강제 줄바꿈 줄, 문단 끝 줄과
+            // 함께, 다음 글자처럼 취급 그림/도형/표가 들어가지 않아 끊긴 줄도 앞쪽 정렬로 둔다
+            // (그림 앞 짧은 줄이 칸 전체로 벌어지지 않게 — Google Docs 와 같은 규칙).
+            let has_forced_break = comp_line.has_line_break
+                || (alignment == Alignment::Justify
+                    && line_ends_before_inline_block_object(
+                        para,
+                        composed,
+                        &tac_offsets_px,
+                        line_idx,
+                    ));
             let needs_justify =
                 needs_word_distribution(alignment, is_last_line_of_para, has_forced_break);
+            // 저장 줄 폭(LINE_SEG segment_width)은 그 줄을 나눈 폭이다. 표 크기 조절 등으로
+            // 지금 그려지는 폭이 그보다 한 글자 이상 넓으면, 늘릴 여유를 줄을 나눈 폭 기준으로만
+            // 계산한다. 그려지는 폭 기준으로 늘리면 좁게 끊긴 줄이 크게 벌어진다.
+            let composed_width_shrink = if comp_line.segment_width > 0
+                && line_avail_w_override.is_none()
+                && !uses_stored_segment_geometry
+            {
+                (effective_col_w
+                    - margin_left
+                    - margin_right
+                    - hwpunit_to_px(comp_line.segment_width, self.dpi))
+                .max(0.0)
+            } else {
+                0.0
+            };
             let needs_distribute = alignment == Alignment::Distribute;
+            let spacing_width =
+                if (needs_justify || needs_distribute) && composed_width_shrink > max_fs.max(8.0) {
+                    (available_width - composed_width_shrink).max(0.0)
+                } else {
+                    available_width
+                };
 
             let has_tabs = comp_line.runs.iter().any(|r| r.text.contains('\t'));
             // 자간은 **그려지는 글자**에 나눠 붙으므로 폭(`total_text_width`)과 같은
@@ -4519,7 +4596,7 @@ impl LayoutEngine {
                 suppress_cell_overflow_spacing,
                 total_char_count,
                 total_text_width,
-                available_width,
+                spacing_width,
                 tab_width,
             );
 
@@ -6436,7 +6513,11 @@ impl LayoutEngine {
                 // x는 이미 sub-run 루프에서 갱신됨 (x += full_width 생략)
             }
 
-            char_offset += run_char_count;
+            // char_offset 은 논리 좌표(텍스트 + 인라인 컨트롤당 1)다. run 안의 TAC 는
+            // 위 분기에서 sub_char_offset 에 1씩 더했으므로 다음 run 의 char_start 에도
+            // 반영해야 한다. 빠지면 수식 뒤 run 이 TAC 개수만큼 앞당겨져 캐럿·선택·
+            // hit-test 가 어긋난다.
+            char_offset += run_char_count + run_tacs.len();
             run_char_pos = run_char_end;
             inline_tab_cursor_render += run.text.chars().filter(|c| *c == '\t').count();
             char_x_map.push((char_offset, x));

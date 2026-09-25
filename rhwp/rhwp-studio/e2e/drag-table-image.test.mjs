@@ -43,7 +43,7 @@ async function collectState(page, table) {
     for (let page = 0; page < wasm.pageCount; page += 1) {
       for (const control of wasm.getPageControlLayout(page).controls) {
         if (control.type !== 'image') continue;
-        const data = wasm.getControlImageData(0, paraIdx, control.controlIdx, JSON.stringify(control.cellPath));
+        const data = wasm.getControlImageData(0, control.paraIdx ?? paraIdx, control.controlIdx, JSON.stringify(control.cellPath ?? []));
         images.push({
           page, x: control.x, y: control.y, w: control.w, h: control.h,
           cellPath: control.cellPath, bytes: Array.from(data),
@@ -197,4 +197,51 @@ await runTest('table image drag between cells and undo/redo', async ({ page }) =
 
   await dragToCell(page, table, redone.images[0], 2);
   expectImageInCell(await collectState(page, table), 2, bytes, 'second-row drag');
+});
+
+await runTest('table image drag out below the last table', async ({ page }) => {
+  await createNewDocument(page);
+  const table = await setupTable(page);
+  // 표 문단을 구역 마지막 문단으로 만들어 표 뒤 빈 문단 생성 경로를 탄다.
+  const paraCount = await page.evaluate(({ paraIdx }) => {
+    const wasm = window.__wasm;
+    while (wasm.getParagraphCount(0) > paraIdx + 1) wasm.deleteParagraph(0, paraIdx + 1);
+    window.__eventBus.emit('document-changed');
+    return wasm.getParagraphCount(0);
+  }, table);
+  await pause(page, 500);
+  const original = await collectState(page, table);
+  const bytes = original.images[0].bytes;
+  expectImageInCell(original, 0, bytes, 'setup');
+
+  const image = original.images[0];
+  const cells = original.cells;
+  const tableBottom = Math.max(...cells.map((cell) => cell.y + cell.h));
+  const from = await clientPoint(page, { pageIndex: 0, x: image.x + image.w / 2, y: image.y + image.h / 2 });
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await pause(page, 80);
+  const to = await clientPoint(page, { pageIndex: 0, x: image.x + image.w / 2, y: tableBottom + 60 });
+  await page.mouse.move(to.x, to.y, { steps: 12 });
+  const caret = await page.evaluate(() => [...document.querySelectorAll('.table-object-layer div')]
+    .some((el) => el.style.width === '2px'));
+  assert(caret, 'a drop caret is shown below the table while dragging');
+  await page.mouse.up();
+  await pause(page, 350);
+
+  const moved = await collectState(page, table);
+  assert(moved.images.length === 1 && !moved.images[0].cellPath?.length,
+    `image left the table (got ${JSON.stringify(moved.images.map((i) => i.cellPath))})`);
+  const movedBottom = Math.max(...moved.cells.map((cell) => cell.y + cell.h));
+  assert(moved.images[0].y >= movedBottom - 1,
+    `image renders below the table (image y=${moved.images[0].y}, table bottom=${movedBottom})`);
+  assert(JSON.stringify(moved.images[0].bytes) === JSON.stringify(bytes), 'image bytes are preserved');
+  const after = await page.evaluate(() => window.__wasm.getParagraphCount(0));
+  assert(after === paraCount + 1, `one body paragraph is created after the table (got ${after})`);
+
+  await page.evaluate(() => window.__inputHandler.performUndo());
+  await pause(page);
+  expectImageInCell(await collectState(page, table), 0, bytes, 'undo');
+  const undone = await page.evaluate(() => window.__wasm.getParagraphCount(0));
+  assert(undone === paraCount, `one undo removes the created paragraph (got ${undone})`);
 });

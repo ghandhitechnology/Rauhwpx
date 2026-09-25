@@ -287,3 +287,68 @@ test('body document-end selection includes text after an inline equation', async
     await vite.close();
   }
 });
+
+test('중첩 셀 블록 복사·잘라내기·붙여넣기는 경로와 한 번의 실행 취소를 유지한다', async () => {
+  const vite = await createTestModuleServer(root);
+  try {
+    const { onCopy, onCut, onPaste, clearSelectedCellBlock } = await vite.ssrLoadModule('/src/engine/input-handler-keyboard.ts');
+    const calls: any[] = [];
+    const data = new Map<string, string>();
+    let operations = 0;
+    const handler: any = {
+      active: true,
+      cursor: {
+        isInCellSelectionMode: () => true,
+        isProtectedCellSelectionMode: () => false,
+        getCellTableContext: () => ({ sec: 0, ppi: 8, ci: 3, cellPath: [outer, inner] }),
+        getSelectedCellRange: () => ({ startRow: 1, startCol: 0, endRow: 2, endCol: 1 }),
+        getExcludedCells: () => new Set(),
+        getPosition: () => nestedStart,
+        hasSelection: () => false,
+        isInHeaderFooter: () => false,
+        isInPictureObjectSelection: () => false,
+        isInTableObjectSelection: () => false,
+      },
+      wasm: {
+        getTableCellTargetByPath: () => ({ cellIndex: 2, cellParaIndex: 0, charCount: 0 }),
+        copyTableCellRange: (...args: any[]) => { calls.push(['copy', ...args]); return { ok: true, text: '가\t나', html: '<table><tr><td>가</td><td>나</td></tr></table>' }; },
+        clearTableCellRange: (...args: any[]) => { calls.push(['clear', ...args]); return { ok: true }; },
+        pasteTableCellRange: (...args: any[]) => { calls.push(['paste', ...args]); return { ok: true }; },
+        hasInternalClipboard: () => true,
+        getClipboardText: () => '가\t나',
+      },
+      executeOperation: ({ operation }: any) => { operations++; operation(handler.wasm); },
+      updateCellSelection: () => {},
+    };
+    const event = { preventDefault: () => {}, clipboardData: {
+      setData: (type: string, value: string) => data.set(type, value),
+      getData: (type: string) => data.get(type) ?? '',
+    } };
+    assert.equal(onCopy.call(handler, event), true);
+    assert.equal(data.get('text/plain'), '가\t나');
+    assert.match(data.get('text/html')!, /<table>/);
+    onCut.call(handler, event);
+    assert.equal(operations, 1);
+    onPaste.call(handler, event);
+    assert.equal(operations, 2);
+    clearSelectedCellBlock.call(handler);
+    assert.equal(operations, 3);
+    assert.deepEqual(calls.map(call => call[0]), ['copy', 'copy', 'clear', 'paste', 'clear']);
+    assert.deepEqual(calls[0].slice(1), [0, 8, JSON.stringify([outer, inner]), 1, 0, 2, 1]);
+    assert.deepEqual(calls[3].slice(1), [0, 8, JSON.stringify([outer, inner]), 1, 0]);
+    handler.cursor.isInCellSelectionMode = () => false;
+    handler.cursor.isInCell = () => true;
+    handler.wasm.getCellInfoByPath = () => ({ row: 2, col: 1 });
+    onPaste.call(handler, event);
+    assert.equal(operations, 4);
+    assert.deepEqual(calls.at(-1), ['paste', 0, 8, JSON.stringify(nestedStart.cellPath), 2, 1]);
+    handler.cursor.isInCellSelectionMode = () => true;
+    handler.cursor.isProtectedCellSelectionMode = () => true;
+    onCut.call(handler, event);
+    onPaste.call(handler, event);
+    clearSelectedCellBlock.call(handler);
+    assert.equal(operations, 4);
+  } finally {
+    await vite.close();
+  }
+});

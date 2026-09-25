@@ -24,7 +24,7 @@ enum ParagraphSplitIntent {
     RestoreMetadata(ParaMeta),
 }
 
-fn recalculate_cell_paragraph_vpos(
+pub(super) fn recalculate_cell_paragraph_vpos(
     paragraphs: &mut [Paragraph],
     start_para: usize,
     ignore_reset_at: Option<usize>,
@@ -606,6 +606,24 @@ fn has_clickhere_field_range(para: &Paragraph) -> bool {
 }
 
 impl DocumentCore {
+    /// 캐럿 삽입. 캐럿이 인라인 개체 바로 뒤이면 그 개체 갭 끝에 넣어 개체 앞으로 끼어들지 않게 한다.
+    fn insert_text_for_caret(
+        para: &mut Paragraph,
+        char_offset: usize,
+        text: &str,
+        after_control: Option<usize>,
+    ) {
+        match after_control {
+            Some(ci) if ci < para.controls.len() => {
+                let pos = Self::find_inline_control_gap_start(para, ci) + 8;
+                para.insert_text_at_utf16(char_offset, pos, text);
+            }
+            _ => {
+                para.insert_text_at(char_offset, text);
+            }
+        }
+    }
+
     pub fn replace_body_text_local_native(
         &mut self,
         section_idx: usize,
@@ -614,6 +632,7 @@ impl DocumentCore {
         delete_count: usize,
         text: &str,
     ) -> Result<String, HwpError> {
+        let after_control = self.caret_insert_after_control.take();
         if section_idx >= self.document.sections.len() {
             return Err(HwpError::RenderError(format!(
                 "구역 인덱스 {} 범위 초과 (총 {}개)",
@@ -679,7 +698,7 @@ impl DocumentCore {
                 char_offset,
             );
             let para = &mut self.document.sections[section_idx].paragraphs[para_idx];
-            para.insert_text_at(char_offset, text);
+            Self::insert_text_for_caret(para, char_offset, text, after_control);
             keep_inactive_field_start_outside(para, &before_insertions, new_chars_count);
             keep_inactive_field_end_outside(para, &outside_insertions, new_chars_count);
             if has_clickhere_field_range(para) {
@@ -793,6 +812,7 @@ impl DocumentCore {
         char_offset: usize,
         text: &str,
     ) -> Result<String, HwpError> {
+        let after_control = self.caret_insert_after_control.take();
         // 인덱스 범위 검증
         if section_idx >= self.document.sections.len() {
             return Err(HwpError::RenderError(format!(
@@ -834,7 +854,7 @@ impl DocumentCore {
         );
         {
             let para = &mut self.document.sections[section_idx].paragraphs[para_idx];
-            para.insert_text_at(char_offset, text);
+            Self::insert_text_for_caret(para, char_offset, text, after_control);
             keep_inactive_field_start_outside(para, &before_insertions, new_chars_count);
             keep_inactive_field_end_outside(para, &outside_insertions, new_chars_count);
             if has_clickhere_field_range(para) {
@@ -1219,6 +1239,7 @@ impl DocumentCore {
         text: &str,
         paginate_immediately: bool,
     ) -> Result<String, HwpError> {
+        let after_control = self.caret_insert_after_control.take();
         // 셀 문단 접근 검증 및 텍스트 교체
         let active_field = self.active_field.clone();
         let cell_path = [(control_idx, cell_idx, cell_para_idx)];
@@ -1257,7 +1278,7 @@ impl DocumentCore {
             char_offset,
         );
         if new_chars_count > 0 {
-            cell_para.insert_text_at(char_offset, text);
+            Self::insert_text_for_caret(cell_para, char_offset, text, after_control);
             keep_inactive_field_start_outside(cell_para, &before_insertions, new_chars_count);
             keep_inactive_field_end_outside(cell_para, &outside_insertions, new_chars_count);
             if has_clickhere_field_range(cell_para) {
@@ -1771,7 +1792,7 @@ impl DocumentCore {
             [parent_para_idx]
             .controls
             .get(control_idx)
-            .and_then(|control| Self::cell_metrics_for_control(control, cell_idx))
+            .and_then(|control| self.cell_metrics_for_control(control, cell_idx))
         {
             Some(metrics) => metrics,
             None => return,
@@ -1900,7 +1921,15 @@ impl DocumentCore {
     ///
     /// `reflow_cell_paragraph`(flat)와 `reflow_cell_paragraph_by_path`(중첩)가 공유한다.
     /// `None` = 표/글상자/그림 캡션이 아니거나 대상 셀/텍스트박스가 없음.
-    fn cell_metrics_for_control(control: &Control, cell_idx: usize) -> Option<(u32, i16, i16)> {
+    ///
+    /// 표 셀 폭은 `cell.width` 가 아니라 레이아웃이 실제로 그리는 그리드 폭이다. 두 값이
+    /// 어긋난 표에서 `cell.width` 로 줄을 나누면 그려진 셀보다 좁게 끊긴 줄이 양쪽 정렬로
+    /// 크게 벌어진다.
+    fn cell_metrics_for_control(
+        &self,
+        control: &Control,
+        cell_idx: usize,
+    ) -> Option<(u32, i16, i16)> {
         match control {
             Control::Table(table) => {
                 if cell_idx == 65534 {
@@ -1924,7 +1953,11 @@ impl DocumentCore {
                     } else {
                         table.padding.right
                     };
-                    Some((cell.width, pad_l, pad_r))
+                    let width = self
+                        .layout_engine
+                        .table_cell_render_width_hu(table, cell_idx)
+                        .unwrap_or(cell.width);
+                    Some((width, pad_l, pad_r))
                 }
             }
             Control::Shape(shape) => {
@@ -1955,7 +1988,7 @@ impl DocumentCore {
         for (i, &(ctrl_idx, cell_idx, cell_para_idx)) in path.iter().enumerate() {
             let control = para.controls.get(ctrl_idx)?;
             if i + 1 == path.len() {
-                return Self::cell_metrics_for_control(control, cell_idx);
+                return self.cell_metrics_for_control(control, cell_idx);
             }
             para = match control {
                 Control::Table(t) => t.cells.get(cell_idx)?.paragraphs.get(cell_para_idx)?,
@@ -4400,6 +4433,7 @@ impl DocumentCore {
             );
         }
 
+        let after_control = self.caret_insert_after_control.take();
         let new_chars_count = text.chars().count();
         let active_field = self.active_field.clone();
         let cell_para = self.get_cell_paragraph_mut_by_path(section_idx, parent_para_idx, path)?;
@@ -4420,7 +4454,7 @@ impl DocumentCore {
             Some(path),
             char_offset,
         );
-        cell_para.insert_text_at(char_offset, text);
+        Self::insert_text_for_caret(cell_para, char_offset, text, after_control);
         keep_inactive_field_start_outside(cell_para, &before_insertions, new_chars_count);
         keep_inactive_field_end_outside(cell_para, &outside_insertions, new_chars_count);
         if has_clickhere_field_range(cell_para) {

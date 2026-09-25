@@ -2261,15 +2261,17 @@ mod text_measurement;
 
 pub(crate) fn measure_known_font_run_width(
     font_family: &str,
+    bold: bool,
     italic: bool,
     text: &str,
     font_size: f64,
 ) -> Option<f64> {
-    text_measurement::measure_known_font_run_width(font_family, italic, text, font_size)
+    text_measurement::measure_known_font_run_width(font_family, bold, italic, text, font_size)
 }
 mod utils;
 
 pub(crate) use paragraph_layout::ensure_min_baseline;
+pub(crate) use picture_footnote::caption_height_px;
 pub(crate) use table_layout::border_style_has_diagonal;
 pub(crate) use text_measurement::{
     compute_char_positions, compute_glyph_positions, enter_resolved_shaping_fonts,
@@ -2344,6 +2346,30 @@ impl LayoutEngine {
     pub fn clear_layout_caches(&self) {
         self.cell_units_cache.borrow_mut().clear();
         self.table_nested_text_flag_cache.borrow_mut().clear();
+    }
+
+    /// 편집으로 내용이 바뀐 표(중첩 표 포함)의 셀 유닛·중첩 텍스트 플래그 캐시를 제거한다.
+    ///
+    /// 셀 포인터 키는 셀 문단 분할/병합·붙여넣기처럼 셀 구조체를 그대로 두고 문단 목록만
+    /// 바꾸는 편집에서도 유지된다. 이때 옛 units 가 남으면 pagination 이 새로 계산한 셀
+    /// 컷(유닛 수)을 옛 유닛 목록에 적용해 분할 표가 엉뚱한 지점에서 끊긴다.
+    pub(crate) fn invalidate_table_layout_caches(&self, table: &crate::model::table::Table) {
+        let mut cell_cache = self.cell_units_cache.borrow_mut();
+        let mut flag_cache = self.table_nested_text_flag_cache.borrow_mut();
+        let mut stack = vec![table];
+        while let Some(table) = stack.pop() {
+            flag_cache.remove(&(table as *const crate::model::table::Table as usize));
+            for cell in &table.cells {
+                cell_cache.remove(&(cell as *const crate::model::table::Cell as usize));
+                for para in &cell.paragraphs {
+                    for ctrl in &para.controls {
+                        if let Control::Table(nested) = ctrl {
+                            stack.push(nested);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn set_resolved_shaping_fonts(&self, fonts: Vec<ResolvedShapingFont>) {

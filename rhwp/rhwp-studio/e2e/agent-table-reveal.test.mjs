@@ -64,7 +64,6 @@ try {
     const duringEdit = coverCount();
     return {
       duringEdit,
-      caretActive: !!document.querySelector('.ag-typewriter-caret.is-writing'),
       cellProps: window.__wasm.getCellProperties(0, addr.paraIdx, addr.controlIdx, 0),
     };
   }, fixture);
@@ -89,12 +88,11 @@ try {
   fs.writeFileSync(path.join(artifacts, 'result.json'), JSON.stringify({ pendingResult, result }, null, 2));
   console.log(JSON.stringify({ duringEdit: pendingResult.duringEdit, afterTurn: result.afterTurn, afterMicrotask: result.afterMicrotask, hasPending: result.hasPending }));
   assert.equal(pendingResult.duringEdit, 0, 'cell edits keep the document visible during the open turn');
-  assert.equal(pendingResult.caretActive, true, 'the agent caret still tracks the cell edit');
   assert.equal(fixture.fill.ok, true, 'the fixture has a colored table cell');
   assert.equal(fixture.equation.ok, true, 'the fixture has an adjacent equation');
   assert.equal(pendingResult.cellProps.fillColor.toLowerCase(), '#ffe0a8');
   assert.equal(result.text, fixture.newText, 'all Korean cell text remains in the document');
-  assert.equal(result.hasPending, true, 'finishing animation keeps changes pending for review');
+  assert.equal(result.hasPending, true, 'ending the turn keeps changes pending for review');
   assert.equal(result.afterTurn, 0, 'completed agent turns leave no white covers hiding table text');
   assert.equal(result.afterMicrotask, 0, 'deferred reveal work keeps completed turns uncovered');
 } finally {

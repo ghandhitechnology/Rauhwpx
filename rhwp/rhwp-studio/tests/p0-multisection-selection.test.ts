@@ -15,7 +15,7 @@ const reader = {
   getParagraphCount(sectionIndex: number): number {
     return sections[sectionIndex]?.length ?? 0;
   },
-  getParagraphLength(sectionIndex: number, paragraphIndex: number): number {
+  getLogicalLength(sectionIndex: number, paragraphIndex: number): number {
     return sections[sectionIndex]?.[paragraphIndex]?.length ?? 0;
   },
 };
@@ -105,6 +105,7 @@ test('Studio routes copy/delete/format/render through cross-section APIs or segm
   assert.match(command, /for \(const range of this\.ranges\)/);
   assert.match(command, /applyCharFormatToTarget\(wasm,/);
   assert.match(command, /for \(const entry of entries\)/);
-  assert.match(command, /applyParaFormatToTarget\(wasm, entry\.target, propsJson\)/);
+  assert.match(command, /applyParaFormatToTarget\(wasm, entry\.target, fixedJson\)/);
+  assert.match(command, /applyParaFormatToTarget\(wasm, entry\.target, JSON\.stringify\(perTarget\)\)/);
   assert.match(inputHandler, /getBodySelectionSegments\(this\.wasm, start, end\)\.flatMap/);
 });

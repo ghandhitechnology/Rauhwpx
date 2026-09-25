@@ -2,9 +2,11 @@ import type { DocumentPosition, CursorRect, LineInfo, CellPathEntry, NavContextE
 import type { WasmBridge } from '@/core/wasm-bridge';
 import { sameAddressedObject } from '@/core/object-address';
 // [#2756] 셀 좌표 축 헬퍼는 command.ts 와 단일 정의를 공유한다(축 유도 복제 금지).
-import { cellAxisPath } from './command';
+import { caretParagraphLength, caretTextOffset, cellAxisPath } from './command';
+import { liftSelectionAcrossTables, type TableBoundaryRequest } from './selection-table-lift';
 
-type CellSelectionReason = 'manual' | 'protected';
+/** manual = F5·셀 드래그, protected = 보호 셀 클릭, extend = 셀 경계를 넘은 Shift 선택 */
+type CellSelectionReason = 'manual' | 'protected' | 'extend';
 
 export type HeaderFooterTextPosition = {
   sectionIdx: number;
@@ -97,15 +99,24 @@ export class CursorState {
     return { anchor: { ...this.anchor }, focus: { ...this.position } };
   }
 
-  /** 선택 영역을 start < end 순서로 반환한다 */
+  /**
+   * 선택 영역을 start < end 순서로 반환한다.
+   * 한쪽 끝만 표 안에 있으면 표를 통째로 포함하도록 두 끝을 공통 컨테이너 좌표로 올린다.
+   */
   getSelectionOrdered(): { start: DocumentPosition; end: DocumentPosition } | null {
     if (!this.anchor) return null;
     const cmp = CursorState.comparePositions(this.anchor, this.position);
-    if (cmp <= 0) {
-      return { start: { ...this.anchor }, end: { ...this.position } };
-    } else {
-      return { start: { ...this.position }, end: { ...this.anchor } };
-    }
+    const ordered = cmp <= 0
+      ? { start: { ...this.anchor }, end: { ...this.position } }
+      : { start: { ...this.position }, end: { ...this.anchor } };
+    const resolve = (request: TableBoundaryRequest) =>
+      this.wasm.getTableBoundaryPosition(request);
+    const lifted = liftSelectionAcrossTables(ordered.start, ordered.end, resolve);
+    // 같은 문단의 인라인 표 뒤 본문 캐럿은 raw 비교에서 셀보다 앞선다.
+    // 경계로 올린 뒤에는 실제 문서 순서로 다시 확인한다.
+    return CursorState.comparePositions(lifted.start, lifted.end) <= 0
+      ? lifted
+      : liftSelectionAcrossTables(ordered.end, ordered.start, resolve);
   }
 
   /** 각주/미주 내부 선택 영역을 반환한다. */
@@ -580,13 +591,14 @@ export class CursorState {
     let newOffset = charOffset + delta;
 
     // hit-test가 cellPath를 제공하면 1-depth 표라도 경로 기반 API가 더 정확하다.
+    // 캐럿 좌표와 같은 논리 길이 — 인라인 수식 같은 개체도 한 칸으로 센다.
     const getParaLen = (paraIdx: number): number => {
       if (useCellPath) {
         const path = cellPath!;
         const p = path.map((e, i) => i < path.length - 1 ? e : { ...e, cellParaIndex: paraIdx });
-        return this.wasm.getCellParagraphLengthByPath(sec, ppi!, JSON.stringify(p));
+        return this.wasm.getCellLogicalLengthByPath(sec, ppi!, JSON.stringify(p));
       }
-      return this.wasm.getCellParagraphLength(sec, ppi!, ci!, cei!, paraIdx);
+      return caretParagraphLength(this.wasm, { ...pos, paragraphIndex: paraIdx, cellParaIndex: paraIdx });
     };
     const getParaCount = (): number => {
       if (useCellPath) {
@@ -725,11 +737,7 @@ export class CursorState {
       // End 키 후 Home 키 시 getLineInfo 가 다음 줄로 판정하여 charStart = 현재 위치 → 미이동.
       // atLineEnd 플래그가 설정된 상태에서 현재 위치가 줄 시작과 동일하면 이전 줄로 판정.
       if (this.atLineEnd && pos.charOffset === lineInfo.charStart && pos.charOffset > 0) {
-        const prevLineInfo = this.isInCell()
-          ? this.wasm.getLineInfoInCell(
-              pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!,
-              pos.cellIndex!, pos.cellParaIndex!, pos.charOffset - 1)
-          : this.wasm.getLineInfo(pos.sectionIndex, pos.paragraphIndex, pos.charOffset - 1);
+        const prevLineInfo = this.getLineInfoForOffset(pos, pos.charOffset - 1);
         if (prevLineInfo.charEnd === pos.charOffset) {
           lineInfo = prevLineInfo;
         }
@@ -906,7 +914,7 @@ export class CursorState {
           } else {
             // 문서 마지막 문단 끝
             const lastPara = paraCount - 1;
-            const paraLen = this.wasm.getParagraphLength(sec, lastPara);
+            const paraLen = this.wasm.getLogicalLength(sec, lastPara);
             this.position = { ...pos, paragraphIndex: lastPara, charOffset: paraLen };
           }
         }
@@ -934,6 +942,14 @@ export class CursorState {
 
   // ─── 단어 단위 이동 (Alt/Option+Arrow) ────────────────
 
+  private textOffsetToCaret(pos: DocumentPosition, offset: number): number {
+    return pos.parentParaIndex !== undefined
+      ? this.wasm.textToLogicalOffsetInCellByPath(
+        pos.sectionIndex, pos.parentParaIndex, JSON.stringify(cellAxisPath(pos)), offset,
+      )
+      : this.wasm.textToLogicalOffset(pos.sectionIndex, pos.paragraphIndex, offset);
+  }
+
   /** 단어 경계로 이동 (direction: -1=왼쪽, +1=오른쪽) */
   moveToWordBoundary(direction: -1 | 1): void {
     this.preferredX = null;
@@ -947,7 +963,7 @@ export class CursorState {
     try {
       const sec = pos.sectionIndex;
       const para = pos.paragraphIndex;
-      const paraLen = this.wasm.getParagraphLength(sec, para);
+      const paraLen = this.wasm.getLogicalLength(sec, para);
 
       if (direction === 1) {
         if (pos.charOffset >= paraLen) {
@@ -956,9 +972,10 @@ export class CursorState {
           return;
         }
         const remaining = paraLen - pos.charOffset;
-        const text = this.wasm.getTextRange(sec, para, pos.charOffset, Math.min(remaining, 50));
+        const text = this.wasm.getTextRange(sec, para, pos.charOffset, Math.min(remaining, 50), true);
         const offset = findWordBoundaryForward(text);
-        this.position = { ...pos, charOffset: pos.charOffset + offset };
+        const target = this.textOffsetToCaret(pos, caretTextOffset(this.wasm, pos) + offset);
+        this.position = { ...pos, charOffset: Math.max(pos.charOffset + 1, target) };
       } else {
         if (pos.charOffset <= 0) {
           // 문단 시작 → 이전 문단 끝으로 이동
@@ -967,9 +984,10 @@ export class CursorState {
         }
         const start = Math.max(0, pos.charOffset - 50);
         const count = pos.charOffset - start;
-        const text = this.wasm.getTextRange(sec, para, start, count);
+        const text = this.wasm.getTextRange(sec, para, start, count, true);
         const offset = findWordBoundaryBackward(text);
-        this.position = { ...pos, charOffset: start + offset };
+        const target = this.textOffsetToCaret(pos, caretTextOffset(this.wasm, pos, start) + offset);
+        this.position = { ...pos, charOffset: Math.min(pos.charOffset - 1, target) };
       }
       this.updateRect();
     } catch (e) {
@@ -989,9 +1007,7 @@ export class CursorState {
 
     try {
       const pathJson = useCellPath ? JSON.stringify(cellPath) : '';
-      const paraLen = useCellPath
-        ? this.wasm.getCellParagraphLengthByPath(sec, ppi, pathJson)
-        : this.wasm.getCellParagraphLength(sec, ppi, ci, cei, cpi);
+      const paraLen = caretParagraphLength(this.wasm, pos);
 
       if (direction === 1) {
         if (pos.charOffset >= paraLen) {
@@ -1000,10 +1016,11 @@ export class CursorState {
         }
         const remaining = paraLen - pos.charOffset;
         const text = useCellPath
-          ? this.wasm.getTextInCellByPath(sec, ppi, pathJson, pos.charOffset, Math.min(remaining, 50))
-          : this.wasm.getTextInCell(sec, ppi, ci, cei, cpi, pos.charOffset, Math.min(remaining, 50));
+          ? this.wasm.getTextInCellByPath(sec, ppi, pathJson, pos.charOffset, Math.min(remaining, 50), true)
+          : this.wasm.getTextInCell(sec, ppi, ci, cei, cpi, pos.charOffset, Math.min(remaining, 50), true);
         const offset = findWordBoundaryForward(text);
-        this.position = { ...pos, charOffset: pos.charOffset + offset };
+        const target = this.textOffsetToCaret(pos, caretTextOffset(this.wasm, pos) + offset);
+        this.position = { ...pos, charOffset: Math.max(pos.charOffset + 1, target) };
       } else {
         if (pos.charOffset <= 0) {
           this.moveHorizontal(-1);
@@ -1012,10 +1029,11 @@ export class CursorState {
         const start = Math.max(0, pos.charOffset - 50);
         const count = pos.charOffset - start;
         const text = useCellPath
-          ? this.wasm.getTextInCellByPath(sec, ppi, pathJson, start, count)
-          : this.wasm.getTextInCell(sec, ppi, ci, cei, cpi, start, count);
+          ? this.wasm.getTextInCellByPath(sec, ppi, pathJson, start, count, true)
+          : this.wasm.getTextInCell(sec, ppi, ci, cei, cpi, start, count, true);
         const offset = findWordBoundaryBackward(text);
-        this.position = { ...pos, charOffset: start + offset };
+        const target = this.textOffsetToCaret(pos, caretTextOffset(this.wasm, pos, start) + offset);
+        this.position = { ...pos, charOffset: Math.min(pos.charOffset - 1, target) };
       }
       this.updateRect();
     } catch (e) {
@@ -1123,7 +1141,7 @@ export class CursorState {
         const paraCount = this.wasm.getCellParagraphCountByPath(sec, ppi, JSON.stringify(basePath));
         const lastCpi = paraCount > 0 ? paraCount - 1 : 0;
         const lastPath = cellPath.map((e, i) => i < cellPath.length - 1 ? e : { ...e, cellIndex: targetCellIdx, cellParaIndex: lastCpi });
-        const lastParaLen = this.wasm.getCellParagraphLengthByPath(sec, ppi, JSON.stringify(lastPath));
+        const lastParaLen = this.wasm.getCellLogicalLengthByPath(sec, ppi, JSON.stringify(lastPath));
         this.position = {
           sectionIndex: sec, paragraphIndex: lastCpi, charOffset: lastParaLen,
           parentParaIndex: ppi, controlIndex: cellPath[0].controlIndex,
@@ -1140,7 +1158,9 @@ export class CursorState {
       if (where === 'end') {
         const paraCount = this.wasm.getCellParagraphCount(sec, ppi, ci!, targetCellIdx);
         const lastCpi = paraCount > 0 ? paraCount - 1 : 0;
-        const lastParaLen = this.wasm.getCellParagraphLength(sec, ppi, ci!, targetCellIdx, lastCpi);
+        const lastParaLen = this.wasm.getCellLogicalLengthByPath(sec, ppi, JSON.stringify([
+          { controlIndex: ci!, cellIndex: targetCellIdx, cellParaIndex: lastCpi },
+        ]));
         this.position = {
           sectionIndex: sec, paragraphIndex: lastCpi, charOffset: lastParaLen,
           parentParaIndex: ppi, controlIndex: ci, cellIndex: targetCellIdx, cellParaIndex: lastCpi,
@@ -1313,6 +1333,14 @@ export class CursorState {
     }
   }
 
+  /** 표 전체 셀을 선택한다 (F5 세 번과 같은 phase 3). */
+  selectWholeTableCells(): boolean {
+    if (!this._cellSelectionMode || !this.cellTableCtx) return false;
+    this._cellSelectionPhase = 3;
+    this.selectAllCells();
+    return true;
+  }
+
   /** 전체 셀 선택 (phase 3) */
   private selectAllCells(): void {
     if (!this.cellTableCtx) return;
@@ -1334,6 +1362,11 @@ export class CursorState {
   /** 셀 선택 모드인가? */
   isInCellSelectionMode(): boolean {
     return this._cellSelectionMode;
+  }
+
+  /** 글자 선택이 셀 경계를 넘어 셀 블록으로 바뀐 선택인가? (방향키만 누르면 해제) */
+  isExtendedCellSelection(): boolean {
+    return this._cellSelectionMode && this._cellSelectionReason === 'extend';
   }
 
   /** 보호 셀 클릭으로 진입한 셀 선택 모드인가? */
@@ -1378,13 +1411,13 @@ export class CursorState {
         this.position = { ...pos, charOffset: end };
       } else if (this._expandPhase === 3) {
         // 문단 전체 선택
-        const paraLen = this.wasm.getParagraphLength(sec, para);
+        const paraLen = this.wasm.getLogicalLength(sec, para);
         this.anchor = { ...pos, charOffset: 0 };
         this.position = { ...pos, charOffset: paraLen };
       } else if (this._expandPhase === 4) {
         // 구역 전체 선택
         const paraCount = this.wasm.getParagraphCount(sec);
-        const lastParaLen = this.wasm.getParagraphLength(sec, paraCount - 1);
+        const lastParaLen = this.wasm.getLogicalLength(sec, paraCount - 1);
         this.anchor = { sectionIndex: sec, paragraphIndex: 0, charOffset: 0 };
         this.position = { sectionIndex: sec, paragraphIndex: paraCount - 1, charOffset: lastParaLen };
       } else {
@@ -1392,7 +1425,7 @@ export class CursorState {
         const secCount = this.wasm.getSectionCount();
         const lastSec = secCount - 1;
         const lastParaCount = this.wasm.getParagraphCount(lastSec);
-        const lastParaLen = this.wasm.getParagraphLength(lastSec, lastParaCount - 1);
+        const lastParaLen = this.wasm.getLogicalLength(lastSec, lastParaCount - 1);
         this.anchor = { sectionIndex: 0, paragraphIndex: 0, charOffset: 0 };
         this.position = { sectionIndex: lastSec, paragraphIndex: lastParaCount - 1, charOffset: lastParaLen };
         this._expandPhase = 5; // cap
@@ -1615,7 +1648,7 @@ export class CursorState {
       if (ppi + 1 < paraCount) {
         this.position = { sectionIndex: sec, paragraphIndex: ppi + 1, charOffset: 0 };
       } else if (ppi > 0) {
-        const prevLen = this.wasm.getParagraphLength(sec, ppi - 1);
+        const prevLen = this.wasm.getLogicalLength(sec, ppi - 1);
         this.position = { sectionIndex: sec, paragraphIndex: ppi - 1, charOffset: prevLen };
       }
     }
@@ -1736,7 +1769,7 @@ export class CursorState {
     if (ppi + 1 < paraCount) {
       this.position = { sectionIndex: sec, paragraphIndex: ppi + 1, charOffset: 0 };
     } else if (ppi > 0) {
-      const prevLen = this.wasm.getParagraphLength(sec, ppi - 1);
+      const prevLen = this.wasm.getLogicalLength(sec, ppi - 1);
       this.position = { sectionIndex: sec, paragraphIndex: ppi - 1, charOffset: prevLen };
     }
     this.exitPictureObjectSelection();
@@ -2165,32 +2198,34 @@ function classifyChar(ch: string): CharClass {
 }
 
 function findWordBoundaryForward(text: string): number {
-  if (text.length === 0) return 0;
-  const startClass = classifyChar(text[0]);
+  const chars = Array.from(text);
+  if (chars.length === 0) return 0;
+  const startClass = classifyChar(chars[0]);
   let i = 0;
   // Skip current word (same class)
   if (startClass === CharClass.Space) {
-    while (i < text.length && classifyChar(text[i]) === CharClass.Space) i++;
+    while (i < chars.length && classifyChar(chars[i]) === CharClass.Space) i++;
   } else {
-    while (i < text.length && classifyChar(text[i]) === startClass) i++;
+    while (i < chars.length && classifyChar(chars[i]) === startClass) i++;
     // Also skip trailing spaces
-    while (i < text.length && classifyChar(text[i]) === CharClass.Space) i++;
+    while (i < chars.length && classifyChar(chars[i]) === CharClass.Space) i++;
   }
   return i || 1;
 }
 
 function findWordBoundaryBackward(text: string): number {
-  if (text.length === 0) return 0;
-  let i = text.length;
-  const endClass = classifyChar(text[i - 1]);
+  const chars = Array.from(text);
+  if (chars.length === 0) return 0;
+  let i = chars.length;
+  const endClass = classifyChar(chars[i - 1]);
   // Skip trailing spaces
   if (endClass === CharClass.Space) {
-    while (i > 0 && classifyChar(text[i - 1]) === CharClass.Space) i--;
+    while (i > 0 && classifyChar(chars[i - 1]) === CharClass.Space) i--;
   }
   if (i === 0) return 0;
   // Skip the word (same class)
-  const wordClass = classifyChar(text[i - 1]);
-  while (i > 0 && classifyChar(text[i - 1]) === wordClass) i--;
+  const wordClass = classifyChar(chars[i - 1]);
+  while (i > 0 && classifyChar(chars[i - 1]) === wordClass) i--;
   return i;
 }
 

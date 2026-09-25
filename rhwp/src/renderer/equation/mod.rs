@@ -10,6 +10,7 @@ pub mod canvas_render;
 pub(crate) mod font;
 pub mod layout;
 pub(crate) mod legacy_hwpeq;
+pub(crate) mod measure;
 pub mod parser;
 pub mod svg_render;
 pub mod symbols;
@@ -76,6 +77,20 @@ pub fn intrinsic_metrics_px_with_version(
         height: layout.height,
         baseline: layout.baseline,
     }
+}
+
+/// 저장 개체 폭 안에 배치한 수식의 실제 paint 폭(HWPUNIT).
+///
+/// painter는 `layout_in_control_width`로 원자 간격을 줄여 저장 폭에 맞춘다. 최소 간격으로도
+/// 넘칠 때만 자연 폭이 저장 폭보다 커지며, 줄 advance는 그 초과분만 더해야 한다.
+pub fn fitted_width_hwp(eq: &crate::model::control::Equation) -> u32 {
+    let font_size_px = super::hwpunit_to_px(eq.font_size.max(1) as i32, super::DEFAULT_DPI);
+    let ast = parser::EqParser::new(tokenizer::tokenize(&eq.script)).parse();
+    let stored = super::hwpunit_to_px(eq.common.width as i32, super::DEFAULT_DPI);
+    let layout = layout::EqLayout::with_font(font_size_px, &eq.font_name)
+        .with_version(&eq.version_info)
+        .layout_in_control_width(&ast, stored);
+    super::px_to_hwpunit(layout.width, super::DEFAULT_DPI).max(1) as u32
 }
 
 /// Natural equation box metrics in HWPUNIT, used by line composition.

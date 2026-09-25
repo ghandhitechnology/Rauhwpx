@@ -46,7 +46,7 @@ export const SELECTION_TEXT_MAX_CHARS = 4000;
 /** 채팅 말풍선에 표시하는 발췌 상한. */
 export const EXCERPT_MAX_SCALARS = 80;
 
-/** Extract cell text with text offsets while retaining logical offsets in the caller's target. */
+/** 셀 선택(캐럿 논리 오프셋)의 텍스트를 텍스트 오프셋으로 변환해 추출한다. */
 export function extractCellSelectionText(
   firstPara: number,
   lastPara: number,
@@ -250,6 +250,21 @@ function addressLine(address: InlineObjectAddress): string {
   return parts.join(' ');
 }
 
+/** 셀 텍스트 선택을 replace_range 등 셀 쓰기 도구에 그대로 넘길 인자로 적는다. */
+function cellToolArgs(address: InlineObjectAddress, start: SelPoint, end: SelPoint): string {
+  const args: Record<string, unknown> = {
+    sectionIdx: address.sectionIdx,
+    cell: { paraIdx: address.paraIdx, controlIdx: address.controlIdx, cellIdx: address.cellIdx },
+  };
+  // 중첩 셀은 cell(최외곽)과 cellPath(최내곽까지)를 함께 넘겨야 한다.
+  if ((address.cellPath?.length ?? 0) > 1) args['cellPath'] = address.cellPath;
+  args['startParaIdx'] = start.paraIdx;
+  args['startCharOffset'] = start.charOffset;
+  args['endParaIdx'] = end.paraIdx;
+  args['endCharOffset'] = end.charOffset;
+  return JSON.stringify(args);
+}
+
 function itemLines(item: InlinePromptItem, index: number): string[] {
   if (item.kind === 'text') {
     const { start, end } = item.selection;
@@ -257,6 +272,7 @@ function itemLines(item: InlinePromptItem, index: number): string[] {
       `## ${index}. 텍스트`,
       ...(item.address ? [`- 컨테이너 주소: ${addressLine(item.address)}`] : []),
       `- 범위: paraIdx ${start.paraIdx} charOffset ${start.charOffset} → paraIdx ${end.paraIdx} charOffset ${end.charOffset}`,
+      ...(item.address?.cellIdx !== undefined ? [`- 도구 인자: ${cellToolArgs(item.address, start, end)}`] : []),
       `- 오프셋 좌표계: ${item.offsetConvention ?? 'text'}`,
       `- 선택 텍스트${item.selection.truncated ? ' (길어서 앞부분만 표시)' : ''}:`,
       '<<<SELECTION',

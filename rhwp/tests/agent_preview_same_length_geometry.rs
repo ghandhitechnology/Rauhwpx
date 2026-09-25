@@ -162,10 +162,9 @@ fn jinan_title_growth_preserves_other_row_heights_and_restores() {
     let table_cells = |core: &DocumentCore| -> Vec<Value> {
         (0..core.page_count())
             .flat_map(|page_index| {
-                let page: Value = serde_json::from_str(
-                    &core.get_page_control_layout_native(page_index).unwrap(),
-                )
-                .unwrap();
+                let page: Value =
+                    serde_json::from_str(&core.get_page_control_layout_native(page_index).unwrap())
+                        .unwrap();
                 page["controls"]
                     .as_array()
                     .unwrap()
@@ -214,15 +213,22 @@ fn paper_anchored_adjacent_tables_keep_gap_after_z_order_change() {
     let adjacent = |core: &DocumentCore| {
         let tables = table_geometry(core);
         let get = |ci| {
-            tables.iter().find(|table| {
-                table["secIdx"] == 0 && table["paraIdx"] == 0
-                    && table["controlIdx"] == ci && table["page"] == 0
-            }).unwrap()
+            tables
+                .iter()
+                .find(|table| {
+                    table["secIdx"] == 0
+                        && table["paraIdx"] == 0
+                        && table["controlIdx"] == ci
+                        && table["page"] == 0
+                })
+                .unwrap()
         };
         let first = get(3);
         let second = get(4);
-        (first["y"].as_f64().unwrap() + first["h"].as_f64().unwrap(),
-         second["y"].as_f64().unwrap())
+        (
+            first["y"].as_f64().unwrap() + first["h"].as_f64().unwrap(),
+            second["y"].as_f64().unwrap(),
+        )
     };
     let (before_bottom, before_next_top) = adjacent(&core);
     assert!((before_bottom - before_next_top).abs() <= 0.1);

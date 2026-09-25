@@ -1457,3 +1457,38 @@ mod tests {
         assert_ne!((thick.x2, thick.y2), (thin.x2, thin.y2));
     }
 }
+
+impl super::LayoutEngine {
+    /// 표 셀이 실제로 그려지는 폭(HWPUNIT, 중첩 표 렌더 축척 제외).
+    ///
+    /// 표 레이아웃과 같은 열 그리드(`resolve_column_widths` + 행별 [`build_row_col_x`])로
+    /// 해석한다. 셀 자체 `width` 가 그리드와 어긋난 표(병합 셀만 폭이 바뀐 크기 조절,
+    /// 저장 후 사라진 행 단위 크기 조절 힌트 등)에서 편집 줄나눔이 `cell.width` 로
+    /// 줄을 나누면 그려지는 셀 폭과 달라, 짧게 끊긴 줄이 양쪽 정렬로 크게 벌어진다.
+    pub(crate) fn table_cell_render_width_hu(&self, table: &Table, cell_idx: usize) -> Option<u32> {
+        use super::super::{hwpunit_to_px, px_to_hwpunit_round};
+        let cell = table.cells.get(cell_idx)?;
+        let col_count = table.col_count as usize;
+        let row_count = table.row_count as usize;
+        let (r, c) = (cell.row as usize, cell.col as usize);
+        if r >= row_count || c >= col_count {
+            return None;
+        }
+        let scale = self.render_table_width_scale(table);
+        let col_widths = self.resolve_column_widths(table, col_count);
+        let cell_spacing = hwpunit_to_px(table.cell_spacing as i32, self.dpi);
+        let row_col_x = build_row_col_x(
+            table,
+            &col_widths,
+            col_count,
+            row_count,
+            cell_spacing,
+            self.dpi,
+            scale,
+        );
+        let end = (c + cell.col_span.max(1) as usize).min(col_count);
+        let row_x = row_col_x.get(r)?;
+        let width_px = (row_x.get(end)? - row_x.get(c)?) / scale.max(f64::EPSILON);
+        (width_px > 0.0).then(|| px_to_hwpunit_round(width_px, self.dpi) as u32)
+    }
+}

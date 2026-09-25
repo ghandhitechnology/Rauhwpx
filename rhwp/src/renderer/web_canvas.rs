@@ -78,6 +78,16 @@ fn pixel_aligned_hairline_rect(
     Some((left, top, right - left, bottom - top, device_width))
 }
 
+/// 레이아웃이 반각 advance 를 줄 수 있는 구두점 (text_measurement 의 반각 강제 대상).
+#[cfg(target_arch = "wasm32")]
+fn is_halfwidth_punct_cluster(cluster: &str) -> bool {
+    let mut chars = cluster.chars();
+    let (Some(ch), None) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    matches!(ch, '\u{2018}'..='\u{2027}' | '\u{00B7}') || is_halfwidth_cjk_quote(ch)
+}
+
 /// 일반 글자와 효과 글자가 동일한 폰트 측정/변환 규칙을 사용한다.
 #[cfg(target_arch = "wasm32")]
 fn canvas_cluster_transform(
@@ -111,15 +121,30 @@ fn canvas_cluster_transform(
         )
         .unwrap_or(authored);
     }
-    let fit = canvas_cluster_fit_scale(
-        advance,
-        metrics.width() * ratio,
-        letter_spacing,
-        cluster.chars().any(|ch| ch.is_ascii_alphanumeric()),
-    )
-    .unwrap_or(1.0);
+    let pin_ascii_advance = cluster.chars().any(|ch| ch.is_ascii_alphanumeric());
+    let visual_width = metrics.width() * ratio;
+    // 반각 구두점(스마트 따옴표·낫표 등)은 레이아웃이 전각 glyph 를 반각 advance 로
+    // 줄였을 수 있으므로 자간과 무관하게 넘치는 폭만 줄인다. 대체 글꼴 glyph 가 이미
+    // 좁으면 그대로 그린다(고정 0.5 배율은 좁은 따옴표를 가늘게 찌그러뜨린다).
+    let fit_letter_spacing = if is_halfwidth_punct_cluster(cluster) {
+        0.0
+    } else {
+        letter_spacing
+    };
+    let fit =
+        canvas_cluster_fit_scale(advance, visual_width, fit_letter_spacing, pin_ascii_advance)
+            .unwrap_or(1.0);
+    // 영숫자는 원본 advance 슬롯에 고정한다. 대체 글꼴 글자가 더 좁으면 늘리지 않고
+    // 슬롯 가운데에 둔다(고정폭 숫자의 원본 배치와 같다).
+    let slack = advance - visual_width * fit;
+    let offset_x = if pin_ascii_advance && slack > 0.0 && letter_spacing >= 0.0 {
+        slack / 2.0
+    } else {
+        0.0
+    };
     CanvasClusterTransform {
         scale_x: ratio * fit,
+        offset_x,
         ..authored
     }
 }
@@ -2538,50 +2563,33 @@ impl Renderer for WebCanvasRenderer {
                         continue;
                     }
 
-                    // 반각 강제 구두점: 폰트 글리프가 전각이지만 반각 공간에 배치
-                    let needs_halfwidth_scale =
-                        (matches!(ch, '\u{2018}'..='\u{2027}' | '\u{00B7}')
-                            || is_halfwidth_cjk_quote(ch))
-                            && !has_ratio;
-
-                    if needs_halfwidth_scale {
-                        self.ctx.save();
-                        self.ctx.translate(char_x, y).unwrap_or(());
-                        self.ctx.scale(0.5, 1.0).unwrap_or(());
-                        let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
-                        if synthetic_bold {
-                            let _ = self.ctx.stroke_text(cluster_str, 0.0, 0.0);
+                    let glyph_advance = {
+                        let end = *char_idx + cluster_str.chars().count();
+                        if end < glyph_positions.len() {
+                            glyph_positions[end] - glyph_positions[*char_idx]
+                        } else {
+                            0.0
                         }
-                        self.ctx.restore();
-                    } else {
-                        let glyph_advance = {
-                            let end = *char_idx + cluster_str.chars().count();
-                            if end < glyph_positions.len() {
-                                glyph_positions[end] - glyph_positions[*char_idx]
-                            } else {
-                                0.0
-                            }
-                        };
-                        let transform = canvas_cluster_transform(
-                            &self.ctx,
-                            cluster_str,
-                            glyph_advance,
-                            ratio,
-                            style.letter_spacing,
-                        );
-                        self.ctx.save();
-                        self.ctx
-                            .translate(char_x + transform.offset_x, y + transform.offset_y)
-                            .unwrap_or(());
-                        self.ctx
-                            .scale(transform.scale_x, transform.scale_y)
-                            .unwrap_or(());
-                        let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
-                        if synthetic_bold {
-                            let _ = self.ctx.stroke_text(cluster_str, 0.0, 0.0);
-                        }
-                        self.ctx.restore();
+                    };
+                    let transform = canvas_cluster_transform(
+                        &self.ctx,
+                        cluster_str,
+                        glyph_advance,
+                        ratio,
+                        style.letter_spacing,
+                    );
+                    self.ctx.save();
+                    self.ctx
+                        .translate(char_x + transform.offset_x, y + transform.offset_y)
+                        .unwrap_or(());
+                    self.ctx
+                        .scale(transform.scale_x, transform.scale_y)
+                        .unwrap_or(());
+                    let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
+                    if synthetic_bold {
+                        let _ = self.ctx.stroke_text(cluster_str, 0.0, 0.0);
                     }
+                    self.ctx.restore();
                 }
             }
             if synthetic_bold {

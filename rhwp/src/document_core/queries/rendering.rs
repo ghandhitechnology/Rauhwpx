@@ -3716,6 +3716,7 @@ impl DocumentCore {
         for offset in &mut self.para_offset {
             *offset = 0;
         }
+        self.invalidate_layout_caches_for_dirty_tables(section_index);
         for paragraph in &mut self.document.sections[section_index].paragraphs {
             for control in &mut paragraph.controls {
                 if let Control::Table(table) = control {
@@ -3828,6 +3829,11 @@ impl DocumentCore {
         // [#2308] #2004 revision cache와 #2195 sparse overlay를 source IR에서 갱신한다.
         let issue2424_normalize_started = issue2424_profile_enabled.then(std::time::Instant::now);
         self.compute_render_normalized();
+        for section_idx in 0..self.dirty_sections.len() {
+            if self.dirty_sections[section_idx] {
+                self.invalidate_layout_caches_for_dirty_tables(section_idx);
+            }
+        }
         let issue2424_normalize_elapsed = issue2424_normalize_started
             .map(|started| started.elapsed())
             .unwrap_or_default();
@@ -5435,6 +5441,33 @@ impl DocumentCore {
             .map(|result| result.pages.len())
             .sum::<usize>();
         self.invalidate_page_tree_cache_from(first_page as u32);
+    }
+
+    /// dirty 표(편집으로 내용이 바뀐 표)의 셀 단위 레이아웃 캐시를 제거한다.
+    ///
+    /// 측정 캐시는 `table.dirty` 로 재측정 여부를 정하므로, 같은 신호로 렌더 쪽 cell_units
+    /// 캐시도 맞춘다. 그러지 않으면 새 pagination 컷을 옛 units 에 적용해 분할 표가 옛
+    /// 지점에서 끊기고 쪽 아래가 비어 보인다. 표 dirty 플래그를 소비하기 전에 호출한다.
+    fn invalidate_layout_caches_for_dirty_tables(&self, section_idx: usize) {
+        let evict = |paragraphs: &[Paragraph]| {
+            for para in paragraphs {
+                for ctrl in &para.controls {
+                    if let Control::Table(table) = ctrl {
+                        if table.dirty {
+                            self.layout_engine.invalidate_table_layout_caches(table);
+                        }
+                    }
+                }
+            }
+        };
+        let Some(section) = self.document.sections.get(section_idx) else {
+            return;
+        };
+        evict(&section.paragraphs);
+        let render_paragraphs = self.section_render_paragraphs(section_idx);
+        if !std::ptr::eq(render_paragraphs, &section.paragraphs[..]) {
+            evict(render_paragraphs);
+        }
     }
 
     pub(crate) fn invalidate_page_tree_cache_page(&self, page_num: u32) {

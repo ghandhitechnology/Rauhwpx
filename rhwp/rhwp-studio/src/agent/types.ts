@@ -1254,6 +1254,19 @@ export function isDestructiveTableMark(
     && obj.controlIdx === controlIdx;
 }
 
+/**
+ * 텍스트 op 이 적용된 직후의 범위와 카운터. 나중에 적용된 op 들이 모두 정확히
+ * 되돌려지면 문서는 이 op 의 적용 직후 상태로 돌아오므로, 나중 op 이 겹쳐 덮어쓴
+ * (그래서 live range 가 무너진) op 도 이 범위로 정확히 되돌릴 수 있다.
+ */
+export interface PendingAppliedAt {
+  range: DocRange;
+  userEditSeq: number;
+  settledSetSeq: number;
+  /** 나중 에이전트 삭제/교체가 이 op 의 텍스트 일부를 지웠다 (텍스트 검증 불가). */
+  overwritten?: boolean;
+}
+
 export type PendingOp =
   | {
       /** 템플릿 구조 전송 — 전체 문서 스냅샷으로 정확히 되돌리는 applied-now 연산 */
@@ -1269,6 +1282,7 @@ export type PendingOp =
     }
   | {
       kind: 'insert'; id: string; agent: AgentName; range: DocRange; text: string;
+      applied?: PendingAppliedAt;
       /** 전역 등록 순번 — 중첩 검증·스냅샷 되돌림 안전 판별용 (pending-edits 가 부여) */
       seq?: number;
     } // applied
@@ -1302,6 +1316,7 @@ export type PendingOp =
       userEditSeqAtSnapshot?: number;
       /** A different set settled after this whole-document snapshot. */
       settledSetSeqAtSnapshot?: number;
+      applied?: PendingAppliedAt;
       seq?: number;
     } // applied
   | {

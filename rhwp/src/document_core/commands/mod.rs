@@ -1,3 +1,5 @@
+pub(crate) mod caret_edit;
+mod cell_clipboard;
 mod clipboard;
 mod document;
 mod document_transfer;
