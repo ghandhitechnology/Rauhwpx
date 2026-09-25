@@ -761,6 +761,17 @@ pub(crate) fn cell_valign_top_offset(
     }
 }
 
+/// 셀 컷 유닛 적합 판정의 부동소수 허용치(px). 1 HWPUNIT(≈0.0133px)보다 작다.
+///
+/// 유닛 높이는 HWPUNIT 을 px 로 바꾼 값의 합이라, 한컴이 HWPUNIT 단위로 본문 끝에
+/// 정확히 맞춘 조각도 px 합산 오차(~1e-13)로 예산을 넘는 것처럼 보인다.
+const ROW_CUT_FIT_EPSILON_PX: f64 = 0.01;
+
+/// 누적 높이 `h` 뒤에 `fit_h` 유닛을 더하면 예산 `avail` 을 넘는지 판정한다.
+fn row_cut_unit_overflows(h: f64, fit_h: f64, avail: f64) -> bool {
+    h + fit_h > avail + ROW_CUT_FIT_EPSILON_PX
+}
+
 /// 유닛 범위 `[start, end)` 를 한 조각으로 그릴 때의 콘텐츠 높이.
 ///
 /// 조각이 저장 쪽 경계 직전 줄에서 끝나면 그 줄 간격(`trailing_trim`)은 조각에
@@ -8050,7 +8061,7 @@ impl LayoutEngine {
                 let waste_thresh = if start > 0 { 3 } else { 2 };
                 let tiny_fragment_waste = j <= start + waste_thresh
                     && !u.empty_spacer
-                    && h + fit_h <= avail_height
+                    && !row_cut_unit_overflows(h, fit_h, avail_height)
                     && avail_height - h > HARD_BREAK_REMAINING_TOLERANCE_PX;
                 if j > start
                     && u.hard_break_before
@@ -8058,7 +8069,7 @@ impl LayoutEngine {
                         || rewind_internal_hard_break_orphan
                         || !relaxed_hard_break
                         || (!u.empty_spacer
-                            && (h + fit_h > avail_height
+                            && (row_cut_unit_overflows(h, fit_h, avail_height)
                                 || avail_height - h <= HARD_BREAK_REMAINING_TOLERANCE_PX)))
                     && !units[start..j].iter().all(|unit| unit.empty_spacer)
                     && (u.coherent_page_reset_before || !tiny_fragment_waste)
@@ -8101,7 +8112,7 @@ impl LayoutEngine {
                     hit_hard_break = true;
                     break;
                 }
-                if j > start && h + fit_h > avail_height {
+                if j > start && row_cut_unit_overflows(h, fit_h, avail_height) {
                     let visible_tail_before_spacer = relaxed_hard_break
                         && !u.empty_spacer
                         && u.vis_start < u.vis_end
@@ -8247,7 +8258,7 @@ impl LayoutEngine {
                     && (u.coherent_page_reset_before
                         || !relaxed_hard_break
                         || (!u.empty_spacer
-                            && (h + fit_h > avail_height
+                            && (row_cut_unit_overflows(h, fit_h, avail_height)
                                 || avail_height - h <= HARD_BREAK_REMAINING_TOLERANCE_PX)))
                     && !units[start..j].iter().all(|unit| unit.empty_spacer)
                 {
@@ -8287,7 +8298,7 @@ impl LayoutEngine {
                     hit_hard_break = true;
                     break;
                 }
-                if j > start && h + fit_h > avail_height {
+                if j > start && row_cut_unit_overflows(h, fit_h, avail_height) {
                     let visible_tail_before_spacer = relaxed_hard_break
                         && !u.empty_spacer
                         && u.vis_start < u.vis_end
@@ -8453,7 +8464,7 @@ impl LayoutEngine {
                     && (u.coherent_page_reset_before
                         || !cell_relaxed
                         || (!u.empty_spacer
-                            && (h + fit_h > cell_budget
+                            && (row_cut_unit_overflows(h, fit_h, cell_budget)
                                 || cell_budget - h <= HARD_BREAK_REMAINING_TOLERANCE_PX)))
                 {
                     if Self::coherent_reset_has_adjacent_predecessor(&units, j) {
@@ -8488,7 +8499,7 @@ impl LayoutEngine {
                     hit_hard_break = true;
                     break;
                 }
-                if j > start && h + fit_h > cell_budget {
+                if j > start && row_cut_unit_overflows(h, fit_h, cell_budget) {
                     // [#1921] sliver 흡수 — advance_row_block_cut 의 예산 정지와 동일.
                     // 직후 tolerance 안의 저장 hard-break(한글 실제 페이지 경계)까지
                     // 흡수해, 다음 fragment 가 극소 잔여 sliver 페이지가 되는 것을 막는다.
@@ -8502,7 +8513,10 @@ impl LayoutEngine {
                     }
                     break;
                 }
-                if j == start && !allow_force_progress && h + fit_h > cell_budget {
+                if j == start
+                    && !allow_force_progress
+                    && row_cut_unit_overflows(h, fit_h, cell_budget)
+                {
                     break;
                 }
                 h += u.height;
