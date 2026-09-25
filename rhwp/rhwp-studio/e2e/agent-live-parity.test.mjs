@@ -6,6 +6,7 @@
  * 쪽별 SVG 해시를 기록한 뒤 두 가지를 확인한다:
  *   1. reject → 턴 이전 해시와 같다 (되돌림이 정확하다)
  *   2. 같은 편집을 다시 staged → approve → staged 직후 해시와 같다 (승인은 채택만 한다)
+ *   3. 승인 undo → 턴 이전 해시, redo → 승인 결과 해시
  *
  * 실행: npm run e2e:agent-live-parity
  *   (VITE_URL 의 dev server 와 CHROME_PATH 가 필요하다 — e2e/README.md)
@@ -271,6 +272,11 @@ try {
     assert.equal(await page.evaluate((id) => window.__parity.approve(id), second.setId), true, `${name}: approve succeeds`);
     await expectPages('approved', 'staged', staged, `${name}: approve keeps the live preview unchanged`);
     assert.equal(await page.evaluate(() => window.__parity.pendingCount()), 0, `${name}: nothing stays pending`);
+    // 승인이 만든 undo 항목은 턴 이전 문서로, redo 는 승인 결과로 돌아간다
+    await page.evaluate(() => window.__inputHandler.performUndo());
+    await expectPages('undone', 'before', before, `${name}: undo of the approved turn restores the pre-turn pages`);
+    await page.evaluate(() => window.__inputHandler.performRedo());
+    await expectPages('redone', 'staged', staged, `${name}: redo restores the approved pages`);
     report.push({ name, pages: staged.pageCount, changed: JSON.stringify(staged) !== JSON.stringify(before) });
   }
 
@@ -278,7 +284,7 @@ try {
   assert.deepEqual(drops, [], 'no staged edit was dropped or left behind');
   assert.deepEqual(pageErrors, [], 'no page errors');
   const unchanged = report.filter((entry) => !entry.changed).map((entry) => entry.name);
-  console.log(`[agent-live-parity] ${report.length} staged tools: reject and approve match the live preview`);
+  console.log(`[agent-live-parity] ${report.length} staged tools: reject, approve and undo match the live preview`);
   if (unchanged.length > 0) console.log(`[agent-live-parity] render-neutral edits: ${unchanged.join(', ')}`);
 } catch (error) {
   failed = true;
