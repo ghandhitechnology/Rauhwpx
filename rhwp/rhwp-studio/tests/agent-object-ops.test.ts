@@ -38,6 +38,20 @@ function makeEnv(sourcePath: string | null = null) {
     return t;
   };
 
+  // 서식 읽기가 돌려줄 가변 속성 — 테스트가 호출 전에 덮어쓴다
+  const paraProps: Record<string, unknown> = {};
+  const charProps: Record<string, unknown> = { fontFamily: '바탕' };
+
+  /** 가짜 중첩 경로 해석 — 첫 세그먼트로 표/셀을 찾고 마지막 세그먼트의 cellParaIndex 를 문단으로 쓴다 */
+  const resolveCellPath = (para: number, pathJson: string) => {
+    const path = JSON.parse(pathJson) as Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }>;
+    if (path.length === 0) throw new Error('빈 경로');
+    const head = path[0];
+    const t = findTable(para, head.controlIndex);
+    if (head.cellIndex < 0 || head.cellIndex >= t.cells.length) throw new Error('path 범위 밖');
+    return { t, cell: head.cellIndex, para: path[path.length - 1].cellParaIndex };
+  };
+
   const wasm = {
     // ─ 본문 ─
     getSectionCount: () => 1,
@@ -237,7 +251,7 @@ function makeEnv(sourcePath: string | null = null) {
       return { ok: true, cellCount: findTable(para, ctrl).cells.length + nRows * nCols - 1 };
     },
     // ─ 문단 서식/스타일 ─
-    getParaPropertiesAt: (_s: number, p: number) => ({ paraShapeId: bodyParaShapes[p], alignment: 'left' }),
+    getParaPropertiesAt: (_s: number, p: number) => ({ paraShapeId: bodyParaShapes[p], alignment: 'left', ...paraProps }),
     applyParaFormat: (_s: number, p: number, json: string) => {
       record('applyParaFormat', p, json);
       bodyParaShapes[p] = 99;
@@ -251,6 +265,35 @@ function makeEnv(sourcePath: string | null = null) {
     getCellParaPropertiesAt: () => ({ paraShapeId: 55 }),
     applyParaFormatInCell: (...a: unknown[]) => { record('applyParaFormatInCell', ...a); return okJson(); },
     setCellParaShapeId: (...a: unknown[]) => { record('setCellParaShapeId', ...a); return okJson(); },
+    // ─ 중첩 셀 경로 — head 세그먼트로 표를 찾고 마지막 세그먼트의 문단 인덱스를 쓴다
+    // (테스트 표는 1단밖에 없어 path[0] 만 실제로 해석한다)
+    getCellParagraphCountByPath: (_s: number, para: number, pathJson: string) =>
+      resolveCellPath(para, pathJson).t.cells[resolveCellPath(para, pathJson).cell].length,
+    getCellParagraphLengthByPath: (_s: number, para: number, pathJson: string) => {
+      const r = resolveCellPath(para, pathJson);
+      return r.t.cells[r.cell][r.para].length;
+    },
+    getTextInCellByPath: (_s: number, para: number, pathJson: string, off: number, cnt: number) => {
+      const r = resolveCellPath(para, pathJson);
+      return r.t.cells[r.cell][r.para].slice(off, off + cnt);
+    },
+    getCellParaPropertiesAtByPath: (_s: number, para: number, pathJson: string) => {
+      record('getCellParaPropertiesAtByPath', pathJson);
+      return { paraShapeId: 55 };
+    },
+    applyParaFormatInCellByPath: (_s: number, para: number, pathJson: string, json: string) => {
+      record('applyParaFormatInCellByPath', pathJson, json);
+      return okJson();
+    },
+    setCellParaShapeIdByPath: (...a: unknown[]) => { record('setCellParaShapeIdByPath', ...a); return okJson(); },
+    getCellCharPropertiesAtByPath: (_s: number, para: number, pathJson: string, off: number) => {
+      record('getCellCharPropertiesAtByPath', pathJson, off);
+      return charProps;
+    },
+    applyCharFormatInCellByPath: (_s: number, para: number, pathJson: string, so: number, eo: number, json: string) => {
+      record('applyCharFormatInCellByPath', pathJson, so, eo, json);
+      return okJson();
+    },
     getStyleList: () => [
       { id: 0, name: '바탕글', englishName: 'Normal', type: 0, nextStyleId: 0, paraShapeId: 1, charShapeId: 1 },
       { id: 3, name: '개요 1', englishName: 'Outline 1', type: 0, nextStyleId: 3, paraShapeId: 5, charShapeId: 5 },
@@ -263,8 +306,8 @@ function makeEnv(sourcePath: string | null = null) {
       if (i < 0) { fonts.push(name); i = fonts.length - 1; }
       return i;
     },
-    getCharPropertiesAt: () => ({ fontFamily: '바탕' }),
-    getCellCharPropertiesAt: () => ({ fontFamily: '바탕' }),
+    getCharPropertiesAt: () => charProps,
+    getCellCharPropertiesAt: () => charProps,
     applyCharFormat: (...a: unknown[]) => { record('applyCharFormat', ...a); return okJson(); },
     // ─ 셀 수식 ─
     renderEquationPreview: (script: string) =>
@@ -390,7 +433,7 @@ function makeEnv(sourcePath: string | null = null) {
   const call = (tool: string, args: Record<string, unknown> = {}) =>
     executor.execute(tool, { expectedRevision: revision.revision, ...args }, 'claude');
   return { executor, pending, revision, call, body, tables, calls, bus, wasm, snapshots, captures,
-    getExternalSnapshotCount: () => externalSnapshotIds };
+    paraProps, charProps, getExternalSnapshotCount: () => externalSnapshotIds };
 }
 
 async function expectErr(p: Promise<unknown>, code: string): Promise<AgentToolError> {
@@ -1276,4 +1319,240 @@ test('create_table + 같은 턴 셀 텍스트 op → reject 가 표를 정상 �
   assert.equal(t.cells[1][0], '추가');
   pending.reject(c.changeSetId);
   assert.equal(tables.length, 0); // 에이전트 자신의 셀 편집은 드리프트가 아니다
+});
+
+// ─── P4.1 타이포그래피 패스스루 ────────────────────────────
+
+test('apply_char_format: 장평/자간 스칼라는 7개 언어 슬롯으로 확장된다', async () => {
+  const { call, calls } = makeEnv();
+  await call('apply_char_format', {
+    sectionIdx: 0, paraIdx: 0, startOffset: 0, endOffset: 5,
+    widthPercent: 90, letterSpacingPercent: -5,
+  });
+  const json = JSON.parse(calls.find((x) => x.m === 'applyCharFormat')!.a[4] as string) as Record<string, unknown>;
+  assert.deepEqual(json['ratios'], [90, 90, 90, 90, 90, 90, 90]);
+  assert.deepEqual(json['spacings'], [-5, -5, -5, -5, -5, -5, -5]);
+});
+
+test('apply_char_format: 7-배열은 슬롯별 값으로 통과하고 다른 길이/범위는 거부된다', async () => {
+  const { call, calls } = makeEnv();
+  await call('apply_char_format', {
+    sectionIdx: 0, paraIdx: 0, startOffset: 0, endOffset: 5,
+    widthPercent: [80, 90, 100, 100, 100, 100, 100],
+    letterSpacingPercent: [0, 0, 0, 0, 0, 0, -10],
+  });
+  const json = JSON.parse(calls.find((x) => x.m === 'applyCharFormat')!.a[4] as string) as Record<string, unknown>;
+  assert.deepEqual(json['ratios'], [80, 90, 100, 100, 100, 100, 100]);
+  assert.deepEqual(json['spacings'], [0, 0, 0, 0, 0, 0, -10]);
+  for (const bad of [
+    { widthPercent: [90, 90] },
+    { widthPercent: 20 },
+    { widthPercent: 250 },
+    { letterSpacingPercent: 99 },
+    { letterSpacingPercent: [0, 0, 0, 0, 0, 0] },
+  ]) {
+    await expectErr(call('apply_char_format', {
+      sectionIdx: 0, paraIdx: 0, startOffset: 0, endOffset: 5, ...bad,
+    }), 'INVALID_ARGS');
+  }
+});
+
+test('apply_char_format: reject 역서식에 이전 ratios/spacings 가 실린다', async () => {
+  const { call, pending, calls, charProps } = makeEnv();
+  charProps['ratios'] = [80, 80, 80, 80, 80, 80, 80];
+  charProps['spacings'] = [5, 5, 5, 5, 5, 5, 5];
+  const r = (await call('apply_char_format', {
+    sectionIdx: 0, paraIdx: 0, startOffset: 0, endOffset: 5, widthPercent: 90,
+  })) as { changeSetId: string };
+  calls.length = 0;
+  pending.reject(r.changeSetId);
+  const inverse = calls.find((x) => x.m === 'applyCharFormat')!;
+  const invJson = JSON.parse(inverse.a[4] as string) as Record<string, unknown>;
+  assert.deepEqual(invJson['ratios'], [80, 80, 80, 80, 80, 80, 80]);
+  assert.equal(invJson['spacings'], undefined); // 자간은 바꾸지 않았으므로 역서식에 없다
+});
+
+test('get_char_format: 동일 슬롯은 스칼라, 다른 슬롯은 배열, 장평 100/자간 0 은 생략', async () => {
+  const { call, charProps } = makeEnv();
+  charProps['fontSize'] = 1100;
+  charProps['ratios'] = [90, 90, 90, 90, 90, 90, 90];
+  charProps['spacings'] = [0, 0, 0, 0, 0, 0, -5];
+  const r = (await call('get_char_format', { sectionIdx: 0, paraIdx: 0, charOffset: 1 })) as Record<string, unknown>;
+  assert.equal(r['widthPercent'], 90);
+  assert.deepEqual(r['letterSpacingPercent'], [0, 0, 0, 0, 0, 0, -5]);
+  charProps['ratios'] = [100, 100, 100, 100, 100, 100, 100];
+  charProps['spacings'] = [0, 0, 0, 0, 0, 0, 0];
+  const plain = (await call('get_char_format', { sectionIdx: 0, paraIdx: 0, charOffset: 1 })) as Record<string, unknown>;
+  assert.equal(plain['widthPercent'], undefined);
+  assert.equal(plain['letterSpacingPercent'], undefined);
+  const full = (await call('get_char_format', { sectionIdx: 0, paraIdx: 0, charOffset: 1, full: true })) as Record<string, unknown>;
+  assert.equal(full['widthPercent'], 100);
+  assert.equal(full['letterSpacingPercent'], 0);
+});
+
+test('apply_para_format: lineSpacingType+lineSpacingPt 는 enum 과 2x HWPUNIT 으로 변환된다', async () => {
+  const { call, calls } = makeEnv();
+  await call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, lineSpacingType: 'fixed', lineSpacingPt: 12,
+  });
+  let json = JSON.parse(calls.find((x) => x.m === 'applyParaFormat')!.a[1] as string) as Record<string, unknown>;
+  assert.equal(json['lineSpacingType'], 'Fixed');
+  assert.equal(json['lineSpacing'], 2400); // 12pt × 200 (비율형 2x HWPUNIT)
+
+  calls.length = 0;
+  await call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, lineSpacingType: 'atLeast', lineSpacingPt: 9,
+  });
+  json = JSON.parse(calls.find((x) => x.m === 'applyParaFormat')!.a[1] as string) as Record<string, unknown>;
+  assert.equal(json['lineSpacingType'], 'Minimum');
+  assert.equal(json['lineSpacing'], 1800);
+
+  await expectErr(call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, lineSpacingType: 'spaceOnly',
+  }), 'INVALID_ARGS'); // pt 없음
+  await expectErr(call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, lineSpacingPt: 12,
+  }), 'INVALID_ARGS'); // type 없음
+  await expectErr(call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, lineSpacingType: 'fixed', lineSpacingPt: 12, lineSpacingPercent: 160,
+  }), 'INVALID_ARGS'); // 두 형태 동시 지정
+  await expectErr(call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, lineSpacingType: 'stretch',
+  }), 'INVALID_ARGS');
+});
+
+test('apply_para_format: tabStops 는 mm→2x HWPUNIT, type 문자열→코드로 변환된다', async () => {
+  const { call, calls } = makeEnv();
+  await call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0,
+    tabStops: [{ positionMm: 50, type: 'right' }, { positionMm: 25.4, fill: 2 }],
+  });
+  const json = JSON.parse(calls.find((x) => x.m === 'applyParaFormat')!.a[1] as string) as Record<string, unknown>;
+  assert.deepEqual(json['tabStops'], [
+    { position: mmToHu(50) * 2, type: 1, fill: 0 },
+    { position: mmToHu(25.4) * 2, type: 0, fill: 2 },
+  ]);
+
+  calls.length = 0;
+  await call('apply_para_format', { sectionIdx: 0, paraIdx: 0, tabStops: [] });
+  const cleared = JSON.parse(calls.find((x) => x.m === 'applyParaFormat')!.a[1] as string) as Record<string, unknown>;
+  assert.deepEqual(cleared['tabStops'], []);
+
+  await expectErr(call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, tabStops: [{ positionMm: -5 }],
+  }), 'INVALID_ARGS');
+  await expectErr(call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, tabStops: [{ positionMm: 10, type: 'middle' }],
+  }), 'INVALID_ARGS');
+});
+
+test('apply_para_format: borders/borderSpacingMm/koreanBreakUnit — 지정하지 않은 변은 보존한다', async () => {
+  const { call, calls, paraProps } = makeEnv();
+  paraProps['borderLeft'] = { type: 1, width: 6, color: '#FF0000' }; // 기존 왼쪽 테두리 (0.7mm)
+  paraProps['borderSpacing'] = [100, 200, 300, 400];
+  await call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0,
+    borders: { top: { type: 1, widthMm: 1.0, color: '#0000FF' } },
+    borderSpacingMm: { top: 2 },
+    koreanBreakUnit: 'char',
+  });
+  const json = JSON.parse(calls.find((x) => x.m === 'applyParaFormat')!.a[1] as string) as Record<string, unknown>;
+  assert.deepEqual(json['borderTop'], { type: 1, width: 10, color: '#0000FF' }); // 1.0mm → 인덱스 10
+  assert.deepEqual(json['borderLeft'], { type: 1, width: 6, color: '#FF0000' }); // 미지정 변은 현재값 유지
+  assert.equal(json['borderRight'], undefined); // 기존에도 없음
+  assert.deepEqual(json['borderSpacing'], [100, 200, mmToHu(2), 400]);
+  assert.equal(json['koreanBreakUnit'], 1);
+
+  // widthMm 스냅 + type 0 제거
+  calls.length = 0;
+  await call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0,
+    borders: { bottom: { type: 2, widthMm: 0.9, color: '#00FF00' }, left: { type: 0 } },
+  });
+  const json2 = JSON.parse(calls.find((x) => x.m === 'applyParaFormat')!.a[1] as string) as Record<string, unknown>;
+  assert.deepEqual(json2['borderBottom'], { type: 2, width: 10, color: '#00FF00' }); // 0.9 → 1.0mm 스냅
+  assert.deepEqual(json2['borderLeft'], { type: 0, width: 0, color: '#000000' }); // type 0 은 테두리 제거
+
+  for (const bad of [
+    { borders: { top: { type: 1, color: '#000000' } } },           // widthMm 없음
+    { borders: { top: { type: 1, widthMm: 1, color: 'blue' } } },   // 잘못된 색
+    { borders: { middle: { type: 1, widthMm: 1, color: '#000000' } } },
+    { borders: { top: { type: 99, widthMm: 1, color: '#000000' } } },
+    { koreanBreakUnit: 'syllable' },
+    { borderSpacingMm: { left: 'wide' } },
+  ]) {
+    await expectErr(call('apply_para_format', { sectionIdx: 0, paraIdx: 0, ...bad }), 'INVALID_ARGS');
+  }
+});
+
+test('get_para_format: 줄간격/탭/테두리/줄나눔 읽기 — 기본값은 생략한다', async () => {
+  const { call, paraProps } = makeEnv();
+  paraProps['lineSpacingType'] = 'Fixed';
+  paraProps['lineSpacing'] = 18; // px
+  paraProps['tabStops'] = [{ position: mmToHu(40) * 2, type: 2, fill: 1 }];
+  paraProps['borderTop'] = { type: 1, width: 10, color: '#123456' };
+  paraProps['borderLeft'] = { type: 0, width: 0, color: '#000000' };
+  paraProps['borderSpacing'] = [0, 0, mmToHu(1), 0];
+  paraProps['koreanBreakUnit'] = 1;
+  const r = (await call('get_para_format', { sectionIdx: 0, paraIdx: 0 })) as Record<string, unknown>;
+  assert.equal(r['lineSpacingType'], 'fixed');
+  assert.equal(r['lineSpacingPt'], 13.5); // 18px × 72/96
+  assert.equal(r['lineSpacingPercent'], undefined);
+  assert.deepEqual(r['tabStops'], [{ positionMm: 40, type: 'center', fill: 1 }]);
+  assert.deepEqual(r['borders'], { top: { type: 1, widthMm: 1, color: '#123456' } }); // type-0 left 는 생략
+  assert.deepEqual(r['borderSpacingMm'], { top: 1 });
+  assert.equal(r['koreanBreakUnit'], 'char');
+
+  // 기본 문단 — 새 필드 전부 생략
+  const plainEnv = makeEnv();
+  const plain = (await plainEnv.call('get_para_format', { sectionIdx: 0, paraIdx: 1 })) as Record<string, unknown>;
+  assert.equal(plain['lineSpacingType'], undefined);
+  assert.equal(plain['tabStops'], undefined);
+  assert.equal(plain['borders'], undefined);
+  assert.equal(plain['borderSpacingMm'], undefined);
+  assert.equal(plain['koreanBreakUnit'], undefined);
+  // full:true 는 기본값도 싣는다
+  const full = (await plainEnv.call('get_para_format', { sectionIdx: 0, paraIdx: 1, full: true })) as Record<string, unknown>;
+  assert.equal(full['lineSpacingType'], 'percent');
+  assert.equal(full['koreanBreakUnit'], 'word');
+  assert.deepEqual(full['tabStops'], []);
+});
+
+test('apply_para_format + get_para_format: cellPath 중첩 셀은 ByPath wasm 경로를 쓴다', async () => {
+  const { call, calls, pending } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['x']],
+  })) as { table: { paraIdx: number; controlIdx: number } };
+  const cell = { paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, cellIdx: 0 };
+  const cellPath = [{ controlIndex: c.table.controlIdx, cellIndex: 0, cellParaIndex: 0 }];
+
+  const r = (await call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, cell, cellPath, alignment: 'right',
+  })) as { changeSetId: string };
+  const apply = calls.find((x) => x.m === 'applyParaFormatInCellByPath')!;
+  const pathJson = JSON.parse(apply.a[0] as string) as Array<Record<string, number>>;
+  assert.equal(pathJson[0].controlIndex, c.table.controlIdx);
+  assert.equal(pathJson[0].cellIndex, 0);
+  assert.equal(pathJson[0].cellParaIndex, 0); // 활성 문단 인덱스로 교체됐다
+  assert.ok(!calls.some((x) => x.m === 'applyParaFormatInCell'));
+
+  // 읽기도 ByPath
+  calls.length = 0;
+  await call('get_para_format', { sectionIdx: 0, paraIdx: 0, cell, cellPath });
+  assert.ok(calls.some((x) => x.m === 'getCellParaPropertiesAtByPath'));
+
+  // cellPath 의 첫 세그먼트는 cell 주소와 일치해야 한다
+  await expectErr(call('get_para_format', {
+    sectionIdx: 0, paraIdx: 0, cell,
+    cellPath: [{ controlIndex: 99, cellIndex: 0, cellParaIndex: 0 }],
+  }), 'INVALID_ARGS');
+  // cell 없이 cellPath 만 — 거부
+  await expectErr(call('get_para_format', {
+    sectionIdx: 0, paraIdx: 0, cellPath,
+  }), 'INVALID_ARGS');
+
+  // reject 는 setCellParaShapeIdByPath 로 복원한다 (같은 change-set 이라 표까지 되돌아가므로 마지막에 둔다)
+  calls.length = 0;
+  pending.reject(r.changeSetId);
+  assert.ok(calls.some((x) => x.m === 'setCellParaShapeIdByPath'));
 });

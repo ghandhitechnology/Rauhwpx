@@ -114,7 +114,9 @@ export function shiftPointAfterDelete(p: DocPoint, del: DocRange): DocPoint {
   return { paraIdx: del.startParaIdx, charOffset: del.startCharOffset };
 }
 
-const CHAR_FORMAT_KEYS = ['bold', 'italic', 'underline', 'strikethrough', 'fontSize', 'textColor'] as const;
+const CHAR_FORMAT_KEYS = [
+  'bold', 'italic', 'underline', 'strikethrough', 'fontSize', 'textColor', 'ratios', 'spacings',
+] as const;
 
 const DROP_CAUSE_LABELS: Record<PendingDropCause, string> = {
   'text-changed': 'text changed',
@@ -1678,14 +1680,18 @@ export class PendingEditManager {
       case 'paraFormat': {
         // 역연산용 이전 para_shape_id 를 최초 적용 시에만 캡처 (replay 는 revert 후라 동일 상태)
         if (obj.prevParaShapeId < 0) {
-          const props = obj.cell
-            ? wasm.getCellParaPropertiesAt(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx)
-            : wasm.getParaPropertiesAt(obj.sectionIdx, obj.paraIdx);
+          const props = obj.cell?.path
+            ? wasm.getCellParaPropertiesAtByPath(obj.sectionIdx, obj.cell.paraIdx, this.cellPathAt(obj.cell, obj.paraIdx))
+            : obj.cell
+              ? wasm.getCellParaPropertiesAt(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx)
+              : wasm.getParaPropertiesAt(obj.sectionIdx, obj.paraIdx);
           obj.prevParaShapeId = props.paraShapeId ?? -1;
         }
-        const raw = obj.cell
-          ? wasm.applyParaFormatInCell(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx, obj.propsJson)
-          : wasm.applyParaFormat(obj.sectionIdx, obj.paraIdx, obj.propsJson);
+        const raw = obj.cell?.path
+          ? wasm.applyParaFormatInCellByPath(obj.sectionIdx, obj.cell.paraIdx, this.cellPathAt(obj.cell, obj.paraIdx), obj.propsJson)
+          : obj.cell
+            ? wasm.applyParaFormatInCell(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx, obj.propsJson)
+            : wasm.applyParaFormat(obj.sectionIdx, obj.paraIdx, obj.propsJson);
         this.parseOkLenient(raw, 'applyParaFormat');
         return;
       }
@@ -1852,7 +1858,11 @@ export class PendingEditManager {
         }
         case 'paraFormat': {
           if (obj.prevParaShapeId < 0) return false;
-          if (obj.cell) {
+          if (obj.cell?.path) {
+            wasm.setCellParaShapeIdByPath(
+              obj.sectionIdx, obj.cell.paraIdx, this.cellPathAt(obj.cell, obj.paraIdx), obj.prevParaShapeId,
+            );
+          } else if (obj.cell) {
             wasm.setCellParaShapeId(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx, obj.prevParaShapeId);
           } else {
             wasm.setParaShapeId(obj.sectionIdx, obj.paraIdx, obj.prevParaShapeId);
@@ -2239,10 +2249,8 @@ export class PendingEditManager {
           return obj.tableParaIdx < wasm.getParagraphCount(obj.sectionIdx) ? null : 'paragraph-changed';
         case 'paraFormat':
         case 'applyStyle': {
-          if (obj.cell) {
-            const n = wasm.getCellParagraphCount(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx);
-            if (obj.paraIdx >= n) return 'paragraph-changed';
-          } else if (obj.paraIdx >= wasm.getParagraphCount(obj.sectionIdx)) {
+          // containerParaCount 는 cell.path (중첩 셀) 까지 내려간다
+          if (obj.paraIdx >= this.containerParaCount(obj.sectionIdx, obj.cell)) {
             return 'paragraph-changed';
           }
           // 텍스트 지문: 문단 삽입/삭제로 인덱스가 다른 문단을 가리키면 드리프트 (리뷰 확정 결함 수정)
@@ -2292,14 +2300,9 @@ export class PendingEditManager {
 
   /** paraFormat/applyStyle 대상 문단의 앞 24자 (드리프트 지문) */
   private paraTextSample(obj: Extract<ObjectOp, { type: 'paraFormat' | 'applyStyle' }>): string {
-    const wasm = this.deps.wasm;
-    const len = obj.cell
-      ? wasm.getCellParagraphLength(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx)
-      : wasm.getParagraphLength(obj.sectionIdx, obj.paraIdx);
+    const len = this.containerParaLen(obj.sectionIdx, obj.paraIdx, obj.cell);
     const n = Math.min(len, 24);
-    return n === 0 ? '' : (obj.cell
-      ? wasm.getTextInCell(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx, 0, n)
-      : wasm.getTextRange(obj.sectionIdx, obj.paraIdx, 0, n));
+    return n === 0 ? '' : this.containerText(obj.sectionIdx, obj.paraIdx, 0, n, obj.cell);
   }
 
   /**

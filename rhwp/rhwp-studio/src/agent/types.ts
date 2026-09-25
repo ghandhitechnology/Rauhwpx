@@ -1006,6 +1006,10 @@ export interface CharFormatProps {
   textColor?: string;
   /** findOrCreateFontId 로 해석된 숫자 id (fontFamily 는 executor 에서 변환) */
   fontId?: number;
+  /** 장평 % — 7개 언어 슬롯 (한/영/한자/일/외/기/사) */
+  ratios?: number[];
+  /** 자간 % — 7개 언어 슬롯 */
+  spacings?: number[];
 }
 
 /** 표 등 컨트롤 앵커 — replay 후 재바인딩된다 */
