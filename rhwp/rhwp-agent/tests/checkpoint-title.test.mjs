@@ -9,10 +9,11 @@ import {
   CHECKPOINT_TITLE_MAX_SUMMARY_BYTES,
   cleanCheckpointTitle,
   extractCheckpointTitleText,
-  findDeepSeekV4FlashModel,
+  codexQuotaAllowsTitle,
   generateCheckpointTitle,
   normalizeCheckpointTitleRequest,
   resolveCheckpointTitleCliRoute,
+  resolveOpenRouterTitleModel,
 } from '../agents/checkpoint-title.mjs';
 import { PROCESS_TREE_CLEANUP_OUTCOME } from '../process-tree.mjs';
 
@@ -63,9 +64,9 @@ function request(overrides = {}) {
 
 function readiness(overrides = {}) {
   return {
-    pi: { ready: true, model: 'opencode/deepseek-v4-flash-free' },
-    codex: { ready: true, model: 'gpt-5.6-luna' },
-    claude: { ready: true, model: 'haiku' },
+    codex: { ready: true, model: 'gpt-6-luna' },
+    pi: { ready: true, model: 'deepseek/deepseek-v4.1-flash' },
+    claude: { ready: true, model: 'claude-haiku-4-5' },
     ...overrides,
   };
 }
@@ -105,16 +106,33 @@ test('request parsing rejects extra document or chat fields and invalid variants
   })), null);
 });
 
-test('DeepSeek selection requires an exact configured V4 Flash catalog identity', () => {
-  const exact = findDeepSeekV4FlashModel([
-    { id: 'deepseek/deepseek-v4', name: 'DeepSeek V4' },
-    { id: 'opencode/deepseek-v4-flash-free', name: 'OpenCode: DeepSeek V4 Flash (free)' },
-    { id: 'deepseek/deepseek-v4-flash-preview', name: 'DeepSeek V4 Flash Preview' },
-  ]);
-  assert.equal(exact.id, 'opencode/deepseek-v4-flash-free');
-  assert.equal(findDeepSeekV4FlashModel([
-    { id: 'deepseek/deepseek-v4-flash-preview', name: 'DeepSeek V4 Flash Preview' },
-  ]), null);
+test('OpenRouter titles use DeepSeek V4.1 Flash only when the catalog lists it', async () => {
+  assert.equal(
+    await resolveOpenRouterTitleModel(async () => [
+      { id: 'deepseek/deepseek-v4-flash' },
+      { id: 'deepseek/deepseek-v4.1-flash' },
+    ]),
+    'deepseek/deepseek-v4.1-flash',
+  );
+  assert.equal(await resolveOpenRouterTitleModel(async () => [{ id: 'deepseek/deepseek-v4-flash' }]), null);
+  assert.equal(
+    await resolveOpenRouterTitleModel(async () => { throw new Error('offline'); }),
+    'deepseek/deepseek-v4.1-flash',
+  );
+});
+
+test('Codex keeps titles only while every live quota window has more than 5% left', () => {
+  const now = 1_000;
+  const quota = (session, week, resetsAt = null) => ({
+    status: 'ok',
+    session: { percent: session, resetsAt },
+    week: { percent: week, resetsAt: null },
+  });
+  assert.equal(codexQuotaAllowsTitle(quota(40, 90), now), true);
+  assert.equal(codexQuotaAllowsTitle(quota(96, 10), now), false);
+  assert.equal(codexQuotaAllowsTitle(quota(10, 95), now), false);
+  assert.equal(codexQuotaAllowsTitle(quota(99, 10, now - 1), now), true);
+  assert.equal(codexQuotaAllowsTitle({ status: 'unavailable' }, now), true);
 });
 
 test('generated titles must be one plain line of at most 72 characters', () => {
@@ -133,60 +151,48 @@ test('CLI output parsing accepts the final Codex and Claude message shapes', () 
   assert.equal(extractCheckpointTitleText(JSON.stringify({ type: 'result', result: '문단 정리' })), '문단 정리');
 });
 
-test('providers run in fixed order, skip unavailable routes, and cascade on failures', async () => {
+test('providers run Codex, then OpenRouter, then Claude and cascade on failures', async () => {
   const calls = [];
   const result = await generateCheckpointTitle(request(), {
-    readiness: readiness({ pi: { ready: false, model: '' } }),
+    readiness: readiness(),
     runProvider: async ({ provider, model, prompt }) => {
       calls.push({ provider, model, prompt });
-      if (provider === 'codex') throw new Error('codex unavailable');
+      if (provider !== 'claude') throw new Error(`${provider} unavailable`);
       return '문서 구조와 일정 정리';
     },
   });
 
-  assert.deepEqual(calls.map((call) => call.provider), ['codex', 'claude']);
+  assert.deepEqual(calls.map((call) => call.provider), ['codex', 'pi', 'claude']);
   assert.deepEqual(result, {
     commitId: 'commit-1',
     titleRevision: 3,
     title: '문서 구조와 일정 정리',
     provider: 'claude',
-    model: 'haiku',
+    model: 'claude-haiku-4-5',
   });
   assert.match(calls[0].prompt, /"totals"/);
   assert.doesNotMatch(calls[0].prompt, /chat transcript|binary document/i);
 });
 
-test('Codex Luna is resolved only when the title reaches its Codex route', async () => {
-  let discoveries = 0;
+test('route models resolve only when the title reaches that route', async () => {
+  let codexLookups = 0;
+  let piLookups = 0;
   const deps = {
-    readiness: readiness({ codex: { ready: true, model: 'luna' } }),
-    resolveCodexTitleModel: async () => { discoveries++; return 'gpt-6.1-luna'; },
-    runProvider: async ({ provider }) => provider === 'pi' ? '표 제목 정리' : '여백 정리',
+    readiness: readiness({ codex: { ready: true, model: 'luna' }, pi: { ready: true, model: 'openrouter' } }),
+    resolveCodexTitleModel: async () => { codexLookups++; return 'gpt-6-luna'; },
+    resolvePiTitleModel: async () => { piLookups++; return 'deepseek/deepseek-v4.1-flash'; },
+    runProvider: async ({ provider }) => provider === 'codex' ? '표 제목 정리' : '여백 정리',
   };
-  assert.equal((await generateCheckpointTitle(request(), deps)).provider, 'pi');
-  assert.equal(discoveries, 0);
+  const first = await generateCheckpointTitle(request(), deps);
+  assert.equal(first.model, 'gpt-6-luna');
+  assert.deepEqual([codexLookups, piLookups], [1, 0]);
   const fallback = await generateCheckpointTitle(request(), {
     ...deps,
-    readiness: readiness({ pi: { ready: false, model: '' }, codex: { ready: true, model: 'luna' } }),
+    readiness: readiness({ codex: { ready: false, model: '' }, pi: { ready: true, model: 'openrouter' } }),
   });
-  assert.equal(fallback.provider, 'codex');
-  assert.equal(fallback.model, 'gpt-6.1-luna');
-  assert.equal(discoveries, 1);
-});
-
-test('the first successful Pi route returns its exact live model metadata', async () => {
-  const calls = [];
-  const result = await generateCheckpointTitle(request(), {
-    readiness: readiness(),
-    runProvider: async (call) => {
-      calls.push(call);
-      return '표 제목과 여백 조정';
-    },
-  });
-
-  assert.equal(calls.length, 1);
-  assert.equal(result.provider, 'pi');
-  assert.equal(result.model, 'opencode/deepseek-v4-flash-free');
+  assert.equal(fallback.provider, 'pi');
+  assert.equal(fallback.model, 'deepseek/deepseek-v4.1-flash');
+  assert.deepEqual([codexLookups, piLookups], [1, 1]);
 });
 
 test('all provider failures settle to null', async () => {
@@ -197,7 +203,7 @@ test('all provider failures settle to null', async () => {
   assert.equal(result, null);
 });
 
-test('CLI specs use explicit arrays, fixed low-effort models, and no tools', () => {
+test('CLI specs use explicit arrays, fixed models and efforts, and no tools', () => {
   const codex = buildCheckpointTitleCliSpec('codex');
   assert.ok(Array.isArray(codex.argv));
   assert.ok(codex.argv.includes('gpt-6-luna'));
@@ -208,8 +214,8 @@ test('CLI specs use explicit arrays, fixed low-effort models, and no tools', () 
   assert.ok(codex.argv.includes('unified_exec'));
 
   const claude = buildCheckpointTitleCliSpec('claude');
-  assert.ok(claude.argv.includes('haiku'));
-  assert.ok(claude.argv.includes('low'));
+  assert.equal(claude.argv[claude.argv.indexOf('--model') + 1], 'claude-haiku-4-5');
+  assert.equal(claude.argv[claude.argv.indexOf('--effort') + 1], 'max');
   assert.equal(claude.argv[claude.argv.indexOf('--tools') + 1], '');
 });
 
@@ -367,6 +373,30 @@ test('a timed-out CLI attempt terminates its owned process tree', async () => {
     fs.access(spawned.options.cwd),
     { code: 'ENOENT' },
   );
+});
+
+test('Claude titles keep the HOME its runtime env chose so macOS Keychain login still works', async () => {
+  let spawned;
+  await generateCheckpointTitle(request(), {
+    readiness: readiness({ codex: { ready: false, model: '' }, pi: { ready: false, model: '' } }),
+    providerTimeoutMs: 15,
+    overallTimeoutMs: 80,
+    spawnProcess(command, argv, options) {
+      spawned = { options, proc: new HungProcess() };
+      return spawned.proc;
+    },
+    terminateProcess(proc) {
+      proc.emit('exit', null, 'SIGTERM');
+      proc.emit('close', null, 'SIGTERM');
+    },
+    providerEnvs: { claude: { HOME: '/Users/real', CLAUDE_CONFIG_DIR: '/isolated/home/.claude' } },
+    isolatedHome: '/isolated/home',
+    sessionId: 'session-1',
+  });
+
+  assert.equal(spawned.options.env.HOME, '/Users/real');
+  assert.equal(spawned.options.env.CLAUDE_CONFIG_DIR, '/isolated/home/.claude');
+  assert.equal(spawned.options.env.RHWP_SESSION_ID, 'session-1');
 });
 
 test('external cancellation terminates an active CLI attempt', async () => {
