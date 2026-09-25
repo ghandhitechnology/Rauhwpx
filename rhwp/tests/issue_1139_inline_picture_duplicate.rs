@@ -3176,8 +3176,9 @@ fn issue_1284_2022_oct_page15_question28_formula_does_not_overlap_case_label() {
     let doc = HwpDocument::from_bytes(&bytes).expect("parse");
     let tree = doc.build_page_render_tree(14).expect("page 15 render tree");
 
-    let equation_bottom = max_equation_bottom_in_region(&tree.root, 390.0, 570.0, 740.0, 790.0)
-        .expect("문28 중간 수식");
+    // 고정 y 창으로 찾으면 수식이 한컴 위치(줄 상단)로 올라간 뒤 (ii) 줄의 인라인 수식까지
+    // 창에 들어온다. 문28 중간 수식 문단(pi=816) 자체의 하단을 기준으로 삼는다.
+    let equation_bottom = max_para_content_bottom(&tree.root, 816).expect("문28 중간 수식");
     let next_text = find_text_line_bbox(&tree.root, 817, 0).expect("문28 (ii) 본문");
 
     assert!(
