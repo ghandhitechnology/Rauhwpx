@@ -435,9 +435,16 @@ test('get_para_format: 목록 속성 + 정렬/간격을 pt 로 환산해 반환�
   assert.equal(r['lineSpacingPercent'], 160);
   assert.equal(r['spaceBeforePt'], 6);   // 8px × 72/96
   assert.equal(r['marginLeftPt'], 15);   // 20px × 72/96
+  // 기본 응답은 기본값(목록 아님, 0pt, false)을 생략한다 — full:true 는 전부 싣는다.
   const plain = (await call('get_para_format', { sectionIdx: 0, paraIdx: 0 })) as Record<string, unknown>;
-  assert.equal(plain['headType'], 'none');
-  assert.equal(plain['numberingId'], 0);
+  assert.equal(plain['headType'], undefined);
+  assert.equal(plain['numberingId'], undefined);
+  assert.equal(plain['pageBreakBefore'], undefined);
+  assert.ok(plain['alignment']);
+  const full = (await call('get_para_format', { sectionIdx: 0, paraIdx: 0, full: true })) as Record<string, unknown>;
+  assert.equal(full['headType'], 'none');
+  assert.equal(full['numberingId'], 0);
+  assert.equal(full['pageBreakBefore'], false);
 });
 
 test('get_para_format: cell 주소로 셀 문단을 읽는다', async () => {
@@ -462,6 +469,9 @@ test('get_char_format: 글자 속성을 pt 환산과 함께 반환한다 (본문
   assert.equal(r['underline'], true);
   assert.equal(r['textColor'], '#FF0000');
   assert.equal(r['charShapeId'], 4);
+  assert.equal(r['italic'], undefined); // false 는 생략 — full:true 에만 실린다
+  const full = (await call('get_char_format', { sectionIdx: 0, paraIdx: 0, charOffset: 1, full: true })) as Record<string, unknown>;
+  assert.equal(full['italic'], false);
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 3, charOffset: 0, cells: [['x']],
   })) as { table: { paraIdx: number; controlIdx: number } };
@@ -502,6 +512,29 @@ test('verify_changes: change-set 요약 + postEditText + 즉시 적용 삭제', 
   assert.equal(body[1], ' item');
   assert.ok(!r.warnings.some((w) => w.includes('struck-through')));
   assert.equal(typeof r.revision, 'number');
+});
+
+test('verify_changes: 같은 턴의 다음 호출은 그 뒤 새 op 만 싣고 full:true 는 전체를 싣는다', async () => {
+  const { call } = makeEnv();
+  await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X' });
+  const first = (await call('verify_changes', {})) as { ops: Array<{ kind: string }>; counts: { total: number } };
+  assert.equal(first.ops.length, 1);
+  assert.equal(first.counts.total, 1);
+  const idle = (await call('verify_changes', {})) as { ops: unknown[]; postEditText: unknown[]; note: string };
+  assert.equal(idle.ops.length, 0);
+  assert.equal(idle.postEditText.length, 0);
+  assert.match(idle.note, /full:true/);
+  await call('insert_text', { sectionIdx: 0, paraIdx: 1, charOffset: 0, text: 'Y' });
+  const second = (await call('verify_changes', {})) as {
+    ops: Array<{ kind: string }>; counts: { total: number };
+    postEditText: Array<{ paraIdx: number }>;
+  };
+  assert.equal(second.ops.length, 1);
+  assert.equal(second.counts.total, 2);
+  assert.deepEqual(second.postEditText.map((p) => p.paraIdx), [1]);
+  const all = (await call('verify_changes', { full: true })) as { ops: unknown[]; note?: string };
+  assert.equal(all.ops.length, 2);
+  assert.equal(all.note, undefined);
 });
 
 test('verify_changes: 표 구조 op 경고 + 영향 페이지', async () => {

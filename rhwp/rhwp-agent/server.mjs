@@ -54,6 +54,7 @@ import { ArtifactStore } from './artifact-store.mjs';
 import { BrowserbaseFleet, normalizeBrowserbaseOverride, validateBrowserbaseCredentials } from './browserbase-session.mjs';
 import { createProviderHealth } from './provider-health.mjs';
 import { createUsageStore } from './usage-store.mjs';
+import { appendToolTelemetryRow, startToolCall, ToolTurnTelemetry } from './tool-telemetry.mjs';
 import { createProviderLimitsClient } from './provider-limits.mjs';
 import {
   createPiManager,
@@ -411,6 +412,7 @@ const sessions = new HubSessionRegistry({
       pendingReferenceMessage: null,
       nextCapabilityEpoch: 1,
       pendingCalls: new Map(),
+      toolTelemetry: null,
       pendingUserQuestion: null,
       suppressedUserQuestionCallIds: new Set(),
       pendingUserQuestionScopes: [],
@@ -1358,9 +1360,33 @@ function settleAgentTurn(record, activeSession, event) {
   failPendingProviderCallsForTurn(record, activeSession, settledTurnId);
   retireProviderSockets(record, activeSession, { turnId: settledTurnId });
   retirePiSubagentsForTurn(record, activeSession);
+  flushToolTelemetry(record, activeSession, settledTurnId, event);
   activeSession.status = 'idle';
   activeSession.turnId = null;
   activeSession.providerTurnStarted = false;
+}
+
+// 도구 텔레메트리: 턴 단위 누산기. 지난 턴에 늦게 도착한 결과는 버린다.
+function toolTelemetryForTurn(record, providerTurn) {
+  if (!providerTurn) return null;
+  if (record.toolTelemetry?.turnId === providerTurn.turnId) return record.toolTelemetry;
+  if (providerTurn.session !== record.agentSession || providerTurn.turnId !== record.agentSession?.turnId) return null;
+  record.toolTelemetry = new ToolTurnTelemetry(providerTurn.turnId);
+  return record.toolTelemetry;
+}
+
+function flushToolTelemetry(record, activeSession, turnId, event) {
+  if (!turnId) return;
+  const turn = record.toolTelemetry?.turnId === turnId ? record.toolTelemetry : new ToolTurnTelemetry(turnId);
+  record.toolTelemetry = null;
+  void appendToolTelemetryRow(WORK_ROOT, {
+    v: 1,
+    ts: new Date().toISOString(),
+    agent: activeSession.agent,
+    workflow: activeSession.planning.workflow,
+    stopReason: event?.stopReason ?? null,
+    ...turn.summary(),
+  });
 }
 
 function requestUserQuestion(record, request, {
@@ -4427,6 +4453,7 @@ function handleMcpMessage(record, sock, msg) {
         : null;
       let providerTurn = null;
       let callSettled = false;
+      const telemetryCall = startToolCall(tool, msg.args);
       const sendError = (error, fallback = 'TOOL_ERROR') => {
         if (callSettled) return false;
         const terminalQuestionOutcome = tool === 'ask_user_question'
@@ -4436,6 +4463,10 @@ function handleMcpMessage(record, sock, msg) {
           ? noActiveProviderTurnError()
           : error;
         callSettled = true;
+        telemetryCall.finish(toolTelemetryForTurn(record, providerTurn), {
+          errorCode: reported?.code ?? fallback,
+          errorMessage: String(reported?.message ?? reported),
+        });
         return sendJson(sock, {
           v: 1,
           type: 'tool-result',
@@ -4454,6 +4485,7 @@ function handleMcpMessage(record, sock, msg) {
           return sendError(noActiveProviderTurnError());
         }
         callSettled = true;
+        telemetryCall.finish(toolTelemetryForTurn(record, providerTurn), { result });
         return sendJson(sock, { v: 1, type: 'tool-result', id: clientId, ok: true, result });
       };
       if (!workerJob) {

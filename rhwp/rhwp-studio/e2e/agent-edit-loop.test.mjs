@@ -318,7 +318,7 @@ try {
     try {
       // ── a. revision 게이트 ─────────────────────────────────
       setTestCase('a. revision / REVISION_MISMATCH');
-      const s0 = must(await call('get_structure', {}), 'get_structure');
+      const s0 = must(await call('get_structure', { format: 'json' }), 'get_structure');
       assert(
         Number.isInteger(s0.revision) && s0.revision >= 1,
         `get_structure 가 revision 을 반환 (revision=${s0.revision})`,
@@ -367,7 +367,7 @@ try {
         await page.evaluate((i) => window.__agentBridge.pendingEdits.approve(i), id);
       }
       // 첫 write 가 마지막 문단 끝에 공백을 추가했으므로 좌표를 다시 읽는다
-      const s1 = must(await call('get_structure', {}), 'get_structure(첫 write 후)');
+      const s1 = must(await call('get_structure', { format: 'json' }), 'get_structure(첫 write 후)');
       lastRevision = s1.revision;
       const seedBase = s1.sections[0].paragraphCount;
       const seedBaseLen = s1.sections[0].paragraphs[seedBase - 1]?.length ?? 0;
@@ -446,7 +446,8 @@ try {
         'get_char_format(비교 위치)',
       );
       assert(
-        fmtIn.bold === true && fmtOut.bold === false,
+        // false 는 기본 응답에서 생략된다 (full:true 에만 실린다)
+        fmtIn.bold === true && fmtOut.bold === undefined,
         `삽입 텍스트가 교체 구간 서식(bold) 상속 (삽입=${fmtIn.bold}, 범위 밖=${fmtOut.bold})`,
       );
 
@@ -597,7 +598,8 @@ try {
 
       // ── e. verify_changes 종합 + PNG ────────────────────────
       setTestCase('e. verify_changes 요약/다이제스트/PNG');
-      const v1 = must(await call('verify_changes', {}), 'verify_changes(요약)');
+      // 같은 턴에 앞서 verify_changes(b) 를 불렀으므로 전체 요약은 full:true 로 받는다.
+      const v1 = must(await call('verify_changes', { full: true }), 'verify_changes(요약)');
       const kindCount = (k) => v1.ops.filter((o) => o.kind === k).length;
       assert(
         v1.changeSetId && v1.status === 'open'
@@ -815,7 +817,7 @@ try {
       // 실제 wasm 의 이벤트 타이밍(스테이징 → document-mutated bump)이 저널
       // 기록과 어긋나면 여기서 gap 으로 드러난다.
       setTestCase('i. 병렬 리베이스 (edit journal)');
-      const sR = must(await call('get_structure', {}), 'get_structure(리베이스 기준)');
+      const sR = must(await call('get_structure', { format: 'json' }), 'get_structure(리베이스 기준)');
       const sharedRev = sR.revision;
       const rParaCount = sR.sections[0].paragraphCount;
       const rLastLen = sR.sections[0].paragraphs[rParaCount - 1]?.length ?? 0;

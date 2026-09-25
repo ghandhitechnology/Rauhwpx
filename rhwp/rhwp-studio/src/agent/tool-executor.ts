@@ -12,7 +12,7 @@ import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 import type { CellPathEntry, DocumentPosition } from '../core/types.ts';
 import type { RevisionTracker } from './revision.ts';
 import type { PendingEditManager } from './pending-edits.ts';
-import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, DocumentTemplate, ObjectOp, PendingStructureOpInfo, PermissionProfile } from './types.ts';
+import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, DocumentTemplate, ObjectOp, PendingOp, PendingStructureOpInfo, PermissionProfile } from './types.ts';
 import { AgentToolError } from './types.ts';
 import { EditJournal } from './edit-journal.ts';
 import { renderChartPng, validateChartSpec } from './chart-render.ts';
@@ -22,7 +22,8 @@ import {
   applyEngineEditSession,
   getEngineEditCapabilities,
   getEngineEditCapabilityCount,
-  getEngineEditTypeDefinitions,
+  getEngineEditMethodNamesByKind,
+  getReferencedTypeDefinitions,
   type EngineEditOperation,
 } from './engine-edit.ts';
 import { inferExportFormat } from '../command/save-target.ts';
@@ -48,7 +49,35 @@ const MAX_SVG_BYTES = 800_000;
 // WebSocket text frames cap at 100 MiB. Base64 expands by 4/3, so 64 MiB
 // leaves room for the protocol envelope while still covering normal HWP/HWPX files.
 const MAX_DOCUMENT_SNAPSHOT_BYTES = 64 * 1024 * 1024;
-const PENDING_NOTE = 'staged now as live preview; when the turn ends it is auto-committed (전체 접근) or held for the user’s review and approval (안전). A failed turn rolls it back';
+/** get_structure compact 텍스트의 범례 — 결과 머리에 한 번만 싣는다. */
+const STRUCTURE_LEGEND = 'Lines: "s<sec> p<paraIdx> (<length>) <text>"; … = preview cut, ⇥ = tab, "pA-pB empty" = empty paragraphs. '
+  + 'Each table follows its anchor paragraph as "table s<sec> p<paraIdx> c<controlIdx> <rows>x<cols>" plus "r<row> [cellIdx] text | …" lines; '
+  + 'rsN/csN = span when not 1, ⏎ = next cell paragraph (cellParaIdx 0,1,…), ⊞ = cell paragraph holding a nested table (use find_text/get_selection). '
+  + 'cell = {paraIdx: table p, controlIdx: table c, cellIdx}. format:"json" gives JSON.';
+
+interface StructureParagraph { paraIdx: number; length: number; text: string }
+interface StructureCellParagraph { cellParaIdx: number; length: number; text: string }
+interface StructureTable {
+  paraIdx: number;
+  controlIdx: number;
+  rowCount: number;
+  colCount: number;
+  cellCount: number;
+  cells: Array<{
+    cellIdx: number; row: number; col: number; rowSpan: number; colSpan: number;
+    paragraphs: StructureCellParagraph[];
+  }>;
+  /** 문단 예산이 이 표의 셀 텍스트 수집 도중/이전에 소진됐다 (JSON 출력에는 싣지 않는다) */
+  textCut: boolean;
+}
+interface StructureData {
+  sectionCount: number;
+  pageCount: number;
+  truncated: boolean;
+  sections: Array<{ sectionIdx: number; paragraphCount: number; paragraphs: StructureParagraph[] }>;
+  tablesBySection: Map<number, StructureTable[]>;
+}
+
 
 /** Every Studio tool that can create or stage a document mutation. */
 export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
@@ -63,6 +92,9 @@ export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'create_table',
   'delete_table',
   'edit_table',
+  'set_table_props',
+  'set_cell_props',
+  'set_zone_borders',
   'apply_para_format',
   'apply_style',
   'insert_image',
@@ -110,6 +142,9 @@ const BATCHABLE_EDIT_TOOLS: ReadonlySet<string> = new Set([
   'set_page_layout',
   'create_table',
   'edit_table',
+  'set_table_props',
+  'set_cell_props',
+  'set_zone_borders',
   'delete_table',
   'insert_equation',
 ]);
@@ -309,7 +344,7 @@ function optCell(args: Record<string, unknown>): CellAddr | undefined {
     if (typeof val !== 'number' || !Number.isSafeInteger(val)) {
       throw new AgentToolError(
         'INVALID_ARGS',
-        `cell.${key} must be an integer (got ${JSON.stringify(val)}). cell.paraIdx/controlIdx are the TABLE's body paragraph address — assemble cell from a get_structure tables[] entry (its paraIdx/controlIdx) plus the target cell's cellIdx, or copy a find_text match's cell object verbatim.`,
+        `cell.${key} must be an integer (got ${JSON.stringify(val)}). cell.paraIdx/controlIdx are the TABLE's body paragraph address — assemble cell from the get_structure table line ("table s0 p5 c0" → paraIdx 5, controlIdx 0) plus the target cell's [cellIdx], or copy a find_text match's cell object verbatim.`,
       );
     }
   }
@@ -361,6 +396,63 @@ function rangeRebaseAnchor(args: Record<string, unknown>): [number, number, numb
   return [sectionIdx, reqInt(args, 'startParaIdx'), reqInt(args, 'endParaIdx')];
 }
 
+/** get_document_info fontQuery — 문자열 하나 또는 1..16개 배열 */
+function parseFontQuery(raw: unknown): string[] {
+  if (raw === undefined || raw === null) return [];
+  const list = typeof raw === 'string' ? [raw] : raw;
+  if (!Array.isArray(list) || list.length > 16
+    || list.some((q) => typeof q !== 'string' || q.trim().length === 0 || q.length > 64)) {
+    throw new AgentToolError('INVALID_ARGS', 'fontQuery must be a font name or an array of 1..16 non-empty names');
+  }
+  return list as string[];
+}
+
+const FONT_MATCH_LIMIT = 8;
+
+/**
+ * 질의한 폰트 이름별 등록 폰트 후보. 대소문자·공백을 무시한 정확 일치, 접두어 일치("맑은" →
+ * "맑은 고딕"), 부분 일치("바탕" → "한컴바탕") 순으로 질의당 8개까지 돌려준다.
+ */
+function matchRegisteredFonts(queries: string[], registered: string[]): Record<string, string[]> {
+  const norm = (name: string): string => name.toLowerCase().replace(/\s+/g, '');
+  const out: Record<string, string[]> = {};
+  for (const query of queries) {
+    const q = norm(query);
+    const exact = registered.filter((name) => norm(name) === q);
+    const prefix = registered.filter((name) => norm(name) !== q && norm(name).startsWith(q));
+    const inner = registered.filter((name) => !norm(name).startsWith(q) && norm(name).includes(q));
+    out[query] = [...exact, ...prefix, ...inner].slice(0, FONT_MATCH_LIMIT);
+  }
+  return out;
+}
+
+/**
+ * 서식 읽기 결과에서 기본값을 걷어 낸다 — false, 0, '', null/undefined, 그리고 그렇게 비워진
+ * 중첩 객체. keep 에 든 최상위 키는 값이 0/false 여도 남긴다 (undefined 는 항상 뺀다).
+ */
+function omitDefaults(value: Record<string, unknown>, keep: readonly string[] = []): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (raw === undefined) continue;
+    if (keep.includes(key)) {
+      out[key] = raw;
+      continue;
+    }
+    if (raw === null || raw === false || raw === 0 || raw === '') continue;
+    if (typeof raw === 'object' && !Array.isArray(raw)) {
+      const inner = omitDefaults(raw as Record<string, unknown>);
+      if (Object.keys(inner).length > 0) out[key] = inner;
+      continue;
+    }
+    out[key] = raw;
+  }
+  return out;
+}
+
+function isColor(value: unknown, hex: string): boolean {
+  return typeof value !== 'string' || value.length === 0 || value.toLowerCase() === hex;
+}
+
 export class AgentToolExecutor {
   private deps: AgentToolExecutorDeps;
   private turnWriteMode: TurnWriteMode = 'none';
@@ -372,6 +464,8 @@ export class AgentToolExecutor {
   // 병렬 서브에이전트 리베이스용 편집 저널 — 정밀 기록된 핵심 텍스트 쓰기만 담고,
   // 기록되지 않은 revision bump 는 자동으로 '불명'(리베이스 불가) 취급된다.
   private journal = new EditJournal();
+  // verify_changes 증분 커서 — `${agent}:${changeSetId}` 별로 이번 턴에 이미 보고한 op id.
+  private verifiedOpIds = new Map<string, Set<string>>();
 
   constructor(deps: AgentToolExecutorDeps) {
     this.deps = deps;
@@ -379,10 +473,12 @@ export class AgentToolExecutor {
 
   beginTurn(): void {
     this.turnWriteMode = 'none';
+    this.verifiedOpIds.clear();
   }
 
   endTurn(): void {
     this.turnWriteMode = 'none';
+    this.verifiedOpIds.clear();
   }
 
   async execute(
@@ -447,7 +543,7 @@ export class AgentToolExecutor {
       case 'get_text_range': return this.getTextRange(args);
       case 'get_selection': return this.getSelection();
       case 'get_fields': return this.getFields();
-      case 'get_document_info': return this.getDocumentInfo();
+      case 'get_document_info': return this.getDocumentInfo(args);
       case 'materialize_document_snapshot': return this.materializeDocumentSnapshot();
       case 'publish_cloud_document': {
         this.requireDocLoaded();
@@ -467,8 +563,8 @@ export class AgentToolExecutor {
       case 'get_table_layout': return this.getTableLayout(args);
       case 'get_engine_edit_capabilities': return this.getEngineEditCapabilities(args);
       case 'list_numberings': return this.listNumberings();
-      case 'verify_changes': return this.verifyChanges(args);
-      case 'template_get_structure': return this.templateRead('get_structure', args, capability, true);
+      case 'verify_changes': return this.verifyChanges(args, agent);
+      case 'template_get_structure': return this.templateGetStructure(args, capability);
       case 'template_get_text_range': return this.templateRead('get_text_range', args, capability);
       case 'template_get_para_format': return this.templateRead('get_para_format', args, capability);
       case 'template_get_char_format': return this.templateRead('get_char_format', args, capability);
@@ -488,6 +584,10 @@ export class AgentToolExecutor {
       case 'create_table': return this.createTable(args, agent);
       case 'delete_table': return this.deleteTable(args, agent);
       case 'edit_table': return this.editTable(args, agent);
+      // 표 속성·셀 속성·영역 테두리는 도구 정의 크기 때문에 별도 도구로 나뉘었다. 실행은 edit_table 과 같은 경로다.
+      case 'set_table_props':
+      case 'set_cell_props':
+      case 'set_zone_borders': return this.editTable({ ...args, op: tool }, agent);
       case 'apply_para_format': return this.applyParaFormat(args, agent);
       case 'list_styles': return this.listStyles();
       case 'apply_style': return this.applyStyle(args, agent);
@@ -516,18 +616,33 @@ export class AgentToolExecutor {
     return this.deps.revision.revision;
   }
 
+  /**
+   * 기본(쿼리 없음)은 kind 별 메서드 이름만 돌려준다. query 나 detail:true 면 시그니처와
+   * argumentGuide 를 싣고, typeDefinitions 는 돌려주는 capability 가 참조하는 타입만 담는다.
+   */
   private getEngineEditCapabilities(args: Record<string, unknown>) {
     this.requireDocLoaded();
     const query = args['query'];
     if (query !== undefined && typeof query !== 'string') {
       throw new AgentToolError('INVALID_ARGS', 'query must be a string');
     }
+    const detail = args['detail'] === true || (typeof query === 'string' && query.trim().length > 0);
+    if (!detail) {
+      return {
+        revision: this.revision,
+        capabilityCount: getEngineEditCapabilityCount(),
+        methods: getEngineEditMethodNamesByKind(),
+        note: 'names only; pass query (method or signature text) or detail:true for signatures and argument types',
+      };
+    }
+    const capabilities = getEngineEditCapabilities(query ?? '');
+    const usesBinary = capabilities.some((capability) => capability.signature.includes('Uint8Array'));
     return {
       revision: this.revision,
       capabilityCount: getEngineEditCapabilityCount(),
-      capabilities: getEngineEditCapabilities(query ?? ''),
-      typeDefinitions: getEngineEditTypeDefinitions(),
-      binaryArgument: { $base64: 'base64-encoded bytes' },
+      capabilities,
+      typeDefinitions: getReferencedTypeDefinitions(capabilities),
+      ...(usesBinary ? { binaryArgument: { $base64: 'base64-encoded bytes' } } : {}),
     };
   }
 
@@ -779,22 +894,53 @@ export class AgentToolExecutor {
 
   // ─── read tools ───────────────────────────────────────────
 
-  private getStructure(args: Record<string, unknown>): unknown {
+  /**
+   * get_structure — 기본은 한 줄씩의 compact 텍스트(범례 한 줄 + 문단/표 줄), format:'json' 은
+   * 예전 JSON 모양을 그대로 돌려준다. revisionLabel 은 머리 줄에 쓰인다 (템플릿은 템플릿 revision).
+   */
+  private getStructure(args: Record<string, unknown>, revisionLabel?: string): unknown {
     this.requireDocLoaded();
+    const format = args['format'] ?? 'text';
+    if (format !== 'text' && format !== 'json') {
+      throw new AgentToolError('INVALID_ARGS', `format must be 'text' or 'json' (got ${JSON.stringify(format)})`);
+    }
+    const data = this.collectStructure(args);
+    if (format === 'json') {
+      const sectionsOut = data.sections.map((s) => {
+        const tables = data.tablesBySection.get(s.sectionIdx);
+        return tables && tables.length > 0
+          ? { ...s, tables: tables.map(({ textCut: _cut, ...table }) => table) }
+          : s;
+      });
+      return {
+        revision: this.revision,
+        sectionCount: data.sectionCount,
+        pageCount: data.pageCount,
+        truncated: data.truncated,
+        sections: sectionsOut,
+      };
+    }
+    const text = this.renderCompactStructure(data, revisionLabel ?? `revision ${this.revision}`);
+    return {
+      revision: this.revision,
+      pageCount: data.pageCount,
+      truncated: data.truncated,
+      mcpContent: [{ type: 'text', text }],
+    };
+  }
+
+  /** get_structure 의 문단·표 수집 — 본문 문단이 먼저 예산(maxParagraphs)을 쓰고 표 셀 문단이 나머지를 쓴다. */
+  private collectStructure(args: Record<string, unknown>): StructureData {
     const maxPreviewChars = Math.min(Math.max(optInt(args, 'maxPreviewChars', 120), 0), 500);
     const maxParagraphs = Math.min(Math.max(optInt(args, 'maxParagraphs', 500), 1), 2000);
     const { wasm } = this.deps;
     const sectionCount = wasm.getSectionCount();
-    const sections: Array<{
-      sectionIdx: number;
-      paragraphCount: number;
-      paragraphs: Array<{ paraIdx: number; length: number; text: string }>;
-    }> = [];
+    const sections: StructureData['sections'] = [];
     let total = 0;
     let truncated = false;
     for (let sec = 0; sec < sectionCount; sec++) {
       const paragraphCount = wasm.getParagraphCount(sec);
-      const paragraphs: Array<{ paraIdx: number; length: number; text: string }> = [];
+      const paragraphs: StructureParagraph[] = [];
       for (let para = 0; para < paragraphCount; para++) {
         if (total >= maxParagraphs) {
           truncated = true;
@@ -811,36 +957,27 @@ export class AgentToolExecutor {
     }
 
     // 표: 섹션별 tables[] 로 셀 주소 + 셀 텍스트를 노출한다 (문단 예산 공유).
-    interface StructTable {
-      paraIdx: number;
-      controlIdx: number;
-      rowCount: number;
-      colCount: number;
-      cellCount: number;
-      cells: Array<{
-        cellIdx: number; row: number; col: number; rowSpan: number; colSpan: number;
-        paragraphs: Array<{ cellParaIdx: number; length: number; text: string }>;
-      }>;
-    }
-    const tablesBySection = new Map<number, StructTable[]>();
+    const tablesBySection = new Map<number, StructureTable[]>();
     for (const t of this.listTables()) {
-      let table: StructTable;
+      let table: StructureTable;
       try {
         const dims = wasm.getTableDimensions(t.sectionIdx, t.paraIdx, t.controlIdx);
         table = {
           paraIdx: t.paraIdx, controlIdx: t.controlIdx,
           rowCount: dims.rowCount, colCount: dims.colCount, cellCount: dims.cellCount,
           cells: [],
+          textCut: false,
         };
         for (let cellIdx = 0; cellIdx < dims.cellCount; cellIdx++) {
           const info = wasm.getCellInfo(t.sectionIdx, t.paraIdx, t.controlIdx, cellIdx);
           const cellParaCount = wasm.getCellParagraphCount(t.sectionIdx, t.paraIdx, t.controlIdx, cellIdx);
-          const cellParas: Array<{ cellParaIdx: number; length: number; text: string }> = [];
+          const cellParas: StructureCellParagraph[] = [];
           for (let cp = 0; cp < cellParaCount; cp++) {
             // 예산 소진 시에도 표/셀 좌표(주소 지정에 필수)는 계속 내보내고
             // 셀 텍스트 수집만 멈춘다 — 표가 통째로 사라지면 셀 주소를 만들 수 없다.
             if (total >= maxParagraphs) {
               truncated = true;
+              table.textCut = true;
               break;
             }
             const length = wasm.getCellParagraphLength(t.sectionIdx, t.paraIdx, t.controlIdx, cellIdx, cp);
@@ -863,18 +1000,79 @@ export class AgentToolExecutor {
       list.push(table);
       tablesBySection.set(t.sectionIdx, list);
     }
-    const sectionsOut = sections.map((s) => {
-      const tables = tablesBySection.get(s.sectionIdx);
-      return tables && tables.length > 0 ? { ...s, tables } : s;
-    });
+    return { sectionCount, pageCount: wasm.pageCount, truncated, sections, tablesBySection };
+  }
 
-    return {
-      revision: this.revision,
-      sectionCount,
-      pageCount: wasm.pageCount,
-      truncated,
-      sections: sectionsOut,
-    };
+  /**
+   * compact 구조 텍스트. 문단 한 줄 "s0 p12 (40) text…", 빈 문단 연속은 "s0 p13-p17 empty" 로 접고,
+   * 표는 앵커 문단 바로 뒤에 "table s0 p5 c0 3x4" + 행마다 "[cellIdx] text | …" 로 적는다.
+   * 스팬은 1 이 아닐 때만 rs/cs 로, 셀 문단 경계는 ⏎, 중첩 표를 품은 셀 문단은 ⊞ 로 표시한다.
+   */
+  private renderCompactStructure(data: StructureData, revisionLabel: string): string {
+    const lines: string[] = [];
+    const sectionWord = data.sectionCount === 1 ? 'section' : 'sections';
+    lines.push(`${revisionLabel} · ${data.pageCount} pages · ${data.sectionCount} ${sectionWord}`
+      + (data.truncated ? ' · TRUNCATED by maxParagraphs (raise it or use find_text)' : ''));
+    lines.push(STRUCTURE_LEGEND);
+    const clean = (text: string): string => text.replace(/\t/g, '⇥').replace(/\r?\n|\r/g, '⏎');
+    const preview = (text: string, length: number): string =>
+      clean(text) + (text.length < length ? '…' : '');
+    for (const section of data.sections) {
+      const sec = section.sectionIdx;
+      lines.push(`s${sec} · ${section.paragraphCount} paragraphs`);
+      const tables = [...(data.tablesBySection.get(sec) ?? [])];
+      const emitTable = (table: StructureTable): void => {
+        lines.push(`  table s${sec} p${table.paraIdx} c${table.controlIdx} ${table.rowCount}x${table.colCount}`
+          + (table.textCut ? ' (cell text cut by maxParagraphs)' : ''));
+        const rows = new Map<number, string[]>();
+        for (const cell of table.cells) {
+          const spans = `${cell.rowSpan !== 1 ? ` rs${cell.rowSpan}` : ''}${cell.colSpan !== 1 ? ` cs${cell.colSpan}` : ''}`;
+          const body = cell.paragraphs.map((p) => {
+            if (p.length === 0) {
+              const nested = this.cellParaHostsNestedTable(
+                sec, { paraIdx: table.paraIdx, controlIdx: table.controlIdx, cellIdx: cell.cellIdx }, p.cellParaIdx,
+              );
+              return nested ? '⊞' : '';
+            }
+            const cut = p.text.length < p.length;
+            return clean(p.text) + (cut ? `…(${p.length})` : '');
+          }).join('⏎');
+          const row = rows.get(cell.row) ?? [];
+          row.push(`[${cell.cellIdx}${spans}]${body ? ` ${body}` : ''}`);
+          rows.set(cell.row, row);
+        }
+        for (const [row, cells] of [...rows.entries()].sort((a, b) => a[0] - b[0])) {
+          lines.push(`  r${row} ${cells.join(' | ')}`);
+        }
+      };
+      let emptyStart = -1;
+      let emptyEnd = -1;
+      const flushEmpty = (): void => {
+        if (emptyStart < 0) return;
+        lines.push(emptyStart === emptyEnd
+          ? `s${sec} p${emptyStart} empty`
+          : `s${sec} p${emptyStart}-p${emptyEnd} empty`);
+        emptyStart = -1;
+      };
+      for (const para of section.paragraphs) {
+        const anchored = tables.filter((t) => t.paraIdx === para.paraIdx);
+        if (para.length === 0 && anchored.length === 0) {
+          if (emptyStart < 0) emptyStart = para.paraIdx;
+          emptyEnd = para.paraIdx;
+          continue;
+        }
+        flushEmpty();
+        lines.push(`s${sec} p${para.paraIdx} (${para.length})${para.length > 0 ? ` ${preview(para.text, para.length)}` : ''}`);
+        for (const table of anchored) {
+          emitTable(table);
+          tables.splice(tables.indexOf(table), 1);
+        }
+      }
+      flushEmpty();
+      // 예산이 끊긴 뒤의 표는 좌표라도 남긴다 (셀 주소 지정에 필수).
+      for (const table of tables) emitTable(table);
+    }
+    return lines.join('\n');
   }
 
   private getTextRange(args: Record<string, unknown>): unknown {
@@ -1037,8 +1235,13 @@ export class AgentToolExecutor {
     return { revision: this.revision, fields };
   }
 
-  private async getDocumentInfo(): Promise<unknown> {
+  /**
+   * 문서 메타데이터 + 폰트 요약. 등록 폰트 전체 목록은 싣지 않고 개수만 준다 —
+   * fontQuery 로 물은 이름만 등록 여부(정규화한 접두어 일치)를 돌려준다.
+   */
+  private async getDocumentInfo(args: Record<string, unknown>): Promise<unknown> {
     this.requireDocLoaded();
+    const fontQueries = parseFontQuery(args['fontQuery']);
     const { wasm, documentState } = this.deps;
     // Snapshot every document field before the async desktop-path lookup so a
     // tab/document switch cannot combine one handle's path with another doc's metadata.
@@ -1074,7 +1277,8 @@ export class AgentToolExecutor {
       sourcePath,
       fontsUsed,
       fallbackFont,
-      registeredFonts,
+      registeredFontCount: registeredFonts.length,
+      ...(fontQueries.length > 0 ? { fontMatches: matchRegisteredFonts(fontQueries, registeredFonts) } : {}),
     };
   }
 
@@ -1318,7 +1522,7 @@ export class AgentToolExecutor {
       replacedCount,
       skippedPendingDelete,
       truncated,
-      ...(truncated ? { note: `only the first ${maxMatches} matches were replaced — call replace_all again with the returned revision to continue. ${PENDING_NOTE}` } : { note: PENDING_NOTE }),
+      ...(truncated ? { note: `only the first ${maxMatches} matches were replaced — call replace_all again with the returned revision to continue.` } : {}),
     };
   }
 
@@ -1436,7 +1640,6 @@ export class AgentToolExecutor {
     return {
       revision: this.revision,
       changeSetId: r.changeSetId,
-      note: PENDING_NOTE,
       ...(applied.anchor
         ? { anchor: { paraIdx: applied.anchor.paraIdx, controlIdx: applied.anchor.controlIdx } }
         : {}),
@@ -1458,7 +1661,7 @@ export class AgentToolExecutor {
     }
     const obj: ObjectOp = { type: 'setNoteText', sectionIdx, paraIdx, controlIdx, text };
     const r = this.deps.pending.addObjectOp(agent, obj);
-    return { revision: this.revision, changeSetId: r.changeSetId, note: PENDING_NOTE };
+    return { revision: this.revision, changeSetId: r.changeSetId };
   }
 
   private listBookmarks(): unknown {
@@ -1489,7 +1692,7 @@ export class AgentToolExecutor {
       }
       const obj: ObjectOp = { type: 'bookmark', op: 'add', sectionIdx, paraIdx, charOffset, name };
       const r = this.deps.pending.addObjectOp(agent, obj);
-      return { revision: this.revision, changeSetId: r.changeSetId, note: PENDING_NOTE };
+      return { revision: this.revision, changeSetId: r.changeSetId };
     }
     // delete / rename — 이름으로 대상 해석
     const target = this.deps.wasm.getBookmarks().find((b) => b.name === name);
@@ -1509,14 +1712,14 @@ export class AgentToolExecutor {
         sectionIdx: target.sec, paraIdx: target.para, ctrlIdx: target.ctrlIdx, name: newName,
       };
       const r = this.deps.pending.addObjectOp(agent, obj);
-      return { revision: this.revision, changeSetId: r.changeSetId, note: PENDING_NOTE };
+      return { revision: this.revision, changeSetId: r.changeSetId };
     }
     const obj: ObjectOp = {
       type: 'bookmark', op: 'delete',
       sectionIdx: target.sec, paraIdx: target.para, ctrlIdx: target.ctrlIdx,
     };
     const r = this.deps.pending.addObjectOp(agent, obj);
-    return { revision: this.revision, changeSetId: r.changeSetId, note: PENDING_NOTE };
+    return { revision: this.revision, changeSetId: r.changeSetId };
   }
 
   private async renderPage(args: Record<string, unknown>): Promise<unknown> {
@@ -1601,8 +1804,8 @@ export class AgentToolExecutor {
         : wasm.getParaPropertiesAt(sectionIdx, paraIdx);
     const pxToPt = (px: number | undefined): number | undefined =>
       (typeof px === 'number' ? Math.round(px * 72 / 96 * 10) / 10 : undefined);
-    return {
-      revision: this.revision,
+    const headType = (props.headType ?? 'None').toLowerCase();
+    const format = {
       alignment: props.alignment,
       lineSpacingType: props.lineSpacingType,
       ...(props.lineSpacingType === 'Percent' ? { lineSpacingPercent: Math.round(props.lineSpacing ?? 100) } : {}),
@@ -1612,10 +1815,18 @@ export class AgentToolExecutor {
       marginLeftPt: pxToPt(props.marginLeft),
       marginRightPt: pxToPt(props.marginRight),
       pageBreakBefore: props.pageBreakBefore === true,
-      headType: (props.headType ?? 'None').toLowerCase(),
+      headType,
       numberingId: props.numberingId ?? 0,
       paraLevel: props.paraLevel ?? 0,
       paraShapeId: props.paraShapeId,
+    };
+    if (args['full'] === true) return { revision: this.revision, ...format };
+    // 기본값(0pt 간격·여백, false, 목록 아님)은 생략한다. 목록 문단이면 numberingId/paraLevel 은
+    // 0 이어도 의미가 있으므로 남긴다.
+    const isList = headType !== 'none';
+    return {
+      revision: this.revision,
+      ...omitDefaults({ ...format, headType: isList ? headType : undefined }, isList ? ['numberingId', 'paraLevel'] : []),
     };
   }
 
@@ -1632,8 +1843,7 @@ export class AgentToolExecutor {
       : cell
         ? wasm.getCellCharPropertiesAt(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset)
         : wasm.getCharPropertiesAt(sectionIdx, paraIdx, charOffset);
-    return {
-      revision: this.revision,
+    const format = {
       fontFamily: props.fontFamily,
       fontSizePt: typeof props.fontSize === 'number' ? props.fontSize / 100 : undefined,
       bold: props.bold === true,
@@ -1646,6 +1856,16 @@ export class AgentToolExecutor {
       shadeColor: props.shadeColor,
       fontId: props.fontId,
       charShapeId: props.charShapeId,
+    };
+    if (args['full'] === true) return { revision: this.revision, ...format };
+    // 기본값(false 속성, 검정 글자, 흰/없음 음영)은 생략한다.
+    return {
+      revision: this.revision,
+      ...omitDefaults({
+        ...format,
+        textColor: isColor(format.textColor, '#000000') ? undefined : format.textColor,
+        shadeColor: isColor(format.shadeColor, '#ffffff') ? undefined : format.shadeColor,
+      }),
     };
   }
 
@@ -1693,9 +1913,21 @@ export class AgentToolExecutor {
       fillColor: props['fillColor'],
     };
 
+    const full = args['full'] === true;
+    // 기본 응답은 기본값(false, 0mm, 'none', 꺼진 캡션)을 생략한다. 글자처럼 취급하는(inline) 표는
+    // 개체 배치 필드가 의미 없으므로 함께 생략한다.
+    const inline = table.positionMode === 'inline';
+    const tableOut = full ? table : omitDefaults({
+      ...table,
+      pageBreak: table.pageBreak === 'none' ? undefined : table.pageBreak,
+      textWrap: inline ? undefined : table.textWrap,
+      horizontal: inline ? undefined : table.horizontal,
+      vertical: inline ? undefined : table.vertical,
+      caption: table.caption.enabled ? table.caption : undefined,
+    }, ['sizeMm']);
     const rawCellIdx = args['cellIdx'];
     if (rawCellIdx === undefined || rawCellIdx === null) {
-      return { revision: this.revision, sectionIdx, paraIdx, controlIdx, dimensions: dims, table };
+      return { revision: this.revision, sectionIdx, paraIdx, controlIdx, dimensions: dims, table: tableOut };
     }
     const cellIdx = reqInt(args, 'cellIdx');
     if (cellIdx < 0 || cellIdx >= dims.cellCount) {
@@ -1717,7 +1949,11 @@ export class AgentToolExecutor {
       fieldName: typeof cellProps['fieldName'] === 'string' ? cellProps['fieldName'] : '',
       fillColor: cellProps['fillColor'],
     };
-    return { revision: this.revision, sectionIdx, paraIdx, controlIdx, dimensions: dims, table, cell };
+    const cellOut = full ? cell : omitDefaults({
+      ...cell,
+      textDirection: cell.textDirection === 'horizontal' ? undefined : cell.textDirection,
+    }, ['cellIdx', 'sizeMm']);
+    return { revision: this.revision, sectionIdx, paraIdx, controlIdx, dimensions: dims, table: tableOut, cell: cellOut };
   }
 
   /**
@@ -1839,11 +2075,12 @@ export class AgentToolExecutor {
   }
 
   /**
-   * verify_changes — 에이전트 셀프체크. change set 요약 + 영향 문단의 편집 후 텍스트
-   * 다이제스트 + 경고를 반환한다. includeImage 면 첫 영향 페이지를 mark-only op 까지
-   * 적용한 상태(승인 후 모습)로 PNG 렌더한다 (withMarkedOpsApplied — 문서에는 흔적 없음).
+   * verify_changes — 에이전트 셀프체크. 이번 턴에 앞서 verify_changes 를 부른 뒤로 새로 쌓인
+   * op 만 요약·다이제스트·경고로 돌려주고 전체는 counts 로만 알린다 (full:true 면 change set 전체).
+   * includeImage 면 영향 페이지를 mark-only op 까지 적용한 상태(승인 후 모습)로 PNG 렌더한다
+   * (withMarkedOpsApplied — 문서에는 흔적 없음).
    */
-  private async verifyChanges(args: Record<string, unknown>): Promise<unknown> {
+  private async verifyChanges(args: Record<string, unknown>, agent: AgentName): Promise<unknown> {
     this.requireDocLoaded();
     const rawId = args['changeSetId'];
     if (rawId !== undefined && rawId !== null && (typeof rawId !== 'string' || rawId.length < 1)) {
@@ -1851,6 +2088,7 @@ export class AgentToolExecutor {
     }
     const changeSetId = typeof rawId === 'string' ? rawId : undefined;
     const includeImage = args['includeImage'] === true;
+    const full = args['full'] === true;
     const { pending } = this.deps;
     const summary = pending.describeChangeSet(changeSetId);
     const sets = pending.getChangeSets();
@@ -1858,14 +2096,91 @@ export class AgentToolExecutor {
       ? sets.find((s) => s.id === changeSetId)
       : sets[sets.length - 1];
 
+    const allOps = set?.ops ?? [];
+    const seenKey = `${agent}:${set?.id ?? ''}`;
+    const seen = this.verifiedOpIds.get(seenKey) ?? new Set<string>();
+    const reportOps = full ? allOps : allOps.filter((op) => !seen.has(op.id));
+    const reportIds = new Set(reportOps.map((op) => op.id));
+    if (set) this.verifiedOpIds.set(seenKey, new Set(allOps.map((op) => op.id)));
+
     const warnings: string[] = [];
     if (!set) {
       warnings.push('no pending change set found — edits may have been committed/rolled back already, or none were made');
     }
+    const report = this.collectVerifyTargets(reportOps);
+    warnings.push(...report.warnings);
 
-    // op 좌표 → 영향 문단 수집 (dedupe, 상한 8)
-    interface AffectedPara { sectionIdx: number; paraIdx: number; cell?: CellAddr }
-    const affected: AffectedPara[] = [];
+    // 편집 후 텍스트 다이제스트 (문단당 앞 200자 — 지금 문서에 보이는 그대로)
+    const postEditText = report.affected.map((a) => ({
+      sectionIdx: a.sectionIdx,
+      paraIdx: a.paraIdx,
+      ...(a.cell ? { cell: a.cell } : {}),
+      text: this.readPostEditDigest(a.sectionIdx, a.paraIdx, 0, a.cell),
+    }));
+    const affectedPages = this.pagesOfTargets(report);
+    const summaryOps = summary.ops.filter((op) => reportIds.has(op.id));
+
+    const result: Record<string, unknown> = {
+      changeSetId: summary.changeSetId,
+      status: summary.status,
+      agent: summary.agent,
+      counts: {
+        total: summary.ops.length,
+        appliesAtCommit: summary.ops.filter((op) => !op.applied).length,
+      },
+      ops: summaryOps,
+      postEditText,
+      affectedPages,
+      warnings,
+      ...(!full && set && summaryOps.length < summary.ops.length
+        ? { note: summaryOps.length === 0
+          ? 'no new ops since your last verify_changes this turn; full:true lists the whole change set'
+          : 'only ops since your last verify_changes this turn; full:true lists the whole change set' }
+        : {}),
+      ...(report.templateTransfers.length > 0 ? {
+        templateTransfers: report.templateTransfers,
+        skippedFeatures: [...new Set(report.templateTransfers.flatMap((transfer) => transfer.skippedFeatures))],
+        templateRevision: report.templateTransfers.at(-1)?.templateRevision,
+      } : {}),
+    };
+
+    if (includeImage) {
+      // 새 op 이 없으면 change set 전체의 첫 영향 페이지를 그린다.
+      const page = affectedPages[0]
+        ?? (reportOps.length < allOps.length ? this.pagesOfTargets(this.collectVerifyTargets(allOps))[0] : undefined)
+        ?? 0;
+      try {
+        // 마크 전용 op 까지 적용한 "승인 후" 상태로 렌더하고 반드시 원복된다.
+        // 스냅샷 복원으로 문서가 그대로 돌아오므로 미리보기 이벤트가 revision 을
+        // 올리지 않게 막는다 — 안 막으면 에이전트가 든 revision 이 무효가 되어
+        // 다음 write 가 불필요한 REVISION_MISMATCH 재조회 왕복을 만든다.
+        const canvas = set
+          ? this.deps.revision.holdDuring(
+            () => pending.withMarkedOpsApplied(set.id, () => this.renderPageToCanvasElement(page, 2)),
+          )
+          : this.renderPageToCanvasElement(page, 2);
+        const png = await canvasToPngBase64(canvas);
+        result['image'] = { data: png.data, mimeType: 'image/png' };
+        result['imagePageIndex'] = page;
+      } catch (e) {
+        if (e instanceof AgentToolError && e.code !== 'RENDER_UNAVAILABLE') throw e;
+        // 캔버스 없는 환경(테스트 등)이나 렌더 실패는 이미지 생략 + 경고로 degrade
+        const msg = e instanceof Error ? e.message : String(e);
+        warnings.push(`includeImage requested but the page render is unavailable here — image skipped (${msg.slice(0, 120)})`);
+      }
+    }
+    // 미리보기 창은 holdDuring 으로 revision 을 올리지 않지만, 방어적으로 마지막에 읽는다
+    return { revision: this.revision, ...result };
+  }
+
+  /** verify_changes 대상 op 들의 영향 문단(dedupe, 상한 8)·상태 경고·템플릿 전송 요약 */
+  private collectVerifyTargets(ops: readonly PendingOp[]): {
+    affected: Array<{ sectionIdx: number; paraIdx: number; cell?: CellAddr }>;
+    warnings: string[];
+    templateTransfers: Array<{ label: string; templateRevision: number; affectedSections: number[]; skippedFeatures: string[] }>;
+  } {
+    const affected: Array<{ sectionIdx: number; paraIdx: number; cell?: CellAddr }> = [];
+    const warnings: string[] = [];
     const seenPara = new Set<string>();
     let hasDeleteMark = false;
     let hasTableStructure = false;
@@ -1878,7 +2193,7 @@ export class AgentToolExecutor {
       seenPara.add(key);
       affected.push(cell ? { sectionIdx, paraIdx, cell } : { sectionIdx, paraIdx });
     };
-    for (const op of set?.ops ?? []) {
+    for (const op of ops) {
       if (op.kind === 'delete') hasDeleteMark = true;
       if (op.kind === 'object' && (op.obj.type === 'tableStructure' || op.obj.type === 'tableStructureMarked' || op.obj.type === 'deleteTable')) {
         hasTableStructure = true;
@@ -1938,63 +2253,20 @@ export class AgentToolExecutor {
         + 'further edits to it are rejected (PENDING_DESTRUCTIVE_OP) until then; re-read get_structure on your next turn',
       );
     }
+    return { affected, warnings, templateTransfers };
+  }
 
-    // 편집 후 텍스트 다이제스트 (문단당 앞 200자 — 지금 문서에 보이는 그대로)
-    const postEditText = affected.map((a) => ({
-      sectionIdx: a.sectionIdx,
-      paraIdx: a.paraIdx,
-      ...(a.cell ? { cell: a.cell } : {}),
-      text: this.readPostEditDigest(a.sectionIdx, a.paraIdx, 0, a.cell),
-    }));
-    const affectedPages: number[] = [];
-    for (const a of affected) {
+  private pagesOfTargets(report: ReturnType<AgentToolExecutor['collectVerifyTargets']>): number[] {
+    const pages: number[] = [];
+    for (const a of report.affected) {
       const page = this.pageOfParagraph(a.sectionIdx, a.paraIdx, a.cell);
-      if (page !== null && !affectedPages.includes(page)) affectedPages.push(page);
+      if (page !== null && !pages.includes(page)) pages.push(page);
     }
-    for (const sectionIdx of new Set(templateTransfers.flatMap((transfer) => transfer.affectedSections))) {
+    for (const sectionIdx of new Set(report.templateTransfers.flatMap((transfer) => transfer.affectedSections))) {
       const page = this.pageOfParagraph(sectionIdx, 0);
-      if (page !== null && !affectedPages.includes(page)) affectedPages.push(page);
+      if (page !== null && !pages.includes(page)) pages.push(page);
     }
-
-    const result: Record<string, unknown> = {
-      changeSetId: summary.changeSetId,
-      status: summary.status,
-      agent: summary.agent,
-      ops: summary.ops,
-      postEditText,
-      affectedPages,
-      warnings,
-      ...(templateTransfers.length > 0 ? {
-        templateTransfers,
-        skippedFeatures: [...new Set(templateTransfers.flatMap((transfer) => transfer.skippedFeatures))],
-        templateRevision: templateTransfers.at(-1)?.templateRevision,
-      } : {}),
-    };
-
-    if (includeImage) {
-      const page = affectedPages[0] ?? 0;
-      try {
-        // 마크 전용 op 까지 적용한 "승인 후" 상태로 렌더하고 반드시 원복된다.
-        // 스냅샷 복원으로 문서가 그대로 돌아오므로 미리보기 이벤트가 revision 을
-        // 올리지 않게 막는다 — 안 막으면 에이전트가 든 revision 이 무효가 되어
-        // 다음 write 가 불필요한 REVISION_MISMATCH 재조회 왕복을 만든다.
-        const canvas = set
-          ? this.deps.revision.holdDuring(
-            () => pending.withMarkedOpsApplied(set.id, () => this.renderPageToCanvasElement(page, 2)),
-          )
-          : this.renderPageToCanvasElement(page, 2);
-        const png = await canvasToPngBase64(canvas);
-        result['image'] = { data: png.data, mimeType: 'image/png' };
-        result['imagePageIndex'] = page;
-      } catch (e) {
-        if (e instanceof AgentToolError && e.code !== 'RENDER_UNAVAILABLE') throw e;
-        // 캔버스 없는 환경(테스트 등)이나 렌더 실패는 이미지 생략 + 경고로 degrade
-        const msg = e instanceof Error ? e.message : String(e);
-        warnings.push(`includeImage requested but the page render is unavailable here — image skipped (${msg.slice(0, 120)})`);
-      }
-    }
-    // 미리보기 창은 holdDuring 으로 revision 을 올리지 않지만, 방어적으로 마지막에 읽는다
-    return { revision: this.revision, ...result };
+    return pages;
   }
 
   // ─── template context + structural transfer ─────────────────
@@ -2053,6 +2325,21 @@ export class AgentToolExecutor {
       return { templateId: template.id, templateRevision: template.revision, ...rest };
     }
     return { templateId: template.id, templateRevision: template.revision, result };
+  }
+
+  /**
+   * template_get_structure — get_structure 와 같은 모양(기본 compact 텍스트, format:'json' 은 JSON)을
+   * 템플릿 문서로 만든다. compact 머리 줄에는 문서 revision 대신 템플릿 revision 을 쓴다.
+   */
+  private async templateGetStructure(args: Record<string, unknown>, capability?: ToolCapabilityContext): Promise<unknown> {
+    const { template, wasm } = await this.ensureTemplate(capability);
+    const rest = this.templateArgs(args, template);
+    const nested = new AgentToolExecutor({ ...this.deps, wasm, loadTemplateBytes: undefined });
+    const result = asRecord(nested.getStructure(rest, `template ${template.id} revision ${template.revision}`));
+    assertToolRequestActive(capability);
+    this.templateInspectionKey = `${template.id}:${template.revision}`;
+    const { revision: _documentRevision, ...out } = result;
+    return { templateId: template.id, templateRevision: template.revision, ...out };
   }
 
   private async templateGetPageLayout(args: Record<string, unknown>, capability?: ToolCapabilityContext): Promise<unknown> {
@@ -2313,20 +2600,24 @@ export class AgentToolExecutor {
           );
         }
         // 항목별 revision 은 배치 중간 값이라 오해를 부른다 — 최상위 값만 유효하다.
-        // note 는 상용구(PENDING_NOTE)만 제거한다: edit_header_footer 처럼 런타임
-        // 경고를 note 로만 전달하는 툴이 있어 통째로 지우면 정보가 유실된다.
-        const { revision: _r, note, ...rest } = asRecord(itemResult);
-        const trimmedNote = typeof note === 'string'
-          ? note.replace(PENDING_NOTE, '').replace(/[.\s]+$/, '').trim()
-          : '';
-        results.push({ tool: edit.tool, ...rest, ...(trimmedNote.length > 0 ? { note: trimmedNote } : {}) });
+        // note 는 edit_header_footer 처럼 런타임 경고를 담을 때만 오므로 그대로 둔다.
+        const { revision: _r, ...rest } = asRecord(itemResult);
+        results.push({ tool: edit.tool, ...rest });
       });
     });
+    // 한 턴의 항목은 모두 같은 change set 에 쌓인다 — 항목마다 반복하지 않고 한 번만 싣는다.
+    const changeSetIds = new Set(results.map((item) => asRecord(item)['changeSetId']));
+    const sharedChangeSetId = changeSetIds.size === 1 ? [...changeSetIds][0] : undefined;
     return {
       revision: this.revision,
+      ...(typeof sharedChangeSetId === 'string' ? { changeSetId: sharedChangeSetId } : {}),
       applied: edits.length,
-      results,
-      note: PENDING_NOTE,
+      results: typeof sharedChangeSetId === 'string'
+        ? results.map((item) => {
+          const { changeSetId: _id, ...rest } = asRecord(item);
+          return rest;
+        })
+        : results,
     };
   }
 
@@ -2380,7 +2671,6 @@ export class AgentToolExecutor {
       },
       postEdit: this.readPostEditDigest(sectionIdx, r.insertedRange.startParaIdx, r.insertedRange.startCharOffset, cell),
       ...(shift !== 0 ? { rebasedParaShift: shift } : {}),
-      note: PENDING_NOTE,
     };
   }
 
@@ -2480,7 +2770,7 @@ export class AgentToolExecutor {
       collapsedAt: { paraIdx: range.startParaIdx, charOffset: range.startCharOffset },
       postEdit: this.readPostEditDigest(range.sectionIdx, range.startParaIdx, range.startCharOffset, range.cell),
       ...(shift !== 0 ? { rebasedParaShift: shift } : {}),
-      note: `text removed from the live preview now; auto-committed on turn success and restored on turn failure. Coordinates after the range have shifted — use collapsedAt to insert replacement text. ${PENDING_NOTE}`,
+      note: 'coordinates after the range have shifted; use collapsedAt to insert replacement text.',
     };
   }
 
@@ -2529,7 +2819,6 @@ export class AgentToolExecutor {
       },
       postEdit: this.readPostEditDigest(range.sectionIdx, r.insertedRange.startParaIdx, r.insertedRange.startCharOffset, range.cell),
       ...(shift !== 0 ? { rebasedParaShift: shift } : {}),
-      note: PENDING_NOTE,
     };
   }
 
@@ -2609,7 +2898,6 @@ export class AgentToolExecutor {
     return {
       revision: this.revision, changeSetId: r.changeSetId, applied: true,
       ...(shift !== 0 ? { rebasedParaShift: shift } : {}),
-      note: PENDING_NOTE,
     };
   }
 
@@ -2627,7 +2915,6 @@ export class AgentToolExecutor {
       fieldId: r.fieldId,
       oldValue: r.oldValue,
       newValue: r.newValue,
-      note: PENDING_NOTE,
     };
   }
 
@@ -2763,7 +3050,7 @@ export class AgentToolExecutor {
       revision: this.revision,
       changeSetId: r.changeSetId,
       table: { paraIdx: anchor.paraIdx, controlIdx: anchor.controlIdx, rowCount: rows, colCount: cols },
-      note: `${PENDING_NOTE}; cells are addressed row-major: cellIdx = row*${cols}+col`,
+      note: `cells are addressed row-major: cellIdx = row*${cols}+col`,
     };
   }
 
@@ -2802,28 +3089,28 @@ export class AgentToolExecutor {
         const obj: ObjectOp = { type: 'tableStructure', ...base, op: 'insert_row', index: rowIdx, after: optBool('below', true) };
         const r = this.deps.pending.addObjectOp(agent, obj);
         const d = (r.obj as Extract<ObjectOp, { type: 'tableStructure' }>).dims!;
-        return { revision: this.revision, changeSetId: r.changeSetId, rowCount: d.rowCount, colCount: d.colCount, note: PENDING_NOTE };
+        return { revision: this.revision, changeSetId: r.changeSetId, rowCount: d.rowCount, colCount: d.colCount };
       }
       case 'insert_col': {
         const colIdx = reqIdx('colIdx', dims.colCount);
         const obj: ObjectOp = { type: 'tableStructure', ...base, op: 'insert_col', index: colIdx, after: optBool('right', true) };
         const r = this.deps.pending.addObjectOp(agent, obj);
         const d = (r.obj as Extract<ObjectOp, { type: 'tableStructure' }>).dims!;
-        return { revision: this.revision, changeSetId: r.changeSetId, rowCount: d.rowCount, colCount: d.colCount, note: PENDING_NOTE };
+        return { revision: this.revision, changeSetId: r.changeSetId, rowCount: d.rowCount, colCount: d.colCount };
       }
       case 'delete_row': {
         const rowIdx = reqIdx('rowIdx', dims.rowCount);
         if (dims.rowCount <= 1) throw new AgentToolError('INVALID_ARGS', 'cannot delete the only row');
         const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'delete_row', rowIdx, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `row is staged for removal at the successful turn commit. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `row is staged for removal at the successful turn commit.` };
       }
       case 'delete_col': {
         const colIdx = reqIdx('colIdx', dims.colCount);
         if (dims.colCount <= 1) throw new AgentToolError('INVALID_ARGS', 'cannot delete the only column');
         const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'delete_col', colIdx, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `column is staged for removal at the successful turn commit. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `column is staged for removal at the successful turn commit.` };
       }
       case 'merge_cells': {
         const startRow = reqIdx('startRow', dims.rowCount);
@@ -2835,7 +3122,7 @@ export class AgentToolExecutor {
         }
         const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'merge_cells', startRow, startCol, endRow, endCol, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `cells are staged for merging at the successful turn commit. Merging then renumbers cellIdx, so re-read get_structure on your next turn before editing this table again. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `cells are staged for merging at the successful turn commit. Merging then renumbers cellIdx, so re-read get_structure on your next turn before editing this table again.` };
       }
       case 'split_cell': {
         const rowIdx = reqIdx('rowIdx', dims.rowCount);
@@ -2846,7 +3133,7 @@ export class AgentToolExecutor {
           throw new AgentToolError('INVALID_ARGS', 'splitRows/splitCols must be 1..64 and at least one must be greater than 1');
         }
         // getTableDimensions 범위만으로는 병합 셀의 덮인 좌표도 통과한다. 엔진은
-        // 실제 앵커(row/col)만 나눌 수 있으므로 get_structure cells[]와 같은 원점을 강제한다.
+        // 실제 앵커(row/col)만 나눌 수 있으므로 get_structure 그리드와 같은 원점을 강제한다.
         let isCellOrigin = false;
         for (let cellIdx = 0; cellIdx < dims.cellCount; cellIdx++) {
           const info = wasm.getCellInfo(sectionIdx, paraIdx, controlIdx, cellIdx);
@@ -2856,27 +3143,28 @@ export class AgentToolExecutor {
           }
         }
         if (!isCellOrigin) {
-          throw new AgentToolError('INVALID_ARGS', `No cell starts at row ${rowIdx}, col ${colIdx} — use row/col from get_structure cells[] (covered coordinates inside merged cells are not valid split targets)`);
+          throw new AgentToolError('INVALID_ARGS', `No cell starts at row ${rowIdx}, col ${colIdx} — use the r<row> line and column position from the get_structure grid (covered coordinates inside merged cells are not valid split targets)`);
         }
         const obj: ObjectOp = {
           type: 'tableStructureMarked', ...base, op: 'split_cell', rowIdx, colIdx,
           splitRows, splitCols, dims: dimsNow,
         };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `cell is staged for splitting at the successful turn commit. Splitting renumbers cellIdx, so re-read get_structure on the next turn. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `cell is staged for splitting at the successful turn commit. Splitting renumbers cellIdx, so re-read get_structure on the next turn.` };
       }
       case 'set_cell_props': {
         const cellIdx = reqIdx('cellIdx', dims.cellCount);
-        const props = this.parseCellProps(asRecord(args['props'] ?? {}));
+        // props 는 edit_table op 시절의 옛 이름 — 한 릴리스 동안 받아 준다.
+        const props = this.parseCellProps(asRecord(args['cellProps'] ?? args['props'] ?? {}));
         const obj: ObjectOp = { type: 'setCellProps', ...base, cellIdx, props, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit.` };
       }
       case 'set_table_props': {
-        const props = this.parseTableProps(asRecord(args['props'] ?? {}));
+        const props = this.parseTableProps(asRecord(args['tableProps'] ?? args['props'] ?? {}));
         const obj: ObjectOp = { type: 'setTableProps', ...base, props, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit.` };
       }
       case 'set_column_widths': {
         const raw = args['columnWidthsMm'];
@@ -2894,12 +3182,12 @@ export class AgentToolExecutor {
         });
         const obj: ObjectOp = { type: 'setColumnWidths', ...base, widthsHu, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, colCount: dims.colCount, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, colCount: dims.colCount, note: `applied at the successful turn commit.` };
       }
       case 'fit_to_page': {
         const obj: ObjectOp = { type: 'fitToPage', ...base, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `columns shrink proportionally to the body width at the successful turn commit. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `columns shrink proportionally to the body width at the successful turn commit.` };
       }
       case 'set_zone_borders': {
         const corner = (key: string): { row: number; col: number } => {
@@ -2926,7 +3214,7 @@ export class AgentToolExecutor {
           props, dims: dimsNow,
         };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `borders/fill land on the zone outline at the successful turn commit. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `borders/fill land on the zone outline at the successful turn commit.` };
       }
       case 'apply_formula': {
         const row = reqIdx('row', dims.rowCount);
@@ -2951,7 +3239,7 @@ export class AgentToolExecutor {
           dims: dimsNow,
         };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `the computed result is written into the cell at the successful turn commit. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `the computed result is written into the cell at the successful turn commit.` };
       }
       case 'set_caption': {
         const text = reqString(args, 'text');
@@ -2959,10 +3247,10 @@ export class AgentToolExecutor {
         const withNumber = optBool('withNumber', true);
         const obj: ObjectOp = { type: 'setCaption', ...base, text, withNumber, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `the caption is created if missing and written at the successful turn commit. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `the caption is created if missing and written at the successful turn commit.` };
       }
       default:
-        throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|split_cell|set_cell_props|set_table_props|set_column_widths|fit_to_page|set_zone_borders|apply_formula|set_caption (got ${JSON.stringify(op)})`);
+        throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|split_cell|set_column_widths|fit_to_page|apply_formula|set_caption (got ${JSON.stringify(op)}); table, cell and zone properties use set_table_props, set_cell_props and set_zone_borders`);
     }
   }
 
@@ -3085,7 +3373,7 @@ export class AgentToolExecutor {
       controlIdx,
       revision: this.revision,
       changeSetId: r.changeSetId,
-      note: `table is staged for removal at the successful turn commit. Further edits to this table fail with PENDING_DESTRUCTIVE_OP. ${PENDING_NOTE}`,
+      note: `table is staged for removal at the successful turn commit. Further edits to this table fail with PENDING_DESTRUCTIVE_OP.`,
     };
   }
 
@@ -3096,13 +3384,15 @@ export class AgentToolExecutor {
       'applyInnerMargin', 'textDirection', 'protected', 'editableInForm', 'fieldName',
     ]);
     const unknown = Object.keys(raw).filter((key) => !allowed.has(key));
-    if (unknown.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported cell props: ${unknown.join(', ')}`);
+    if (unknown.length > 0) {
+      throw new AgentToolError('INVALID_ARGS', `Unsupported cellProps keys: ${unknown.join(', ')}. Valid keys: ${[...allowed].join(', ')}`);
+    }
 
     const out: Record<string, unknown> = {};
     const fill = raw['fillColor'];
     if (fill !== undefined && fill !== null) {
       if (typeof fill !== 'string' || !HEX_COLOR_RE.test(fill)) {
-        throw new AgentToolError('INVALID_ARGS', 'props.fillColor must be "#RRGGBB"');
+        throw new AgentToolError('INVALID_ARGS', 'cellProps.fillColor must be "#RRGGBB"');
       }
       out['fillType'] = 'solid';
       out['fillColor'] = fill;
@@ -3111,7 +3401,7 @@ export class AgentToolExecutor {
     if (va !== undefined && va !== null) {
       const map: Record<string, number> = { top: 0, center: 1, bottom: 2 };
       if (typeof va !== 'string' || !(va in map)) {
-        throw new AgentToolError('INVALID_ARGS', 'props.verticalAlign must be "top"|"center"|"bottom"');
+        throw new AgentToolError('INVALID_ARGS', 'cellProps.verticalAlign must be "top"|"center"|"bottom"');
       }
       out['verticalAlign'] = map[va];
     }
@@ -3121,21 +3411,21 @@ export class AgentToolExecutor {
     ] as const) {
       const value = raw[publicKey];
       if (value !== undefined && value !== null) {
-        if (typeof value !== 'boolean') throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be a boolean`);
+        if (typeof value !== 'boolean') throw new AgentToolError('INVALID_ARGS', `cellProps.${publicKey} must be a boolean`);
         out[internalKey] = value;
       }
     }
     const direction = raw['textDirection'];
     if (direction !== undefined && direction !== null) {
       if (direction !== 'horizontal' && direction !== 'vertical') {
-        throw new AgentToolError('INVALID_ARGS', 'props.textDirection must be "horizontal"|"vertical"');
+        throw new AgentToolError('INVALID_ARGS', 'cellProps.textDirection must be "horizontal"|"vertical"');
       }
       out['textDirection'] = direction === 'vertical' ? 1 : 0;
     }
     const fieldName = raw['fieldName'];
     if (fieldName !== undefined && fieldName !== null) {
       if (typeof fieldName !== 'string' || fieldName.length > 255) {
-        throw new AgentToolError('INVALID_ARGS', 'props.fieldName must be a string up to 255 chars (empty clears it)');
+        throw new AgentToolError('INVALID_ARGS', 'cellProps.fieldName must be a string up to 255 chars (empty clears it)');
       }
       out['fieldName'] = fieldName;
     }
@@ -3143,7 +3433,7 @@ export class AgentToolExecutor {
       const value = raw[mmKey];
       if (value !== undefined && value !== null) {
         if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 500) {
-          throw new AgentToolError('INVALID_ARGS', `props.${mmKey} must be a positive number up to 500mm`);
+          throw new AgentToolError('INVALID_ARGS', `cellProps.${mmKey} must be a positive number up to 500mm`);
         }
         out[huKey] = mmToHu(value);
       }
@@ -3151,7 +3441,7 @@ export class AgentToolExecutor {
     const padding = raw['paddingMm'];
     if (padding !== undefined && padding !== null) {
       if (typeof padding !== 'object' || Array.isArray(padding)) {
-        throw new AgentToolError('INVALID_ARGS', 'props.paddingMm must be an object with left/right/top/bottom');
+        throw new AgentToolError('INVALID_ARGS', 'cellProps.paddingMm must be an object with left/right/top/bottom');
       }
       const sides = padding as Record<string, unknown>;
       const badSides = Object.keys(sides).filter((key) => !['left', 'right', 'top', 'bottom'].includes(key));
@@ -3160,14 +3450,14 @@ export class AgentToolExecutor {
         const value = sides[side];
         if (value === undefined || value === null) continue;
         if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) {
-          throw new AgentToolError('INVALID_ARGS', `props.paddingMm.${side} must be 0..100mm`);
+          throw new AgentToolError('INVALID_ARGS', `cellProps.paddingMm.${side} must be 0..100mm`);
         }
         out[`padding${side[0].toUpperCase()}${side.slice(1)}`] = mmToHu(value);
       }
       if (out['applyInnerMargin'] === undefined) out['applyInnerMargin'] = true;
     }
     if (Object.keys(out).length === 0) {
-      throw new AgentToolError('INVALID_ARGS', `props requires at least one of: ${[...allowed].join('/')}`);
+      throw new AgentToolError('INVALID_ARGS', `cellProps needs at least one of: ${[...allowed].join(', ')}`);
     }
     return out;
   }
@@ -3182,7 +3472,9 @@ export class AgentToolExecutor {
       'captionDirection', 'captionWidthMm', 'captionSpacingMm', 'captionVerticalAlign',
     ]);
     const unknown = Object.keys(raw).filter((key) => !allowed.has(key));
-    if (unknown.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported table props: ${unknown.join(', ')}`);
+    if (unknown.length > 0) {
+      throw new AgentToolError('INVALID_ARGS', `Unsupported tableProps keys: ${unknown.join(', ')}. Valid keys: ${[...allowed].join(', ')}`);
+    }
 
     const out: Record<string, unknown> = {};
     for (const [publicKey, internalKey] of [
@@ -3192,7 +3484,7 @@ export class AgentToolExecutor {
     ] as const) {
       const value = raw[publicKey];
       if (value !== undefined && value !== null) {
-        if (typeof value !== 'boolean') throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be a boolean`);
+        if (typeof value !== 'boolean') throw new AgentToolError('INVALID_ARGS', `tableProps.${publicKey} must be a boolean`);
         out[internalKey] = value;
       }
     }
@@ -3202,7 +3494,7 @@ export class AgentToolExecutor {
       const value = raw[publicKey];
       if (value === undefined || value === null) return;
       if (typeof value !== 'string' || !(value in map)) {
-        throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be one of ${Object.keys(map).join('|')}`);
+        throw new AgentToolError('INVALID_ARGS', `tableProps.${publicKey} must be one of ${Object.keys(map).join('|')}`);
       }
       out[internalKey] = map[value];
     };
@@ -3220,7 +3512,7 @@ export class AgentToolExecutor {
     const mode = raw['positionMode'];
     if (mode !== undefined && mode !== null) {
       if (mode !== 'inline' && mode !== 'floating') {
-        throw new AgentToolError('INVALID_ARGS', 'props.positionMode must be "inline"|"floating"');
+        throw new AgentToolError('INVALID_ARGS', 'tableProps.positionMode must be "inline"|"floating"');
       }
       out['treatAsChar'] = mode === 'inline';
     }
@@ -3247,7 +3539,7 @@ export class AgentToolExecutor {
       const value = raw[publicKey];
       if (value === undefined || value === null) return;
       if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
-        throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be ${min}..${max}mm`);
+        throw new AgentToolError('INVALID_ARGS', `tableProps.${publicKey} must be ${min}..${max}mm`);
       }
       out[internalKey] = mmToHu(value);
     };
@@ -3261,7 +3553,7 @@ export class AgentToolExecutor {
       const group = raw[groupKey];
       if (group === undefined || group === null) continue;
       if (typeof group !== 'object' || Array.isArray(group)) {
-        throw new AgentToolError('INVALID_ARGS', `props.${groupKey} must be an object with left/right/top/bottom`);
+        throw new AgentToolError('INVALID_ARGS', `tableProps.${groupKey} must be an object with left/right/top/bottom`);
       }
       const sides = group as Record<string, unknown>;
       const badSides = Object.keys(sides).filter((key) => !['left', 'right', 'top', 'bottom'].includes(key));
@@ -3270,13 +3562,13 @@ export class AgentToolExecutor {
         const value = sides[side];
         if (value === undefined || value === null) continue;
         if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) {
-          throw new AgentToolError('INVALID_ARGS', `props.${groupKey}.${side} must be 0..100mm`);
+          throw new AgentToolError('INVALID_ARGS', `tableProps.${groupKey}.${side} must be 0..100mm`);
         }
         out[`${prefix}${side[0].toUpperCase()}${side.slice(1)}`] = mmToHu(value);
       }
     }
     if (Object.keys(out).length === 0) {
-      throw new AgentToolError('INVALID_ARGS', `props requires at least one of: ${[...allowed].join('/')}`);
+      throw new AgentToolError('INVALID_ARGS', `tableProps needs at least one of: ${[...allowed].join(', ')}`);
     }
     return out;
   }
@@ -3376,7 +3668,6 @@ export class AgentToolExecutor {
     return {
       revision: this.revision, changeSetId: r.changeSetId, applied: true,
       ...(paraShift !== 0 ? { rebasedParaShift: paraShift } : {}),
-      note: PENDING_NOTE,
     };
   }
 
@@ -3475,7 +3766,6 @@ export class AgentToolExecutor {
       changeSetId,
       numberingId,
       paragraphs: endParaIdx - startParaIdx + 1,
-      note: PENDING_NOTE,
     };
   }
 
@@ -3560,7 +3850,6 @@ export class AgentToolExecutor {
         widthMm: Math.round((widthHu / HU_PER_MM) * 10) / 10,
         heightMm: Math.round((heightHu / HU_PER_MM) * 10) / 10,
       },
-      note: PENDING_NOTE,
     };
   }
 
@@ -3591,7 +3880,6 @@ export class AgentToolExecutor {
       ...(preview.baselinePx !== undefined ? { baselineMm: pxToMm(preview.baselinePx) } : {}),
       warnings: preview.warnings,
       diagnostics: preview.diagnostics,
-      note: PENDING_NOTE,
     };
   }
 
@@ -3726,7 +4014,6 @@ export class AgentToolExecutor {
       revision: this.revision,
       changeSetId: r.changeSetId,
       chart: { paraIdx: anchor.paraIdx, controlIdx: anchor.controlIdx, widthMm, heightMm },
-      note: PENDING_NOTE,
     };
   }
 
@@ -3840,7 +4127,7 @@ export class AgentToolExecutor {
       } : {}),
     };
     const r = this.deps.pending.addObjectOp(agent, obj);
-    return { revision: this.revision, changeSetId: r.changeSetId, applied: true, pageCount: this.deps.wasm.pageCount, note: PENDING_NOTE };
+    return { revision: this.revision, changeSetId: r.changeSetId, applied: true, pageCount: this.deps.wasm.pageCount };
   }
 
   private editHeaderFooter(args: Record<string, unknown>, agent: AgentName): unknown {
@@ -3886,14 +4173,13 @@ export class AgentToolExecutor {
       existedBefore,
     };
     const r = this.deps.pending.addObjectOp(agent, obj);
+    const note = (oddEvenExists
+      ? `this section also has an odd/even-page-only ${which} which this tool does NOT replace — the new both-pages ${which} may render alongside it. `
+      : '') + (existedBefore ? `existing ${which} will be replaced at the successful turn commit.` : '');
     return {
       revision: this.revision,
       changeSetId: r.changeSetId,
-      note: (oddEvenExists
-        ? `this section also has an odd/even-page-only ${which} which this tool does NOT replace — the new both-pages ${which} may render alongside it. `
-        : '') + (existedBefore
-        ? `existing ${which} will be replaced at the successful turn commit. ${PENDING_NOTE}`
-        : PENDING_NOTE),
+      ...(note.trim().length > 0 ? { note: note.trim() } : {}),
     };
   }
 
@@ -3917,7 +4203,7 @@ export class AgentToolExecutor {
       revision: this.revision,
       changeSetId: r.changeSetId,
       pageCount: this.deps.wasm.pageCount,
-      note: `page now breaks before paragraph ${paraIdx}. ${PENDING_NOTE}`,
+      note: `page now breaks before paragraph ${paraIdx}.`,
     };
   }
 
@@ -3953,7 +4239,7 @@ export class AgentToolExecutor {
     return {
       revision: this.revision, changeSetId: r.changeSetId,
       ...(shift !== 0 ? { rebasedParaShift: shift } : {}),
-      note: `applied at the successful turn commit. ${PENDING_NOTE}`,
+      note: `applied at the successful turn commit.`,
     };
   }
 }

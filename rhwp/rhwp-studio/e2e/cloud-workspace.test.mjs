@@ -1072,7 +1072,7 @@ try {
     bridge.workflow = 'direct';
     bridge.phase = 'direct';
     bridge.handleAgentEvent({ type: 'turn-start', agent: 'codex', turnId: 'alongside-test' });
-    const structure = await bridge.executor.execute('get_structure', {}, 'codex');
+    const structure = await bridge.executor.execute('get_structure', { format: 'json' }, 'codex');
     return { revision: structure.revision, lease: bridge.getEditingLease(),
       inputLocked: window.__inputHandler.isUserEditingLocked() };
   });
@@ -1095,7 +1095,7 @@ try {
     const readText = () => Array.from({ length: wasm.getSectionCount() }, (_, sectionIdx) =>
       Array.from({ length: wasm.getParagraphCount(sectionIdx) }, (_, paraIdx) =>
         wasm.getTextRange(sectionIdx, paraIdx, 0, 100000)).join('\n')).join('\n');
-    const afterUser = await bridge.executor.execute('get_structure', {}, 'codex');
+    const afterUser = await bridge.executor.execute('get_structure', { format: 'json' }, 'codex');
     let staleCode = null;
     try {
       await bridge.executor.execute('insert_text', { expectedRevision: revision,
@@ -1164,7 +1164,7 @@ try {
     if (userFirst) await userInput();
     await workerPage.evaluate(async (marker) => {
       const executor = window.__agentBridge.executor;
-      const structure = await executor.execute('get_structure', {}, 'codex');
+      const structure = await executor.execute('get_structure', { format: 'json' }, 'codex');
       const section = structure.sections.at(-1);
       const paraIdx = section.paragraphCount - 1;
       await executor.execute('insert_text', { expectedRevision: structure.revision,

@@ -44,6 +44,7 @@ import {
   systemBriefFor,
   validateExecutionMode,
 } from '../agents/backend.mjs';
+import { RHWP_TOOL_RULES } from '../tools.mjs';
 
 const testHome = mkdtempSync(path.join(os.tmpdir(), 'rhwp-backend-test-'));
 test.after(() => rmSync(testHome, { recursive: true, force: true }));
@@ -569,6 +570,20 @@ test('every write-capable brief directs batched writes through apply_edits', () 
     assert.match(writeBrief, /recovery guidance in the error message/);
     assert.doesNotMatch(writeBrief, /ONE AT A TIME/);
   }
+});
+
+test('every workflow brief and rhwp subagent carries the shared tool rules once', () => {
+  for (const opts of [
+    { workflow: 'direct', permissionProfile: 'safe' },
+    { workflow: 'direct', permissionProfile: 'unrestricted' },
+    { workflow: 'question', phase: 'questioning' },
+    { workflow: 'plan', phase: 'planning' },
+    { workflow: 'plan', phase: 'implementing', permissionProfile: 'safe' },
+  ]) {
+    const brief = systemBriefFor(opts);
+    assert.equal(brief.split(RHWP_TOOL_RULES).length - 1, 1, JSON.stringify(opts));
+  }
+  for (const agent of Object.values(RHWP_SUBAGENTS)) assert.ok(agent.prompt.endsWith(RHWP_TOOL_RULES));
 });
 
 test('doc-editor subagent prompt batches independent writes through apply_edits', () => {

@@ -4,21 +4,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { z } from 'zod/v3';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   TOOL_CATEGORIES,
   TOOL_CLASSIFICATIONS,
   TOOL_DEFINITIONS,
   IMPLEMENTATION_PLAN_SHAPE,
-  OFFSET_CAVEAT,
+  RHWP_TOOL_RULES,
+  TABLE_PROPS_KEYS,
+  CELL_PROPS_KEYS,
   filterToolDefinitions,
   toToolContent,
   toolAnnotations,
 } from '../tools.mjs';
+import { toolDefinitionChars } from '../tool-telemetry.mjs';
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 82개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 82);
+test('도구는 정확히 85개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 85);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -61,7 +66,7 @@ test('nested table paths are accepted on staged cell text tools', () => {
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 70);
+  assert.equal(direct.size, 73);
   assert.equal(byName.get('commit_product_skill')?.category, 'instruction-write');
   assert.equal(byName.get('list_harness_skills')?.category, 'instruction-read');
   assert.ok(direct.has('commit_product_skill'));
@@ -328,29 +333,52 @@ test('copy-layout runner schema exposes actions and data, never commands or path
   assert.equal('helperPath' in definition.shape, false);
 });
 
-test('cell 파라미터를 받는 모든 도구에 조립 방법 안내가 있다', () => {
-  const cellTools = TOOL_DEFINITIONS.filter((d) => d.shape && 'cell' in d.shape);
-  assert.ok(cellTools.length >= 10, `expected >= 10 cell-taking tools, got ${cellTools.length}`);
-  for (const d of cellTools) {
-    const desc = d.shape.cell?._def?.description ?? '';
-    assert.ok(desc.length > 0, `${d.name}: cell param has no description`);
-    // get_structure 의 셀 항목에는 paraIdx/controlIdx 가 없으므로 테이블 항목 것과 조립해야 한다는 안내
-    assert.match(desc, /paraIdx\/controlIdx/, `${d.name}: cell desc missing paraIdx/controlIdx assembly note`);
-    assert.match(desc, /cellIdx/, `${d.name}: cell desc missing cellIdx`);
-    assert.match(desc, /find_text/, `${d.name}: cell desc missing find_text verbatim note`);
+test('공유 규칙은 한 번만: 셀 주소·오프셋·리비전·스테이징·단위가 RHWP_TOOL_RULES 에 있다', () => {
+  // get_structure 의 셀 항목에는 paraIdx/controlIdx 가 없으므로 표 항목 것과 조립해야 한다는 안내
+  assert.match(RHWP_TOOL_RULES, /paraIdx\/controlIdx come from the get_structure table line/);
+  assert.match(RHWP_TOOL_RULES, /cellIdx is the row-major index/);
+  assert.match(RHWP_TOOL_RULES, /find_text match carries a complete cell/);
+  assert.match(RHWP_TOOL_RULES, /cellPath/);
+  assert.match(RHWP_TOOL_RULES, /charOffset counts text characters only/);
+  assert.match(RHWP_TOOL_RULES, /lands before the object/);
+  assert.match(RHWP_TOOL_RULES, /expectedRevision/);
+  assert.match(RHWP_TOOL_RULES, /recovery guidance in the error message/);
+  assert.match(RHWP_TOOL_RULES, /ONE apply_edits call \(up to 32 items\)/);
+  assert.match(RHWP_TOOL_RULES, /전체 접근/);
+  assert.match(RHWP_TOOL_RULES, /안전/);
+  assert.match(RHWP_TOOL_RULES, /lengths in mm, font sizes in pt/);
+
+  const ruleLines = RHWP_TOOL_RULES.split('\n').slice(1).map((line) => line.replace(/^- [A-Za-z ]+: /, ''));
+  for (const definition of TOOL_DEFINITIONS) {
+    for (const line of ruleLines) {
+      assert.ok(!definition.description.includes(line.slice(0, 60)), `${definition.name} repeats a shared rule`);
+    }
   }
 });
 
-test('charOffset 계열 도구 전부에 OFFSET_CAVEAT 가 붙어 있다', () => {
-  const expected = [
-    'insert_text', 'delete_range', 'replace_range', 'apply_char_format',
-    'create_table', 'insert_image', 'insert_equation', 'insert_chart',
-  ];
-  for (const name of expected) {
-    const def = byName.get(name);
-    assert.ok(def, `missing tool: ${name}`);
-    assert.ok(def.description.includes(OFFSET_CAVEAT), `${name}: missing OFFSET_CAVEAT`);
+test('cell 을 받는 도구와 모든 문서 쓰기 도구는 공유 규칙을 한 줄로 가리킨다', () => {
+  const cellTools = TOOL_DEFINITIONS.filter((d) => d.shape && 'cell' in d.shape);
+  assert.ok(cellTools.length >= 10, `expected >= 10 cell-taking tools, got ${cellTools.length}`);
+  for (const d of cellTools) {
+    assert.match(d.shape.cell?._def?.description ?? '', /rhwp tool rules/, `${d.name}: cell param lacks the rules pointer`);
+    if (d.shape.cellPath) assert.match(d.shape.cellPath._def.description ?? '', /rhwp tool rules/, d.name);
   }
+  const writeTools = TOOL_DEFINITIONS.filter((d) => d.category === 'document-write' && d.shape.expectedRevision);
+  assert.ok(writeTools.length >= 20);
+  for (const d of writeTools) {
+    assert.match(d.description, /rhwp tool rules/, `${d.name}: missing the rules pointer`);
+  }
+});
+
+test('MCP 서버 instructions 가 공유 규칙을 싣는다', () => {
+  const mcpStdio = readFileSync(fileURLToPath(new URL('../mcp-stdio.mjs', import.meta.url)), 'utf8');
+  assert.match(mcpStdio, /new McpServer\(\{ name: 'rhwp', version: '[^']+' \}, \{ instructions: RHWP_TOOL_RULES \}\)/);
+});
+
+test('수식 문법 안내는 preview_equation 에만 있다', () => {
+  assert.match(byName.get('preview_equation').description, /NOT LaTeX/);
+  assert.doesNotMatch(byName.get('insert_equation').description, /NOT LaTeX/);
+  assert.match(byName.get('insert_equation').description, /preview_equation/);
 });
 
 test('verify_changes 설명에 셀프체크 지시와 라이브 미리보기 안내가 있다', () => {
@@ -451,7 +479,7 @@ test('delete_table: 스키마는 주소 네 값이 필수이고 document-write �
   const def = byName.get('delete_table');
   assert.ok(def, 'missing tool: delete_table');
   assert.equal(def.category, 'document-write');
-  assert.match(def.description, /get_structure tables\[\]/);
+  assert.match(def.description, /get_structure table line/);
   assert.match(def.description, /PENDING_DESTRUCTIVE_OP/);
   assert.match(def.description, /mark-only/i);
   for (const key of ['expectedRevision', 'sectionIdx', 'paraIdx', 'controlIdx']) {
@@ -471,7 +499,6 @@ test('edit_table: op 별 필수 파라미터를 이름 붙여 즉시 실패', ()
     () => validate({ op: 'merge_cells', startRow: 0, startCol: 0 }),
     (e) => e.code === 'INVALID_ARGS' && /endRow/.test(e.message) && /endCol/.test(e.message)
   );
-  assert.throws(() => validate({ op: 'set_cell_props', cellIdx: 0 }), (e) => e.code === 'INVALID_ARGS' && /props/.test(e.message));
   validate({ op: 'insert_row', rowIdx: 0 }); // 통과
   assert.throws(
     () => validate({ op: 'split_cell', rowIdx: 0, colIdx: 0, splitRows: 2 }),
@@ -479,14 +506,9 @@ test('edit_table: op 별 필수 파라미터를 이름 붙여 즉시 실패', ()
   );
   validate({ op: 'merge_cells', startRow: 0, startCol: 0, endRow: 1, endCol: 1 }); // 통과
   validate({ op: 'split_cell', rowIdx: 0, colIdx: 0, splitRows: 1, splitCols: 2 }); // 통과
-  validate({ op: 'set_table_props', props: { horizontalAlign: 'center' } }); // 통과
   assert.throws(
     () => validate({ op: 'set_column_widths' }),
     (e) => e.code === 'INVALID_ARGS' && /columnWidthsMm/.test(e.message),
-  );
-  assert.throws(
-    () => validate({ op: 'set_zone_borders', startCell: { row: 0, col: 0 } }),
-    (e) => e.code === 'INVALID_ARGS' && /endCell/.test(e.message),
   );
   assert.throws(
     () => validate({ op: 'apply_formula', row: 3, col: 1 }),
@@ -495,7 +517,6 @@ test('edit_table: op 별 필수 파라미터를 이름 붙여 즉시 실패', ()
   assert.throws(() => validate({ op: 'set_caption' }), (e) => e.code === 'INVALID_ARGS' && /text/.test(e.message));
   validate({ op: 'set_column_widths', columnWidthsMm: [30, 40] }); // 통과
   validate({ op: 'fit_to_page' }); // 통과 (추가 인자 없음)
-  validate({ op: 'set_zone_borders', startCell: { row: 0, col: 0 }, endCell: { row: 2, col: 3 } }); // 통과
   validate({ op: 'apply_formula', row: 3, col: 1, formula: '=SUM(A1:A3)' }); // 통과
   validate({ op: 'set_caption', text: '분기별 매출' }); // 통과
 });
@@ -514,7 +535,7 @@ test('get_table_layout: 표의 쪽별 배치와 넘침 여부를 읽는 읽기 �
 
   const edit = byName.get('edit_table');
   const values = edit.shape.op._def.values;
-  for (const op of ['set_column_widths', 'fit_to_page', 'set_zone_borders', 'apply_formula', 'set_caption']) {
+  for (const op of ['set_column_widths', 'fit_to_page', 'apply_formula', 'set_caption']) {
     assert.ok(values.includes(op), `edit_table op enum missing ${op}`);
     assert.match(edit.description, new RegExp(op));
   }
@@ -530,9 +551,66 @@ test('get_table_properties reads optional cell state and edit_table documents ob
   assert.match(read.description, /object placement/i);
 
   const edit = byName.get('edit_table');
-  assert.match(edit.description, /EASY CENTERING/);
-  assert.match(edit.description, /horizontalAlign/);
   assert.match(edit.description, /split_cell/);
   const values = edit.shape.op._def.values;
   assert.ok(values.includes('split_cell'));
+  const tableProps = byName.get('set_table_props');
+  assert.match(tableProps.description, /EASY CENTERING/);
+  assert.match(tableProps.description, /horizontalAlign/);
+});
+
+test('표·셀 속성은 타입이 있는 객체이고 모르는 키는 올바른 키 목록과 함께 거절된다', () => {
+  const table = byName.get('set_table_props');
+  const cell = byName.get('set_cell_props');
+  const zone = byName.get('set_zone_borders');
+  for (const d of [table, cell, zone]) assert.equal(d.category, 'document-write');
+  assert.ok(table.shape.tableProps.safeParse({ horizontalAlign: 'center', pageBreak: 'row' }).success);
+  assert.ok(!table.shape.tableProps.safeParse({ pageBreak: 'rows' }).success, 'enum 값은 스키마가 거른다');
+  const unknownTable = table.shape.tableProps.safeParse({ align: 'center' });
+  assert.ok(!unknownTable.success);
+  assert.match(unknownTable.error.issues[0].message, /Valid keys: .*horizontalAlign/);
+  const unknownCell = cell.shape.cellProps.safeParse({ color: '#FFFFFF' });
+  assert.ok(!unknownCell.success);
+  assert.match(unknownCell.error.issues[0].message, /Valid keys: .*fillColor/);
+  assert.throws(() => table.validate({ tableProps: {} }), (e) => e.code === 'INVALID_ARGS' && /repeatHeader/.test(e.message));
+  assert.throws(() => cell.validate({ cellProps: {} }), (e) => e.code === 'INVALID_ARGS' && /fillColor/.test(e.message));
+  assert.ok(zone.shape.startCell.safeParse({ row: 0, col: 0 }).success);
+  assert.ok(!zone.shape.startCell.safeParse(undefined).success);
+
+  // 스튜디오 파서가 받는 키와 스키마 키가 어긋나면 한쪽이 조용히 버려진다.
+  const executor = readFileSync(fileURLToPath(new URL('../../rhwp-studio/src/agent/tool-executor.ts', import.meta.url)), 'utf8');
+  const allowedIn = (fn) => {
+    const body = executor.slice(executor.indexOf(`private ${fn}(`));
+    const list = /const allowed = new Set\(\[([^\]]*)\]\)/.exec(body)?.[1] ?? '';
+    return [...list.matchAll(/'([A-Za-z]+)'/g)].map((m) => m[1]).sort();
+  };
+  assert.deepEqual(allowedIn('parseTableProps'), [...TABLE_PROPS_KEYS].sort());
+  assert.deepEqual(allowedIn('parseCellProps'), [...CELL_PROPS_KEYS].sort());
+});
+
+// ─── 도구 정의 크기 한도 ─────────────────────────────────────
+// 모델은 매 요청마다 direct 프로필의 설명 + JSON 스키마 전체를 읽는다. SDK 와 같은 변환
+// (zod-to-json-schema, strictUnions, input)으로 글자 수를 재서 한도를 넘지 못하게 한다.
+// 공유 규칙은 RHWP_TOOL_RULES 에 한 번만 두고, 새 도구도 이 한도 안에 들어와야 한다.
+// P0 기준선: 70개 106,936자 (edit_table 10,174자).
+const DIRECT_DEFINITION_TOTAL_LIMIT = 60_000;
+const TOOL_DEFINITION_LIMIT = 3_000;
+
+test('direct 프로필 도구 정의 크기가 한도를 넘지 않는다', () => {
+  let total = 0;
+  const over = [];
+  for (const definition of filterToolDefinitions('direct')) {
+    const chars = toolDefinitionChars(definition);
+    total += chars;
+    if (chars > TOOL_DEFINITION_LIMIT) over.push(`${definition.name} ${chars} > ${TOOL_DEFINITION_LIMIT}`);
+  }
+  assert.deepEqual(over, [], 'tool definitions over their size limit');
+  assert.ok(total <= DIRECT_DEFINITION_TOTAL_LIMIT, `direct tool definitions total ${total} > ${DIRECT_DEFINITION_TOTAL_LIMIT}`);
+});
+
+test('도구 스키마는 $ref 없이 펼쳐진다 (Codex/Pi 가 $ref 를 못 읽는다)', () => {
+  for (const definition of TOOL_DEFINITIONS) {
+    const schema = JSON.stringify(zodToJsonSchema(z.object(definition.shape), { strictUnions: true, pipeStrategy: 'input' }));
+    assert.doesNotMatch(schema, /"\$ref"/, `${definition.name} has a $ref`);
+  }
 });

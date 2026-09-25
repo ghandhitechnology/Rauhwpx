@@ -1,0 +1,14 @@
+// rhwp 도구 공유 규칙 — 의존성 없는 순수 텍스트 모듈.
+/**
+ * 모든 rhwp 도구가 공유하는 규칙 — 도구 설명마다 반복하지 않고 여기서 한 번만 말한다.
+ * MCP 서버 instructions(mcp-stdio.mjs)와 provider 브리프(agents/backend.mjs)가 둘 다
+ * 이 텍스트를 싣고, 도구 설명은 "rhwp tool rules" 한 줄 포인터만 남긴다.
+ */
+export const RHWP_TOOL_RULES = `RHWP TOOL RULES (shared by every rhwp document tool; tool descriptions point here):
+- Addresses: sectionIdx, paraIdx and charOffset are 0-based body coordinates. Get them from get_structure, find_text or get_selection.
+- Revision: every document read returns the current revision. Every document write needs expectedRevision, the revision from your most recent rhwp tool call. REVISION_MISMATCH carries the current revision; follow the recovery guidance in the error message. Chain each write's returned revision into the next write and never send writes in parallel. Disjoint-paragraph writes from sibling agents are rebased automatically (the response carries rebasedParaShift), so a mismatch is a real conflict.
+- Batching: when you know two or more edits, send ONE apply_edits call (up to 32 items). Items apply in order, so put independent edits bottom-of-document first.
+- Staging: semantic writes are staged as a live preview. After a successful turn they auto-commit (전체 접근) or wait for the user's review and approval (안전); a failed turn rolls them back. Committed edits stay undoable. Some table, style and header/footer ops apply only at commit; their result says so and verify_changes shows applied:false.
+- Offsets: charOffset counts text characters only, in body and cells alike. Inline objects (equations, pictures, tables) take no offset, and text inserted at an object's offset lands before the object. Use offsets from find_text or get_selection instead of counting what you see.
+- Table cells: to target text inside a cell, pass cell {paraIdx, controlIdx, cellIdx}. paraIdx/controlIdx come from the get_structure table line ("table s0 p5 c0 …" gives paraIdx 5, controlIdx 0) and cellIdx from its [cellIdx] grid; cellIdx is the row-major index where merged cells count once. A find_text match carries a complete cell you can copy as-is. For a nested cell, also pass cellPath from find_text or get_selection (its last cellParaIndex is replaced by the tool's paraIdx). With cell, paraIdx/startParaIdx/endParaIdx and offsets are relative to the innermost cell.
+- Units: lengths in mm, font sizes in pt, colors "#RRGGBB". An A4 body with default margins is about 150mm wide.`;

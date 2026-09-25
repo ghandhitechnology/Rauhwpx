@@ -608,14 +608,20 @@ test('get_table_properties + set_table_props: 표 개체를 가로 가운데로 
 
   const before = (await call('get_table_properties', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
-  })) as { table: { positionMode: string; horizontal: { align: string }; sizeMm: { width: number } } };
+  })) as { table: { positionMode: string; horizontal?: { align: string }; sizeMm: { width: number } } };
   assert.equal(before.table.positionMode, 'inline');
-  assert.equal(before.table.horizontal.align, 'left');
+  // 기본 응답은 글자처럼 취급하는 표의 개체 배치 필드를 생략한다. full:true 는 전부 싣는다.
+  assert.equal(before.table.horizontal, undefined);
   assert.ok(Math.abs(before.table.sizeMm.width - 150) < 0.1);
+  const beforeFull = (await call('get_table_properties', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, full: true,
+  })) as { table: { horizontal: { align: string }; repeatHeader: boolean } };
+  assert.equal(beforeFull.table.horizontal.align, 'left');
+  assert.equal(beforeFull.table.repeatHeader, false);
 
-  const edit = (await call('edit_table', {
+  const edit = (await call('set_table_props', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
-    op: 'set_table_props', props: { horizontalAlign: 'center' },
+    tableProps: { horizontalAlign: 'center' },
   })) as { changeSetId: string };
   assert.ok(!calls.some((entry) => entry.m === 'setTableProperties'));
   pending.approve(edit.changeSetId);
@@ -628,10 +634,10 @@ test('get_table_properties + set_table_props: 표 개체를 가로 가운데로 
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
   })) as { table: { positionMode: string; horizontal: { align: string; relativeTo: string; offsetMm: number } } };
   assert.equal(after.table.positionMode, 'floating');
-  assert.deepEqual(after.table.horizontal, { align: 'center', relativeTo: 'column', offsetMm: 0 });
+  assert.deepEqual(after.table.horizontal, { align: 'center', relativeTo: 'column' });
 });
 
-test('set_table_props ignores a null horizontal alignment without repositioning the table', async () => {
+test('legacy edit_table set_table_props props still apply and ignore a null horizontal alignment', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const created = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a']],
@@ -655,9 +661,9 @@ test('set_table_props exposes pagination, wrapping, margins, overlap and caption
   })) as { changeSetId: string };
   pending.approve(created.changeSetId);
   const t = tables[0];
-  const edit = (await call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'set_table_props',
-    props: {
+  const edit = (await call('set_table_props', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
+    tableProps: {
       pageBreak: 'row', repeatHeader: true, cellSpacingMm: 1.5,
       cellPaddingMm: { left: 2, right: 2, top: 1, bottom: 1 },
       outerMarginMm: { left: 3, right: 3 }, textWrap: 'topAndBottom',
@@ -694,9 +700,9 @@ test('set_cell_props exposes padding, direction, protection, form field and read
   })) as { changeSetId: string };
   pending.approve(created.changeSetId);
   const t = tables[0];
-  const edit = (await call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'set_cell_props', cellIdx: 0,
-    props: {
+  const edit = (await call('set_cell_props', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0,
+    cellProps: {
       paddingMm: { left: 2, top: 1 }, textDirection: 'vertical', protected: true,
       editableInForm: true, fieldName: 'amount', verticalAlign: 'center',
     },
@@ -734,8 +740,8 @@ test('신규 표 op 5종은 mark-only 이고 승인 시 각 브리지 메서드�
 
   const widths = (await call('edit_table', { ...at, op: 'set_column_widths', columnWidthsMm: [60, 90] })) as { changeSetId: string };
   const fit = (await call('edit_table', { ...at, op: 'fit_to_page' })) as { changeSetId: string };
-  const zone = (await call('edit_table', {
-    ...at, op: 'set_zone_borders',
+  const zone = (await call('set_zone_borders', {
+    ...at,
     startCell: { row: 0, col: 0 }, endCell: { row: 1, col: 1 },
     borderTop: { type: 1, width: 2, color: '#112233' }, fillColor: '#EEEEEE', centerLine: 'CROSS',
   })) as { changeSetId: string };
@@ -808,13 +814,18 @@ test('신규 표 op 의 인자 검증: 열 수 불일치·범위 역전·빈 zon
   const at = { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx };
 
   await expectErr(call('edit_table', { ...at, op: 'set_column_widths', columnWidthsMm: [60] }), 'INVALID_ARGS');
-  await expectErr(call('edit_table', {
-    ...at, op: 'set_zone_borders', startCell: { row: 0, col: 1 }, endCell: { row: 0, col: 0 },
+  await expectErr(call('set_zone_borders', {
+    ...at, startCell: { row: 0, col: 1 }, endCell: { row: 0, col: 0 },
     fillColor: '#FFFFFF',
   }), 'INVALID_ARGS');
-  await expectErr(call('edit_table', {
-    ...at, op: 'set_zone_borders', startCell: { row: 0, col: 0 }, endCell: { row: 0, col: 1 },
+  await expectErr(call('set_zone_borders', {
+    ...at, startCell: { row: 0, col: 0 }, endCell: { row: 0, col: 1 },
   }), 'INVALID_ARGS');
+  // 모르는 속성 키는 올바른 키 목록을 담아 거절한다 (apply_edits 경로는 허브 스키마를 거치지 않는다).
+  const unknownTable = await expectErr(call('set_table_props', { ...at, tableProps: { align: 'center' } }), 'INVALID_ARGS');
+  assert.match(unknownTable.message, /Unsupported tableProps keys: align\. Valid keys: .*horizontalAlign/);
+  const unknownCell = await expectErr(call('set_cell_props', { ...at, cellIdx: 0, cellProps: { color: '#FFFFFF' } }), 'INVALID_ARGS');
+  assert.match(unknownCell.message, /Unsupported cellProps keys: color\. Valid keys: .*fillColor/);
   await expectErr(call('edit_table', { ...at, op: 'apply_formula', row: 5, col: 0, formula: '=SUM(A1)' }), 'INVALID_ARGS');
 });
 
@@ -1165,10 +1176,14 @@ test('rejecting a later equation keeps an earlier approved marked change', async
   assert.equal(tables[0].cellProps[0].reviewMarker, 'approved');
 });
 
-test('get_document_info 에 registeredFonts 가 실린다', async () => {
+test('get_document_info 는 등록 폰트 개수만 싣고 fontQuery 로 물은 폰트만 찾아 준다', async () => {
   const { call } = makeEnv();
-  const r = (await call('get_document_info')) as { registeredFonts: string[] };
-  assert.deepEqual(r.registeredFonts, ['바탕']);
+  const plain = (await call('get_document_info')) as Record<string, unknown>;
+  assert.equal(plain['registeredFontCount'], 1);
+  assert.equal(plain['registeredFonts'], undefined);
+  assert.equal(plain['fontMatches'], undefined);
+  const r = (await call('get_document_info', { fontQuery: ['바', '탕', '맑은 고딕'] })) as { fontMatches: Record<string, string[]> };
+  assert.deepEqual(r.fontMatches, { '바': ['바탕'], '탕': ['바탕'], '맑은 고딕': [] });
 });
 
 // ─── 리뷰 확정 결함 회귀 테스트 ─────────────────────────────
