@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloud 이용약관 | Rauhwpx</title>
+<meta name="description" content="Rauhwpx Cloud 이용약관.">
+<meta name="theme-color" content="#ececea">
+<link rel="icon" type="image/png" href="assets/rauhwpx-logo.png">
+<link rel="apple-touch-icon" href="assets/rauhwpx-logo.png">
+<link rel="canonical" href="https://heemangstudios.com/tos">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hahmlet:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500&family=Nanum+Pen+Script&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/pretendard@1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" rel="stylesheet">
+<style>
+/* 흰 종이, 검은 목탄. index.html과 같은 토큰을 써요.
+   약관 한 장이 압정에 꽂혀 있고, 왼쪽 여백에 조 번호가 붙어요. */
+*,*::before,*::after{box-sizing:border-box}
+
+:root{
+  --ground:#ececea;
+  --sheet:#fcfcfb;
+  --ink:#1b1b1a;
+  --ink-2:#3a3a38;
+  --ink-3:#62625f;
+  --ink-4:#8d8d8a;
+  --rule:#cdcdca;
+  --sans:'Pretendard Variable',Pretendard,system-ui,-apple-system,'Apple SD Gothic Neo',sans-serif;
+  --serif:'Hahmlet','Apple SD Gothic Neo',serif;
+  --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  --hand:'Nanum Pen Script',cursive;
+  --gut:clamp(16px,4vw,48px);
+  --frame:83.333ms;
+  --margin:clamp(64px,8vw,104px);
+  --tooth:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='t' x='0' y='0' width='100%25' height='100%25'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.78' numOctaves='3' seed='3' stitchTiles='stitch'/%3E%3CfeDiffuseLighting lighting-color='%23fff' surfaceScale='1.1' diffuseConstant='1'%3E%3CfeDistantLight azimuth='225' elevation='60'/%3E%3C/feDiffuseLighting%3E%3CfeComponentTransfer%3E%3CfeFuncR type='linear' slope='.07' intercept='.868'/%3E%3CfeFuncG type='linear' slope='.07' intercept='.868'/%3E%3CfeFuncB type='linear' slope='.07' intercept='.863'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23t)'/%3E%3C/svg%3E");
+  --dust:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='720' height='720'%3E%3Cfilter id='d' x='0' y='0' width='100%25' height='100%25'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.62' numOctaves='2' seed='11' stitchTiles='stitch' result='a'/%3E%3CfeColorMatrix in='a' values='0 0 0 0 .1 0 0 0 0 .1 0 0 0 0 .1 -64 0 0 0 16.4' result='f'/%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.2' numOctaves='2' seed='5' stitchTiles='stitch' result='b'/%3E%3CfeColorMatrix in='b' values='0 0 0 0 .1 0 0 0 0 .1 0 0 0 0 .1 -48 0 0 0 11.3' result='c'/%3E%3CfeMerge result='s'%3E%3CfeMergeNode in='f'/%3E%3CfeMergeNode in='c'/%3E%3C/feMerge%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.0045' numOctaves='2' seed='8' stitchTiles='stitch' result='m'/%3E%3CfeColorMatrix in='m' values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 5 0 0 0 -2.35' result='k'/%3E%3CfeComposite in='s' in2='k' operator='in'/%3E%3C/filter%3E%3Crect width='720' height='720' filter='url(%23d)' opacity='.42'/%3E%3C/svg%3E");
+}
+
+html{-webkit-text-size-adjust:100%;overflow-x:clip;scroll-padding-top:84px}
+html,body{margin:0;padding:0}
+body{
+  background-color:var(--ground);
+  background-image:var(--dust),var(--tooth);
+  background-size:720px 720px,300px 300px;
+  color:var(--ink);
+  font:400 16.5px/1.8 var(--sans);
+  letter-spacing:-.006em;
+  -webkit-font-smoothing:antialiased;
+}
+::selection{background:var(--ink);color:var(--sheet)}
+a{color:inherit}
+p,li,h1,h2,dt,dd,td,th{word-break:keep-all;overflow-wrap:break-word}
+h1,h2,p{margin:0}
+ol,ul{margin:0;padding:0;list-style:none}
+:focus-visible{outline:2px solid var(--ink);outline-offset:4px;border-radius:2px}
+.wrap{max-width:1180px;margin:0 auto;padding:0 var(--gut)}
+.charcoal{filter:url(#cct)}
+.mono{font:500 12px/1.4 var(--mono);letter-spacing:.06em;text-transform:uppercase;font-variant-numeric:tabular-nums}
+
+/* 머리글 */
+.mast{position:sticky;top:0;z-index:40;height:60px;background:rgba(236,236,234,.9);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+.mast .wrap{display:flex;align-items:center;justify-content:space-between;gap:18px;height:100%;max-width:none}
+.mast__rule{position:absolute;left:0;right:0;bottom:-3px;width:100%;height:6px;overflow:visible;color:var(--ink);pointer-events:none;filter:url(#cc0)}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;font:700 18px/1 var(--serif);letter-spacing:-.03em;min-height:44px}
+.tile{position:relative;width:30px;height:30px;border-radius:8px;overflow:hidden;flex:0 0 auto;background:#1c1c1b;box-shadow:0 1px 0 rgba(0,0,0,.35)}
+.tile img{position:absolute;left:-6%;top:-6%;width:112%;height:112%;max-width:none;filter:url(#logo)}
+.back{min-height:44px;display:inline-flex;align-items:center;gap:8px;color:var(--ink-2);font-size:15px;text-decoration:none}
+.back:hover{color:var(--ink);text-decoration:underline;text-underline-offset:5px;text-decoration-thickness:1px}
+.back svg{width:18px;height:18px}
+
+/* ── 배치: 왼쪽 목차, 오른쪽 약관 한 장 ─────────── */
+.main{padding:clamp(36px,5vw,72px) 0 clamp(48px,6vw,88px)}
+.layout{display:grid;grid-template-columns:200px minmax(0,1fr);gap:clamp(28px,4vw,56px);align-items:start}
+
+/* 목차: 색인 카드 */
+.toc{position:sticky;top:92px;padding:16px 0 0}
+.toc .mono{color:var(--ink-3);font-size:11px;margin-bottom:10px}
+.toc ol{border-top:1.5px solid var(--ink)}
+.toc li{border-bottom:1px solid var(--rule)}
+.toc a{position:relative;display:flex;gap:10px;align-items:baseline;padding:7px 0 7px 2px;font-size:14px;line-height:1.35;color:var(--ink-3);text-decoration:none}
+.toc a span{font:500 11px/1 var(--mono);color:var(--ink-4);width:18px;flex:0 0 auto}
+.toc a:hover{color:var(--ink)}
+/* 지금 읽는 조: 목탄 한 획 */
+.toc a::before{content:'';position:absolute;left:-14px;top:50%;width:8px;height:2px;margin-top:-1px;background:var(--ink);opacity:0;border-radius:2px}
+.toc a.is-on{color:var(--ink);font-weight:600}
+.toc a.is-on span{color:var(--ink-2)}
+.toc a.is-on::before{opacity:1}
+
+/* 약관 한 장 */
+.sheet{
+  position:relative;background:var(--sheet);
+  padding:clamp(40px,5vw,64px) clamp(24px,5vw,64px) clamp(40px,5vw,60px) calc(var(--margin) + clamp(20px,3vw,36px));
+  box-shadow:0 .5px 1px rgba(10,10,10,.2),0 4px 14px -4px rgba(10,10,10,.16);
+  transform:rotate(-.2deg);
+}
+.sheet::after{content:'';position:absolute;inset:0;pointer-events:none;background:linear-gradient(165deg,rgba(255,255,255,.2),rgba(0,0,0,.02) 75%,rgba(0,0,0,.045))}
+/* 여백 두 줄 */
+.sheet::before{content:'';position:absolute;top:0;bottom:0;left:var(--margin);width:4px;border-left:1px solid rgba(0,0,0,.18);border-right:1px solid rgba(0,0,0,.1);pointer-events:none}
+.tack{position:absolute;z-index:3;left:50%;top:-7px;width:17px;height:17px;margin-left:-8px;border-radius:50%;
+  background:radial-gradient(circle at 36% 30%,#9a9a97 0 1.6px,#3a3a38 3.4px,#141413 8.5px);
+  box-shadow:3px 5px 3px -1px rgba(0,0,0,.28),inset 0 -1px 1px rgba(0,0,0,.5)}
+/* 바인더 구멍 */
+.punch{position:absolute;left:calc(var(--margin)/2 - 7px);width:14px;height:14px;border-radius:50%;background:var(--ground);box-shadow:inset 0 1px 2px rgba(0,0,0,.4)}
+.punch.a{top:90px}.punch.b{top:50%}.punch.c{bottom:90px}
+
+.doc-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:24px 40px;align-items:end;padding-bottom:26px;border-bottom:1.5px solid var(--ink)}
+.doc-head .mono{color:var(--ink-3);margin-bottom:12px}
+.doc-head h1{font:800 clamp(34px,4vw,52px)/1.12 var(--serif);letter-spacing:-.04em}
+.doc-head dl{margin:0;display:grid;grid-template-columns:auto auto;gap:6px 18px;font-size:14px}
+.doc-head dt{font:500 11px/1.9 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-4)}
+.doc-head dd{margin:0;font-weight:600;font-variant-numeric:tabular-nums}
+
+/* 조 */
+.art{position:relative;padding-top:34px}
+.art h2{font:700 20px/1.35 var(--serif);letter-spacing:-.025em}
+/* 조 번호는 여백에 */
+.art .no{position:absolute;left:calc(-1*(var(--margin) + clamp(20px,3vw,36px)));width:var(--margin);top:38px;text-align:center;font:500 12px/1 var(--mono);letter-spacing:.08em;color:var(--ink-4)}
+.art p,.art li{color:var(--ink-2)}
+.art>p,.art>ol{margin-top:10px}
+@counter-style circled{system:fixed;symbols:"①" "②" "③" "④" "⑤" "⑥" "⑦" "⑧" "⑨" "⑩";suffix:" "}
+.art ol{list-style:circled outside;padding-left:1.6em}
+.art ol li+li{margin-top:6px}
+.art ol li::marker{color:var(--ink-3);font-variant-numeric:tabular-nums}
+.art ul.dash li{position:relative;padding-left:1.1em}
+.art ul.dash li::before{content:'';position:absolute;left:0;top:.9em;width:.55em;height:1.5px;background:var(--ink-3)}
+.art ul.dash{margin-top:6px}
+.art b{color:var(--ink);font-weight:650}
+
+/* 제4조 요금표: 괘선 표 */
+.plan-t{width:100%;margin-top:16px;border-collapse:collapse;font-size:15px;font-variant-numeric:tabular-nums}
+.plan-t th,.plan-t td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--rule)}
+.plan-t thead th{font:500 11px/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);border-bottom:1.5px solid var(--ink)}
+.plan-t tbody th{font:700 16px/1.3 var(--serif);letter-spacing:-.02em;color:var(--ink)}
+.plan-t td{color:var(--ink-2)}
+.plan-t tr:last-child th,.plan-t tr:last-child td{border-bottom:0}
+.plan-t .x{color:var(--ink-4)}
+
+/* 부칙과 서명 */
+.sign{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;flex-wrap:wrap;margin-top:44px;padding-top:24px;border-top:1px dashed var(--ink-4)}
+.sign p{color:var(--ink-3);font-size:14.5px}
+.sign .who{position:relative;text-align:right;min-width:170px}
+.sign .who .mono{color:var(--ink-4);font-size:11px}
+.sign .who b{display:block;margin-top:2px;font:400 34px/1.1 var(--hand);color:var(--ink);letter-spacing:0;transform:rotate(-3deg)}
+.sign .who svg{position:absolute;right:-6px;bottom:-8px;width:180px;height:14px;overflow:visible;color:var(--ink);filter:url(#cc0)}
+
+.foot{padding:40px 0 36px}
+.colophon{border-top:1px solid var(--rule);padding-top:18px;margin:0;font:400 12px/1.8 var(--mono);color:var(--ink-3);display:flex;flex-wrap:wrap;gap:4px 22px}
+.colophon a{color:var(--ink-2);text-underline-offset:3px;text-decoration-color:var(--ink-4)}
+
+/* 한 장 내려놓기 (초당 12장) */
+@media (prefers-reduced-motion:no-preference){
+  .sheet{animation:drop calc(var(--frame)*8) steps(1,end) both}
+  .toc{animation:slide calc(var(--frame)*5) steps(1,end) calc(var(--frame)*4) both}
+}
+@keyframes drop{
+  0%   {opacity:0;transform:translate(-10px,-90px) rotate(-2.6deg) scale(1.02)}
+  12.5%{opacity:1;transform:translate(-6px,-54px) rotate(.7deg) scale(1.016)}
+  25%  {transform:translate(4px,-22px) rotate(-1deg) scale(1.008)}
+  37.5%{transform:translate(1px,-5px) rotate(-.05deg) scale(1.003)}
+  50%  {transform:translate(0,2px) rotate(-.2deg) scale(1.004,.994)}
+  62.5%{transform:translate(0,-1px) rotate(-.15deg)}
+  75%,100%{opacity:1;transform:rotate(-.2deg)}
+}
+@keyframes slide{
+  0%{opacity:0;transform:translateX(-40px) rotate(-2deg)}
+  20%{opacity:1;transform:translateX(-14px) rotate(.6deg)}
+  40%{transform:translateX(3px) rotate(-.3deg)}
+  60%,100%{opacity:1;transform:none}
+}
+
+@media (max-width:900px){
+  .layout{grid-template-columns:minmax(0,1fr)}
+  .toc{display:none}
+}
+@media (max-width:640px){
+  :root{--margin:0px}
+  .sheet{padding:40px 22px 34px;transform:none}
+  .sheet::before,.punch{display:none}
+  .doc-head{grid-template-columns:minmax(0,1fr)}
+  .art .no{position:static;display:block;width:auto;text-align:left;margin-bottom:6px}
+  .plan-t{font-size:14px}
+  .plan-t th,.plan-t td{padding:9px 8px}
+  @keyframes drop{0%{opacity:0;transform:translateY(-70px) rotate(-2deg)}25%{opacity:1;transform:translateY(-20px) rotate(.6deg)}50%{transform:translateY(2px) scale(1,.994)}75%,100%{opacity:1;transform:none}}
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <filter id="cc0" x="-8%" y="-8%" width="116%" height="116%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.03" numOctaves="2" seed="2" result="w"/>
+      <feDisplacementMap in="SourceGraphic" in2="w" scale="3.4" xChannelSelector="R" yChannelSelector="G" result="d"/>
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="5" result="g"/>
+      <feColorMatrix in="g" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 3.4 0 0 0 -0.8" result="m"/>
+      <feComposite in="d" in2="m" operator="in"/>
+    </filter>
+    <filter id="cct" x="-4%" y="-10%" width="108%" height="120%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.06" numOctaves="2" seed="4" result="w"/>
+      <feDisplacementMap in="SourceGraphic" in2="w" scale="1.8" xChannelSelector="R" yChannelSelector="G" result="d"/>
+      <feTurbulence type="fractalNoise" baseFrequency="1.1" numOctaves="1" seed="8" result="g"/>
+      <feColorMatrix in="g" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 2.6 0 0 0 -0.12" result="m"/>
+      <feComposite in="d" in2="m" operator="in"/>
+    </filter>
+    <filter id="logo" color-interpolation-filters="sRGB">
+      <feColorMatrix type="saturate" values="0"/>
+      <feComponentTransfer><feFuncR type="linear" slope="1.56" intercept="-.6"/><feFuncG type="linear" slope="1.56" intercept="-.6"/><feFuncB type="linear" slope="1.56" intercept="-.6"/></feComponentTransfer>
+    </filter>
+  </defs>
+</svg>
+
+<header class="mast">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="tile"><img src="assets/rauhwpx-logo.png" width="1024" height="1024" alt=""></span>Rauhwpx</a>
+  </div>
+  <svg class="mast__rule" viewBox="0 0 1000 6" preserveAspectRatio="none" aria-hidden="true"><path d="M-4 3.2C180 2.1 330 4.4 520 3.1S850 2.2 1004 3.6" fill="none" stroke="currentColor" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>
+</header>
+
+<main class="main">
+  <div class="wrap layout">
+    <nav class="toc" aria-label="약관 목차">
+      <p class="mono">목차</p>
+      <ol>
+        <li><a href="#a1"><span>01</span>목적</a></li>
+        <li><a href="#a2"><span>02</span>정의</a></li>
+        <li><a href="#a3"><span>03</span>약관의 게시와 변경</a></li>
+        <li><a href="#a4"><span>04</span>요금제와 세션 시간</a></li>
+        <li><a href="#a5"><span>05</span>결제와 자동 갱신</a></li>
+        <li><a href="#a6"><span>06</span>환불</a></li>
+        <li><a href="#a7"><span>07</span>새 기능 먼저 사용</a></li>
+        <li><a href="#a8"><span>08</span>문서와 데이터</a></li>
+        <li><a href="#a9"><span>09</span>AI 제공자 계정</a></li>
+        <li><a href="#a10"><span>10</span>서비스 변경과 중단</a></li>
+        <li><a href="#a11"><span>11</span>이용 제한과 해지</a></li>
+        <li><a href="#a12"><span>12</span>책임의 제한</a></li>
+        <li><a href="#a13"><span>13</span>준거법과 관할</a></li>
+      </ol>
+    </nav>
+
+    <article class="sheet" aria-labelledby="terms-title">
+      <i class="tack" aria-hidden="true"></i>
+      <i class="punch a" aria-hidden="true"></i><i class="punch b" aria-hidden="true"></i><i class="punch c" aria-hidden="true"></i>
+
+      <header class="doc-head">
+        <div>
+          <p class="mono">Rauhwpx Cloud</p>
+          <h1 id="terms-title" class="charcoal">Cloud 이용약관</h1>
+        </div>
+        <dl>
+          <dt>시행일</dt><dd>2026. 9. 25.</dd>
+          <dt>버전</dt><dd>1.0</dd>
+        </dl>
+      </header>
+
+      <section class="art" id="a1" aria-labelledby="h1">
+        <span class="no" aria-hidden="true">제1조</span>
+        <h2 id="h1">목적</h2>
+        <p>이 약관은 하태욱(이하 “운영자”)가 제공하는 Rauhwpx Cloud(이하 “서비스”)의 이용 조건과 절차, 운영자와 이용자의 권리와 의무를 정합니다.</p>
+      </section>
+
+      <section class="art" id="a2" aria-labelledby="h2">
+        <span class="no" aria-hidden="true">제2조</span>
+        <h2 id="h2">정의</h2>
+        <ol>
+          <li><b>서비스</b>는 Rauhwpx 앱에서 문서와 대화를 원격 작업 공간으로 보내 AI 에이전트가 이어서 작업하게 하는 기능을 말합니다.</li>
+          <li><b>클라우드 세션</b>은 서비스의 원격 작업 공간이 이용자의 요청을 처리하며 실행되는 시간을 말합니다.</li>
+          <li><b>이용자</b>는 이 약관에 동의하고 서비스를 이용하는 사람을 말합니다.</li>
+          <li><b>요금제</b>는 제4조에서 정한 Free와 Cloud를 말합니다.</li>
+        </ol>
+      </section>
+
+      <section class="art" id="a3" aria-labelledby="h3">
+        <span class="no" aria-hidden="true">제3조</span>
+        <h2 id="h3">약관의 게시와 변경</h2>
+        <ol>
+          <li>운영자는 이 약관을 웹사이트에 게시합니다.</li>
+          <li>약관을 바꿀 때는 시행 7일 전까지 변경 내용과 시행일을 알립니다. 이용자에게 불리한 변경은 30일 전까지 알립니다.</li>
+          <li>이용자는 바뀐 약관에 동의하지 않으면 시행일 전에 이용을 해지할 수 있습니다.</li>
+        </ol>
+      </section>
+
+      <section class="art" id="a4" aria-labelledby="h4">
+        <span class="no" aria-hidden="true">제4조</span>
+        <h2 id="h4">요금제와 세션 시간</h2>
+        <table class="plan-t">
+          <thead><tr><th scope="col">요금제</th><th scope="col">하루 세션 시간</th><th scope="col">월 요금</th><th scope="col">새 기능 먼저 사용</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Free</th><td>60분</td><td>0원</td><td class="x">—</td></tr>
+            <tr><th scope="row">Cloud</th><td>5시간</td><td>9,900원</td><td>포함</td></tr>
+          </tbody>
+        </table>
+        <ol>
+          <li>세션 시간은 매일 0시(한국 시간)에 새로 채워지며, 쓰지 않은 시간은 다음 날로 넘어가지 않습니다.</li>
+          <li>세션 시간은 클라우드 세션이 실행된 시간을 1분 단위로 셉니다. 대기 중이거나 잠든 작업 공간은 세지 않습니다.</li>
+          <li>하루 세션 시간을 모두 쓰면 진행 중인 작업은 안전한 지점에서 멈추고, 결과는 제8조에 따라 보관됩니다.</li>
+          <li>표시된 요금은 부가가치세를 포함한 금액입니다.</li>
+        </ol>
+      </section>
+
+      <section class="art" id="a5" aria-labelledby="h5">
+        <span class="no" aria-hidden="true">제5조</span>
+        <h2 id="h5">결제와 자동 갱신</h2>
+        <ol>
+          <li>Cloud 요금제는 한 달 단위로 미리 결제하며, 해지하지 않으면 매월 같은 날 자동으로 갱신·결제됩니다.</li>
+          <li>이용자는 언제든 해지할 수 있습니다. 해지하면 이미 결제한 기간이 끝날 때까지 Cloud 요금제를 쓰고, 그 뒤에는 Free 요금제로 바뀝니다.</li>
+          <li>요금을 바꿀 때는 적용 30일 전까지 알리며, 바뀐 요금은 그 뒤 첫 갱신부터 적용됩니다.</li>
+        </ol>
+      </section>
+
+      <section class="art" id="a6" aria-labelledby="h6">
+        <span class="no" aria-hidden="true">제6조</span>
+        <h2 id="h6">환불</h2>
+        <p>결제가 완료된 요금은 환불되지 않습니다. 해지하면 제5조 제2항에 따라 결제한 기간이 끝날 때까지 Cloud 요금제를 쓸 수 있습니다.</p>
+      </section>
+
+      <section class="art" id="a7" aria-labelledby="h7">
+        <span class="no" aria-hidden="true">제7조</span>
+        <h2 id="h7">새 기능 먼저 사용</h2>
+        <p>Cloud 이용자는 정식 출시 전 기능을 먼저 쓸 수 있습니다. 이런 기능은 예고 없이 바뀌거나 빠질 수 있습니다.</p>
+      </section>
+
+      <section class="art" id="a8" aria-labelledby="h8">
+        <span class="no" aria-hidden="true">제8조</span>
+        <h2 id="h8">문서와 데이터</h2>
+        <ol>
+          <li>이용자가 올린 문서와 작업 결과의 권리는 이용자에게 있습니다.</li>
+          <li>서비스는 작업에 필요한 다음 자료를 받아 처리합니다.
+            <ul class="dash">
+              <li>문서 스냅샷과 참고 자료</li>
+              <li>에이전트와의 대화 기록</li>
+              <li>제9조의 AI 제공자 인증 정보</li>
+            </ul>
+          </li>
+          <li>완료된 작업 결과는 암호화해 30일 동안 보관한 뒤 삭제합니다. 이용자가 결과를 내려받아 확인하거나 대화를 끝내면 원격 작업 내용은 그때 삭제합니다.</li>
+          <li>운영자는 이용자의 문서와 대화를 AI 모델 학습에 쓰지 않으며, 법령에 따른 경우를 빼고 제3자에게 제공하지 않습니다.</li>
+        </ol>
+      </section>
+
+      <section class="art" id="a9" aria-labelledby="h9">
+        <span class="no" aria-hidden="true">제9조</span>
+        <h2 id="h9">AI 제공자 계정</h2>
+        <ol>
+          <li>서비스는 이용자가 연결한 Codex, Claude, OpenRouter 등 AI 제공자 계정으로 작업합니다. 인증 정보는 암호화해 보관하고 해당 작업에만 씁니다.</li>
+          <li>AI 제공자의 이용료와 이용 한도, 약관은 이용자와 해당 제공자 사이에 적용되며, 서비스 요금에 포함되지 않습니다.</li>
+          <li>이용자가 보낸 내용은 작업 처리를 위해 해당 AI 제공자에게 전달되고, 그 처리에는 제공자의 정책이 적용됩니다.</li>
+        </ol>
+      </section>
+
+      <section class="art" id="a10" aria-labelledby="h10">
+        <span class="no" aria-hidden="true">제10조</span>
+        <h2 id="h10">서비스 변경과 중단</h2>
+        <ol>
+          <li>운영자는 점검이나 설비 교체를 위해 서비스를 잠시 멈출 수 있으며, 가능한 한 미리 알립니다.</li>
+          <li>서비스를 끝낼 때는 30일 전까지 알립니다.</li>
+        </ol>
+      </section>
+
+      <section class="art" id="a11" aria-labelledby="h11">
+        <span class="no" aria-hidden="true">제11조</span>
+        <h2 id="h11">이용 제한과 해지</h2>
+        <ol>
+          <li>이용자가 법령이나 이 약관을 어기면 운영자는 사유를 알린 뒤 이용을 제한하거나 계약을 해지할 수 있습니다. 긴급한 경우에는 먼저 제한하고 바로 알립니다.</li>
+          <li>이용자는 이의가 있으면 통지를 받은 날부터 7일 이내에 이의를 제기할 수 있습니다.</li>
+        </ol>
+      </section>
+
+      <section class="art" id="a12" aria-labelledby="h12">
+        <span class="no" aria-hidden="true">제12조</span>
+        <h2 id="h12">책임의 제한</h2>
+        <ol>
+          <li>운영자는 천재지변, AI 제공자의 장애 등 운영자가 통제할 수 없는 사유로 생긴 손해에 책임을 지지 않습니다.</li>
+          <li>운영자의 고의나 중대한 과실로 생긴 손해에는 이 조항이 적용되지 않습니다.</li>
+        </ol>
+      </section>
+
+      <section class="art" id="a13" aria-labelledby="h13">
+        <span class="no" aria-hidden="true">제13조</span>
+        <h2 id="h13">준거법과 관할</h2>
+        <p>이 약관은 대한민국 법에 따르며, 서비스와 관련한 분쟁은 민사소송법에 따른 관할 법원에서 해결합니다.</p>
+      </section>
+
+      <footer class="sign">
+        <p>부칙 · 이 약관은 2026년 9월 25일부터 시행합니다.<br>문의 <a href="mailto:heemang12bo@gmail.com">heemang12bo@gmail.com</a></p>
+        <div class="who">
+          <p class="mono">운영자</p>
+          <b>하태욱</b>
+          <svg viewBox="0 0 180 14" preserveAspectRatio="none" aria-hidden="true"><path d="M2 9C40 6.5 90 10.5 176 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </div>
+      </footer>
+    </article>
+  </div>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <p class="colophon">
+      <span><a href="index.html">Rauhwpx</a></span>
+      <span><a href="https://github.com/heemangstudio/Rauhwpx">GitHub</a></span>
+      <span>문의 <a href="mailto:heemang12bo@gmail.com">heemang12bo@gmail.com</a></span>
+    </p>
+  </div>
+</footer>
+
+<script>
+/* 목차: 지금 읽는 조에 목탄 한 획. 화면 위 1/3을 지난 마지막 조가 지금 조예요 */
+(function(){
+  var arts=Array.prototype.slice.call(document.querySelectorAll('.art'));
+  var links=Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+  var on=-1,queued=false;
+  function pick(){
+    queued=false;
+    var line=window.innerHeight/3,i=0;
+    arts.forEach(function(a,k){if(a.getBoundingClientRect().top<=line)i=k;});
+    if(window.innerHeight+window.scrollY>=document.documentElement.scrollHeight-2)i=arts.length-1;
+    if(i===on)return;
+    if(links[on])links[on].classList.remove('is-on');
+    on=i;links[on].classList.add('is-on');
+  }
+  window.addEventListener('scroll',function(){if(!queued){queued=true;requestAnimationFrame(pick);}},{passive:true});
+  window.addEventListener('resize',pick);
+  pick();
+})();
+</script>
+</body>
+</html>
