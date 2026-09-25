@@ -10,7 +10,8 @@ function imageError(code, message) {
   return error;
 }
 
-function imageDetails(bytes) {
+/** PNG/GIF/BMP/JPEG 헤더에서 삽입 확장자와 픽셀 크기를 읽는다. 알 수 없으면 null. */
+export function imageDetails(bytes) {
   if (bytes.length >= 24
     && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
     && bytes.toString('ascii', 12, 16) === 'IHDR') {
@@ -75,6 +76,13 @@ async function readImageFile(imagePath, openFile) {
 /** Read a bounded local image and prepare the browser document tool's byte payload. */
 export async function prepareInsertImageArgs(args, allowedRoots, { openFile = open } = {}) {
   const { imagePath, imageBase64, extension, ...rest } = args ?? {};
+  // 참조 이미지는 허브가 참조 저장소에서 직접 읽는다 — 로컬 파일을 찾지 않는다.
+  if (typeof rest.referenceFileId === 'string' && rest.referenceFileId.length > 0) {
+    if (imagePath || imageBase64) {
+      throw imageError('INVALID_ARGS', 'pass only one of imagePath, imageBase64 or referenceFileId');
+    }
+    return rest;
+  }
   let bytes;
   let fromBase64 = false;
   if (typeof imagePath === 'string' && imagePath.length > 0) {

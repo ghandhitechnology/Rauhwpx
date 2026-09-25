@@ -13,6 +13,8 @@
  *   f. 인라인 수식 줄바꿈 — 수식 bbox/텍스트 런이 열 오른쪽 가장자리를 넘지 않음
  *   g. pageBreakBefore 문단의 멀티라인 삽입이 continuation마다 쪽 나눔을 복제하지 않음
  *   h. pending/approve/권위 refresh의 page map 동일 + 문서 상태 영속
+ *   j. 참조 이미지 — referenceFileId+cropPx 캔버스 잘라내기, afterObjects, 셀, 떠 있는 배치,
+ *      read_reference_image 확대
  *
  * 실행: npm run e2e:agent-edit-loop   (headless Chrome + 자체 vite/허브 프로세스 기동)
  */
@@ -27,6 +29,7 @@ import { PNG } from 'pngjs';
 
 import { registerHubSession } from '../../../desktop/agent-hub.mjs';
 import { writeFakeCliBin } from '../../rhwp-agent/tests/fake-cli-bin.mjs';
+import { ReferenceStore } from '../../rhwp-agent/reference-store.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const studioRoot = path.resolve(__dirname, '..');
@@ -196,13 +199,28 @@ writeFakeCliBin(path.join(piRoot, 'prefix/node_modules/.bin'), 'pi', `
   }, 25);
 `);
 
+// 전역 참조 이미지 — 120x80 흰 바탕의 왼쪽 위 60x40 검은 상자 (잘라내기 대상)
+const referencesRoot = path.join(fixtureRoot, 'references');
+const refPng = new PNG({ width: 120, height: 80 });
+for (let y = 0; y < 80; y += 1) {
+  for (let x = 0; x < 120; x += 1) {
+    const i = (y * 120 + x) * 4;
+    const ink = x >= 10 && x < 70 && y >= 10 && y < 50;
+    refPng.data[i] = refPng.data[i + 1] = refPng.data[i + 2] = ink ? 0 : 255;
+    refPng.data[i + 3] = 255;
+  }
+}
+const refImage = await (await new ReferenceStore({ root: referencesRoot }).init()).addBuffer({
+  scope: 'global', scopeId: 'global', name: 'logo.png', mimeType: 'image/png', bytes: PNG.sync.write(refPng),
+});
+
 const hub = spawnLogged(
   process.execPath,
   [path.join(repoRoot, 'rhwp-agent', 'server.mjs')],
   path.join(repoRoot, 'rhwp-agent'),
   { NODE_ENV: 'test', RHWP_AGENT_MODE: 'development', RHWP_SECRET_BROKER: '',
     RHWP_AGENT_PORT: String(hubPort), RHWP_AGENT_TOKEN: HUB_TOKEN,
-    RHWP_PI_DIR: piRoot, RHWP_WORK_DIR: fixtureRoot,
+    RHWP_PI_DIR: piRoot, RHWP_WORK_DIR: fixtureRoot, RHWP_REFERENCES_DIR: referencesRoot,
     RHWP_AGENT_INSTRUCTIONS_DIR: path.join(fixtureRoot, 'instructions'),
     RHWP_TEMPLATES_DIR: path.join(fixtureRoot, 'templates') },
   path.join(repoRoot, 'target', 'rhwp-agent-e2e-hub.log'),
@@ -877,6 +895,67 @@ try {
         !conflict.ok && conflict.error?.code === 'REVISION_MISMATCH'
           && /concurrent edit touched/.test(conflict.error?.message ?? ''),
         `같은 문단을 노린 stale 쓰기는 충돌 메시지로 거부 (${conflict.ok ? '성공(버그)' : conflict.error?.code})`,
+      );
+
+      // ── j. 참조 이미지 삽입/읽기 ──────────────────────────
+      setTestCase('j. 참조 이미지 (referenceFileId, cropPx, afterObjects, cell, floating)');
+      const imgPara = rParaCount;
+      const picProps = (p, ci) => page.evaluate(({ p, ci }) => window.__wasm.getPictureProperties(0, p, ci), { p, ci });
+      const cropped = await callWrite(call, 'insert_image', {
+        sectionIdx: 0, paraIdx: imgPara, charOffset: 0,
+        referenceFileId: refImage.id, cropPx: { x: 10, y: 10, width: 60, height: 40 },
+      });
+      const croppedProps = await picProps(imgPara, cropped.image.controlIdx);
+      assert(
+        croppedProps.width === 60 * 75 && croppedProps.height === 40 * 75 && cropped.cropPx?.width === 60,
+        `cropPx 로 잘라낸 60x40 원본 크기로 삽입 (${croppedProps.width}x${croppedProps.height} HU)`,
+      );
+      const afterPic = await callWrite(call, 'insert_image', {
+        sectionIdx: 0, paraIdx: imgPara, charOffset: 0, referenceFileId: refImage.id, afterObjects: true,
+      });
+      const beforePic = await callWrite(call, 'insert_image', {
+        sectionIdx: 0, paraIdx: imgPara, charOffset: 0, referenceFileId: refImage.id, widthMm: 10,
+      });
+      const order = await page.evaluate((p) => window.__wasm.getPageControlLayout(
+        window.__wasm.getCursorRect(0, p, 0).pageIndex,
+      ).controls.filter((c) => c.type === 'image' && c.paraIdx === p).sort((a, b) => a.x - b.x)
+        .map((c) => Math.round(c.w)), imgPara);
+      assert(
+        afterPic.image.controlIdx === cropped.image.controlIdx + 1 && beforePic.image.controlIdx === cropped.image.controlIdx
+          && order.length === 3 && order[0] < order[1] && order[1] < order[2],
+        `afterObjects 는 기존 그림 뒤, 기본은 앞 (ci ${cropped.image.controlIdx}/${afterPic.image.controlIdx}/${beforePic.image.controlIdx}, 좌→우 폭 ${JSON.stringify(order)})`,
+      );
+      const floated = await callWrite(call, 'insert_image', {
+        sectionIdx: 0, paraIdx: imgPara, charOffset: 0, referenceFileId: refImage.id,
+        positionMode: 'floating', xMm: 30, yMm: 40, relativeTo: 'paper', wrap: 'inFrontOfText',
+      });
+      const floatProps = await picProps(imgPara, floated.image.controlIdx);
+      assert(
+        floatProps.treatAsChar === false && floatProps.horzRelTo === 'Paper' && floatProps.vertRelTo === 'Paper'
+          && Math.abs(floatProps.horzOffset - 8504) <= 1 && floatProps.textWrap === 'InFrontOfText',
+        `떠 있는 배치 적용 (${JSON.stringify({ tac: floatProps.treatAsChar, h: floatProps.horzRelTo, x: floatProps.horzOffset, wrap: floatProps.textWrap })})`,
+      );
+      const table = await callWrite(call, 'create_table', { sectionIdx: 0, paraIdx: imgPara, charOffset: 0, rows: 1, cols: 2 });
+      const inCell = await callWrite(call, 'insert_image', {
+        sectionIdx: 0, paraIdx: 0, charOffset: 0,
+        cell: { paraIdx: table.table.paraIdx, controlIdx: table.table.controlIdx, cellIdx: 1 },
+        referenceFileId: refImage.id,
+      });
+      const cellPic = await page.evaluate(({ tp, tc, ci }) => window.__wasm.getCellPicturePropertiesByPath(
+        0, tp, [{ controlIndex: tc, cellIndex: 1, cellParaIndex: 0 }], ci,
+      ), { tp: table.table.paraIdx, tc: table.table.controlIdx, ci: inCell.image.controlIdx });
+      assert(
+        cellPic.treatAsChar === true && cellPic.width > 0 && cellPic.width <= 120 * 75,
+        `셀 문단 안 인라인 그림 (${cellPic.width}x${cellPic.height} HU, 응답 ${inCell.image.widthMm}mm)`,
+      );
+      const zoomed = must(await call('read_reference_image', {
+        fileId: refImage.id, cropPx: { x: 10, y: 10, width: 60, height: 40 }, zoom: 3,
+      }), 'read_reference_image(cropPx+zoom)');
+      const zoomedPng = PNG.sync.read(Buffer.from(zoomed.image?.data ?? '', 'base64'));
+      assert(
+        zoomedPng.width === 180 && zoomedPng.height === 120 && zoomed.zoom === 3
+          && zoomedPng.data[(60 * 180 + 90) * 4] < 40,
+        `확대된 잘라내기 (${zoomedPng.width}x${zoomedPng.height}, 가운데 잉크=${zoomedPng.data[(60 * 180 + 90) * 4]})`,
       );
 
       // 정리 — 검증용 스테이징 편집을 되돌려 종료 상태를 깨끗이 한다

@@ -548,3 +548,14 @@ test('get_table_properties reads optional cell state and edit_table documents ob
   const values = edit.shape.op._def.values;
   assert.ok(values.includes('split_cell'));
 });
+
+test('insert_image takes one source and floating fields only with positionMode floating', () => {
+  const def = byName.get('insert_image');
+  assert.ok(def.shape.cell && def.shape.cellPath && def.shape.cropPx && def.shape.referenceFileId);
+  assert.throws(() => def.validate({ imagePath: '/a.png', referenceFileId: 'ref-1' }), /only one/);
+  assert.throws(() => def.validate({ referenceFileId: 'ref-1', xMm: 10 }), /positionMode/);
+  def.validate({ referenceFileId: 'ref-1', positionMode: 'floating', xMm: 10, wrap: 'behindText' });
+  assert.ok(!def.shape.cropPx.safeParse({ x: 0, y: 0, width: 0, height: 5 }).success);
+  assert.ok(byName.get('read_reference_image').shape.zoom.safeParse(4).success);
+  assert.ok(!byName.get('read_reference_image').shape.zoom.safeParse(5).success);
+});

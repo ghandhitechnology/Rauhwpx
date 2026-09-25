@@ -91,7 +91,11 @@ import {
   referenceScopesForSession,
   resolveSessionIdentity,
 } from './reference-session.mjs';
-import { executeReferenceTool } from './reference-tools.mjs';
+import {
+  executeReferenceTool,
+  referenceImageNeedsStudio,
+  resolveReferenceImageArgs,
+} from './reference-tools.mjs';
 import { TemplateStore } from './template-store.mjs';
 import { createTemplateHttpHandler } from './template-http.mjs';
 import {
@@ -4934,7 +4938,8 @@ function handleMcpMessage(record, sock, msg) {
         }
         return;
       }
-      if (definition.category === 'reference-read') {
+      const referenceImageViaStudio = referenceImageNeedsStudio(tool, args);
+      if (definition.category === 'reference-read' && !referenceImageViaStudio) {
         void executeReferenceTool({ tool, args, store: referenceStore, session: record.agentSession })
           .then(({ handled, result }) => {
             if (!handled) throw workflowError('UNKNOWN_TOOL', `Unknown reference tool: ${tool}`);
@@ -5095,111 +5100,133 @@ function handleMcpMessage(record, sock, msg) {
           return;
         }
       }
-      if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) {
-        sendError(workflowError('NO_STUDIO', 'Studio is not connected; open rhwp-studio in a browser'));
-        return;
-      }
-      if (record.pendingCalls.size >= MAX_PENDING_STUDIO_TOOL_CALLS) {
-        sendError(workflowError(
-          'TOO_MANY_INFLIGHT_CALLS',
-          `At most ${MAX_PENDING_STUDIO_TOOL_CALLS} Studio tool calls may be in flight`,
-        ));
-        return;
-      }
-      let activeTemplate = null;
-      if (tool.startsWith('template_')) {
-        try {
-          if (!record.agentSession?.activeTemplateId) throw workflowError('TEMPLATE_NOT_SELECTED', 'Select a template with /templates first.');
-          activeTemplate = templateStore.get(record.agentSession.activeTemplateId);
-          if (args.templateRevision !== activeTemplate.revision) {
-            throw workflowError('TEMPLATE_REVISION_MISMATCH', `Template changed from revision ${String(args.templateRevision)} to ${activeTemplate.revision}; inspect it again before continuing.`);
+      // 스튜디오 전달 — 참조 이미지 경로는 허브가 인자를 채운 뒤 비동기로 호출한다.
+      const forwardToStudio = (args) => {
+        if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) {
+          sendError(workflowError('NO_STUDIO', 'Studio is not connected; open rhwp-studio in a browser'));
+          return;
+        }
+        if (record.pendingCalls.size >= MAX_PENDING_STUDIO_TOOL_CALLS) {
+          sendError(workflowError(
+            'TOO_MANY_INFLIGHT_CALLS',
+            `At most ${MAX_PENDING_STUDIO_TOOL_CALLS} Studio tool calls may be in flight`,
+          ));
+          return;
+        }
+        let activeTemplate = null;
+        if (tool.startsWith('template_')) {
+          try {
+            if (!record.agentSession?.activeTemplateId) throw workflowError('TEMPLATE_NOT_SELECTED', 'Select a template with /templates first.');
+            activeTemplate = templateStore.get(record.agentSession.activeTemplateId);
+            if (args.templateRevision !== activeTemplate.revision) {
+              throw workflowError('TEMPLATE_REVISION_MISMATCH', `Template changed from revision ${String(args.templateRevision)} to ${activeTemplate.revision}; inspect it again before continuing.`);
+            }
+          } catch (error) {
+            sendError(error, 'TEMPLATE_NOT_FOUND');
+            return;
           }
-        } catch (error) {
-          sendError(error, 'TEMPLATE_NOT_FOUND');
-          return;
         }
-      }
-      // render_page savePath 는 스튜디오 렌더 전에 경로부터 검증한다 (쓰기는 응답 때 허브가 한다).
-      let renderSavePath = null;
-      if (tool === 'render_page' && args.savePath !== undefined) {
-        try {
-          renderSavePath = resolveRenderSavePath(record.workDir, args.savePath);
-        } catch (error) {
-          sendError(error, 'INVALID_ARGS');
-          return;
+        // render_page savePath 는 스튜디오 렌더 전에 경로부터 검증한다 (쓰기는 응답 때 허브가 한다).
+        let renderSavePath = null;
+        if (tool === 'render_page' && args.savePath !== undefined) {
+          try {
+            renderSavePath = resolveRenderSavePath(record.workDir, args.savePath);
+          } catch (error) {
+            sendError(error, 'INVALID_ARGS');
+            return;
+          }
         }
-      }
-      const hubId = record.nextHubId++;
-      if (workerJob && tool === 'materialize_document_snapshot') {
-        try {
-          claimCopyLayoutSnapshot(workerJob);
-        } catch (error) {
-          sendError(error, 'COPY_LAYOUT_SNAPSHOT_ACTIVE');
-          return;
-        }
-      }
-      // apply_edits 는 항목 수만큼 변이+마감 리플로우를 안고 오므로 배치 크기에
-      // 비례해 늘린다. 전체 문서 직렬화+base64 전송도 큰 파일에서는 길어질 수 있어
-      // 별도 예산을 준다 (둘 다 mcp-stdio 의 180s 한도 아래로 유지).
-      const timeoutMs = tool === 'apply_edits'
-        ? Math.min(STUDIO_TOOL_TIMEOUT_MS + 2_000 * (Array.isArray(args.edits) ? args.edits.length : 0), 120_000)
-        : tool === 'materialize_document_snapshot'
-          ? 120_000
-          : STUDIO_TOOL_TIMEOUT_MS;
-      const timer = setTimeout(() => {
-        const pendingEntry = record.pendingCalls.get(hubId);
-        record.pendingCalls.delete(hubId);
-        cancelStudioToolRequest(record, hubId, pendingEntry, 'studio-timeout');
+        const hubId = record.nextHubId++;
         if (workerJob && tool === 'materialize_document_snapshot') {
-          releaseCopyLayoutSnapshot(workerJob);
+          try {
+            claimCopyLayoutSnapshot(workerJob);
+          } catch (error) {
+            sendError(error, 'COPY_LAYOUT_SNAPSHOT_ACTIVE');
+            return;
+          }
         }
-        sendError(workflowError(
-          'STUDIO_TIMEOUT',
-          `Studio did not answer within ${timeoutMs / 1000}s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates`,
-        ));
-      }, timeoutMs);
-      record.pendingCalls.set(hubId, {
-        mcpSocket: sock,
-        clientId,
-        sendResult,
-        sendError,
-        providerTurn,
-        timer,
-        tool,
-        documentIdentity: workerJob
-          ? { documentId: workerJob.binding.documentId, documentName: workerJob.binding.documentName }
-          : activeDocumentIdentity(record.agentSession),
-        chatId: workerJob?.jobId
-          ?? record.agentSession?.chatId
-          ?? record.agentSession?.threadId
-          ?? record.sessionId,
-        copyLayoutJobId: workerJob?.jobId ?? null,
-        sessionGeneration: record.agentSession?.generation ?? null,
-        renderSavePath,
-      });
-      const forwarded = sendJson(record.studioSocket, {
-        v: 1, type: 'tool-request', id: hubId,
-        // 호출을 보낸 MCP 소켓의 에이전트 라벨을 단다 — 현재 세션 기준으로 찍으면
-        // 세션 교체 직후 남은 호출이 엉뚱한 에이전트로 기록될 수 있다.
-        agent: sock.agentLabel ?? record.agentSession?.agent ?? 'claude',
-        tool,
-        args,
-        ...(activeTemplate ? { template: activeTemplate } : {}),
-        workflow: record.agentSession?.planning.snapshot().workflow,
-        phase: record.agentSession?.planning.snapshot().phase,
-        capabilityEpoch: record.agentSession?.planning.capabilityEpoch,
-        turnBound: !workerJob,
-        ...(providerTurn ? { providerTurnId: providerTurn.turnId } : {}),
-        ...(sock.parentTaskId ? { parentTaskId: sock.parentTaskId } : {}),
-      });
-      if (!forwarded) {
-        clearTimeout(timer);
-        record.pendingCalls.delete(hubId);
-        if (workerJob && tool === 'materialize_document_snapshot') {
-          releaseCopyLayoutSnapshot(workerJob);
+        // apply_edits 는 항목 수만큼 변이+마감 리플로우를 안고 오므로 배치 크기에
+        // 비례해 늘린다. 전체 문서 직렬화+base64 전송도 큰 파일에서는 길어질 수 있어
+        // 별도 예산을 준다 (둘 다 mcp-stdio 의 180s 한도 아래로 유지).
+        const timeoutMs = tool === 'apply_edits'
+          ? Math.min(STUDIO_TOOL_TIMEOUT_MS + 2_000 * (Array.isArray(args.edits) ? args.edits.length : 0), 120_000)
+          : tool === 'materialize_document_snapshot'
+            ? 120_000
+            : STUDIO_TOOL_TIMEOUT_MS;
+        const timer = setTimeout(() => {
+          const pendingEntry = record.pendingCalls.get(hubId);
+          record.pendingCalls.delete(hubId);
+          cancelStudioToolRequest(record, hubId, pendingEntry, 'studio-timeout');
+          if (workerJob && tool === 'materialize_document_snapshot') {
+            releaseCopyLayoutSnapshot(workerJob);
+          }
+          sendError(workflowError(
+            'STUDIO_TIMEOUT',
+            `Studio did not answer within ${timeoutMs / 1000}s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates`,
+          ));
+        }, timeoutMs);
+        record.pendingCalls.set(hubId, {
+          mcpSocket: sock,
+          clientId,
+          sendResult,
+          sendError,
+          providerTurn,
+          timer,
+          tool,
+          documentIdentity: workerJob
+            ? { documentId: workerJob.binding.documentId, documentName: workerJob.binding.documentName }
+            : activeDocumentIdentity(record.agentSession),
+          chatId: workerJob?.jobId
+            ?? record.agentSession?.chatId
+            ?? record.agentSession?.threadId
+            ?? record.sessionId,
+          copyLayoutJobId: workerJob?.jobId ?? null,
+          sessionGeneration: record.agentSession?.generation ?? null,
+          renderSavePath,
+        });
+        const forwarded = sendJson(record.studioSocket, {
+          v: 1, type: 'tool-request', id: hubId,
+          // 호출을 보낸 MCP 소켓의 에이전트 라벨을 단다 — 현재 세션 기준으로 찍으면
+          // 세션 교체 직후 남은 호출이 엉뚱한 에이전트로 기록될 수 있다.
+          agent: sock.agentLabel ?? record.agentSession?.agent ?? 'claude',
+          tool,
+          args,
+          ...(activeTemplate ? { template: activeTemplate } : {}),
+          workflow: record.agentSession?.planning.snapshot().workflow,
+          phase: record.agentSession?.planning.snapshot().phase,
+          capabilityEpoch: record.agentSession?.planning.capabilityEpoch,
+          turnBound: !workerJob,
+          ...(providerTurn ? { providerTurnId: providerTurn.turnId } : {}),
+          ...(sock.parentTaskId ? { parentTaskId: sock.parentTaskId } : {}),
+        });
+        if (!forwarded) {
+          clearTimeout(timer);
+          record.pendingCalls.delete(hubId);
+          if (workerJob && tool === 'materialize_document_snapshot') {
+            releaseCopyLayoutSnapshot(workerJob);
+          }
+          sendError(workflowError('NO_STUDIO', 'Studio disconnected before receiving the tool request'));
         }
-        sendError(workflowError('NO_STUDIO', 'Studio disconnected before receiving the tool request'));
+      };
+      // 참조 이미지 잘라내기/삽입은 허브가 저장소 blob 을 읽어 인자를 채운 뒤 스튜디오로 넘긴다.
+      if (referenceImageViaStudio) {
+        if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) {
+          sendError(workflowError('NO_STUDIO', 'Studio is not connected; open rhwp-studio in a browser'));
+          return;
+        }
+        void resolveReferenceImageArgs({ tool, args, store: referenceStore, session: record.agentSession })
+          .then((resolved) => {
+            if (callSettled) return;
+            if (providerTurn && !providerTurnIsActive(record, providerTurn)) {
+              sendError(noActiveProviderTurnError());
+              return;
+            }
+            forwardToStudio(resolved);
+          })
+          .catch((error) => sendError(error, 'REFERENCE_READ_FAILED'));
+        return;
       }
+      forwardToStudio(args);
       return;
     }
     default:
