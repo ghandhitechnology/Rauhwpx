@@ -274,14 +274,17 @@ export class PendingEditManager {
     this.emitChange({ type: 'ops-changed' });
   }
 
-  endTurn(outcome: 'review' | 'commit' | 'reject' = 'review'): void {
+  /**
+   * 턴 종료 시 열린 set 을 닫는다. 성공하지 못한 종료(오류·중단·재연결)도
+   * 편집을 되돌리지 않고 검토 대기로 남긴다 — 되돌림은 사용자의 reject() 뿐이다.
+   */
+  endTurn(outcome: 'review' | 'commit' = 'review', opts: { turnStopped?: boolean } = {}): void {
     if (!this.open) return;
     const set = this.open;
+    if (opts.turnStopped) set.turnStopped = true;
     this.finalizeOpenSet();
     if (set.ops.length === 0) return;
-    if (outcome === 'commit') {
-      if (!this.approve(set.id)) this.reject(set.id);
-    } else if (outcome === 'reject') this.reject(set.id);
+    if (outcome === 'commit' && !this.approve(set.id)) this.reject(set.id);
   }
 
   insertText(

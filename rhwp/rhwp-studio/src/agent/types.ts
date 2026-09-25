@@ -1374,6 +1374,8 @@ export interface PendingChangeSet {
   status: ChangeSetStatus;
   ops: PendingOp[];
   createdAt: number;
+  /** 성공 없이 끝난 턴(중단·오류·재연결)의 set — 리뷰 카드가 중단 사실을 표시한다 */
+  turnStopped?: boolean;
 }
 
 export type PendingEditsChangeEvent =
