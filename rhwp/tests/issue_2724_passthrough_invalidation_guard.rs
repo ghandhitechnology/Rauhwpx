@@ -148,6 +148,18 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
         "복사 — `self.clipboard` / `self.paste_cascade_count` 만 변경.",
     ),
     (
+        "commands/clipboard.rs",
+        "copy_selection_in_cell_by_path_native",
+        Exempt::SessionState,
+        "복사 — 중첩 셀 선택을 읽어 `self.clipboard` 에만 기록.",
+    ),
+    (
+        "commands/cell_clipboard.rs",
+        "copy_table_cell_range_native",
+        Exempt::SessionState,
+        "복사 — 셀 블록 복제본을 `self.clipboard` / `self.paste_cascade_count` 에만 기록.",
+    ),
+    (
         "commands/document.rs",
         "begin_batch_native",
         Exempt::SessionState,
@@ -332,6 +344,24 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
          무효화 책임은 전적으로 호출자에게 있다.",
     ),
     // ── 위임 ───────────────────────────────────────────────────────────────
+    (
+        "commands/clipboard.rs",
+        "paste_internal_in_cell_native",
+        Exempt::DelegatesTo("paste_internal_in_cell_by_path_native"),
+        "단일 셀 경로 래퍼. 경로 붙여넣기가 구역 raw_stream 무효화를 수행한다.",
+    ),
+    (
+        "commands/cell_clipboard.rs",
+        "paste_table_cell_range_native",
+        Exempt::DelegatesTo("finish_cell_clipboard_edit"),
+        "셀 블록 붙여넣기. 공통 마무리 helper가 구역 raw_stream 무효화를 수행한다.",
+    ),
+    (
+        "commands/cell_clipboard.rs",
+        "clear_table_cell_range_native",
+        Exempt::DelegatesTo("finish_cell_clipboard_edit"),
+        "셀 블록 비우기. 공통 마무리 helper가 구역 raw_stream 무효화를 수행한다.",
+    ),
     (
         "commands/object_ops/table.rs",
         "delete_cell_picture_control_by_path_native",
@@ -669,21 +699,28 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
 /// 증가는 통과하며 갱신을 안내한다. 함수 단위 검사(검사 1)가 못 잡는 "한 함수 안 여러
 /// 무효화 갈래 중 일부만 제거" 를 잡는 것이 목적이다.
 const INVALIDATION_LEDGER: &[(&str, usize)] = &[
-    ("commands/clipboard.rs", 4),
-    ("commands/footnote_ops.rs", 6),
-    ("commands/formatting.rs", 16),
-    ("commands/header_footer_ops.rs", 9),
+    ("commands/caret_edit.rs", 1),
+    ("commands/cell_clipboard.rs", 1),
+    // 단일 셀 붙여넣기가 경로 붙여넣기에 위임하면서 사이트 하나가 합쳐졌다.
+    ("commands/clipboard.rs", 3),
+    ("commands/document_transfer.rs", 3),
+    ("commands/footnote_ops.rs", 9),
+    ("commands/foreign_paste.rs", 3),
+    ("commands/formatting.rs", 18),
+    ("commands/formatting_runs.rs", 2),
+    ("commands/header_footer_ops.rs", 14),
     ("commands/html_import.rs", 5),
     ("commands/object_ops/common.rs", 2),
     ("commands/object_ops/connector.rs", 4),
-    ("commands/object_ops/equation.rs", 3),
+    ("commands/object_ops/equation.rs", 6),
     ("commands/object_ops/note.rs", 3),
-    ("commands/object_ops/picture.rs", 8),
+    ("commands/object_ops/picture.rs", 11),
     ("commands/object_ops/shape.rs", 7),
     ("commands/object_ops/table.rs", 7),
+    ("commands/picture_transform_journal.rs", 1),
     // Structural table edits now share one invalidating finish helper.
     ("commands/table_ops.rs", 14),
-    ("commands/text_editing.rs", 21),
+    ("commands/text_editing.rs", 22),
     ("converters/hwpx_to_hwp.rs", 3),
     ("html_table_import.rs", 2),
     ("hyperlink.rs", 1),
