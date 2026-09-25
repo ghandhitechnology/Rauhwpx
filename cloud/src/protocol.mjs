@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 export const PROTOCOL_VERSION = 1;
 export const ROOM_PROTOCOL_VERSION = 2;
 export const PROVIDERS = Object.freeze(['claude', 'codex', 'pi']);
@@ -44,6 +46,46 @@ export const TRANSFER_LIMITS = Object.freeze({
   maxTimelineBytes: 100 * 1024 ** 2,
   chunkBytes: 4 * 1024 ** 2,
 });
+
+const IMAGE_REFERENCE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
+const DOCUMENT_REFERENCE_EXTENSIONS = new Set([
+  '.txt', '.md', '.markdown', '.csv', '.tsv', '.json', '.xml', '.html', '.htm',
+  '.pdf', '.docx', '.hwp', '.hwpx', '.hml',
+]);
+const MAX_INDEXED_REFERENCE_BYTES = 25 * 1024 * 1024;
+const MAX_INDEXED_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_CHAT_REFERENCE_BYTES = 100 * 1024 * 1024;
+const MAX_CHAT_REFERENCE_FILES = 20;
+
+export function validateCloudReference(name, size) {
+  const extension = path.extname(String(name ?? '')).toLowerCase();
+  if (!IMAGE_REFERENCE_EXTENSIONS.has(extension) && !DOCUMENT_REFERENCE_EXTENSIONS.has(extension)) {
+    throw new CloudError('REFERENCE_TYPE_UNSUPPORTED', `Cloud agents cannot read ${extension || 'extensionless'} attachments`);
+  }
+  const maximum = IMAGE_REFERENCE_EXTENSIONS.has(extension)
+    ? MAX_INDEXED_IMAGE_BYTES : MAX_INDEXED_REFERENCE_BYTES;
+  if (size < 1 || size > maximum) {
+    throw new CloudError('REFERENCE_FILE_TOO_LARGE', `${name} must be 1-${maximum} bytes for cloud agents`);
+  }
+}
+
+export function validateCloudReferenceBudget(references) {
+  const unique = new Map();
+  for (const reference of references) {
+    const previous = unique.get(reference.blobId);
+    if (previous !== undefined && previous !== reference.size) {
+      throw new CloudError('BLOB_SIZE_MISMATCH', 'Reference versions disagree on blob size', 409);
+    }
+    unique.set(reference.blobId, reference.size);
+  }
+  if (unique.size > MAX_CHAT_REFERENCE_FILES) {
+    throw new CloudError('REFERENCE_FILE_COUNT_LIMIT', `Cloud agents can index up to ${MAX_CHAT_REFERENCE_FILES} distinct chat files`, 413);
+  }
+  const bytes = [...unique.values()].reduce((total, size) => total + size, 0);
+  if (bytes > MAX_CHAT_REFERENCE_BYTES) {
+    throw new CloudError('REFERENCE_SCOPE_SIZE_LIMIT', `Cloud agent references exceed the ${MAX_CHAT_REFERENCE_BYTES}-byte chat limit`, 413);
+  }
+}
 
 export const EXECUTION_WORKFLOWS = Object.freeze(['direct', 'plan', 'question']);
 
@@ -111,12 +153,14 @@ export function parseRefresh(value) {
 
 function parseResource(value, index) {
   const input = object(value, `resources[${index}]`);
-  return {
+  const resource = {
     blobId: sha256(input.blobId ?? input.sha256, `resources[${index}].blobId`),
     size: integer(input.size, `resources[${index}].size`, { min: 0, max: TRANSFER_LIMITS.maxReferenceBytes }),
     name: string(input.name, `resources[${index}].name`, { min: 1, max: 255 }),
     kind: string(input.kind, `resources[${index}].kind`, { min: 1, max: 32, pattern: /^(document|reference|timeline|result)$/ }),
   };
+  if (resource.kind === 'reference') validateCloudReference(resource.name, resource.size);
+  return resource;
 }
 
 export function parseSessionCreate(value) {
@@ -129,6 +173,8 @@ export function parseSessionCreate(value) {
   if (!Array.isArray(resources) || resources.length > 200) {
     throw new CloudError('INVALID_REQUEST', 'resources is invalid');
   }
+  const parsedResources = resources.map(parseResource);
+  validateCloudReferenceBudget(parsedResources.filter((resource) => resource.kind === 'reference'));
   const provider = string(input.provider, 'provider', { max: 32 });
   if (!PROVIDERS.includes(provider)) throw new CloudError('INVALID_PROVIDER', 'provider is not supported');
   return {
@@ -165,7 +211,7 @@ export function parseSessionCreate(value) {
       blobId: sha256(origin.blobId ?? origin.sha256, 'originDocument.blobId'),
       size: integer(origin.size, 'originDocument.size', { min: 1, max: TRANSFER_LIMITS.maxDocumentBytes }),
     },
-    resources: resources.map(parseResource),
+    resources: parsedResources,
     timeline: input.timeline === undefined ? null : (() => {
       const timeline = object(input.timeline, 'timeline');
       return {

@@ -36,7 +36,11 @@ function referenceMimeType(name) {
 }
 
 function safeAttachmentFilename(name, fallback) {
-  const base = path.basename(String(name ?? '')).replace(/[^\p{L}\p{N}._ -]/gu, '_').slice(0, 180);
+  const cleaned = path.basename(String(name ?? '')).replace(/[^\p{L}\p{N}._ -]/gu, '_');
+  const extension = path.extname(cleaned);
+  const base = cleaned.length > 180 && extension.length <= 16
+    ? `${cleaned.slice(0, 180 - extension.length)}${extension}`
+    : cleaned.slice(0, 180);
   return base && base !== '.' && base !== '..' ? base : fallback;
 }
 
@@ -504,7 +508,13 @@ export async function runSession({
           version: attachment.version,
         });
       }
-      await harness.addReferences(additions);
+      const indexed = await harness.addReferences(additions);
+      if (Array.isArray(indexed) && indexed.length === additions.length) {
+        indexed.forEach((reference, index) => {
+          if (typeof reference?.fileId === 'string') additions[index].fileId = reference.fileId;
+          if (reference?.kind === 'image' || reference?.kind === 'document') additions[index].kind = reference.kind;
+        });
+      }
       references.push(...additions);
       return additions;
     };

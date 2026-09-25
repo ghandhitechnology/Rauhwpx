@@ -51,6 +51,7 @@ import {
 import { DownloadManager } from './download-manager.mjs';
 import { DocumentSnapshotManager } from './document-snapshot-manager.mjs';
 import { ArtifactStore } from './artifact-store.mjs';
+import { cloudReferenceRoots } from './cloud-reference-roots.mjs';
 import { BrowserbaseFleet, normalizeBrowserbaseOverride, validateBrowserbaseCredentials } from './browserbase-session.mjs';
 import { createProviderHealth } from './provider-health.mjs';
 import { createUsageStore } from './usage-store.mjs';
@@ -148,6 +149,7 @@ if (PRODUCTION && !process.env.RHWP_WORK_DIR) {
   throw Object.assign(new Error('RHWP_WORK_DIR is required in production'), { code: 'HUB_WORK_DIR_REQUIRED' });
 }
 const WORK_ROOT = path.resolve(process.env.RHWP_WORK_DIR || path.join(os.tmpdir(), `rhwp-agent-work-${process.pid}`));
+const CLOUD_REFERENCE_ROOTS = cloudReferenceRoots(WORK_ROOT);
 const RUNTIME_ROOT = process.env.RHWP_RUNTIME_DIR
   ? path.resolve(process.env.RHWP_RUNTIME_DIR)
   : null;
@@ -394,6 +396,7 @@ const sessions = new HubSessionRegistry({
       downloadManager.baseDir,
       documentSnapshotManager.baseDir,
       copyLayoutGeneratedRoot,
+      ...CLOUD_REFERENCE_ROOTS,
     ]);
     return {
       sessionId,

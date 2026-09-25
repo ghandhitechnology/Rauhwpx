@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createWriteStream, promises as fs } from 'node:fs';
 import http from 'node:http';
 import { pipeline } from 'node:stream/promises';
@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const UPLOAD_RETRY_ATTEMPTS = 5;
+const DOWNLOAD_RETRY_ATTEMPTS = 5;
 
 function request(target, token, method, pathname, {
   body,
@@ -172,14 +173,30 @@ export class WorkerClient {
   }
 
   async download(blobId, destination) {
-    const response = await request(this.target, this.token, 'GET', `${this.prefix}/blobs/${blobId}`);
-    if (response.statusCode !== 200) return responseJson(response);
-    const digest = createHash('sha256');
-    response.on('data', (chunk) => digest.update(chunk));
-    await pipeline(response, createWriteStream(destination, { mode: 0o600 }));
-    if (digest.digest('hex') !== blobId) {
-      await fs.rm(destination, { force: true });
-      throw new Error(`Downloaded blob ${blobId} failed digest verification`);
+    for (let attempt = 0; attempt < DOWNLOAD_RETRY_ATTEMPTS; attempt += 1) {
+      const temporary = `${destination}.download-${randomUUID()}`;
+      try {
+        const response = await request(this.target, this.token, 'GET', `${this.prefix}/blobs/${blobId}`);
+        if (response.statusCode !== 200) {
+          await responseJson(response);
+          throw new Error(`Worker blob download returned HTTP ${response.statusCode}`);
+        }
+        const digest = createHash('sha256');
+        response.on('data', (chunk) => digest.update(chunk));
+        await pipeline(response, createWriteStream(temporary, { flags: 'wx', mode: 0o600 }));
+        if (digest.digest('hex') !== blobId) {
+          const error = new Error(`Downloaded blob ${blobId} failed digest verification`);
+          error.code = 'BLOB_DIGEST_MISMATCH';
+          throw error;
+        }
+        await fs.rename(temporary, destination);
+        return;
+      } catch (error) {
+        await fs.rm(temporary, { force: true });
+        if ((error?.code !== 'BLOB_DIGEST_MISMATCH' && !retryableUploadError(error))
+          || attempt === DOWNLOAD_RETRY_ATTEMPTS - 1) throw error;
+        await delay(Math.min(2_000, 100 * (2 ** attempt)));
+      }
     }
   }
 

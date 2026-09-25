@@ -257,6 +257,22 @@ test('required reference indexing fails closed after publishing a bounded diagno
   }]);
 });
 
+test('indexed image references give the provider an exact vision tool target', async () => {
+  const references = [{ name: 'photo.png', mimeType: 'image/png', filename: '/workspace/input/photo.png' }];
+  const indexed = await uploadRequiredReferences({
+    page: { evaluate: async () => ({ id: 'reference-image-1', status: 'ready', kind: 'image' }) },
+    bootstrap: 'b'.repeat(43),
+    origin: 'http://127.0.0.1:7700',
+    references,
+    scopeId: 'thread-reference',
+    onEvent: async () => {},
+  });
+  assert.equal(indexed[0].fileId, 'reference-image-1');
+  const prompt = composeTurnPrompt('Use the attached image', indexed);
+  assert.match(prompt, /reference-image-1/);
+  assert.match(prompt, /read_reference_image/);
+});
+
 test('runSession performs provider turns, checkpoints edits, publishes a portable timeline, and returns edited bytes', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-document-runtime-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -535,6 +551,9 @@ test('persistent runSession stays warm between turns and finishes only after End
           attachments: [{
             attachmentId: 'notes', version: 1, blobId: 'a'.repeat(64),
             name: 'notes.txt', mimeType: 'text/plain', size: 12,
+          }, {
+            attachmentId: 'photo', version: 1, blobId: 'a'.repeat(64),
+            name: `${'long-name-'.repeat(22)}.png`, mimeType: 'image/png', size: 12,
           }],
         }] };
       }
@@ -591,6 +610,7 @@ test('persistent runSession stays warm between turns and finishes only after End
   assert.match(prompts[1], /Apply the follow-up/);
   assert.match(prompts[1], /notes\.txt/);
   assert.equal(addedReferences[0].version, 1);
+  assert.match(addedReferences[1].name, /\.png$/);
   assert.deepEqual(turnModes, ['direct', 'plan']);
   assert.equal(workflowChanges.at(-1), 'plan');
   assert.equal(finishClaims, 4);
