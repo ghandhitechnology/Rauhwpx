@@ -64,6 +64,67 @@ test('nested table paths are accepted on staged cell text tools', () => {
   }
 });
 
+// ─── 텍스트 앵커 (P2.2) ───────────────────────────────────
+// 다섯 쓰기 도구가 anchor 인자를 받고, 좌표/앵커 혼용·누락·잘못된 필드를 validate 훅이
+// INVALID_ARGS 로 거절하는지 본다. 해석 자체(매치/모호성)는 스튜디오 테스트가 본다.
+
+const ANCHORED_TOOLS = ['insert_text', 'delete_range', 'replace_range', 'apply_char_format', 'apply_para_format'];
+
+test('앵커 도구는 anchor 인자를 받고 좌표를 선택 필드로 둔다', () => {
+  for (const name of ANCHORED_TOOLS) {
+    const def = byName.get(name);
+    assert.ok(def.shape.anchor, `${name}: missing anchor param`);
+    assert.ok(def.shape.anchor.safeParse(undefined).success, `${name}: anchor must be optional`);
+    assert.match(def.description, /anchor/i, `${name}: description should mention anchors`);
+    assert.ok(def.validate, `${name}: needs the coord-or-anchor validator`);
+  }
+  // 좌표 도구는 전부 숫자 필드 필수 → 앵커 없으면 누락 에러.
+  assert.throws(() => byName.get('insert_text').validate({ text: 'x' }), /missing sectionIdx\/paraIdx\/charOffset/);
+  assert.throws(() => byName.get('delete_range').validate({}), /missing sectionIdx/);
+  assert.throws(() => byName.get('apply_para_format').validate({ alignment: 'left' }), /missing sectionIdx\/paraIdx/);
+});
+
+test('anchor 와 숫자 좌표는 섞어 쓸 수 없다', () => {
+  const anchor = { text: '결론' };
+  for (const name of ANCHORED_TOOLS) {
+    const def = byName.get(name);
+    assert.throws(
+      () => def.validate({ anchor, sectionIdx: 0 }),
+      /either anchor or coordinates, not both/,
+      `${name}: anchor + sectionIdx must clash`,
+    );
+    // cell/cellPath 도 앵커와 함께면 충돌 (스코프는 anchor.within.cell 로만)
+    assert.throws(
+      () => def.validate({ anchor, cell: { paraIdx: 1, controlIdx: 0, cellIdx: 0 } }),
+      /not both/,
+      `${name}: anchor + cell must clash`,
+    );
+  }
+  // 앵커만 있으면 좌표 없이 통과한다.
+  assert.doesNotThrow(() => byName.get('insert_text').validate({ anchor, text: 'x' }));
+  assert.doesNotThrow(() => byName.get('delete_range').validate({ anchor }));
+  assert.doesNotThrow(() => byName.get('replace_range').validate({ anchor, text: 'y' }));
+  assert.doesNotThrow(() => byName.get('apply_char_format').validate({ anchor, bold: true }));
+  assert.doesNotThrow(() => byName.get('apply_para_format').validate({ anchor, alignment: 'center' }));
+});
+
+test('anchor 내부 필드는 validate 훅이 모양을 고정한다', () => {
+  const def = byName.get('insert_text');
+  const ok = (anchor) => def.validate({ anchor, text: 'x' });
+  const bad = (anchor, re) => assert.throws(() => def.validate({ anchor, text: 'x' }), re);
+  ok({ text: 'a' });
+  ok({ text: 'a', occurrence: 2, position: 'before', within: { sectionIdx: 0, paraRange: [1, 3], cell: { paraIdx: 4, controlIdx: 0, cellIdx: 2 } } });
+  bad('text', /must be an object/);
+  bad({}, /anchor\.text/);
+  bad({ text: '' }, /anchor\.text/);
+  bad({ text: 'a', bogus: 1 }, /unknown anchor key bogus/);
+  bad({ text: 'a', occurrence: 0 }, /occurrence/);
+  bad({ text: 'a', occurrence: 1.5 }, /occurrence/);
+  bad({ text: 'a', position: 'inside' }, /position/);
+  bad({ text: 'a', within: 's0' }, /within must be an object/);
+  bad({ text: 'a', within: { paraIddx: 0 } }, /unknown anchor\.within key/);
+});
+
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
   assert.equal(direct.size, 74);
@@ -344,6 +405,12 @@ test('공유 규칙은 한 번만: 셀 주소·오프셋·리비전·스테이�
   assert.match(RHWP_TOOL_RULES, /expectedRevision/);
   assert.match(RHWP_TOOL_RULES, /recovery guidance in the error message/);
   assert.match(RHWP_TOOL_RULES, /ONE apply_edits call \(up to 32 items\)/);
+  // 앵커 규칙 — 다섯 도구명, occurrence 1-based, 최대 5개 후보, bottom-first 규칙 부재.
+  assert.match(RHWP_TOOL_RULES, /anchor \{text, occurrence\?/);
+  assert.match(RHWP_TOOL_RULES, /occurrence \(1-based\)/);
+  assert.match(RHWP_TOOL_RULES, /up to 5 candidates/);
+  assert.doesNotMatch(RHWP_TOOL_RULES, /bottom-of-document first/);
+  assert.doesNotMatch(byName.get('apply_edits').description, /bottom|맨 뒤|뒤에서/);
   assert.match(RHWP_TOOL_RULES, /전체 접근/);
   assert.match(RHWP_TOOL_RULES, /안전/);
   assert.match(RHWP_TOOL_RULES, /lengths in mm, font sizes in pt/);

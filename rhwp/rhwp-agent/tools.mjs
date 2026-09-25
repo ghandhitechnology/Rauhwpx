@@ -46,13 +46,11 @@ export function cellParam() {
   }).optional().describe('Cell (rhwp tool rules)');
 }
 
-// 경로 항목의 음수 검사는 스튜디오 optCell 이 한다 (도구 7개에 반복되는 스키마라 짧게 둔다).
+// 경로 항목의 키/음수 검사는 스튜디오 optCell 이 한다 (도구 8개에 반복되는 스키마라
+// 항목 모양은 레코드로 두고 키 이름은 describe 에 적는다 — 직접 프로필 크기 한도).
 export function cellPathParam() {
-  return z.array(z.object({
-    controlIndex: z.number().int(),
-    cellIndex: z.number().int(),
-    cellParaIndex: z.number().int(),
-  })).min(1).max(8).optional().describe('Cell path (rhwp tool rules)');
+  return z.array(z.record(z.string(), z.unknown())).min(1).max(8).optional()
+    .describe('Cell path [{controlIndex,cellIndex,cellParaIndex},…] (rhwp tool rules)');
 }
 
 /** set_zone_borders 의 테두리 한 변 스펙. 인스턴스를 공유하면 JSON 스키마에 $ref 가 생기므로 매번 새로 만든다. */
@@ -90,6 +88,75 @@ function zoneCorner(description) {
     row: z.number().int().min(0),
     col: z.number().int().min(0),
   }).strict().describe(description);
+}
+
+/**
+ * 텍스트 앵커 — 숫자 좌표 대신 받는 위치 지정. 5개 도구에 반복되는 스키마라 중첩
+ * 필드는 레코드 + 검증 훅으로 짧게 두고(직접 프로필 크기 한도), 규칙 본문
+ * (occurrence/within/position, 해석 시점, 오류 동작)은 RHWP_TOOL_RULES 에만 둔다.
+ */
+function anchorParam() {
+  return z.record(z.string(), z.unknown()).optional()
+    .describe('{text,occurrence?,within?{sectionIdx?,paraRange?[a,b],cell?{paraIdx,controlIdx,cellIdx}},position? before|after|replace}');
+}
+
+const ANCHOR_KEYS = ['text', 'occurrence', 'within', 'position'];
+const ANCHOR_WITHIN_KEYS = ['sectionIdx', 'paraRange', 'cell'];
+
+/** anchor 내부 필드 검증 — 레코드 스키마가 풀어주는 만큼 여기서 모양을 고정한다. */
+function validateAnchorShape(anchor) {
+  if (typeof anchor !== 'object' || Array.isArray(anchor)) {
+    throw invalidArgs('anchor must be an object {text, occurrence?, within?, position?}');
+  }
+  const unknown = Object.keys(anchor).filter((k) => !ANCHOR_KEYS.includes(k));
+  if (unknown.length > 0) {
+    throw invalidArgs(`unknown anchor key ${unknown.join('/')} — valid keys: ${ANCHOR_KEYS.join(', ')}`);
+  }
+  if (typeof anchor.text !== 'string' || anchor.text.length < 1) {
+    throw invalidArgs('anchor.text must be a non-empty string');
+  }
+  const occurrence = anchor.occurrence;
+  if (occurrence !== undefined && occurrence !== null
+    && (typeof occurrence !== 'number' || !Number.isSafeInteger(occurrence) || occurrence < 1)) {
+    throw invalidArgs('anchor.occurrence must be a 1-based integer (>= 1)');
+  }
+  const position = anchor.position;
+  if (position !== undefined && position !== null
+    && position !== 'before' && position !== 'after' && position !== 'replace') {
+    throw invalidArgs(`anchor.position must be "before" | "after" | "replace" (got ${JSON.stringify(position)})`);
+  }
+  const within = anchor.within;
+  if (within !== undefined && within !== null) {
+    if (typeof within !== 'object' || Array.isArray(within)) {
+      throw invalidArgs('anchor.within must be an object {sectionIdx?, paraRange?, cell?}');
+    }
+    const wk = Object.keys(within).filter((k) => !ANCHOR_WITHIN_KEYS.includes(k));
+    if (wk.length > 0) {
+      throw invalidArgs(`unknown anchor.within key ${wk.join('/')} — valid keys: ${ANCHOR_WITHIN_KEYS.join(', ')}`);
+    }
+  }
+}
+
+/**
+ * anchor 와 숫자 좌표는 둘 중 하나만 받는다 — 스튜디오 executor 도 같은 검사를
+ * 다시 하므로 apply_edits 항목에서도 동일하게 실패한다.
+ * @param {string[]} coordKeys 좌표 방식일 때 반드시 있어야 하는 키
+ * @param {string[]} extraClashKeys anchor 와 함께면 안 되는 추가 키 (cell/cellPath)
+ */
+function validateAnchorTool(args, coordKeys, extraClashKeys = []) {
+  const present = (k) => args[k] !== undefined && args[k] !== null;
+  if (present('anchor')) {
+    const clash = [...coordKeys, ...extraClashKeys].filter(present);
+    if (clash.length > 0) {
+      throw invalidArgs(`pass either anchor or coordinates, not both (got ${clash.join('/')}) — anchor.within scopes the search instead`);
+    }
+    validateAnchorShape(args.anchor);
+    return;
+  }
+  const missing = coordKeys.filter((k) => !present(k));
+  if (missing.length > 0) {
+    throw invalidArgs(`missing ${missing.join('/')} — pass coordinates or an anchor {text, occurrence?, within?, position?}`);
+  }
 }
 
 /** 상하좌우 mm 묶음 (셀 안 여백·표 바깥 여백). */
@@ -651,7 +718,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'apply_edits',
-    description: `Apply 1-32 staged semantic edits in ONE call under one expectedRevision; prefer it whenever you know two or more edits. Each item is {tool, args} with that tool's arguments minus expectedRevision. Items run in order on the previous results — put independent edits bottom-of-document first. Any failure rolls back the whole batch and names the index. ${WRITE_POINTER}`,
+    description: `Apply 1-32 staged semantic edits in ONE call under one expectedRevision; prefer it whenever you know two or more edits. Each item is {tool, args} with that tool's arguments minus expectedRevision. Items run in order on the evolving document — anchored items resolve against the text left by earlier items. Any failure rolls back the whole batch and names the index. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       edits: z.array(z.object({
@@ -662,16 +729,18 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'insert_text',
-    description: `Insert text at charOffset. "\\n" splits paragraphs ("\\r\\n" and "\\r" become "\\n"). At most 10000 chars per call; split longer text across calls. ${WRITE_POINTER}`,
+    description: `Insert text at charOffset or at an anchor. "\\n" splits paragraphs ("\\r\\n" and "\\r" become "\\n"). At most 10000 chars per call; split longer text across calls. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
-      sectionIdx: z.number().int().min(0),
-      paraIdx: z.number().int().min(0),
-      charOffset: z.number().int().min(0),
+      sectionIdx: z.number().int().min(0).optional(),
+      paraIdx: z.number().int().min(0).optional(),
+      charOffset: z.number().int().min(0).optional(),
+      anchor: anchorParam(),
       text: z.string().min(1).max(10000),
       cell: cellParam(),
       cellPath: cellPathParam(),
     },
+    validate: (args) => validateAnchorTool(args, ['sectionIdx', 'paraIdx', 'charOffset'], ['cell', 'cellPath']),
   },
   {
     name: 'template_apply_section_layout',
@@ -719,42 +788,47 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'delete_range',
-    description: `Delete a text range. The text disappears immediately and later coordinates shift; collapsedAt gives the collapse point. Ranges crossing a table are rejected (edit inside with cell/cellPath). To rewrite text prefer replace_range. ${WRITE_POINTER}`,
+    description: `Delete a text range (coordinates or an anchor). The text disappears immediately and later coordinates shift; collapsedAt gives the collapse point. Ranges crossing a table are rejected (edit inside with cell/cellPath). To rewrite text prefer replace_range. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
-      sectionIdx: z.number().int().min(0),
-      startParaIdx: z.number().int().min(0),
-      startCharOffset: z.number().int().min(0),
-      endParaIdx: z.number().int().min(0),
-      endCharOffset: z.number().int().min(0),
+      sectionIdx: z.number().int().min(0).optional(),
+      startParaIdx: z.number().int().min(0).optional(),
+      startCharOffset: z.number().int().min(0).optional(),
+      endParaIdx: z.number().int().min(0).optional(),
+      endCharOffset: z.number().int().min(0).optional(),
+      anchor: anchorParam(),
       cell: cellParam(),
       cellPath: cellPathParam(),
     },
+    validate: (args) => validateAnchorTool(args, ['sectionIdx', 'startParaIdx', 'startCharOffset', 'endParaIdx', 'endCharOffset'], ['cell', 'cellPath']),
   },
   {
     name: 'replace_range',
-    description: `Replace a text range with new text in one atomic op that keeps formatting; prefer it over delete_range + insert_text. Ranges crossing a table are rejected (edit inside with cell/cellPath). ${WRITE_POINTER}`,
+    description: `Replace a text range with new text in one atomic op that keeps formatting; prefer it over delete_range + insert_text. Coordinates or an anchor. Ranges crossing a table are rejected (edit inside with cell/cellPath). ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
-      sectionIdx: z.number().int().min(0),
-      startParaIdx: z.number().int().min(0),
-      startCharOffset: z.number().int().min(0),
-      endParaIdx: z.number().int().min(0),
-      endCharOffset: z.number().int().min(0),
+      sectionIdx: z.number().int().min(0).optional(),
+      startParaIdx: z.number().int().min(0).optional(),
+      startCharOffset: z.number().int().min(0).optional(),
+      endParaIdx: z.number().int().min(0).optional(),
+      endCharOffset: z.number().int().min(0).optional(),
+      anchor: anchorParam(),
       text: z.string().min(1).max(10000),
       cell: cellParam(),
       cellPath: cellPathParam(),
     },
+    validate: (args) => validateAnchorTool(args, ['sectionIdx', 'startParaIdx', 'startCharOffset', 'endParaIdx', 'endCharOffset'], ['cell', 'cellPath']),
   },
   {
     name: 'apply_char_format',
-    description: `Apply character formatting to startOffset..endOffset of one paragraph. At least one format key is required. ${WRITE_POINTER}`,
+    description: `Apply character formatting to startOffset..endOffset of one paragraph, or to an anchor's match. At least one format key is required. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
-      sectionIdx: z.number().int().min(0),
-      paraIdx: z.number().int().min(0),
-      startOffset: z.number().int().min(0),
-      endOffset: z.number().int().min(0),
+      sectionIdx: z.number().int().min(0).optional(),
+      paraIdx: z.number().int().min(0).optional(),
+      startOffset: z.number().int().min(0).optional(),
+      endOffset: z.number().int().min(0).optional(),
+      anchor: anchorParam(),
       cell: cellParam(),
       cellPath: cellPathParam(),
       bold: z.boolean().optional(),
@@ -765,6 +839,7 @@ const BASE_TOOL_DEFINITIONS = [
       textColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
       fontFamily: z.string().min(1).max(64).optional().describe('From get_document_info fontQuery'),
     },
+    validate: (args) => validateAnchorTool(args, ['sectionIdx', 'paraIdx', 'startOffset', 'endOffset'], ['cell', 'cellPath']),
   },
   {
     name: 'create_table',
@@ -881,11 +956,12 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'apply_para_format',
-    description: `Format one paragraph: alignment, line spacing, spacing before/after, indent, margins, pageBreakBefore (how to insert a page break) and list fields — headType "none" clears the list (to create lists prefer apply_list). ${WRITE_POINTER}`,
+    description: `Format one paragraph — by address or by anchor (the match's paragraph): alignment, line spacing, spacing before/after, indent, margins, pageBreakBefore (how to insert a page break) and list fields — headType "none" clears the list (to create lists prefer apply_list). ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
-      sectionIdx: z.number().int().min(0),
-      paraIdx: z.number().int().min(0),
+      sectionIdx: z.number().int().min(0).optional(),
+      paraIdx: z.number().int().min(0).optional(),
+      anchor: anchorParam(),
       cell: cellParam(),
       alignment: z.enum(['left', 'center', 'right', 'justify', 'distribute']).optional(),
       lineSpacingPercent: z.number().min(50).max(500).optional().describe('160 = Korean default'),
@@ -900,6 +976,7 @@ const BASE_TOOL_DEFINITIONS = [
       paraLevel: z.number().int().min(0).max(6).optional(),
       bulletChar: z.string().min(1).optional(),
     },
+    validate: (args) => validateAnchorTool(args, ['sectionIdx', 'paraIdx'], ['cell']),
   },
   {
     name: 'apply_list',
