@@ -1177,13 +1177,16 @@ export type ObjectOp =
         next: { columnCount: number; columnType: number; sameWidth: number; spacing: number };
         prev: { columnCount: number; columnType: number; sameWidth: number; spacing: number };
       };
+      /** 시작 쪽 번호 등 구역 설정 — setSectionDef 로 적용/되돌림 */
+      sectionDef?: { next: Record<string, unknown>; prev: Record<string, unknown> };
     }
   | {
       type: 'headerFooter';
       sectionIdx: number; isHeader: boolean; applyTo: number;
-      text: string;
-      /** 'left'|'center'|'right' 위치의 쪽 번호 필드 추가 */
-      pageNumber?: string;
+      /** HF 전체를 대체하는 문단들 (줄바꿈 없는 문단별 텍스트) */
+      lines: string[];
+      /** 마지막에 붙는 쪽번호 문단 — template 의 {n} 은 \u{0015} 필드로 치환된다 */
+      pageNumber?: { template: string; align: 'left' | 'center' | 'right' };
       /** false = 이 op 이 HF 를 생성했다 (reject 시 삭제) */
       existedBefore: boolean;
       /** 기존 HF 수정: HF 컨트롤을 품은 본문 문단 (문단 보관 대상) */

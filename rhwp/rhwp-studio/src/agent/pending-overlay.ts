@@ -956,10 +956,10 @@ export class PendingOverlayRenderer {
         const rects: SelectionRect[] = [];
         for (const page of wasm.getAllPageInfo()) {
           if (page.sectionIndex !== ref.sectionIdx) continue;
-          // applyTo 0 = 양쪽, 1 = 홀수, 2 = 짝수 전용 머리말/꼬리말
+          // applyTo 0 = 양쪽, 1 = 짝수, 2 = 홀수 전용 머리말/꼬리말 (엔진 HeaderFooterApply)
           const parity = page.pageNumber ?? page.pageIndex + 1;
-          if (ref.applyTo === 1 && parity % 2 === 0) continue;
-          if (ref.applyTo === 2 && parity % 2 === 1) continue;
+          if (ref.applyTo === 1 && parity % 2 === 1) continue;
+          if (ref.applyTo === 2 && parity % 2 === 0) continue;
           const band = resolveHeaderFooterBandBox(page, ref.isHeader);
           if (band.width > 0 && band.height > 0) {
             rects.push({ pageIndex: page.pageIndex, x: band.x, y: band.y, width: band.width, height: band.height });

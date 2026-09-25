@@ -4611,49 +4611,138 @@ export class AgentToolExecutor {
     if (sectionIdx < 0 || sectionIdx >= wasm.getSectionCount()) {
       throw new AgentToolError('INVALID_ARGS', `sectionIdx ${sectionIdx} out of range`);
     }
-    const which = reqString(args, 'which');
-    if (which !== 'header' && which !== 'footer') {
-      throw new AgentToolError('INVALID_ARGS', 'which must be "header" or "footer"');
-    }
-    const text = reqString(args, 'text');
-    if (text.length > 500 || text.includes('\n')) {
-      throw new AgentToolError('INVALID_ARGS', 'text must be a single line of at most 500 chars');
-    }
-    const pageNumber = args['pageNumber'];
-    if (pageNumber !== undefined && pageNumber !== null
-      && (typeof pageNumber !== 'string' || !['left', 'center', 'right'].includes(pageNumber))) {
-      throw new AgentToolError('INVALID_ARGS', 'pageNumber must be "left"|"center"|"right"');
-    }
-    if (text.length === 0 && !pageNumber) {
-      throw new AgentToolError('INVALID_ARGS', 'text or pageNumber is required');
-    }
-    const isHeader = which === 'header';
-    const applyTo = 0; // Both — 이 도구는 항상 양쪽 페이지 대상 컨트롤을 쓴다
-    let existedBefore = false;
-    let oddEvenExists = false;
-    try {
-      const raw = JSON.parse(wasm.getHeaderFooter(sectionIdx, isHeader, applyTo)) as { exists?: boolean };
-      existedBefore = raw?.exists === true;
-      // 홀수/짝수 전용 컨트롤(applyTo 1/2)은 교체 대상이 아니므로 따로 조회해
-      // "없다"고 잘못 안내한 채 중복 컨트롤을 만드는 일을 막는다.
-      for (const scoped of [1, 2]) {
-        const r = JSON.parse(wasm.getHeaderFooter(sectionIdx, isHeader, scoped)) as { exists?: boolean };
-        if (r?.exists === true) oddEvenExists = true;
+
+    // 내용 인자: lines[] (한 항목 = 한 문단). 구형 `text` 는 한 줄짜리 lines 로 읽는다.
+    let lines: string[] | undefined;
+    const linesArg = args['lines'];
+    if (linesArg !== undefined && linesArg !== null) {
+      if (!Array.isArray(linesArg) || linesArg.length > 32
+        || linesArg.some((l) => typeof l !== 'string' || l.length > 500 || /[\r\n]/.test(l as string))) {
+        throw new AgentToolError('INVALID_ARGS', 'lines must be an array of up to 32 single-line strings of at most 500 chars');
       }
-    } catch { /* 조회 실패 시 신규 취급 */ }
-    const obj: ObjectOp = {
-      type: 'headerFooter', sectionIdx, isHeader, applyTo, text,
-      ...(typeof pageNumber === 'string' ? { pageNumber } : {}),
-      existedBefore,
+      lines = linesArg as string[];
+    } else if (typeof args['text'] === 'string') {
+      const text = args['text'];
+      if (text.length > 500 || /[\r\n]/.test(text)) {
+        throw new AgentToolError('INVALID_ARGS', 'text must be a single line of at most 500 chars');
+      }
+      lines = [text];
+    }
+
+    // 쪽번호 문단: {template, align}. 구형 문자열 'left'|'center'|'right' 도 받는다.
+    let pageNumber: { template: string; align: 'left' | 'center' | 'right' | 'outside' } | undefined;
+    const pnArg = args['pageNumber'];
+    if (typeof pnArg === 'string') {
+      if (!['left', 'center', 'right'].includes(pnArg)) {
+        throw new AgentToolError('INVALID_ARGS', 'pageNumber must be {template, align} or "left"|"center"|"right"');
+      }
+      pageNumber = { template: '{n}', align: pnArg as 'left' | 'center' | 'right' };
+    } else if (pnArg !== undefined && pnArg !== null) {
+      const rec = asRecord(pnArg);
+      const template = rec['template'] ?? '{n}';
+      const align = rec['align'] ?? 'center';
+      if (typeof template !== 'string' || template.length > 500 || /[\r\n]/.test(template)) {
+        throw new AgentToolError('INVALID_ARGS', 'pageNumber.template must be a single line of at most 500 chars');
+      }
+      if (!template.includes('{n}') && !template.includes('{total}')) {
+        throw new AgentToolError('INVALID_ARGS', 'pageNumber.template must contain {n} (and may contain {total})');
+      }
+      if (!['left', 'center', 'right', 'outside'].includes(align as string)) {
+        throw new AgentToolError('INVALID_ARGS', 'pageNumber.align must be "left"|"center"|"right"|"outside"');
+      }
+      pageNumber = { template, align: align as 'left' | 'center' | 'right' | 'outside' };
+    }
+
+    const startPageNumber = args['startPageNumber'];
+    if (startPageNumber !== undefined && startPageNumber !== null
+      && (typeof startPageNumber !== 'number' || !Number.isSafeInteger(startPageNumber)
+        || startPageNumber < 0 || startPageNumber > 32767)) {
+      throw new AgentToolError('INVALID_ARGS', 'startPageNumber must be an integer 0..32767 (0 = continue)');
+    }
+
+    const hasHfContent = lines !== undefined || pageNumber !== undefined;
+    if (!hasHfContent && startPageNumber === undefined) {
+      throw new AgentToolError('INVALID_ARGS', 'at least one of lines, pageNumber or startPageNumber is required');
+    }
+
+    const isHeader = args['which'] === undefined ? undefined : reqString(args, 'which') === 'header';
+    if (hasHfContent) {
+      if (args['which'] !== 'header' && args['which'] !== 'footer') {
+        throw new AgentToolError('INVALID_ARGS', 'which must be "header" or "footer"');
+      }
+    }
+    const applyToArg = args['applyTo'] ?? 'both';
+    if (applyToArg !== 'both' && applyToArg !== 'odd' && applyToArg !== 'even') {
+      throw new AgentToolError('INVALID_ARGS', 'applyTo must be "both"|"odd"|"even"');
+    }
+
+    // 엔진 HeaderFooterApply: 0=Both, 1=Even, 2=Odd
+    const ENGINE_APPLY = { both: 0, even: 1, odd: 2 } as const;
+    const outside = pageNumber?.align === 'outside';
+    const alignFor = (scope: 'both' | 'odd' | 'even'): 'left' | 'center' | 'right' => {
+      const a = pageNumber?.align ?? 'center';
+      if (a !== 'outside') return a;
+      return scope === 'even' ? 'left' : 'right'; // 바깥쪽: 홀수=오른쪽, 짝수=왼쪽
     };
-    const r = this.deps.pending.addObjectOp(agent, obj);
-    const note = (oddEvenExists
-      ? `this section also has an odd/even-page-only ${which} which this tool does NOT replace — the new both-pages ${which} may render alongside it. `
-      : '') + (existedBefore ? `the existing ${which} text was replaced.` : '');
+    // 'outside' 는 양쪽 스코프 쌍으로만 표현할 수 있다 — 홀수 오른쪽 + 짝수 왼쪽
+    const scopes: Array<'both' | 'odd' | 'even'> = outside && applyToArg === 'both'
+      ? ['odd', 'even']
+      : [applyToArg as 'both' | 'odd' | 'even'];
+
+    const hfExists = (isHdr: boolean, apply: number): boolean => {
+      try {
+        const raw = JSON.parse(wasm.getHeaderFooter(sectionIdx, isHdr, apply)) as { exists?: boolean };
+        return raw?.exists === true;
+      } catch {
+        return false;
+      }
+    };
+
+    const ops: ObjectOp[] = [];
+    const notes: string[] = [];
+    if (hasHfContent) {
+      const isHdr = isHeader === true;
+      for (const scope of scopes) {
+        const applyTo = ENGINE_APPLY[scope];
+        const existedBefore = hfExists(isHdr, applyTo);
+        const align = alignFor(scope);
+        ops.push({
+          type: 'headerFooter', sectionIdx, isHeader: isHdr, applyTo,
+          lines: lines ?? [],
+          ...(pageNumber ? { pageNumber: { template: pageNumber.template, align } } : {}),
+          existedBefore,
+        });
+        if (existedBefore) notes.push(`the existing ${scope === 'both' ? '' : `${scope}-page `}${isHdr ? 'header' : 'footer'} was replaced.`);
+      }
+      // 형제 스코프 컨트롤이 남아 있으면 엔진 우선순위(홀/짝 전용 > 양쪽)로 나란히 그려진다
+      const written = new Set(scopes.map((s) => ENGINE_APPLY[s]));
+      const siblings = ([0, 1, 2] as const).filter((a) => !written.has(a) && hfExists(isHdr, a));
+      if (siblings.length > 0) {
+        const names = siblings.map((a) => a === 0 ? 'both-pages' : a === 1 ? 'even-page' : 'odd-page').join('/');
+        notes.push(`this section also has a ${names} ${isHdr ? 'header' : 'footer'} that stays — odd/even-specific controls win over both-pages ones on their pages.`);
+      }
+    }
+    if (startPageNumber !== undefined && startPageNumber !== null) {
+      const prev = wasm.getSectionDef(sectionIdx) as unknown as Record<string, unknown>;
+      ops.push({
+        type: 'pageLayout', sectionIdx,
+        sectionDef: { prev, next: { ...prev, pageNum: startPageNumber } },
+      });
+      notes.push(`page numbering now starts at ${startPageNumber}.`);
+    }
+
+    const stage = () => {
+      let changeSetId = '';
+      for (const obj of ops) changeSetId = this.deps.pending.addObjectOp(agent, obj).changeSetId;
+      return changeSetId;
+    };
+    const changeSetId = ops.length === 1
+      ? stage()
+      : this.deps.pending.runAtomicBatch(stage);
     return {
       revision: this.revision,
-      changeSetId: r.changeSetId,
-      ...(note.trim().length > 0 ? { note: note.trim() } : {}),
+      changeSetId,
+      ...(notes.length > 0 ? { note: notes.join(' ') } : {}),
     };
   }
 

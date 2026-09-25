@@ -154,7 +154,7 @@ try {
     }]]);
     await commit([
       ['insert_footnote', { sectionIdx: 0, paraIdx: ctx.p('First'), charOffset: 5, text: 'A note.' }],
-      ['edit_header_footer', { sectionIdx: 0, which: 'header', text: 'Parity header' }],
+      ['edit_header_footer', { sectionIdx: 0, which: 'header', lines: ['Parity header'] }],
     ]);
   }
 
@@ -172,8 +172,14 @@ try {
     ['insert_footnote', (c) => [['insert_footnote', { sectionIdx: 0, paraIdx: c.p('Closing'), charOffset: 3, text: 'Second note.' }]]],
     ['edit_footnote', (c) => [['edit_footnote', { sectionIdx: 0, paraIdx: c.note.paraIdx, controlIdx: c.note.controlIdx, text: 'Edited note.' }]]],
     ['set_bookmark', (c) => [['set_bookmark', { op: 'add', name: 'parity', sectionIdx: 0, paraIdx: c.p('Closing'), charOffset: 1 }]]],
-    ['edit_header_footer existing', () => [['edit_header_footer', { sectionIdx: 0, which: 'header', text: 'Replaced header' }]]],
-    ['edit_header_footer new', () => [['edit_header_footer', { sectionIdx: 0, which: 'footer', text: 'Page ', pageNumber: 'right' }]]],
+    ['edit_header_footer existing', () => [['edit_header_footer', { sectionIdx: 0, which: 'header', lines: ['Replaced header', 'second line'] }]]],
+    ['edit_header_footer new', () => [['edit_header_footer', {
+      sectionIdx: 0, which: 'footer', pageNumber: { template: 'Page {n}', align: 'right' },
+    }]]],
+    // 바깥쪽 쪽번호 + 시작 번호: 홀수-오른쪽/짝수-왼쪽 꼬리말 쌍과 SectionDef.pageNum 이 한 세트로 스테이징된다
+    ['edit_header_footer outside + startPageNumber', () => [['edit_header_footer', {
+      sectionIdx: 0, which: 'footer', pageNumber: { template: '- {n} -', align: 'outside' }, startPageNumber: 3,
+    }]]],
     ['set_page_layout', () => [['set_page_layout', { sectionIdx: 0, marginsMm: { left: 25, right: 25 } }]]],
     ['insert_equation', (c) => [['insert_equation', { sectionIdx: 0, paraIdx: c.p('Closing'), charOffset: 2, script: 'x over y' }]]],
     ['insert_image', (c) => [['insert_image', {

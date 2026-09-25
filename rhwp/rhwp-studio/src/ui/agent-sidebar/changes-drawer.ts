@@ -225,7 +225,8 @@ function pendingObjectDetail(op: PendingOp): string {
     case 'pageLayout': return '쪽 설정 변경';
     case 'headerFooter': {
       const kind = obj.isHeader ? '머리말' : '꼬리말';
-      return `${kind} ${obj.existedBefore ? '변경' : '삽입'}${obj.text ? ` · ${obj.text}` : ''}`;
+      const preview = obj.lines.filter((line) => line.length > 0).join(' / ');
+      return `${kind} ${obj.existedBefore ? '변경' : '삽입'}${preview ? ` · ${preview}` : ''}`;
     }
     case 'insertNote': return `${obj.noteKind === 'endnote' ? '미주' : '각주'} 삽입 · ${obj.text}`;
     case 'setNoteText': return `각주/미주 변경 · ${obj.text}`;

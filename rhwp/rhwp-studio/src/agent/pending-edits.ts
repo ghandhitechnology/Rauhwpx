@@ -173,6 +173,11 @@ function scalarLen(s: string): number {
   return [...s].length;
 }
 
+/** 머리말/꼬리말 텍스트의 {n}/{total} 플레이스홀더를 엔진 필드 문자로 치환한다 */
+function hfFieldMarkers(s: string): string {
+  return s.replaceAll('{n}', '\u{0015}').replaceAll('{total}', '\u{0016}');
+}
+
 type TableTargetOp = Extract<ObjectOp, { tableParaIdx: number }>;
 
 /** 기존 표를 (tableParaIdx, controlIdx) 로 가리키는 객체 op 인가 */
@@ -1704,14 +1709,26 @@ export class PendingEditManager {
           const c = obj.columns.next;
           wasm.setColumnDef(obj.sectionIdx, c.columnCount, c.columnType, c.sameWidth, c.spacing);
         }
+        if (obj.sectionDef) {
+          const r = wasm.setSectionDef(obj.sectionIdx, obj.sectionDef.next as never);
+          if (r?.ok === false) throw new AgentToolError('RPC_ERROR', 'setSectionDef failed');
+        }
         return;
       }
       case 'headerFooter': {
-        // 기존 HF 는 문단 0 텍스트를 교체하고(문단 보관본으로 되돌림), 없으면 새로 만든다
-        if (!obj.existedBefore) {
-          this.parseOk(wasm.createHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo), 'createHeaderFooter');
+        // 기존 HF 는 내용을 통째로 교체하고(문단 보관본으로 되돌림), 없으면 새로 만든다
+        if (obj.existedBefore) {
+          this.writeHeaderFooterContent(obj);
+          return;
         }
-        this.writeHeaderFooterContent(obj, obj.existedBefore);
+        this.parseOk(wasm.createHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo), 'createHeaderFooter');
+        try {
+          this.writeHeaderFooterContent(obj);
+        } catch (error) {
+          // 내용 쓰기 실패 시 만든 HF 를 남기지 않는다 — 등록되지 않은 op 라 역연산이 없다
+          try { wasm.deleteHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo); } catch { /* best effort */ }
+          throw error;
+        }
         return;
       }
       case 'insertNote': {
@@ -1875,6 +1892,7 @@ export class PendingEditManager {
             const c = obj.columns.prev;
             wasm.setColumnDef(obj.sectionIdx, c.columnCount, c.columnType, c.sameWidth, c.spacing);
           }
+          if (obj.sectionDef) wasm.setSectionDef(obj.sectionIdx, obj.sectionDef.prev as never);
           return true;
         }
         case 'headerFooter': {
@@ -2430,32 +2448,37 @@ export class PendingEditManager {
     }
   }
 
-  /** HF 문단 0 에 텍스트(+쪽번호 필드)를 쓴다. replace=true 면 기존 문단 0 텍스트를 지운다. */
+  /**
+   * HF 전체 내용을 한 번의 범위 치환으로 쓴다 — lines 의 각 항목이 한 문단이 되고,
+   * pageNumber 가 있으면 그 템플릿이 마지막 문단으로 붙는다. `{n}`/`{total}` 은
+   * 엔진 필드 문자(\u{0015}/\u{0016})로 치환해 텍스트로 넣는다 (insertTextAt 은
+   * 제어 문자를 그대로 저장하고 렌더러가 쪽번호로 해석한다).
+   */
   private writeHeaderFooterContent(
-    obj: Extract<ObjectOp, { type: 'headerFooter' }>, replace = false,
+    obj: Extract<ObjectOp, { type: 'headerFooter' }>,
   ): void {
     const wasm = this.deps.wasm;
-    if (replace) {
-      try {
-        const info = JSON.parse(wasm.getHeaderFooterParaInfo(obj.sectionIdx, obj.isHeader, obj.applyTo, 0)) as { length?: number; charCount?: number };
-        const len = info?.length ?? info?.charCount ?? 0;
-        if (len > 0) wasm.deleteTextInHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo, 0, 0, len);
-      } catch { /* 문단 정보 조회 실패 시 그냥 덧붙인다 */ }
-    }
-    let off = 0;
-    if (obj.text.length > 0) {
-      this.parseOkLenient(
-        wasm.insertTextInHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo, 0, 0, obj.text),
-        'insertTextInHeaderFooter',
-      );
-      off = scalarLen(obj.text); // 스칼라 단위 (astral 문자 대응)
-    }
+    const paras = obj.lines.map(hfFieldMarkers);
+    if (obj.pageNumber) paras.push(hfFieldMarkers(obj.pageNumber.template));
+    const first = JSON.parse(
+      wasm.getHeaderFooterParaInfo(obj.sectionIdx, obj.isHeader, obj.applyTo, 0),
+    ) as { paraCount?: number; charCount?: number };
+    const paraCount = Math.max(1, first?.paraCount ?? 1);
+    const lastLen = paraCount === 1
+      ? (first?.charCount ?? 0)
+      : ((JSON.parse(
+        wasm.getHeaderFooterParaInfo(obj.sectionIdx, obj.isHeader, obj.applyTo, paraCount - 1),
+      ) as { charCount?: number })?.charCount ?? 0);
+    const res = wasm.replaceRangeInHeaderFooter(
+      obj.sectionIdx, obj.isHeader, obj.applyTo, 0, 0, paraCount - 1, lastLen, paras.join('\n'),
+    );
+    if (res?.ok === false) throw new AgentToolError('RPC_ERROR', 'replaceRangeInHeaderFooter failed');
     if (obj.pageNumber) {
-      wasm.insertFieldInHf(obj.sectionIdx, obj.isHeader, obj.applyTo, 0, off, 1); // 1 = 쪽 번호
-      const align = obj.pageNumber === 'left' || obj.pageNumber === 'right' || obj.pageNumber === 'center'
-        ? obj.pageNumber : 'center';
       try {
-        wasm.applyParaFormatInHf(obj.sectionIdx, obj.isHeader, obj.applyTo, 0, JSON.stringify({ alignment: align }));
+        wasm.applyParaFormatInHf(
+          obj.sectionIdx, obj.isHeader, obj.applyTo, paras.length - 1,
+          JSON.stringify({ alignment: obj.pageNumber.align }),
+        );
       } catch { /* 정렬은 best-effort */ }
     }
   }

@@ -103,10 +103,13 @@ function makeEnv(headerFooterExists = true) {
     getParaPropertiesAt: () => ({ paraShapeId: 3, alignment: 'left' }),
     applyParaFormat: () => okJson(),
     getHeaderFooter: () => JSON.stringify({ exists: headerFooterExists, paraIndex: 0 }),
-    getHeaderFooterParaInfo: () => JSON.stringify({ length: 5 }),
+    getHeaderFooterParaInfo: () => JSON.stringify({ ok: true, paraCount: 1, charCount: 5 }),
     deleteTextInHeaderFooter: () => {},
     insertTextInHeaderFooter: () => okJson(),
+    replaceRangeInHeaderFooter: () => ({ ok: true, hfParaIndex: 0, charOffset: 0 }),
     createHeaderFooter: () => okJson(),
+    deleteHeaderFooter: () => {},
+    applyParaFormatInHf: () => okJson(),
     setPageDef: () => ({ ok: true }),
     // 문단 보관본
     captureParagraph: () => 7,
@@ -220,7 +223,7 @@ test('기존 머리말·쪽 설정 변경은 modify 마커를, 새 머리말은 
   const { pending, ops } = makeEnv();
   pending.addObjectOp('codex', {
     type: 'headerFooter', sectionIdx: 0, isHeader: true, applyTo: 0,
-    text: '새 머리말', existedBefore: true,
+    lines: ['새 머리말'], existedBefore: true,
   });
   let op = ops().at(-1)!;
   assert.equal(op.kind, 'modify');
@@ -234,7 +237,7 @@ test('기존 머리말·쪽 설정 변경은 modify 마커를, 새 머리말은 
   const fresh = makeEnv(false);
   fresh.pending.addObjectOp('codex', {
     type: 'headerFooter', sectionIdx: 0, isHeader: false, applyTo: 0,
-    text: '새 꼬리말', existedBefore: false,
+    lines: ['새 꼬리말'], existedBefore: false,
   });
   op = fresh.ops().at(-1)!;
   assert.equal(op.kind, 'insert');

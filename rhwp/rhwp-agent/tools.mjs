@@ -73,7 +73,7 @@ function regionMmParam() {
     y: z.number(),
     width: z.number().positive(),
     height: z.number().positive(),
-  }).strict().optional();
+  }).optional();
 }
 
 /** 참조 이미지 원본 픽셀 기준 잘라내기 상자 (insert_image / read_reference_image). */
@@ -83,7 +83,7 @@ function cropPxParam(description) {
     y: z.number().int().min(0),
     width: z.number().int().min(1),
     height: z.number().int().min(1),
-  }).strict().optional();
+  }).optional();
 }
 
 /** set_zone_borders 의 범위 모서리 좌표. */
@@ -91,7 +91,7 @@ function zoneCorner(description) {
   return z.object({
     row: z.number().int(),
     col: z.number().int(),
-  }).strict().describe(description);
+  }).describe(description);
 }
 
 /** 상하좌우 mm 묶음 (셀 안 여백·표 바깥 여백·문단 테두리 여백). */
@@ -659,7 +659,7 @@ const BASE_TOOL_DEFINITIONS = [
       operations: z.array(z.object({
         method: z.string().min(1),
         args: z.array(z.unknown()),
-      }).strict()).min(1).max(32),
+      })).min(1).max(32),
     },
   },
   {
@@ -679,7 +679,7 @@ const BASE_TOOL_DEFINITIONS = [
       edits: z.array(z.object({
         tool: z.enum(BATCHABLE_EDIT_TOOL_NAMES),
         args: z.record(z.string(), z.unknown()),
-      }).strict()).min(1).max(32),
+      })).min(1).max(32),
     },
   },
   {
@@ -704,7 +704,7 @@ const BASE_TOOL_DEFINITIONS = [
       mappings: z.array(z.object({
         templateSectionIdx: z.number().int().min(0),
         targetSectionIdx: z.number().int().min(0),
-      }).strict()).min(1).max(100),
+      })).min(1).max(100),
       components: z.array(z.enum(['page', 'columns', 'headersFooters', 'borders', 'sectionDefaults'])).min(1).optional(),
     },
   },
@@ -714,8 +714,8 @@ const BASE_TOOL_DEFINITIONS = [
     shape: {
       expectedRevision: z.number().int(),
       templateRevision: z.number().int().min(1),
-      source: z.object({ sectionIdx: z.number().int().min(0), paraIdx: z.number().int().min(0) }).strict(),
-      targets: z.array(z.object({ sectionIdx: z.number().int().min(0), paraIdx: z.number().int().min(0) }).strict()).min(1).max(500),
+      source: z.object({ sectionIdx: z.number().int().min(0), paraIdx: z.number().int().min(0) }),
+      targets: z.array(z.object({ sectionIdx: z.number().int().min(0), paraIdx: z.number().int().min(0) })).min(1).max(500),
     },
   },
   {
@@ -728,12 +728,12 @@ const BASE_TOOL_DEFINITIONS = [
         sectionIdx: z.number().int().min(0),
         startParaIdx: z.number().int().min(0),
         endParaIdx: z.number().int().min(0),
-      }).strict(),
+      }),
       target: z.object({
         sectionIdx: z.number().int().min(0),
         paraIdx: z.number().int().min(0),
         charOffset: z.number().int().min(0),
-      }).strict(),
+      }),
     },
     validate: (args) => {
       if (args.source.endParaIdx < args.source.startParaIdx) throw invalidArgs('template_insert_block source range is reversed');
@@ -835,13 +835,13 @@ const BASE_TOOL_DEFINITIONS = [
       columnWidthsMm: z.array(z.number()).min(1).optional(),
       row: z.number().int().optional(),
       col: z.number().int().optional(),
-      formula: z.string().min(1).optional().describe('e.g. "=SUM(A1:B3)", "=AVG(left)", "=A1*1.1"'),
+      formula: z.string().min(1).optional().describe('e.g. "=SUM(A1:B3)"'),
       format: z.object({
         decimalPlaces: z.number().int().optional(),
         thousandsSeparator: z.boolean().optional(),
         prefix: z.string().optional(),
         suffix: z.string().optional(),
-      }).strict().optional().describe('e.g. {decimalPlaces:0, thousandsSeparator:true, suffix:"원"}'),
+      }).optional(),
       text: z.string().optional(),
       withNumber: z.boolean().optional(),
     },
@@ -887,10 +887,10 @@ const BASE_TOOL_DEFINITIONS = [
       borderTop: borderSpec(),
       borderBottom: borderSpec(),
       fillColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
-      diagonalLine: z.number().int().min(0).max(15).optional(),
-      diagonalSlash: z.number().int().min(0).max(7).optional(),
-      diagonalBackSlash: z.number().int().min(0).max(7).optional(),
-      diagonalWidth: z.number().int().min(0).max(6).optional(),
+      diagonalLine: z.number().int().optional(),
+      diagonalSlash: z.number().int().optional(),
+      diagonalBackSlash: z.number().int().optional(),
+      diagonalWidth: z.number().int().optional(),
       diagonalColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
       centerLine: z.enum(['NONE', 'VERTICAL', 'HORIZONTAL', 'CROSS']).optional(),
     },
@@ -915,7 +915,7 @@ const BASE_TOOL_DEFINITIONS = [
       cell: cellParam(),
       cellPath: cellPathParam(),
       alignment: z.enum(['left', 'center', 'right', 'justify', 'distribute']).optional(),
-      lineSpacingPercent: z.number().min(50).optional().describe('160 = Korean default'),
+      lineSpacingPercent: z.number().optional().describe('160 = Korean default'),
       lineSpacingType: z.enum(['percent', 'fixed', 'atLeast', 'spaceOnly']).optional(),
       lineSpacingPt: z.number().positive().optional(),
       spaceBeforePt: z.number().optional(),
@@ -925,12 +925,12 @@ const BASE_TOOL_DEFINITIONS = [
       marginRightPt: z.number().optional(),
       pageBreakBefore: z.boolean().optional(),
       tabStops: z.array(tabStopParam()).optional().describe('Replaces all tab stops; [] clears'),
-      borders: paraBordersParam().describe('{left|right|top|bottom: {type,widthMm,color}}; type 0 clears'),
+      borders: paraBordersParam().describe('type 0 clears'),
       borderSpacingMm: sidesMm(),
       koreanBreakUnit: z.enum(['word', 'char']).optional(),
       headType: z.enum(['none', 'number', 'bullet', 'outline']).optional(),
-      numberingId: z.number().int().min(0).optional(),
-      paraLevel: z.number().int().min(0).max(6).optional(),
+      numberingId: z.number().int().optional(),
+      paraLevel: z.number().int().max(6).optional(),
       bulletChar: z.string().min(1).optional(),
     },
   },
@@ -943,9 +943,9 @@ const BASE_TOOL_DEFINITIONS = [
       startParaIdx: z.number().int().min(0),
       endParaIdx: z.number().int().min(0),
       format: z.enum(['1.', '1)', '(1)', '①', 'a.', 'a)', 'A.', 'A)', 'I.', 'i.', 'i)', '가.', 'ㄱ.']).optional(),
-      level: z.number().int().min(0).max(6).default(0).optional(),
-      startNumber: z.number().int().min(1).optional(),
-      bulletChar: z.string().min(1).optional(),
+      level: z.number().int().max(6).default(0).optional(),
+      startNumber: z.number().int().optional(),
+      bulletChar: z.string().optional(),
     },
     validate: validateApplyList,
   },
@@ -1077,13 +1077,18 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'edit_header_footer',
-    description: `Create or replace a section's header or footer on all pages: one line of text plus an optional page-number field. Applies immediately; replacing discards existing content, so check it with render_page first. ${WRITE_POINTER}`,
+    description: `Create or replace a section's header or footer: lines = its paragraphs; pageNumber appends a numbered line {template: "{n}" = page, "{total}" = page count; align: left|center|right|outside — outside writes an odd-right/even-left pair}; applyTo both|odd|even; startPageNumber restarts numbering there (0 = continue). Replacing discards existing content. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
-      which: z.enum(['header', 'footer']),
-      text: z.string().describe('"" for page number only'),
-      pageNumber: z.enum(['left', 'center', 'right']).optional(),
+      which: z.enum(['header', 'footer']).optional(),
+      applyTo: z.enum(['both', 'odd', 'even']).optional(),
+      lines: z.array(z.string()).optional().describe('each item = one paragraph'),
+      pageNumber: z.object({
+        template: z.string().optional(),
+        align: z.enum(['left', 'center', 'right', 'outside']).optional(),
+      }).optional(),
+      startPageNumber: z.number().int().optional(),
     },
   },
   {

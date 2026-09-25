@@ -503,6 +503,24 @@ test('apply_para_format: 줄간격 유형/탭/테두리/한글 줄나눔 + cellP
   assert.ok(!shape.cellPath.safeParse([]).success);
 });
 
+test('edit_header_footer: applyTo/lines/pageNumber/startPageNumber 스키마', () => {
+  const { shape, description } = byName.get('edit_header_footer');
+  assert.match(description, /outside/);
+  assert.match(description, /\{n\}/);
+  assert.match(description, /startPageNumber/);
+  for (const key of ['applyTo', 'lines', 'pageNumber', 'startPageNumber']) {
+    assert.ok(key in shape, `edit_header_footer missing ${key}`);
+  }
+  assert.ok(!('text' in shape), 'legacy text field must be gone');
+  assert.ok(shape.applyTo.safeParse('odd').success);
+  assert.ok(shape.applyTo.safeParse('even').success);
+  assert.ok(!shape.applyTo.safeParse('first').success);
+  assert.ok(shape.lines.safeParse(['a', '', 'c']).success);
+  assert.ok(shape.pageNumber.safeParse({ template: '- {n} -', align: 'outside' }).success);
+  assert.ok(!shape.pageNumber.safeParse({ align: 'middle' }).success);
+  assert.ok(shape.startPageNumber.safeParse(0).success);
+});
+
 test('toToolContent: image 필드가 있으면 image 블록 + 나머지 JSON', () => {
   const blocks = toToolContent({ image: { data: 'aGVsbG8=', mimeType: 'image/png' }, revision: 7, pages: [2] });
   assert.equal(blocks.length, 2);
