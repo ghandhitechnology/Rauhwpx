@@ -9,13 +9,14 @@
 import type { WasmBridge } from '../core/wasm-bridge.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
-import type { CellPathEntry, DocumentPosition } from '../core/types.ts';
+import type { CellPathEntry, ControlLayoutItem, DocumentPosition, LineLayoutItem } from '../core/types.ts';
 import type { RevisionTracker } from './revision.ts';
 import type { PendingEditManager } from './pending-edits.ts';
 import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, DocumentTemplate, ObjectOp, PendingOp, PermissionProfile } from './types.ts';
 import { AgentToolError } from './types.ts';
 import { EditJournal } from './edit-journal.ts';
 import { renderChartPng, validateChartSpec } from './chart-render.ts';
+import { cropImageOnCanvas, REFERENCE_READ_MAX_PIXELS, type ImageCropper, type PixelBox } from './image-crop.ts';
 import type { ChartSpec } from './chart-render.ts';
 import {
   applyEngineEdits,
@@ -39,6 +40,8 @@ export interface AgentToolExecutorDeps {
   getDocumentSourcePath?: () => Promise<string | null>;
   isReadOnly?: () => boolean;
   canPublishCloudDocument?: () => boolean;
+  /** 참조 이미지 잘라내기 — 기본은 브라우저 캔버스 (테스트가 주입한다) */
+  cropImage?: ImageCropper;
 }
 
 const DOC_NOT_LOADED_MESSAGE = '문서가 로드되지 않았습니다';
@@ -231,6 +234,39 @@ function pxToMm(px: number): number {
   return Math.round((px * 25.4) / 96 * 100) / 100;
 }
 
+/** 96dpi 기준 px → mm, 0.1mm 반올림 (get_page_geometry 의 압축 좌표용) */
+function pxToMm1(px: number): number {
+  return Math.round((px * 25.4) / 96 * 10) / 10;
+}
+
+/** mm 사각형 {x,y,width,height} (regionMm) */
+interface MmRect { x: number; y: number; width: number; height: number }
+
+/** 선택적 regionMm 파싱 — 폭/높이는 양수여야 한다 */
+function optRegionMm(args: Record<string, unknown>): MmRect | undefined {
+  const v = args['regionMm'];
+  if (v === undefined || v === null) return undefined;
+  const r = v as Record<string, unknown>;
+  const nums = ['x', 'y', 'width', 'height'].map((k) => r?.[k]);
+  if (typeof v !== 'object' || nums.some((n) => typeof n !== 'number' || !Number.isFinite(n))) {
+    throw new AgentToolError('INVALID_ARGS', 'regionMm must be {x, y, width, height} in mm');
+  }
+  const [x, y, width, height] = nums as number[];
+  if (width <= 0 || height <= 0) {
+    throw new AgentToolError('INVALID_ARGS', 'regionMm width and height must be positive');
+  }
+  return { x, y, width, height };
+}
+
+const GEOMETRY_PARTS = ['lines', 'runs', 'objects'] as const;
+type GeometryPart = typeof GEOMETRY_PARTS[number];
+
+/** getPageControlLayout 항목에서 그대로 옮기는 주소 필드 */
+const GEOMETRY_OBJECT_ADDRESS_KEYS = [
+  'secIdx', 'paraIdx', 'controlIdx', 'parentParaIdx', 'cellIdx', 'cellParaIdx',
+  'innerControlIdx', 'outerTableControlIdx', 'cellPath',
+] as const;
+
 /**
  * renderEquationPreview 의 JSON 계약 파서.
  * 신규 wasm 은 `{"svg",widthPx,heightPx,baselinePx,warnings}` JSON 문자열을,
@@ -247,6 +283,83 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 interface PngCapture { data: string; widthPx: number; heightPx: number }
+
+/** base64 → 바이트. 잘못된 문자열은 INVALID_ARGS */
+function decodeBase64(b64: string, key: string): Uint8Array {
+  let bytes: Uint8Array;
+  try {
+    const bin = atob(b64);
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } catch {
+    throw new AgentToolError('INVALID_ARGS', `${key} is not valid base64`);
+  }
+  if (bytes.length === 0) throw new AgentToolError('INVALID_ARGS', 'image data is empty');
+  return bytes;
+}
+
+// 문서에 그대로 넣을 수 있는 그림 형식 (그 밖의 원본은 캔버스로 PNG 재인코딩)
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', bmp: 'image/bmp',
+};
+// 원본 5MB ≈ base64 6.9M 문자 (설계 리스크 레지스터). 잘라낼 원본은 참조 상한 20MB 까지 받는다.
+const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const IMAGE_MAX_B64 = 7_200_000;
+const CROP_SOURCE_MAX_B64 = 28_000_000;
+
+/** 선택적 cropPx {x,y,width,height} (원본 px) */
+function optCropPx(args: Record<string, unknown>): PixelBox | undefined {
+  const v = args['cropPx'];
+  if (v === undefined || v === null) return undefined;
+  const r = asRecord(v);
+  const nums = (['x', 'y', 'width', 'height'] as const).map((k) => r[k]);
+  if (nums.some((n) => typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0)) {
+    throw new AgentToolError('INVALID_ARGS', 'cropPx must be {x, y, width, height} in whole source pixels');
+  }
+  const [x, y, width, height] = nums as number[];
+  if (width < 1 || height < 1) throw new AgentToolError('INVALID_ARGS', 'cropPx width and height must be positive');
+  return { x, y, width, height };
+}
+
+const FLOAT_REL_TO: Record<string, { horz: string; vert: string }> = {
+  paper: { horz: 'Paper', vert: 'Paper' },
+  page: { horz: 'Page', vert: 'Page' },
+  paragraph: { horz: 'Para', vert: 'Para' },
+};
+const FLOAT_WRAP: Record<string, string> = {
+  square: 'Square', topAndBottom: 'TopAndBottom', behindText: 'BehindText', inFrontOfText: 'InFrontOfText',
+};
+
+/** insert_image 떠 있는 배치 → setPictureProperties 속성 (inline 이면 undefined) */
+function imageFloatingProps(args: Record<string, unknown>): Record<string, unknown> | undefined {
+  const mode = args['positionMode'] ?? 'inline';
+  if (mode !== 'inline' && mode !== 'floating') {
+    throw new AgentToolError('INVALID_ARGS', 'positionMode must be "inline" or "floating"');
+  }
+  if (mode === 'inline') {
+    const stray = ['xMm', 'yMm', 'relativeTo', 'wrap'].filter((k) => args[k] !== undefined && args[k] !== null);
+    if (stray.length > 0) throw new AgentToolError('INVALID_ARGS', `${stray.join('/')} need positionMode "floating"`);
+    return undefined;
+  }
+  const offset = (key: 'xMm' | 'yMm'): number => {
+    const v = args[key] ?? 0;
+    if (typeof v !== 'number' || !Number.isFinite(v) || Math.abs(v) > 500) {
+      throw new AgentToolError('INVALID_ARGS', `${key} must be a number within ±500`);
+    }
+    return mmToHu(v);
+  };
+  const rel = FLOAT_REL_TO[String(args['relativeTo'] ?? 'paragraph')];
+  if (!rel) throw new AgentToolError('INVALID_ARGS', 'relativeTo must be paper|page|paragraph');
+  const wrap = FLOAT_WRAP[String(args['wrap'] ?? 'square')];
+  if (!wrap) throw new AgentToolError('INVALID_ARGS', 'wrap must be square|topAndBottom|behindText|inFrontOfText');
+  return {
+    treatAsChar: false,
+    horzRelTo: rel.horz, vertRelTo: rel.vert,
+    horzAlign: 'Left', vertAlign: 'Top',
+    horzOffset: offset('xMm'), vertOffset: offset('yMm'),
+    textWrap: wrap,
+  };
+}
 
 /** renderPageToCanvas 가 그린 캔버스 → PNG base64 (OffscreenCanvas/HTMLCanvasElement 모두 지원) */
 async function canvasToPngBase64(canvas: OffscreenCanvas | HTMLCanvasElement): Promise<PngCapture> {
@@ -557,6 +670,7 @@ export class AgentToolExecutor {
       }
       case 'find_text': return this.findText(args);
       case 'render_page': return this.renderPage(args);
+      case 'get_page_geometry': return this.getPageGeometry(args);
       case 'get_para_format': return this.getParaFormat(args);
       case 'get_char_format': return this.getCharFormat(args);
       case 'get_table_properties': return this.getTableProperties(args);
@@ -591,7 +705,8 @@ export class AgentToolExecutor {
       case 'apply_para_format': return this.applyParaFormat(args, agent);
       case 'list_styles': return this.listStyles();
       case 'apply_style': return this.applyStyle(args, agent);
-      case 'insert_image': return this.insertImage(args, agent);
+      case 'insert_image': return this.insertImage(args, agent, capability);
+      case 'read_reference_image': return this.readReferenceImage(args);
       case 'insert_equation': return this.insertEquation(args, agent);
       case 'preview_equation': return this.previewEquation(args);
       case 'set_page_layout': return this.setPageLayout(args, agent);
@@ -1718,32 +1833,173 @@ export class AgentToolExecutor {
     if (pageIndex < 0 || pageIndex >= pageCount) {
       throw new AgentToolError('INVALID_ARGS', `pageIndex ${pageIndex} out of range (0..${pageCount - 1})`);
     }
-    const format = args['format'] === undefined || args['format'] === null ? 'svg' : reqString(args, 'format');
+    const format = args['format'] === undefined || args['format'] === null ? 'png' : reqString(args, 'format');
     if (format !== 'svg' && format !== 'png') {
       throw new AgentToolError('INVALID_ARGS', `format must be "svg" or "png" (got ${JSON.stringify(format)})`);
     }
-    if (format === 'png') {
-      const rawScale = args['scale'];
-      if (rawScale !== undefined && rawScale !== null && (typeof rawScale !== 'number' || !Number.isFinite(rawScale))) {
-        throw new AgentToolError('INVALID_ARGS', 'scale must be a number (clamped to 0.5..3)');
+    const region = optRegionMm(args);
+    if (format === 'svg') {
+      // savePath 는 허브가 PNG 바이트를 쓰는 경로라 svg 와 함께 쓸 수 없다
+      if (region || args['savePath'] !== undefined) {
+        throw new AgentToolError('INVALID_ARGS', 'regionMm and savePath need format "png"');
       }
-      const scale = Math.min(3, Math.max(0.5, typeof rawScale === 'number' ? rawScale : 2));
-      // 래스터화는 동기(wasm 렌더) — blob 변환만 비동기다
-      const canvas = this.renderPageToCanvasElement(pageIndex, scale);
-      const png = await canvasToPngBase64(canvas);
-      return {
-        revision: this.revision,
-        pageIndex,
-        image: { data: png.data, mimeType: 'image/png' },
-        widthPx: png.widthPx,
-        heightPx: png.heightPx,
-      };
+      const svg = wasm.renderPageSvg(pageIndex);
+      if (svg.length > MAX_SVG_BYTES) {
+        throw new AgentToolError('RESULT_TOO_LARGE', `SVG is ${svg.length} bytes; page too complex to return`);
+      }
+      return { revision: this.revision, pageIndex, svg };
     }
-    const svg = wasm.renderPageSvg(pageIndex);
-    if (svg.length > MAX_SVG_BYTES) {
-      throw new AgentToolError('RESULT_TOO_LARGE', `SVG is ${svg.length} bytes; page too complex to return`);
+    const rawScale = args['scale'];
+    if (rawScale !== undefined && rawScale !== null && (typeof rawScale !== 'number' || !Number.isFinite(rawScale))) {
+      throw new AgentToolError('INVALID_ARGS', 'scale must be a number (clamped to 0.5..3)');
     }
-    return { revision: this.revision, pageIndex, svg };
+    const scale = Math.min(3, Math.max(0.5, typeof rawScale === 'number' ? rawScale : 1.25));
+    // 래스터화는 동기(wasm 렌더) — blob 변환만 비동기다
+    let canvas = this.renderPageToCanvasElement(pageIndex, scale);
+    let regionOut: { x: number; y: number; width: number; height: number } | undefined;
+    if (region) {
+      // mm → 캔버스 px (쪽 px × scale). 쪽 밖은 잘라낸다.
+      const k = (96 / 25.4) * scale;
+      const x0 = Math.max(0, Math.floor(region.x * k));
+      const y0 = Math.max(0, Math.floor(region.y * k));
+      const x1 = Math.min(canvas.width, Math.ceil((region.x + region.width) * k));
+      const y1 = Math.min(canvas.height, Math.ceil((region.y + region.height) * k));
+      if (x1 - x0 < 1 || y1 - y0 < 1) {
+        throw new AgentToolError('INVALID_ARGS', 'regionMm lies outside the page');
+      }
+      const crop = this.createRenderCanvas();
+      crop.width = x1 - x0;
+      crop.height = y1 - y0;
+      const ctx = crop.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+      if (!ctx) throw new AgentToolError('RENDER_UNAVAILABLE', 'Canvas 2D context is unavailable');
+      ctx.drawImage(canvas as CanvasImageSource, x0, y0, crop.width, crop.height, 0, 0, crop.width, crop.height);
+      canvas = crop;
+      const mm = (px: number) => Math.round((px / k) * 10) / 10;
+      regionOut = { x: mm(x0), y: mm(y0), width: mm(crop.width), height: mm(crop.height) };
+    }
+    const png = await canvasToPngBase64(canvas);
+    return {
+      revision: this.revision,
+      pageIndex,
+      image: { data: png.data, mimeType: 'image/png' },
+      widthPx: png.widthPx,
+      heightPx: png.heightPx,
+      scale,
+      ...(regionOut ? { regionMm: regionOut } : {}),
+    };
+  }
+
+  /**
+   * 쪽 측정 — 줄 상자·베이스라인·런 x 범위·개체 상자를 mm 로 돌려준다.
+   * 줄/런은 반복 키 없이 배열로 압축하고 lineFields/runFields 로 열 순서를 한 번만 알린다.
+   */
+  private getPageGeometry(args: Record<string, unknown>): unknown {
+    const pageIndex = reqInt(args, 'pageIndex');
+    const { wasm } = this.deps;
+    const pageCount = wasm.pageCount;
+    if (pageCount === 0) {
+      throw new AgentToolError('DOC_NOT_LOADED', 'No document is loaded in the studio; ask the user to open one.');
+    }
+    if (pageIndex < 0 || pageIndex >= pageCount) {
+      throw new AgentToolError('INVALID_ARGS', `pageIndex ${pageIndex} out of range (0..${pageCount - 1})`);
+    }
+    const rawInclude = args['include'];
+    let include: Set<GeometryPart>;
+    if (rawInclude === undefined || rawInclude === null) {
+      include = new Set<GeometryPart>(['lines', 'objects']);
+    } else {
+      if (!Array.isArray(rawInclude) || rawInclude.some((p) => !GEOMETRY_PARTS.includes(p as GeometryPart))) {
+        throw new AgentToolError('INVALID_ARGS', `include must list any of ${GEOMETRY_PARTS.join(', ')}`);
+      }
+      include = new Set(rawInclude as GeometryPart[]);
+      // 런은 lines[] 인덱스를 가리키므로 줄도 함께 싣는다
+      if (include.has('runs')) include.add('lines');
+    }
+    const region = optRegionMm(args);
+    const mm = pxToMm1;
+    const hits = (x: number, y: number, w: number, h: number): boolean => !region || (
+      mm(x) < region.x + region.width && mm(x + w) > region.x
+      && mm(y) < region.y + region.height && mm(y + h) > region.y
+    );
+
+    const result: Record<string, unknown> = { revision: this.revision, pageIndex };
+    try {
+      const info = wasm.getPageInfo(pageIndex);
+      result['pageMm'] = [mm(info.width), mm(info.height)];
+      const top = info.marginTop + info.marginHeader;
+      const bottom = info.height - info.marginBottom - info.marginFooter;
+      result['bodyMm'] = [mm(info.marginLeft), mm(top), mm(info.width - info.marginLeft - info.marginRight), mm(bottom - top)];
+    } catch { /* 쪽 정보 실패 시 생략 */ }
+    if (region) result['regionMm'] = region;
+
+    if (include.has('lines')) {
+      let raw: LineLayoutItem[];
+      try {
+        raw = wasm.getPageLineLayout(pageIndex).lines ?? [];
+      } catch {
+        throw new AgentToolError('RENDER_UNAVAILABLE', 'Line layout is unavailable in this engine build');
+      }
+      const lines: unknown[] = [];
+      const runs: unknown[] = [];
+      for (const line of raw) {
+        if (!hits(line.x, line.y, line.w, line.h)) continue;
+        const path = line.cell?.path ?? [];
+        const paraIdx = path.length > 0 ? path[path.length - 1][2] : line.para ?? null;
+        const row: unknown[] = [
+          mm(line.x), mm(line.y), mm(line.w), mm(line.h), mm(line.bl),
+          line.tx0 !== undefined ? mm(line.tx0) : null,
+          line.tx1 !== undefined ? mm(line.tx1) : null,
+          line.sec ?? null, paraIdx, line.cs ?? null, line.ce ?? null,
+        ];
+        const extra: Record<string, unknown> = {};
+        if (line.cell && path.length > 0) {
+          extra['cell'] = { paraIdx: line.cell.pp, controlIdx: path[0][0], cellIdx: path[0][1] };
+          if (path.length > 1) {
+            extra['cellPath'] = path.map(([controlIndex, cellIndex, cellParaIndex]) => ({ controlIndex, cellIndex, cellParaIndex }));
+          }
+        }
+        if (line.area) extra['area'] = line.area;
+        if (Object.keys(extra).length > 0) row.push(extra);
+        if (include.has('runs')) {
+          for (const [x, w, cs, ce] of line.runs ?? []) runs.push([lines.length, mm(x), mm(x + w), cs, ce]);
+        }
+        lines.push(row);
+      }
+      result['lineFields'] = 'x,y,w,h,baseline,textX0,textX1,sectionIdx,paraIdx,charStart,charEnd[,{cell,cellPath,area}]';
+      result['lines'] = lines;
+      if (include.has('runs')) {
+        result['runFields'] = 'line,x0,x1,charStart,charEnd';
+        result['runs'] = runs;
+      }
+    }
+
+    if (include.has('objects')) {
+      let controls: ControlLayoutItem[] = [];
+      try {
+        controls = wasm.getPageControlLayout(pageIndex).controls ?? [];
+      } catch { /* 개체 레이아웃 실패 시 빈 목록 */ }
+      const objects: unknown[] = [];
+      for (const c of controls) {
+        if (!hits(c.x, c.y, c.w, c.h)) continue;
+        const item = c as unknown as Record<string, unknown>;
+        const obj: Record<string, unknown> = { type: c.type, box: [mm(c.x), mm(c.y), mm(c.w), mm(c.h)] };
+        for (const key of GEOMETRY_OBJECT_ADDRESS_KEYS) {
+          if (item[key] !== undefined) obj[key] = item[key];
+        }
+        if (c.type === 'table') {
+          obj['rows'] = item['rowCount'];
+          obj['cols'] = item['colCount'];
+        }
+        if (c.wrap) obj['wrap'] = c.wrap;
+        if (typeof c.zOrder === 'number') obj['z'] = c.zOrder;
+        if (c.headerFooter) obj['area'] = c.headerFooter.kind;
+        else if (c.noteRef) obj['area'] = 'note';
+        if (c.missing) obj['missing'] = true;
+        objects.push(obj);
+      }
+      result['objects'] = objects;
+    }
+    return result;
   }
 
   /** 래스터화용 캔버스 생성 — 브라우저 document 우선, 아니면 OffscreenCanvas (테스트/비브라우저는 RENDER_UNAVAILABLE) */
@@ -3673,45 +3929,86 @@ export class AgentToolExecutor {
 
   // ─── 객체 툴 (Phase 2: 그림/수식) ──────────────────────────
 
-  private insertImage(args: Record<string, unknown>, agent: AgentName): unknown {
+  private insertImage(
+    args: Record<string, unknown>, agent: AgentName, capability?: ToolCapabilityContext,
+  ): unknown {
     this.requireRevision(args);
     const sectionIdx = reqInt(args, 'sectionIdx');
     const paraIdx = reqInt(args, 'paraIdx');
     const charOffset = reqInt(args, 'charOffset');
-    this.validateAddress(sectionIdx, paraIdx, charOffset);
-
-    const b64 = reqString(args, 'imageBase64');
-    // 5MB 원본 ≈ base64 6.9M 문자 상한 (설계 리스크 레지스터)
-    if (b64.length > 7_200_000) {
-      throw new AgentToolError('INVALID_ARGS', 'image too large — max 5MB');
-    }
-    const extension = reqString(args, 'extension').toLowerCase().replace('jpeg', 'jpg');
-    if (!['png', 'jpg', 'gif', 'bmp'].includes(extension)) {
-      throw new AgentToolError('INVALID_ARGS', 'extension must be png|jpg|gif|bmp');
-    }
-    const naturalWidthPx = reqInt(args, 'naturalWidthPx');
-    const naturalHeightPx = reqInt(args, 'naturalHeightPx');
-    if (naturalWidthPx < 1 || naturalHeightPx < 1) {
-      throw new AgentToolError('INVALID_ARGS', 'naturalWidthPx/naturalHeightPx must be positive');
-    }
-    let bytes: Uint8Array;
-    try {
-      const bin = atob(b64);
-      bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    } catch {
-      throw new AgentToolError('INVALID_ARGS', 'imageBase64 is not valid base64');
-    }
-    if (bytes.length === 0) throw new AgentToolError('INVALID_ARGS', 'image data is empty');
-
-    // 크기 결정: mm 지정 > 자연 크기(96dpi, 1px = 75HU), 본문 폭 초과 시 축소
-    const widthMm = args['widthMm'];
-    const heightMm = args['heightMm'];
-    for (const [k, v] of [['widthMm', widthMm], ['heightMm', heightMm]] as const) {
+    const cell = optCell(args);
+    this.validateAddress(sectionIdx, paraIdx, charOffset, cell);
+    const floating = imageFloatingProps(args);
+    const afterObjects = args['afterObjects'] === true;
+    for (const k of ['widthMm', 'heightMm'] as const) {
+      const v = args[k];
       if (v !== undefined && v !== null && (typeof v !== 'number' || !(v > 0) || v > 500)) {
         throw new AgentToolError('INVALID_ARGS', `${k} must be a positive number <= 500`);
       }
     }
+    const cropPx = optCropPx(args);
+    const b64 = reqString(args, 'imageBase64');
+    const rawExt = typeof args['extension'] === 'string' ? args['extension'].toLowerCase().replace('jpeg', 'jpg') : undefined;
+    if (rawExt !== undefined && !IMAGE_MIME_BY_EXTENSION[rawExt]) {
+      throw new AgentToolError('INVALID_ARGS', 'extension must be png|jpg|gif|bmp');
+    }
+    const sourceMime = typeof args['mimeType'] === 'string'
+      ? args['mimeType']
+      : rawExt ? IMAGE_MIME_BY_EXTENSION[rawExt] : undefined;
+    if (!sourceMime) throw new AgentToolError('INVALID_ARGS', 'extension is required with imageBase64');
+    // 잘라내기나 삽입 불가 형식(WebP 참조)은 캔버스로 다시 인코딩한다
+    const viaCanvas = cropPx !== undefined || rawExt === undefined;
+    if (b64.length > (viaCanvas ? CROP_SOURCE_MAX_B64 : IMAGE_MAX_B64)) {
+      throw new AgentToolError('INVALID_ARGS', 'image too large — max 5MB');
+    }
+    const bytes = decodeBase64(b64, 'imageBase64');
+    const place = { sectionIdx, paraIdx, charOffset, cell, floating, afterObjects };
+    if (!viaCanvas) {
+      const naturalWidthPx = reqInt(args, 'naturalWidthPx');
+      const naturalHeightPx = reqInt(args, 'naturalHeightPx');
+      if (naturalWidthPx < 1 || naturalHeightPx < 1) {
+        throw new AgentToolError('INVALID_ARGS', 'naturalWidthPx/naturalHeightPx must be positive');
+      }
+      return this.stageImage(args, agent, place, { bytes, extension: rawExt!, naturalWidthPx, naturalHeightPx });
+    }
+    const crop = this.deps.cropImage ?? cropImageOnCanvas;
+    return (async () => {
+      const out = await crop({
+        bytes, mimeType: sourceMime, cropPx,
+        output: sourceMime === 'image/jpeg' ? 'image/jpeg' : 'image/png',
+      });
+      if (out.bytes.length > IMAGE_MAX_BYTES) {
+        throw new AgentToolError('INVALID_ARGS', 'the cropped image is larger than 5MB; crop a smaller region');
+      }
+      assertToolRequestActive(capability);
+      // await 동안 사용자가 편집했을 수 있다 — 삽입 직전 revision/주소를 재검증한다
+      this.requireRevision(args);
+      this.validateAddress(sectionIdx, paraIdx, charOffset, cell);
+      return this.stageImage(args, agent, place, {
+        bytes: out.bytes,
+        extension: out.mimeType === 'image/jpeg' ? 'jpg' : 'png',
+        naturalWidthPx: out.widthPx,
+        naturalHeightPx: out.heightPx,
+        cropPx: out.crop,
+      });
+    })();
+  }
+
+  /** 크기 결정 + insertImage 객체 op 등록 (insert_image 의 동기/잘라내기 경로 공통) */
+  private stageImage(
+    args: Record<string, unknown>,
+    agent: AgentName,
+    place: {
+      sectionIdx: number; paraIdx: number; charOffset: number; cell?: CellAddr;
+      floating?: Record<string, unknown>; afterObjects: boolean;
+    },
+    image: { bytes: Uint8Array; extension: string; naturalWidthPx: number; naturalHeightPx: number; cropPx?: PixelBox },
+  ): unknown {
+    const { sectionIdx, paraIdx, charOffset, cell, floating, afterObjects } = place;
+    const { naturalWidthPx, naturalHeightPx } = image;
+    // 크기 결정: mm 지정 > 자연 크기(96dpi, 1px = 75HU), 본문 폭 초과 시 축소 (셀은 엔진이 셀 폭으로 다시 줄인다)
+    const widthMm = args['widthMm'];
+    const heightMm = args['heightMm'];
     const ratio = naturalHeightPx / naturalWidthPx;
     let widthHu: number;
     let heightHu: number;
@@ -3740,18 +4037,52 @@ export class AgentToolExecutor {
     const description = typeof args['description'] === 'string' ? args['description'] : '';
     const obj: ObjectOp = {
       type: 'insertImage', sectionIdx, paraIdx, charOffset,
-      bytes, extension, widthHu, heightHu, naturalWidthPx, naturalHeightPx, description,
+      ...(cell ? { cell } : {}),
+      bytes: image.bytes, extension: image.extension,
+      widthHu, heightHu, naturalWidthPx, naturalHeightPx, description,
+      ...(afterObjects ? { afterObjects } : {}),
+      ...(floating ? { floating } : {}),
     };
     const r = this.stageObjectOp(agent, obj, sectionIdx, paraIdx);
-    const anchor = (r.obj as Extract<ObjectOp, { type: 'insertImage' }>).anchor!;
+    const staged = r.obj as Extract<ObjectOp, { type: 'insertImage' }>;
+    const anchor = staged.anchor!;
     return {
       revision: this.revision,
       changeSetId: r.changeSetId,
       image: {
-        paraIdx: anchor.paraIdx, controlIdx: anchor.controlIdx,
-        widthMm: Math.round((widthHu / HU_PER_MM) * 10) / 10,
-        heightMm: Math.round((heightHu / HU_PER_MM) * 10) / 10,
+        paraIdx: cell ? paraIdx : anchor.paraIdx,
+        controlIdx: anchor.controlIdx,
+        widthMm: Math.round((staged.widthHu / HU_PER_MM) * 10) / 10,
+        heightMm: Math.round((staged.heightHu / HU_PER_MM) * 10) / 10,
+        ...(floating ? { positionMode: 'floating' } : {}),
       },
+      ...(image.cropPx ? { cropPx: image.cropPx } : {}),
+    };
+  }
+
+  /** read_reference_image cropPx/zoom — 허브가 넘긴 원본을 잘라 확대한다 (1.15MP 이내) */
+  private async readReferenceImage(args: Record<string, unknown>): Promise<unknown> {
+    const b64 = reqString(args, 'imageBase64');
+    if (b64.length > CROP_SOURCE_MAX_B64) throw new AgentToolError('INVALID_ARGS', 'reference image is too large');
+    const mimeType = reqString(args, 'mimeType');
+    const zoom = args['zoom'] ?? 1;
+    if (typeof zoom !== 'number' || !(zoom >= 1) || zoom > 4) {
+      throw new AgentToolError('INVALID_ARGS', 'zoom must be 1..4');
+    }
+    const crop = this.deps.cropImage ?? cropImageOnCanvas;
+    const out = await crop({
+      bytes: decodeBase64(b64, 'imageBase64'), mimeType, cropPx: optCropPx(args), zoom,
+      maxPixels: REFERENCE_READ_MAX_PIXELS,
+      output: mimeType === 'image/jpeg' ? 'image/jpeg' : 'image/png',
+    });
+    return {
+      ...(typeof args['fileId'] === 'string' ? { fileId: args['fileId'] } : {}),
+      ...(typeof args['name'] === 'string' ? { name: args['name'] } : {}),
+      image: { data: bytesToBase64(out.bytes), mimeType: out.mimeType },
+      widthPx: out.widthPx,
+      heightPx: out.heightPx,
+      cropPx: out.crop,
+      zoom: out.scale,
     };
   }
 

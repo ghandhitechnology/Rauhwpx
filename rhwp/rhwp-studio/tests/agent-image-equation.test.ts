@@ -2,7 +2,8 @@
  * 에이전트 그림/수식 삽입 (Phase 2) 테스트.
  *
  * - insert_image: base64 디코드, mm/자연크기→HWPUNIT 변환, 본문 폭 캡, inline 전환,
- *   reject 시 deletePictureControl
+ *   reject 시 deletePictureControl, 셀/afterObjects/떠 있는 배치, cropPx 잘라내기
+ * - read_reference_image: 잘라내기·확대 (1.15MP 상한)
  * - insert_equation: 삽입 전 렌더 검증 게이트(INVALID_SCRIPT), pt→HU/색 변환,
  *   reject 시 deleteEquationControl
  * - preview_equation: 삽입 없는 렌더
@@ -14,8 +15,9 @@ import { RevisionTracker } from '../src/agent/revision.ts';
 import { AgentToolExecutor } from '../src/agent/tool-executor.ts';
 import { PendingEditManager } from '../src/agent/pending-edits.ts';
 import { AgentToolError } from '../src/agent/types.ts';
+import { planImageCrop, type ImageCropRequest } from '../src/agent/image-crop.ts';
 
-interface FakePic { paraIdx: number; controlIdx: number; widthHu: number; heightHu: number; ext: string; props: Record<string, unknown> }
+interface FakePic { paraIdx: number; controlIdx: number; widthHu: number; heightHu: number; ext: string; props: Record<string, unknown>; cellPath?: string }
 interface FakeEq { paraIdx: number; controlIdx: number; script: string; fontSizeHu: number; colorRef: number; off: number }
 
 function makeEnv() {
@@ -24,6 +26,10 @@ function makeEnv() {
   const eqs: FakeEq[] = [];
   const calls: Array<{ m: string; a: unknown[] }> = [];
   const record = (m: string, ...a: unknown[]) => { calls.push({ m, a }); };
+  // 문단별 인라인 개체의 텍스트 위치 (논리 오프셋 변환용) — 0번 문단 5 자리에 기존 그림 하나
+  const inlineObjects: Record<number, number[]> = { 0: [5] };
+  const cellPic = (path: string, ci: number) => pics.find((x) => x.cellPath === path && x.controlIdx === ci);
+  const crops: ImageCropRequest[] = [];
 
   const wasm = {
     getSectionCount: () => 1,
@@ -37,14 +43,43 @@ function makeEnv() {
       marginGutter: 0, landscape: false, binding: 0,
     }),
     insertPicture: (
-      _s: number, paraIdx: number, _off: number, cellPath: string, data: Uint8Array,
+      _s: number, paraIdx: number, off: number, cellPath: string, data: Uint8Array,
       w: number, h: number, nw: number, nh: number, ext: string, desc: string,
       _x?: number, _y?: number, placement?: 'inline' | 'floating',
     ) => {
-      record('insertPicture', paraIdx, cellPath, data.length, w, h, nw, nh, ext, desc, placement);
+      record('insertPicture', paraIdx, cellPath, data.length, w, h, nw, nh, ext, desc, placement, off);
       const controlIdx = pics.length;
-      pics.push({ paraIdx, controlIdx, widthHu: w, heightHu: h, ext, props: { treatAsChar: placement === 'inline' } });
+      // 셀 삽입은 엔진처럼 셀 폭(30mm ≈ 8504HU)으로 줄인다
+      const cap = cellPath ? Math.min(1, 8504 / w) : 1;
+      pics.push({
+        paraIdx, controlIdx, widthHu: Math.round(w * cap), heightHu: Math.round(h * cap), ext,
+        props: { treatAsChar: placement === 'inline' }, ...(cellPath ? { cellPath } : {}),
+      });
       return { ok: true, paraIdx, controlIdx };
+    },
+    textToLogicalOffset: (_s: number, p: number, t: number) =>
+      t + (inlineObjects[p] ?? []).filter((pos) => pos < t).length,
+    textToLogicalOffsetInCellByPath: (_s: number, _pp: number, _path: string, t: number) => t,
+    getTableDimensions: () => ({ rowCount: 2, colCount: 2, cellCount: 4 }),
+    getCellParagraphCount: () => 1,
+    getCellParagraphLength: () => 4,
+    getCellPicturePropertiesByPath: (_s: number, _pp: number, path: unknown, ci: number) => {
+      const p = cellPic(JSON.stringify(path), ci);
+      if (!p) throw new Error('셀 그림 없음');
+      return { width: p.widthHu, height: p.heightHu };
+    },
+    setCellPicturePropertiesByPath: (_s: number, _pp: number, path: unknown, ci: number, props: Record<string, unknown>) => {
+      record('setCellPicturePropertiesByPath', path, ci, props);
+      const p = cellPic(JSON.stringify(path), ci);
+      if (p) Object.assign(p.props, props);
+      return { ok: Boolean(p) };
+    },
+    deleteCellPictureControlByPath: (_s: number, _pp: number, path: unknown, ci: number) => {
+      record('deleteCellPictureControlByPath', path, ci);
+      const i = pics.findIndex((x) => x.cellPath === JSON.stringify(path) && x.controlIdx === ci);
+      if (i < 0) return { ok: false };
+      pics.splice(i, 1);
+      return { ok: true };
     },
     setPictureProperties: (_s: number, para: number, ci: number, props: Record<string, unknown>) => {
       record('setPictureProperties', para, ci, props);
@@ -154,10 +189,19 @@ function makeEnv() {
     documentState: { isDirty: () => false } as never,
     revision,
     pending,
+    // 캔버스 대신 요청을 기록하고 잘라낸 크기만큼의 가짜 PNG 를 돌려준다
+    cropImage: async (request) => {
+      crops.push(request);
+      const plan = planImageCrop(400, 300, request.cropPx, request.zoom, request.maxPixels);
+      return {
+        bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 9]), mimeType: request.output,
+        widthPx: plan.outWidth, heightPx: plan.outHeight, crop: plan.crop, scale: plan.scale,
+      };
+    },
   });
   const call = (tool: string, args: Record<string, unknown> = {}) =>
     executor.execute(tool, { expectedRevision: revision.revision, ...args }, 'claude');
-  return { call, pending, pics, eqs, calls };
+  return { call, pending, pics, eqs, calls, crops };
 }
 
 const PNG_B64 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]).toString('base64');
@@ -222,6 +266,97 @@ test('insert_image → reject: deletePictureControl 로 사라진다', async () 
   assert.equal(pics.length, 1);
   pending.reject(r.changeSetId);
   assert.equal(pics.length, 0);
+});
+
+test('insert_image: 기본은 같은 오프셋 개체 앞, afterObjects 는 그 뒤의 논리 오프셋에 넣는다', async () => {
+  const { call, calls } = makeEnv();
+  const base = {
+    sectionIdx: 0, paraIdx: 0, charOffset: 5,
+    imageBase64: PNG_B64, extension: 'png', naturalWidthPx: 10, naturalHeightPx: 10,
+  };
+  await call('insert_image', base);
+  await call('insert_image', { ...base, afterObjects: true });
+  const offsets = calls.filter((c) => c.m === 'insertPicture').map((c) => c.a[10]);
+  assert.deepEqual(offsets, [5, 6]);
+});
+
+test('insert_image: cell 주소는 한 칸 cellPath 로 셀 문단에 넣고 셀 폭으로 준 실제 크기를 돌려준다', async () => {
+  const { call, pending, pics, calls } = makeEnv();
+  const r = (await call('insert_image', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 2, cell: { paraIdx: 1, controlIdx: 0, cellIdx: 3 },
+    imageBase64: PNG_B64, extension: 'png', naturalWidthPx: 200, naturalHeightPx: 100,
+  })) as { changeSetId: string; image: { paraIdx: number; widthMm: number } };
+  const ins = calls.find((c) => c.m === 'insertPicture')!;
+  assert.equal(ins.a[0], 1); // 표를 품은 본문 문단
+  assert.deepEqual(JSON.parse(ins.a[1] as string), [{ controlIndex: 0, cellIndex: 3, cellParaIndex: 0 }]);
+  assert.equal(ins.a[9], 'inline');
+  assert.equal(r.image.paraIdx, 0);
+  assert.equal(r.image.widthMm, 30);
+  // 드리프트 판별자가 셀 폭 캡을 반영해 승인 시 폐기되지 않는다
+  pending.approve(r.changeSetId);
+  assert.equal(pics.length, 1);
+  assert.equal(pending.hasPending(), false);
+});
+
+test('insert_image: floating 배치는 삽입 직후 setPictureProperties 로 적용되고 reject 로 사라진다', async () => {
+  const { call, pending, pics, calls } = makeEnv();
+  const r = (await call('insert_image', {
+    sectionIdx: 0, paraIdx: 1, charOffset: 0,
+    imageBase64: PNG_B64, extension: 'png', naturalWidthPx: 10, naturalHeightPx: 10,
+    positionMode: 'floating', xMm: 20, yMm: -5, relativeTo: 'paper', wrap: 'behindText',
+  })) as { changeSetId: string; image: { positionMode?: string } };
+  const set = calls.find((c) => c.m === 'setPictureProperties')!;
+  assert.deepEqual(set.a[2], {
+    treatAsChar: false, horzRelTo: 'Paper', vertRelTo: 'Paper', horzAlign: 'Left', vertAlign: 'Top',
+    horzOffset: 5669, vertOffset: -1417, textWrap: 'BehindText',
+  });
+  assert.equal(pics[0].props['treatAsChar'], false);
+  assert.equal(r.image.positionMode, 'floating');
+  pending.reject(r.changeSetId);
+  assert.equal(pics.length, 0);
+  await expectErr(call('insert_image', {
+    sectionIdx: 0, paraIdx: 1, charOffset: 0,
+    imageBase64: PNG_B64, extension: 'png', naturalWidthPx: 10, naturalHeightPx: 10, xMm: 3,
+  }), 'INVALID_ARGS');
+});
+
+test('insert_image: cropPx 와 WebP 원본은 캔버스로 다시 인코딩한 크기로 넣는다', async () => {
+  const { call, calls, crops } = makeEnv();
+  const r = (await call('insert_image', {
+    sectionIdx: 0, paraIdx: 1, charOffset: 0,
+    imageBase64: PNG_B64, extension: 'png', naturalWidthPx: 400, naturalHeightPx: 300,
+    cropPx: { x: 350, y: 10, width: 100, height: 40 },
+  })) as { cropPx: { x: number; width: number } };
+  assert.equal(crops[0].mimeType, 'image/png');
+  assert.deepEqual(r.cropPx, { x: 350, y: 10, width: 50, height: 40 }); // 원본 밖은 잘린다
+  const ins = calls.find((c) => c.m === 'insertPicture')!;
+  assert.deepEqual([ins.a[5], ins.a[6], ins.a[7]], [50, 40, 'png']);
+  // 허브가 확장자 없이 넘긴 WebP 참조 → PNG
+  await call('insert_image', {
+    sectionIdx: 0, paraIdx: 1, charOffset: 0, imageBase64: PNG_B64, mimeType: 'image/webp',
+  });
+  assert.equal(crops[1].output, 'image/png');
+  assert.equal(calls.filter((c) => c.m === 'insertPicture')[1].a[7], 'png');
+});
+
+test('read_reference_image: 잘라낸 영역을 확대하되 1.15MP 안으로 줄인다', async () => {
+  const { call, crops } = makeEnv();
+  const r = (await call('read_reference_image', {
+    fileId: 'ref-1', name: 'scan.png', imageBase64: PNG_B64, mimeType: 'image/png',
+    cropPx: { x: 0, y: 0, width: 400, height: 300 }, zoom: 4,
+  })) as { fileId: string; image: { mimeType: string }; widthPx: number; heightPx: number; zoom: number };
+  assert.equal(crops[0].maxPixels, 1_150_000);
+  assert.equal(r.fileId, 'ref-1');
+  assert.equal(r.image.mimeType, 'image/png');
+  assert.ok(r.widthPx * r.heightPx <= 1_150_000);
+  assert.ok(r.zoom > 3 && r.zoom < 4);
+});
+
+test('planImageCrop: 원본 밖 상자는 INVALID_ARGS', () => {
+  assert.throws(() => planImageCrop(100, 100, { x: 100, y: 0, width: 10, height: 10 }), AgentToolError);
+  assert.deepEqual(planImageCrop(100, 50, undefined, 2), {
+    crop: { x: 0, y: 0, width: 100, height: 50 }, outWidth: 200, outHeight: 100, scale: 2,
+  });
 });
 
 test('insert_image → approve: 미리보기 그림을 재삽입 없이 확정한다', async () => {

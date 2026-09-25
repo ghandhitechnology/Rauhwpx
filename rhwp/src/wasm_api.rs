@@ -1086,6 +1086,13 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 쪽의 줄 상자·베이스라인·런 x 범위를 압축 JSON 으로 반환한다 (에이전트 측정용).
+    #[wasm_bindgen(js_name = getPageLineLayout)]
+    pub fn get_page_line_layout(&self, page_num: u32) -> Result<String, JsValue> {
+        self.get_page_line_layout_native(page_num)
+            .map_err(|e| e.into())
+    }
+
     /// 컨트롤(표, 이미지 등) 레이아웃 정보를 반환한다.
     #[wasm_bindgen(js_name = getPageControlLayout)]
     pub fn get_page_control_layout(&self, page_num: u32) -> Result<String, JsValue> {

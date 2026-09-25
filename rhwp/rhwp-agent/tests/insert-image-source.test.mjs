@@ -123,3 +123,12 @@ test('invalid formats and oversized generated files fail before document inserti
     (error) => error.code === 'INVALID_ARGS' && /does not match/.test(error.message),
   );
 });
+
+test('reference images pass through for the hub to read from the reference store', async () => {
+  const args = { referenceFileId: 'ref-1', cropPx: { x: 0, y: 0, width: 5, height: 5 }, sectionIdx: 0 };
+  assert.deepEqual(await prepareInsertImageArgs(args, []), args);
+  await assert.rejects(
+    prepareInsertImageArgs({ referenceFileId: 'ref-1', imagePath: '/tmp/a.png' }, []),
+    (error) => error.code === 'INVALID_ARGS',
+  );
+});

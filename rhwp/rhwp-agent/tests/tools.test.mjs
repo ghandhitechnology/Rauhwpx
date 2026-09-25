@@ -22,8 +22,8 @@ import { toolDefinitionChars } from '../tool-telemetry.mjs';
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 85개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 85);
+test('도구는 정확히 86개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 86);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -66,7 +66,7 @@ test('nested table paths are accepted on staged cell text tools', () => {
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 73);
+  assert.equal(direct.size, 74);
   assert.equal(byName.get('commit_product_skill')?.category, 'instruction-write');
   assert.equal(byName.get('list_harness_skills')?.category, 'instruction-read');
   assert.ok(direct.has('commit_product_skill'));
@@ -425,17 +425,29 @@ test('get_char_format 설명에 서식 상속 규칙이 있다', () => {
   assert.match(desc, /replace_range/);
 });
 
-test('render_page 에 format/scale 이 추가됐다', () => {
+test('render_page 는 png 1.25 기본값과 regionMm/savePath 를 받는다', () => {
   const { shape } = byName.get('render_page');
-  assert.ok('format' in shape && 'scale' in shape, 'render_page missing format/scale');
   // .default(x).optional() 형태라 undefined 는 그대로 통과하고, 기본값은 스키마 메타에 든다
   assert.equal(shape.format.parse(undefined), undefined);
-  assert.equal(shape.format._def.innerType._def.defaultValue(), 'svg');
-  assert.equal(shape.scale._def.innerType._def.defaultValue(), 2);
-  assert.ok(shape.format.safeParse('png').success);
+  assert.equal(shape.format._def.innerType._def.defaultValue(), 'png');
+  assert.equal(shape.scale._def.innerType._def.defaultValue(), 1.25);
+  assert.ok(shape.format.safeParse('svg').success);
   assert.ok(!shape.format.safeParse('pdf').success);
   assert.ok(shape.scale.safeParse(0.5).success && shape.scale.safeParse(3).success);
   assert.ok(!shape.scale.safeParse(0.4).success && !shape.scale.safeParse(3.1).success);
+  assert.ok(shape.regionMm.safeParse({ x: 10, y: 20, width: 50, height: 30 }).success);
+  assert.ok(!shape.regionMm.safeParse({ x: 10, y: 20, width: 0, height: 30 }).success);
+  assert.ok(!shape.regionMm.safeParse({ x: 10, y: 20, w: 5, h: 5 }).success);
+  assert.ok(shape.savePath.safeParse('renders/p1.png').success);
+});
+
+test('get_page_geometry: 쪽 측정 읽기 도구', () => {
+  const geometry = byName.get('get_page_geometry');
+  assert.ok(geometry, 'missing tool: get_page_geometry');
+  assert.equal(geometry.category, 'document-read');
+  assert.ok(geometry.shape.include.safeParse(['lines', 'runs']).success);
+  assert.ok(!geometry.shape.include.safeParse(['cells']).success);
+  assert.ok(geometry.shape.regionMm.safeParse({ x: 0, y: 0, width: 10, height: 10 }).success);
 });
 
 test('apply_para_format 에 목록 속성(headType/numberingId/paraLevel/bulletChar)이 추가됐다', () => {
@@ -614,4 +626,15 @@ test('도구 스키마는 $ref 없이 펼쳐진다 (Codex/Pi 가 $ref 를 못 �
     const schema = JSON.stringify(zodToJsonSchema(z.object(definition.shape), { strictUnions: true, pipeStrategy: 'input' }));
     assert.doesNotMatch(schema, /"\$ref"/, `${definition.name} has a $ref`);
   }
+});
+
+test('insert_image takes one source and floating fields only with positionMode floating', () => {
+  const def = byName.get('insert_image');
+  assert.ok(def.shape.cell && def.shape.cellPath && def.shape.cropPx && def.shape.referenceFileId);
+  assert.throws(() => def.validate({ imagePath: '/a.png', referenceFileId: 'ref-1' }), /only one/);
+  assert.throws(() => def.validate({ referenceFileId: 'ref-1', xMm: 10 }), /positionMode/);
+  def.validate({ referenceFileId: 'ref-1', positionMode: 'floating', xMm: 10, wrap: 'behindText' });
+  assert.ok(!def.shape.cropPx.safeParse({ x: 0, y: 0, width: 0, height: 5 }).success);
+  assert.ok(byName.get('read_reference_image').shape.zoom.safeParse(4).success);
+  assert.ok(!byName.get('read_reference_image').shape.zoom.safeParse(5).success);
 });

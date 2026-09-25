@@ -334,6 +334,13 @@ export async function prepareInsertImageArgs(
   pathPolicy: Pick<PiExtensionConfig, 'permissionProfile' | 'rootDir' | 'readOnlyRoots'>,
 ): Promise<Record<string, unknown>> {
   const { imagePath, imageBase64, extension, ...rest } = args ?? {};
+  // 참조 이미지는 허브가 참조 저장소에서 직접 읽는다.
+  if (typeof rest.referenceFileId === 'string' && rest.referenceFileId.length > 0) {
+    if (imagePath || imageBase64) {
+      throw hubError('INVALID_ARGS', 'pass only one of imagePath, imageBase64 or referenceFileId');
+    }
+    return rest;
+  }
   let buf: Buffer;
   let ext: string;
   if (typeof imagePath === 'string' && imagePath.length > 0) {

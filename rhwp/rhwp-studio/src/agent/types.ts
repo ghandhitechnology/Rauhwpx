@@ -1043,10 +1043,16 @@ export type ObjectOp =
   | {
       type: 'insertImage';
       sectionIdx: number; paraIdx: number; charOffset: number;
+      /** 존재하면 paraIdx/charOffset 은 셀 내부 좌표, anchor.controlIdx 는 셀 문단 내 그림 인덱스 */
+      cell?: CellAddr;
       bytes: Uint8Array; extension: string;
       widthHu: number; heightHu: number;
       naturalWidthPx: number; naturalHeightPx: number;
       description: string;
+      /** 같은 오프셋에 이미 있는 인라인 개체 뒤에 넣는다 (기본은 앞) */
+      afterObjects?: boolean;
+      /** 떠 있는 배치 — 삽입 직후 setPictureProperties 로 적용하는 속성 */
+      floating?: Record<string, unknown>;
       anchor?: ObjectAnchor;
     }
   | {
