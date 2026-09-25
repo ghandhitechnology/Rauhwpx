@@ -14,6 +14,7 @@ import {
   applyManagedCliLaunch,
   applyNpmCliLaunch,
   parseNpmCmdShimScript,
+  resolveCommandOnPath,
   resolveNpmCliLaunch,
   WINDOWS_CMD_LINE_LIMIT,
   windowsCmdExeCommandLineLength,
@@ -473,4 +474,23 @@ test('createPiSession unwraps a Windows .cmd bin before spawn', async (t) => {
   assert.equal(spawns[0].argv[0], scriptPath);
   assert.equal(/\.(?:cmd|bat)$/i.test(spawns[0].command), false);
   assert.equal(events.some((event) => event.type === 'turn-start'), true);
+});
+
+test('resolveCommandOnPath resolves a bare name through env.PATH', (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'rhwp-path-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, 'claude');
+  writeFileSync(bin, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+
+  const resolved = resolveCommandOnPath('claude', { env: { PATH: dir } });
+  assert.equal(resolved, bin);
+});
+
+test('resolveCommandOnPath returns null for an unknown name and nulls a missing path', () => {
+  assert.equal(resolveCommandOnPath('rhwp-definitely-missing-cli', { env: { PATH: os.tmpdir() } }), null);
+  assert.equal(resolveCommandOnPath('/nonexistent/claude', {}), null);
+});
+
+test('resolveCommandOnPath keeps an existing absolute path', () => {
+  assert.equal(resolveCommandOnPath(process.execPath, {}), process.execPath);
 });

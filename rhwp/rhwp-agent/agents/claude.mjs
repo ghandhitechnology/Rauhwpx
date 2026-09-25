@@ -12,7 +12,7 @@ import {
   flushCredentialMirrorSync,
   prepareCredentialMirrorSync,
 } from '../credential-mirror.mjs';
-import { applyManagedCliLaunch, resolveNpmCliLaunch } from '../npm-cli-launch.mjs';
+import { applyManagedCliLaunch, resolveCommandOnPath, resolveNpmCliLaunch } from '../npm-cli-launch.mjs';
 import {
   createLineReader,
   isPlanningRestricted,
@@ -918,6 +918,13 @@ export function createClaudeSession(opts, {
         },
       }, sessionId, resume, owner.abortController);
       options.env = { ...options.env, ...launch.env };
+      // SDK 는 pathToClaudeCodeExecutable 이 없으면 env.PATH 를 보지 않고 자체
+      // 번들 바이너리로 떨어진다 — spawn 경로와 같은 바이너리를 가리키도록 PATH
+      // 해석을 여기서 끝낸다 (PATH 스텁으로 바꿔치기하는 e2e 도 이 경로를 탄다).
+      if (!options.pathToClaudeCodeExecutable && platform !== 'win32') {
+        const resolvedBin = resolveCommandOnPath(launch.command, { env: options.env });
+        if (resolvedBin) options.pathToClaudeCodeExecutable = resolvedBin;
+      }
       query = queryAgent({
         prompt: owner.queue,
         options,
