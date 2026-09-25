@@ -200,10 +200,6 @@ export function getEngineEditCapabilityCount() {
   return ENGINE_EDIT_CAPABILITIES.length;
 }
 
-export function getEngineEditTypeDefinitions() {
-  return ENGINE_EDIT_TYPE_DEFINITIONS;
-}
-
 /**
  * 주어진 capability 들이 시그니처·argumentGuide 에서 참조하는 타입 정의만 모은다.
  * 정의 본문이 다른 타입을 참조하면(CellPathLike → CellPathEntry 등) 그것도 따라간다.
