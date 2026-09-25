@@ -35,15 +35,27 @@ fn hash_paragraph(p: &Paragraph, h: &mut DefaultHasher) {
     p.char_offsets.hash(h);
     p.para_shape_id.hash(h);
     p.style_id.hash(h);
-    p.char_shapes.len().hash(h);
+    // 분할·병합은 같은 모양의 경계를 남기거나 빈 목록을 0번 모양으로 채울 수 있다 —
+    // 내용이 같으면 같은 지문이 되도록 빈 목록은 0번 모양 하나로 보고, 앞과 같은
+    // 모양으로 바뀌는 경계는 뺀다.
+    let mut current = 0u32;
     for run in &p.char_shapes {
+        if run.char_shape_id == current {
+            continue;
+        }
         run.start_pos.hash(h);
         run.char_shape_id.hash(h);
+        current = run.char_shape_id;
     }
     p.controls.len().hash(h);
     for control in &p.controls {
         hash_control(control, h);
     }
+}
+
+/// 레이아웃 캐시가 없는 순수 속성 값은 Debug 표현으로 지문에 넣는다.
+fn hash_debug<T: std::fmt::Debug>(value: &T, h: &mut DefaultHasher) {
+    format!("{:?}", value).hash(h);
 }
 
 fn hash_control(control: &Control, h: &mut DefaultHasher) {
@@ -54,8 +66,13 @@ fn hash_control(control: &Control, h: &mut DefaultHasher) {
             t.col_count.hash(h);
             t.border_fill_id.hash(h);
             t.repeat_header.hash(h);
-            t.common.width.hash(h);
-            t.common.height.hash(h);
+            t.attr.hash(h);
+            t.cell_spacing.hash(h);
+            hash_debug(&t.padding, h);
+            hash_debug(&t.page_break, h);
+            hash_debug(&t.common, h);
+            (t.outer_margin_left, t.outer_margin_right).hash(h);
+            (t.outer_margin_top, t.outer_margin_bottom).hash(h);
             t.cells.len().hash(h);
             for cell in &t.cells {
                 cell.row.hash(h);
@@ -65,6 +82,12 @@ fn hash_control(control: &Control, h: &mut DefaultHasher) {
                 cell.width.hash(h);
                 cell.height.hash(h);
                 cell.border_fill_id.hash(h);
+                hash_debug(&cell.padding, h);
+                hash_debug(&cell.vertical_align, h);
+                cell.text_direction.hash(h);
+                cell.apply_inner_margin.hash(h);
+                cell.is_header.hash(h);
+                cell.field_name.hash(h);
                 hash_paragraphs(&cell.paragraphs, h);
             }
             match &t.caption {
@@ -79,6 +102,13 @@ fn hash_control(control: &Control, h: &mut DefaultHasher) {
         Control::Footer(hf) => hash_paragraphs(&hf.paragraphs, h),
         Control::Footnote(note) => hash_paragraphs(&note.paragraphs, h),
         Control::Endnote(note) => hash_paragraphs(&note.paragraphs, h),
+        // 같은 문단의 개체를 사용자가 옮기거나 크기를 바꿨는지 본다.
+        Control::Picture(pic) => hash_debug(&pic.common, h),
+        Control::Shape(shape) => hash_debug(shape.common(), h),
+        Control::Equation(eq) => {
+            hash_debug(&eq.common, h);
+            eq.script.hash(h);
+        }
         _ => {}
     }
 }

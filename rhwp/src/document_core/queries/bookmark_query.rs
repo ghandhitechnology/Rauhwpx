@@ -73,6 +73,9 @@ impl DocumentCore {
         // char_offset에 해당하는 컨트롤 삽입 위치 결정
         let insert_idx = find_control_insert_index(paragraph, char_offset);
 
+        // 책갈피도 확장 컨트롤이라 char_offsets 사이의 8 code unit 갭을 차지한다.
+        // char_offsets 는 텍스트 글자마다 하나이므로 항목을 끼우지 않고 뒤쪽 글자를 민다.
+        paragraph.shift_for_inline_control_insert(char_offset);
         paragraph.controls.insert(
             insert_idx,
             Control::Bookmark(Bookmark {
@@ -87,21 +90,18 @@ impl DocumentCore {
                 .ctrl_data_records
                 .insert(insert_idx, Some(ctrl_data));
         }
-
-        // char_offsets에 컨트롤 위치 정보 추가
-        if !paragraph.char_offsets.is_empty() {
-            let raw_offset = char_offset_to_raw(paragraph, char_offset, insert_idx);
-            paragraph.char_offsets.insert(insert_idx, raw_offset);
+        for field in &mut paragraph.field_ranges {
+            if field.control_idx >= insert_idx {
+                field.control_idx += 1;
+            }
         }
+        paragraph.char_count += 8;
 
         // 원본 스트림 무효화 — serialize_section 은 raw_stream 이 있으면 IR 을 무시하고
         // 원본 바이트를 그대로 반환하므로(serializer/body_text.rs), 비우지 않으면 방금
-        // 삽입한 책갈피 컨트롤이 저장 시 통째로 사라진다. recompose_section 은 화면(구성)만
-        // 갱신할 뿐 raw_stream 을 건드리지 않는다. 누름틀·양식 쪽과 동일한 불변식이다.
-        if let Some(s) = self.document.sections.get_mut(sec) {
-            s.raw_stream = None;
-        }
-        self.recompose_section(sec);
+        // 삽입한 책갈피 컨트롤이 저장 시 통째로 사라진다.
+        section.raw_stream = None;
+        self.finish_bookmark_edit(sec, para);
 
         Ok(r#"{"ok":true}"#.to_string())
     }
@@ -132,19 +132,12 @@ impl DocumentCore {
             return Ok(r#"{"ok":false,"error":"해당 컨트롤이 책갈피가 아닙니다."}"#.to_string());
         }
 
-        paragraph.controls.remove(ctrl_idx);
-        if ctrl_idx < paragraph.ctrl_data_records.len() {
-            paragraph.ctrl_data_records.remove(ctrl_idx);
-        }
-        if ctrl_idx < paragraph.char_offsets.len() {
-            paragraph.char_offsets.remove(ctrl_idx);
-        }
+        // 컨트롤과 그 8 code unit 갭을 함께 지운다 (글자 모양·영역 태그·필드 참조 포함).
+        Self::remove_inline_control_with_metadata(paragraph, ctrl_idx);
 
         // 원본 스트림 무효화 — 비우지 않으면 삭제한 책갈피가 저장 시 원본 바이트로 되살아난다.
-        if let Some(s) = self.document.sections.get_mut(sec) {
-            s.raw_stream = None;
-        }
-        self.recompose_section(sec);
+        section.raw_stream = None;
+        self.finish_bookmark_edit(sec, para);
 
         Ok(r#"{"ok":true}"#.to_string())
     }
@@ -193,16 +186,26 @@ impl DocumentCore {
                 paragraph.ctrl_data_records[ctrl_idx] = Some(build_bookmark_ctrl_data(new_name));
             }
             // 원본 스트림 무효화 — 비우지 않으면 이름 변경이 저장 시 옛 이름으로 되돌아간다.
-            // add/delete 와 달리 이 함수는 recompose_section 도 호출하지 않았다 — 무효화와
-            // 함께 추가한다(다른 뮤테이터와 동일하게 편집 후 구성/커서를 갱신).
             if let Some(s) = self.document.sections.get_mut(sec) {
                 s.raw_stream = None;
             }
+            // 스냅샷이 옛 문단을 공유하지 않도록 문단 revision 을 올린다.
+            self.event_log.mark_paragraph_changed(sec, para);
             self.recompose_section(sec);
             Ok(r#"{"ok":true}"#.to_string())
         } else {
             Ok(r#"{"ok":false,"error":"해당 컨트롤이 책갈피가 아닙니다."}"#.to_string())
         }
+    }
+
+    /// 책갈피 추가·삭제 뒤처리. 문단 revision 을 올리지 않으면 이후 스냅샷이 옛 문단을
+    /// 공유해 undo/승인 복원에서 책갈피가 사라진다. 갭이 줄 시작 위치를 밀었으므로
+    /// 문단을 다시 흘린다.
+    fn finish_bookmark_edit(&mut self, sec: usize, para: usize) {
+        self.event_log.mark_paragraph_changed(sec, para);
+        self.reflow_paragraph(sec, para);
+        self.recompose_section(sec);
+        self.paginate_if_needed();
     }
 
     /// 내부: 모든 책갈피 수집 (중첩 구조 포함)
@@ -316,30 +319,6 @@ fn find_control_insert_index(
     para.controls.len()
 }
 
-/// char_offset을 raw char_offset (파서 원본 기준)으로 변환
-fn char_offset_to_raw(
-    para: &crate::model::paragraph::Paragraph,
-    char_offset: usize,
-    insert_idx: usize,
-) -> u32 {
-    // 기존 char_offsets에서 삽입 위치 주변의 raw offset을 참조
-    if insert_idx > 0 && insert_idx <= para.char_offsets.len() {
-        // 이전 컨트롤의 raw offset + 8 (컨트롤 문자 크기)
-        para.char_offsets[insert_idx - 1] + 8
-    } else if !para.char_offsets.is_empty() {
-        // 첫 위치에 삽입: 기존 첫 번째보다 작은 값
-        let first = para.char_offsets[0];
-        if first >= 8 {
-            first - 8
-        } else {
-            0
-        }
-    } else {
-        // char_offsets가 비어있으면 char_offset * 2 (UTF-16 추정)
-        (char_offset * 2) as u32
-    }
-}
-
 /// 책갈피 CTRL_DATA 바이너리 생성 (ParameterSet 형식)
 ///
 /// 구조: ps_id(2) + count(2) + dummy(2) + item_id(2) + item_type(2) + name_len(2) + name(UTF-16LE)
@@ -437,6 +416,55 @@ mod tests {
             name: name.to_string(),
         }));
         p
+    }
+
+    /// 책갈피는 글자 사이 갭을 차지한다 — 글자 오프셋을 흩뜨리지 않고, 이후 스냅샷이
+    /// 옛 문단을 공유하지 않아 승인/undo 복원에서 사라지지 않아야 한다.
+    #[test]
+    fn add_bookmark_keeps_text_offsets_and_survives_snapshots() {
+        use crate::document_core::helpers::find_control_text_positions;
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().expect("blank document");
+        core.insert_text_native(0, 0, 0, "Closing paragraph.")
+            .expect("text");
+        core.insert_footnote_native(0, 0, 3).expect("footnote");
+        let offsets_before = core.document.sections[0].paragraphs[0].char_offsets.clone();
+        let baseline = core.save_snapshot_native();
+
+        core.add_bookmark_native(0, 0, 1, "mark").expect("bookmark");
+        let para = &core.document.sections[0].paragraphs[0];
+        assert_eq!(para.text, "Closing paragraph.");
+        assert_eq!(para.char_offsets.len(), para.text.chars().count());
+        let kinds: Vec<(bool, usize)> = para
+            .controls
+            .iter()
+            .zip(find_control_text_positions(para))
+            .filter(|(c, _)| matches!(c, Control::Bookmark(_) | Control::Footnote(_)))
+            .map(|(c, pos)| (matches!(c, Control::Bookmark(_)), pos))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![(true, 1), (false, 3)],
+            "책갈피가 각주 앞, 제자리에 놓인다"
+        );
+        let bookmark_idx = para
+            .controls
+            .iter()
+            .position(|c| matches!(c, Control::Bookmark(_)))
+            .unwrap();
+
+        let with_bookmark = core.save_snapshot_native();
+        core.restore_snapshot_native(baseline).expect("baseline");
+        core.restore_snapshot_native(with_bookmark)
+            .expect("with bookmark");
+        assert!(core.get_bookmarks_native().unwrap().contains("\"mark\""));
+
+        core.delete_bookmark_native(0, 0, bookmark_idx)
+            .expect("delete");
+        assert_eq!(
+            core.document.sections[0].paragraphs[0].char_offsets,
+            offsets_before
+        );
     }
 
     #[test]
