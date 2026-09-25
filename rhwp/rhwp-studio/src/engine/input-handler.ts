@@ -7,7 +7,7 @@ import { resolveGlyphStartRect, isCompositionBoxRepresentable } from './line-sta
 import { FieldMarkerRenderer } from './field-marker-renderer';
 import { SelectionRenderer } from './selection-renderer';
 import { CommandHistory } from './history';
-import { DeleteSelectionCommand, ApplyCharFormatCommand, ApplyParaFormatCommand, SnapshotCommand, SubmodeSelectionSnapshotCommand, SetFormValueCommand, TextMutationEffectAccumulator, IMMEDIATE_TEXT_MUTATION_EFFECTS, applyCharFormatToTarget } from './command';
+import { DeleteSelectionCommand, ApplyCharFormatCommand, ApplyParaFormatCommand, SnapshotCommand, SubmodeSelectionSnapshotCommand, SetFormValueCommand, TextMutationEffectAccumulator, IMMEDIATE_TEXT_MUTATION_EFFECTS, applyCharFormatToTarget, caretRangeToTextRange, caretTextOffset } from './command';
 import type { OperationDescriptor, ParaFormatTarget, RefreshPolicy, TextMutationEffects, EditCommand, EditContext, HeaderFooterSelectionSnapshot, FormValueTarget } from './command';
 import { CapturedSnapshotCommand } from './captured-snapshot-command.ts';
 import type { CapturedSnapshotCallbacks } from './captured-snapshot-command.ts';
@@ -32,6 +32,7 @@ import { matchShortcut, defaultShortcuts } from '@/command/shortcut-map';
 import type { ContextMenu, ContextMenuItem } from '@/ui/context-menu';
 import type { CommandPalette } from '@/ui/command-palette';
 import type { CellSelectionRenderer } from './cell-selection-renderer';
+import { cellSelectionParagraphTargets, promoteCrossCellSelection } from './table-cell-selection';
 import type { TableObjectRenderer } from './table-object-renderer';
 import type { TableResizeRenderer, BorderEdge } from './table-resize-renderer';
 import type { CellBbox, CellPathLike } from '@/core/types';
@@ -40,6 +41,8 @@ import * as _mouse from './input-handler-mouse';
 import * as _table from './input-handler-table';
 import * as _keyboard from './input-handler-keyboard';
 import { getBodySelectionSegments } from './body-selection-range';
+import { selectedTablesInRange } from './selected-tables';
+import { tableSelectionRects } from './table-selection-rects';
 import * as _text from './input-handler-text';
 import * as _picture from './input-handler-picture';
 import type { PictureResizeJournal } from './picture-resize-journal';
@@ -163,6 +166,9 @@ function pickDefined<T extends object, K extends keyof T>(source: T, keys: K[]):
   }
   return result;
 }
+
+/** 들여쓰기 한 단계 (px, 96dpi) — 20pt. */
+const PARAGRAPH_INDENT_STEP_PX = 20 * 96 / 72;
 
 function pxToRaw2x(px: number): number {
   return Math.round(px * PX_TO_RAW_2X);
@@ -305,6 +311,8 @@ export class InputHandler {
   private isDragging = false;
   private dragRafId = 0; // requestAnimationFrame throttle용
   private dragAutoScrollRafId = 0;
+  /** 인라인 그림 이동 드래그의 가장자리 자동 스크롤 rAF */
+  private pictureMoveAutoScrollRafId = 0;
   private dragLastClientX = 0;
   private dragLastClientY = 0;
   private cellSelectionDragState: {
@@ -317,12 +325,17 @@ export class InputHandler {
     lastRow: number;
     lastCol: number;
     isDragging: boolean;
+    anchorPosition?: DocumentPosition;
   } | null = null;
   private cellSelectionDragCandidate: {
     startClientX: number;
     startClientY: number;
     startRow: number;
     startCol: number;
+    /** 드래그를 시작한 표. 다른(중첩) 표로 들어가면 셀 블록으로 승격하지 않는다. */
+    tableKey: string | null;
+    /** 누른 자리. 셀 블록 드래그가 표 밖으로 나가면 텍스트 선택 anchor 로 되돌린다. */
+    anchorPosition: DocumentPosition;
   } | null = null;
 
   // 표 경계선 hover 상태
@@ -444,6 +457,9 @@ export class InputHandler {
     originCharOffset?: number;
     startClientX?: number;
     startClientY?: number;
+    /** 자동 스크롤 중 드롭 자리를 다시 계산할 마지막 포인터 좌표 */
+    lastClientX?: number;
+    lastClientY?: number;
     passedDragThreshold?: boolean;
     startPageX: number;
     startPageY: number;
@@ -1645,16 +1661,16 @@ export class InputHandler {
 
     const hit = this.hitTestFromClientPoint(this.dragLastClientX, this.dragLastClientY);
     if (hit && hit.paragraphIndex < 0xFFFFFF00) {
-      // [Issue #669] 셀 내부 드래그: anchor와 같은 셀 컨텍스트인 경우만 커서 이동.
-      // 셀↔본문 혼합은 선택 렌더링 불가이므로 무시 (셀 내 선택 유지).
+      // [Issue #669] 셀 안에서 시작한 드래그가 같은 표의 다른 셀로 가면 셀 블록 선택
+      // 경로가 다룬다. 표 밖(본문·다른 표)으로 나가면 커서를 옮기고, 정렬 선택이
+      // 표를 통째로 포함하도록 올린다 (selection-table-lift).
       const sel = this.cursor.getSelection();
       if (sel) {
         const anchorInCell = sel.anchor.parentParaIndex !== undefined;
-        const hitInSameCell = anchorInCell &&
+        const hitInSameOuterTable = anchorInCell &&
           hit.parentParaIndex === sel.anchor.parentParaIndex &&
-          hit.controlIndex === sel.anchor.controlIndex &&
-          hit.cellIndex === sel.anchor.cellIndex;
-        if (anchorInCell && !hitInSameCell) {
+          hit.controlIndex === sel.anchor.controlIndex;
+        if (hitInSameOuterTable && hit.cellIndex !== sel.anchor.cellIndex) {
           return;
         }
       }
@@ -2151,11 +2167,11 @@ export class InputHandler {
       );
       return;
     }
-    applyCharFormatToTarget(this.wasm, {
+    applyCharFormatToTarget(this.wasm, caretRangeToTextRange(this.wasm, {
       target: editableTargetFromPosition(pos),
       startOffset,
       endOffset,
-    }, json);
+    }), json);
   }
 
   /** 토글 서식 적용 (상호 배타 처리 포함) */
@@ -2233,10 +2249,11 @@ export class InputHandler {
     }
     const sel = this.cursor.getSelectionOrdered();
     const pos = sel ? sel.start : this.cursor.getPosition();
-    // 선택이 있으면 선택 첫 글자, 없으면 커서 앞 글자 기준
+    // 선택이 있으면 선택 첫 글자, 없으면 커서 앞 글자 기준. 글자 속성 API 는 텍스트 오프셋을 받는다.
+    const textOffset = caretTextOffset(this.wasm, pos);
     const queryOffset = sel
-      ? pos.charOffset
-      : (pos.charOffset > 0 ? pos.charOffset - 1 : 0);
+      ? textOffset
+      : (textOffset > 0 ? textOffset - 1 : 0);
     if (pos.parentParaIndex !== undefined) {
       // [#2756] 중첩 표는 최내곽 셀 대상 ...ByPath 로 조회한다. flat controlIndex/cellIndex/
       // cellParaIndex 는 hit-test 가 cellPath[0](최외곽)에서 채우므로 그대로 넘기면 **바깥
@@ -2284,6 +2301,10 @@ export class InputHandler {
   }
 
   private getParaFormatTargetsAtCursor(): ParaFormatTarget[] {
+    if (this.cursor.isInCellSelectionMode()) {
+      const cellTargets = cellSelectionParagraphTargets(this);
+      if (cellTargets.length > 0) return cellTargets;
+    }
     const sel = this.cursor.getSelectionOrdered();
     if (sel) return this.getParaFormatTargetsForRange(sel.start, sel.end);
     const pos = this.cursor.getPosition();
@@ -2409,23 +2430,16 @@ export class InputHandler {
   private getEditableParagraphLength(target: EditableParagraphTarget): number {
     switch (target.kind) {
       case 'body':
-        return this.wasm.getParagraphLength(target.sectionIndex, target.paragraphIndex);
+        return this.wasm.getLogicalLength(target.sectionIndex, target.paragraphIndex);
       case 'container': {
-        const usePath = target.cellPath.length > 1
-          || (target.cellPath.length > 0 && !target.isTextBox);
-        return usePath
-          ? this.wasm.getCellParagraphLengthByPath(
-              target.sectionIndex,
-              target.parentParagraphIndex,
-              JSON.stringify(target.cellPath),
-            )
-          : this.wasm.getCellParagraphLength(
-              target.sectionIndex,
-              target.parentParagraphIndex,
-              target.controlIndex,
-              target.cellIndex,
-              target.paragraphIndex,
-            );
+        const path = target.cellPath.length ? target.cellPath : [{
+          controlIndex: target.controlIndex,
+          cellIndex: target.cellIndex,
+          cellParaIndex: target.paragraphIndex,
+        }];
+        return this.wasm.getCellLogicalLengthByPath(
+          target.sectionIndex, target.parentParagraphIndex, JSON.stringify(path),
+        );
       }
       case 'headerFooter': {
         const info = JSON.parse(this.wasm.getHeaderFooterParaInfo(
@@ -4117,6 +4131,8 @@ export class InputHandler {
       this.selectionRenderer.clear();
       return;
     }
+    // 같은 표의 다른 셀로 넘어간 글자 선택은 셀 블록 선택이 된다.
+    if (promoteCrossCellSelection(this)) return;
 
     const { start, end } = sel;
     const zoom = this.viewportManager.getZoom();
@@ -4186,6 +4202,18 @@ export class InputHandler {
         this.selectionRenderer.clear();
         return;
       }
+      for (const ref of selectedTablesInRange(this.wasm, start, end)) {
+        rects.push(...tableSelectionRects(this.wasm, ref));
+      }
+      // 셀 안의 네이티브 선택 질의가 이미 중첩 표 사각형을 돌려주기도 한다.
+      // 같은 셀을 두 번 칠하면 선택 색이 진해지므로 정확히 같은 영역만 합친다.
+      const seenRects = new Set<string>();
+      rects = rects.filter(rect => {
+        const key = `${rect.pageIndex}:${rect.x}:${rect.y}:${rect.width}:${rect.height}`;
+        if (seenRects.has(key)) return false;
+        seenRects.add(key);
+        return true;
+      });
       this.selectionRenderer.render(rects, zoom);
     } catch (e) {
       console.warn('[InputHandler] getSelectionRects 실패:', e);
@@ -5910,21 +5938,83 @@ export class InputHandler {
     }
   }
 
+  /**
+   * 들여쓰기 한 단계 (direction: +1 = 안으로, -1 = 밖으로). 선택 문단(셀 블록 포함)마다
+   * 목록 문단은 수준과 왼쪽 여백을, 일반 문단은 왼쪽 여백을 옮긴다. 한 번의 Undo 단계.
+   * @param listOnly true 면 목록 문단만 바꾼다 (표 안 Tab). 바꿀 문단이 없으면 false.
+   */
+  shiftParagraphIndent(direction: 1 | -1, listOnly = false): boolean {
+    let targets: ParaFormatTarget[];
+    try {
+      targets = this.getParaFormatTargetsAtCursor();
+    } catch {
+      return false;
+    }
+    if (targets.length === 0) return false;
+    const stepPx = PARAGRAPH_INDENT_STEP_PX;
+    const isList = (props: ParaProperties) => !!props.headType && props.headType !== 'None';
+    const plan = (current: ParaProperties): Partial<ParaProperties> | null => {
+      const list = isList(current);
+      if (listOnly && !list) return null;
+      const margin = current.marginLeft ?? 0;
+      const nextMargin = Math.max(0, margin + direction * stepPx);
+      const next: Partial<ParaProperties> = {};
+      if (list) {
+        const level = Math.min(6, Math.max(0, (current.paraLevel ?? 0) + direction));
+        if (level !== (current.paraLevel ?? 0)) next.paraLevel = level;
+        else return null; // 수준 끝에 닿은 목록은 여백만 따로 밀지 않는다
+      }
+      if (Math.abs(nextMargin - margin) > 0.01) next.marginLeft = pxToRaw2x(nextMargin);
+      return Object.keys(next).length > 0 ? next : null;
+    };
+    if (listOnly) {
+      let anyList = false;
+      try {
+        anyList = targets.some((target) => isList(this.getParaPropertiesForTarget(target)));
+      } catch {
+        anyList = false;
+      }
+      if (!anyList) return false;
+    }
+    const cmd = new ApplyParaFormatCommand(
+      targets,
+      plan,
+      this.cursor.getPosition(),
+      this.getCurrentEditContext(),
+    );
+    this.executeOperation({ kind: 'command', command: cmd });
+    return true;
+  }
+
+  private getParaPropertiesForTarget(target: ParaFormatTarget): ParaProperties {
+    if (target.kind === 'body') return this.wasm.getParaPropertiesAt(target.sectionIndex, target.paragraphIndex);
+    if (target.kind === 'container' && target.cellPath.length > 0) {
+      return this.wasm.getCellParaPropertiesAtByPath(
+        target.sectionIndex, target.parentParagraphIndex, JSON.stringify(target.cellPath),
+      );
+    }
+    return this.getParaProperties();
+  }
+
   /** 개요 수준 변경 (delta: +1=한 수준 증가, -1=한 수준 감소) */
   changeOutlineLevel(delta: number): void {
     const pos = this.cursor.getPosition();
     try {
       const inCell = pos.parentParaIndex !== undefined;
-      const currentStyle = inCell
-        ? this.wasm.getCellStyleAt(
-            pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!,
-            pos.cellIndex!, pos.cellParaIndex!,
-          )
-        : this.wasm.getStyleAt(pos.sectionIndex, pos.paragraphIndex);
+      if (inCell) {
+        this.shiftParagraphIndent(delta > 0 ? 1 : -1);
+        return;
+      }
+      const currentStyle = this.wasm.getStyleAt(pos.sectionIndex, pos.paragraphIndex);
 
       // 현재 개요 수준 파싱 (개요 1~7)
       const match = currentStyle.name.match(/^개요\s*(\d)$/);
-      if (!match) return; // 개요 스타일이 아니면 무시
+      const multiParagraph = this.cursor.hasSelection() || this.cursor.isInCellSelectionMode();
+      if (!match || multiParagraph) {
+        // 개요 스타일이 아니거나 여러 문단이면 목록 수준·왼쪽 여백을 문단마다 옮긴다.
+        this.shiftParagraphIndent(delta > 0 ? 1 : -1);
+        return;
+      }
 
       const currentLevel = parseInt(match[1], 10);
       const targetLevel = currentLevel + delta;
@@ -6052,6 +6142,12 @@ export class InputHandler {
       );
     }
     const pos = this.cursor.getPosition();
+    if (pos.parentParaIndex !== undefined && (pos.cellPath?.length ?? 0) > 1) {
+      // 중첩 표: 평면 필드는 바깥 셀을 가리키므로 경로로 안쪽 문단을 읽는다.
+      return this.wasm.getCellParaPropertiesAtByPath(
+        pos.sectionIndex, pos.parentParaIndex, JSON.stringify(pos.cellPath),
+      );
+    }
     if (pos.parentParaIndex !== undefined) {
       return this.wasm.getCellParaPropertiesAt(
         pos.sectionIndex, pos.parentParaIndex, pos.controlIndex!,

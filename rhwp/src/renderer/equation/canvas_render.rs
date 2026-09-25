@@ -603,9 +603,8 @@ fn set_font(
     bold: bool,
     font_family: &str,
 ) {
-    let style = if italic { "italic " } else { "" };
-    let weight = if bold { "bold " } else { "" };
-    ctx.set_font(&format!("{}{}{:.3}px {}", style, weight, size, font_family,));
+    // layout 측정(measure::measure_css_run)과 같은 font 문자열이어야 advance가 일치한다.
+    ctx.set_font(&super::measure::css_font(size, italic, bold, font_family));
 }
 
 /// 적분 기호(∫)를 stroke path 로 렌더 (Task #1317).

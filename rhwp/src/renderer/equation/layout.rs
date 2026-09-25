@@ -8,7 +8,7 @@ use super::ast::*;
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen::prelude::wasm_bindgen(catch, js_namespace = globalThis, js_name = measureEquationText)]
+    #[wasm_bindgen::prelude::wasm_bindgen(catch, js_namespace = globalThis, js_name = measureEquationTextMetrics)]
     fn measure_equation_text(
         source: &str,
         text: &str,
@@ -16,7 +16,8 @@ extern "C" {
         italic: bool,
         hft: bool,
         literal: bool,
-    ) -> Result<Option<f64>, wasm_bindgen::JsValue>;
+        bold: bool,
+    ) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>;
 }
 
 /// 수식 레이아웃 박스
@@ -142,6 +143,8 @@ pub struct EqLayout {
     font_family: Option<String>,
     hft: bool,
     italic: bool,
+    bold: bool,
+    /// 원자 사이 수식 간격(thin/medium/thick)의 배율. 저장 개체 폭에 맞출 때만 줄인다.
     operator_padding_scale: f64,
 }
 
@@ -226,6 +229,7 @@ impl EqLayout {
             font_family: None,
             hft: false,
             italic: true,
+            bold: false,
             operator_padding_scale: 1.0,
         }
     }
@@ -236,6 +240,7 @@ impl EqLayout {
             font_family: (!font_family.trim().is_empty()).then(|| font_family.to_string()),
             hft: false,
             italic: true,
+            bold: false,
             operator_padding_scale: 1.0,
         }
     }
@@ -250,29 +255,104 @@ impl EqLayout {
     }
 
     fn text_width(&self, text: &str, font_size: f64, italic: bool, literal: bool) -> f64 {
+        self.text_metrics(text, font_size, italic, self.bold, literal)
+            .0
+    }
+
+    /// (advance, 이탤릭 보정) — painter가 실제로 칠하는 서체 기준.
+    ///
+    /// 세션에 로드된 원본 수식 서체(HYhwpEQ PUA/HFT bank), painter의 CSS fallback
+    /// 체인을 같은 font 문자열로 canvas 측정, 같은 체인의 내장 메트릭, 추정 순이다.
+    /// 추정 폭으로 배치하고 fallback 서체로 칠하면 △처럼 넓은 글립이 옆 원자를 덮는다.
+    fn text_metrics(
+        &self,
+        text: &str,
+        font_size: f64,
+        italic: bool,
+        bold: bool,
+        literal: bool,
+    ) -> (f64, f64) {
         #[cfg(target_arch = "wasm32")]
-        if let Some(width) = self
+        if let Some(metrics) = self
             .font_family
             .as_deref()
             .and_then(|family| {
-                measure_equation_text(family, text, font_size, italic, self.hft, literal)
-                    .ok()
-                    .flatten()
+                measure_equation_text(family, text, font_size, italic, self.hft, literal, bold).ok()
             })
-            .filter(|width| width.is_finite() && *width >= 0.0)
+            .and_then(super::measure::RunMetrics::from_js)
         {
-            return width;
+            return (
+                metrics.advance,
+                if italic { metrics.overhang() } else { 0.0 },
+            );
+        }
+        let family = super::font::equation_css_font_family(self.font_family.as_deref());
+        if let Some(metrics) =
+            self.measure_painted_run(&family, text, font_size, italic, bold, literal)
+        {
+            let overhang = if italic { metrics.overhang() } else { 0.0 };
+            return (metrics.advance, overhang);
         }
         #[cfg(not(target_arch = "wasm32"))]
         let _ = literal;
-        self.font_family
+        let measure = |family: &str, text: &str| {
+            crate::renderer::layout::measure_known_font_run_width(
+                family, bold, italic, text, font_size,
+            )
+        };
+        // 요청 서체의 내장 메트릭이 있으면 그 폭을 쓴다(잉크 정보 없음).
+        if let Some(width) = self
+            .font_family
             .as_deref()
-            .and_then(|family| {
-                crate::renderer::layout::measure_known_font_run_width(
-                    family, italic, text, font_size,
-                )
-            })
-            .unwrap_or_else(|| estimate_text_width(text, font_size, italic))
+            .and_then(|name| measure(name, text))
+        {
+            return (width, 0.0);
+        }
+        // 그 외에는 painter fallback 체인(Times 계열)의 메트릭과 이탤릭 보정표를 쓴다.
+        let chain = super::font::equation_font_families(self.font_family.as_deref()).join(", ");
+        let width = measure(&chain, text).unwrap_or_else(|| {
+            text.chars()
+                .map(|ch| {
+                    let glyph = ch.to_string();
+                    measure(&chain, &glyph)
+                        .unwrap_or_else(|| estimate_text_width(&glyph, font_size, italic))
+                })
+                .sum()
+        });
+        let overhang = match text.chars().last() {
+            Some(last) if italic => super::measure::italic_overhang_em(last) * font_size,
+            _ => 0.0,
+        };
+        (width, overhang)
+    }
+
+    /// canvas painter의 fallback 경로와 같은 글꼴·run 단위로 측정한다.
+    fn measure_painted_run(
+        &self,
+        family: &str,
+        text: &str,
+        font_size: f64,
+        italic: bool,
+        bold: bool,
+        literal: bool,
+    ) -> Option<super::measure::RunMetrics> {
+        use super::measure::{css_font, measure_css_run, RunMetrics};
+        if !(self.hft && literal && !text.is_ascii()) {
+            return measure_css_run(&css_font(font_size, italic, bold, family), text);
+        }
+        // HFT literal은 글자마다 칠한다. 비ASCII 글자는 직립이다(canvas_render::draw_legacy_literal).
+        let mut advance = 0.0;
+        let mut ink_right = 0.0;
+        for ch in text.chars() {
+            let glyph_italic = italic && ch.is_ascii();
+            let run = measure_css_run(
+                &css_font(font_size, glyph_italic, bold, family),
+                &ch.to_string(),
+            )?;
+            ink_right = advance + run.ink_right;
+            advance += run.advance;
+        }
+        Some(RunMetrics { advance, ink_right })
     }
 
     /// AST를 레이아웃 박스로 변환
@@ -364,28 +444,13 @@ impl EqLayout {
     }
 
     fn layout_row(&self, children: &[EqNode], fs: f64) -> LayoutBox {
-        if children.is_empty() {
-            return LayoutBox {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: fs,
-                baseline: fs * 0.8,
-                kind: LayoutKind::Row(Vec::new()),
-            };
-        }
-
-        let mut boxes: Vec<LayoutBox> = children
+        let laid: Vec<(&EqNode, LayoutBox)> = children
             .iter()
-            .enumerate()
-            .map(|(i, c)| match c {
-                EqNode::Symbol(s) if is_sign(children, i) => self.padded_symbol(s, fs, SIGN_PAD_EM),
-                _ => self.layout_node(c, fs),
-            })
-            .filter(|b| b.width > 0.0 || matches!(b.kind, LayoutKind::Newline))
+            .map(|c| (c, self.layout_node(c, fs)))
+            .filter(|(_, b)| b.width > 0.0 || matches!(b.kind, LayoutKind::Newline))
             .collect();
 
-        if boxes.is_empty() {
+        if laid.is_empty() {
             return LayoutBox {
                 x: 0.0,
                 y: 0.0,
@@ -397,18 +462,34 @@ impl EqLayout {
         }
 
         // 기준선 정렬: 가장 높은 baseline과 가장 깊은 descent
-        let max_ascent = boxes.iter().map(|b| b.baseline).fold(0.0f64, f64::max);
-        let max_descent = boxes
+        let max_ascent = laid.iter().map(|(_, b)| b.baseline).fold(0.0f64, f64::max);
+        let max_descent = laid
             .iter()
-            .map(|b| b.height - b.baseline)
+            .map(|(_, b)| b.height - b.baseline)
             .fold(0.0f64, f64::max);
         let total_height = max_ascent + max_descent;
 
+        let atoms = resolve_atoms(laid.iter().map(|(node, _)| atom_of(node)).collect());
+        let script = fs < self.font_size * 0.95;
+        let mut previous: Option<Atom> = None;
         let mut x = 0.0;
-        for b in &mut boxes {
+        let mut boxes = Vec::with_capacity(laid.len());
+        for ((_, mut b), atom) in laid.into_iter().zip(atoms) {
+            match atom {
+                AtomSlot::Atom(atom) => {
+                    if let Some(prev) = previous {
+                        x += math_space_em(prev, atom, script) * fs * self.operator_padding_scale;
+                    }
+                    previous = Some(atom);
+                }
+                AtomSlot::Break => previous = None,
+                // 명시 공백(~, `)은 원자 간격에 더해지며 양옆 원자의 관계를 끊지 않는다.
+                AtomSlot::Glue => {}
+            }
             b.x = x;
             b.y = max_ascent - b.baseline;
             x += b.width;
+            boxes.push(b);
         }
 
         LayoutBox {
@@ -421,26 +502,52 @@ impl EqLayout {
         }
     }
 
+    fn is_italic_text(&self, text: &str) -> bool {
+        self.italic && !text.chars().any(is_cjk_char)
+    }
+
     fn layout_text(&self, text: &str, fs: f64) -> LayoutBox {
-        // CJK/한글 텍스트는 이탤릭이 아니므로 italic 보정 제외
-        let has_cjk = text.chars().any(|c| {
-            matches!(c,
-                '\u{3000}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{AC00}'..='\u{D7AF}'
-            )
-        });
-        let w = self.text_width(text, fs, self.italic && !has_cjk, true);
+        // CJK/한글 텍스트는 이탤릭이 아니므로 italic 보정 제외.
+        // 이탤릭 보정(잉크가 advance를 넘는 폭)은 TeX처럼 글자 폭에 포함한다.
+        let (advance, overhang) =
+            self.text_metrics(text, fs, self.is_italic_text(text), self.bold, true);
         LayoutBox {
             x: 0.0,
             y: 0.0,
-            width: w,
+            width: advance + overhang,
             height: fs,
             baseline: fs * 0.8,
             kind: LayoutKind::Text(text.to_string()),
         }
     }
 
+    /// 첨자 기준 글자의 이탤릭 보정. 아래첨자는 이만큼 왼쪽(글자 advance)에 붙는다.
+    fn trailing_italic_correction(&self, node: &EqNode, fs: f64) -> f64 {
+        match node {
+            EqNode::Text(text) if self.is_italic_text(text) => {
+                self.text_metrics(text, fs, true, self.bold, true).1
+            }
+            EqNode::MathSymbol(text)
+                if self.italic
+                    && super::font::is_greek_variable(text)
+                    && !is_integral_symbol(text)
+                    && symbol_class(text) == MathClass::Ord =>
+            {
+                self.text_metrics(text, fs, true, false, false).1
+            }
+            EqNode::FontStyle { style, body } => {
+                self.styled(*style).trailing_italic_correction(body, fs)
+            }
+            EqNode::Color { body, .. } => self.trailing_italic_correction(body, fs),
+            EqNode::Row(children) => children
+                .last()
+                .map_or(0.0, |last| self.trailing_italic_correction(last, fs)),
+            _ => 0.0,
+        }
+    }
+
     fn layout_number(&self, text: &str, fs: f64) -> LayoutBox {
-        let w = self.text_width(text, fs, false, false);
+        let w = self.text_metrics(text, fs, false, self.bold, false).0;
         LayoutBox {
             x: 0.0,
             y: 0.0,
@@ -451,18 +558,13 @@ impl EqLayout {
         }
     }
 
+    /// 연산자·구두점 기호. 좌우 간격은 layout_row의 원자 간격이 정한다.
     fn layout_symbol(&self, text: &str, fs: f64) -> LayoutBox {
-        // 연산자 좌우 여백: 관계 > 이항 > 그 밖의 기호
-        self.padded_symbol(text, fs, operator_pad_em(text).unwrap_or(0.05))
-    }
-
-    fn padded_symbol(&self, text: &str, fs: f64, pad_em: f64) -> LayoutBox {
-        let w = self.text_width(text, fs, false, false);
-        let pad = fs * pad_em;
+        let w = self.text_metrics(text, fs, false, false, false).0;
         LayoutBox {
             x: 0.0,
             y: 0.0,
-            width: w + pad * 2.0 * self.operator_padding_scale,
+            width: w,
             height: fs,
             baseline: fs * 0.8,
             kind: LayoutKind::Symbol(text.to_string()),
@@ -485,16 +587,16 @@ impl EqLayout {
                 kind: LayoutKind::MathSymbol(text.to_string()),
             };
         }
-        // 관계·이항 연산 기호는 Symbol 로 두어 좌우 여백 가운데에 그린다.
-        if let Some(pad_em) = operator_pad_em(text) {
-            return self.padded_symbol(text, fs, pad_em);
+        // 관계·이항 연산 기호는 Symbol 로 두어 가운데에 그린다.
+        if matches!(symbol_class(text), MathClass::Rel | MathClass::Bin) {
+            return self.layout_symbol(text, fs);
         }
         let italic = self.italic && super::font::is_greek_variable(text);
-        let w = self.text_width(text, fs, italic, false);
+        let (advance, overhang) = self.text_metrics(text, fs, italic, false, false);
         LayoutBox {
             x: 0.0,
             y: 0.0,
-            width: w,
+            width: advance + overhang,
             height: fs,
             baseline: fs * 0.8,
             kind: LayoutKind::MathSymbol(text.to_string()),
@@ -502,11 +604,12 @@ impl EqLayout {
     }
 
     fn layout_function(&self, name: &str, fs: f64) -> LayoutBox {
-        let w = self.text_width(name, fs, false, false);
+        // 함수 이름은 Op 원자다. 뒤 피연산자와의 thin space는 layout_row가 넣는다.
+        let w = self.text_metrics(name, fs, false, false, false).0;
         LayoutBox {
             x: 0.0,
             y: 0.0,
-            width: w + fs * 0.02,
+            width: w,
             height: fs,
             baseline: fs * 0.8,
             kind: LayoutKind::Function(name.to_string()),
@@ -730,10 +833,11 @@ impl EqLayout {
         base_box.y = 0.0;
 
         let mut sub_box = s;
-        sub_box.x = base_box.width;
+        // 아래첨자는 이탤릭 보정 전 advance에 붙는다 (TeX rule 18).
+        sub_box.x = base_box.width - self.trailing_italic_correction(base, fs);
         sub_box.y = sub_shift;
 
-        let total_w = base_box.width + sub_box.width;
+        let total_w = base_box.width.max(sub_box.x + sub_box.width);
 
         LayoutBox {
             x: 0.0,
@@ -841,11 +945,10 @@ impl EqLayout {
         sup_box.y = 0.0;
 
         let mut sub_box = sb;
-        sub_box.x = base_box.width;
+        sub_box.x = base_box.width - self.trailing_italic_correction(base, fs);
         sub_box.y = base_y + sub_shift;
 
-        let script_w = sup_box.width.max(sub_box.width);
-        let total_w = base_box.width + script_w;
+        let total_w = (sup_box.x + sup_box.width).max(sub_box.x + sub_box.width);
 
         LayoutBox {
             x: 0.0,
@@ -990,7 +1093,7 @@ impl EqLayout {
 
     fn layout_limit(&self, is_upper: bool, sub: &Option<Box<EqNode>>, fs: f64) -> LayoutBox {
         let name = if is_upper { "Lim" } else { "lim" };
-        let name_w = estimate_text_width(name, fs, false);
+        let name_w = self.text_metrics(name, fs, false, false, false).0;
         let name_h = fs;
 
         let sub_box = sub.as_ref().map(|s| self.layout_node(s, fs * SCRIPT_SCALE));
@@ -1351,13 +1454,7 @@ impl EqLayout {
         body: &EqNode,
         fs: f64,
     ) -> LayoutBox {
-        use super::symbols::FontStyleKind;
-        let mut styled = self.clone();
-        styled.italic = match style {
-            FontStyleKind::Italic => true,
-            FontStyleKind::Bold => self.italic,
-            _ => false,
-        };
+        let styled = self.styled(style);
         let b = styled.layout_node(body, fs);
         LayoutBox {
             x: 0.0,
@@ -1370,6 +1467,22 @@ impl EqLayout {
                 body: Box::new(b),
             },
         }
+    }
+
+    /// FontStyle 적용 후 상태. canvas/svg painter의 전환 규칙과 같아야 측정과 paint가 맞는다.
+    fn styled(&self, style: super::symbols::FontStyleKind) -> Self {
+        use super::symbols::FontStyleKind;
+        let mut styled = self.clone();
+        (styled.italic, styled.bold) = match style {
+            FontStyleKind::Roman | FontStyleKind::SansSerif | FontStyleKind::Monospace => {
+                (false, false)
+            }
+            FontStyleKind::Italic => (true, self.bold),
+            FontStyleKind::Bold => (self.italic, true),
+            FontStyleKind::Blackboard => (false, true),
+            FontStyleKind::Calligraphy | FontStyleKind::Fraktur => (false, false),
+        };
+        styled
     }
 
     fn layout_space(&self, kind: SpaceKind, fs: f64) -> LayoutBox {
@@ -1455,7 +1568,9 @@ fn estimate_unicode_char_width(ch: char) -> f64 {
         '⊥' | '⊤' | '°' | '‰' | '‱' | '♯' => 0.5,
         'ℵ' | 'ℏ' | 'ı' | 'ȷ' | 'ℓ' | '℘' | 'ℑ' | 'ℜ' | 'ℒ' | 'Å' | '℧' => 0.6,
         '℃' | '℉' => 0.9,
-        '△' | '▽' | '○' | '◇' | '⋄' => 0.7,
+        // 기하 도형은 대체 서체(Apple Symbols·맑은 고딕 등)에서 거의 전각이다.
+        '△' | '▽' | '○' | '◇' | '□' | '▲' | '▼' | '●' | '◆' | '■' => 0.97,
+        '⋄' => 0.7,
         // CJK — 전각
         '\u{3000}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{AC00}'..='\u{D7AF}' => 1.0,
         // 기타 비-ASCII — 중간 너비 기본값
@@ -1483,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    fn roman_and_nested_italic_measure_the_face_they_paint() {
+    fn 직립과_중첩_이탤릭은_실제_표시_서체로_측정한다() {
         use super::super::symbols::FontStyleKind;
         let text = EqNode::Text("abc".into());
         let roman = EqNode::FontStyle {
@@ -1506,7 +1621,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_control_width_fits_operator_padding_without_rescaling_glyphs() {
+    fn 저장_폭에는_글립_크기_대신_연산자_간격을_맞춘다() {
         fn leaves(node: &LayoutBox, out: &mut Vec<(String, f64, f64)>) {
             match &node.kind {
                 LayoutKind::Text(s) | LayoutKind::Number(s) => {
@@ -1540,6 +1655,77 @@ mod tests {
             assert_eq!(engine.layout_in_control_width(&ast, 0.01).width, natural.width,
                 "a source box narrower than its glyphs must never stretch glyphs or erase all spacing");
         }
+    }
+
+    fn row_children(lb: &LayoutBox) -> &[LayoutBox] {
+        match &lb.kind {
+            LayoutKind::Row(children) => children,
+            other => panic!("expected Row, got {other:?}"),
+        }
+    }
+
+    /// 사용자 보고: `TRIANGLE x = {lambda L} over {d}` 에서 △가 x를 덮었다.
+    /// 원자 박스는 겹치지 않고, 관계 기호 양쪽은 같은 thick space다.
+    #[test]
+    fn 삼각형과_변수는_겹치지_않고_등호_간격은_대칭이다() {
+        let fs = 13.0 + 1.0 / 3.0;
+        let ast = EqParser::new(tokenize("TRIANGLE  x= {lambda  L} over {d}")).parse();
+        let lb = EqLayout::with_font(fs, "HYhwpEQ").layout(&ast);
+        let atoms = row_children(&lb);
+        assert_eq!(atoms.len(), 4);
+        for pair in atoms.windows(2) {
+            assert!(
+                pair[1].x >= pair[0].x + pair[0].width - 1e-9,
+                "atoms overlap: {:?} / {:?}",
+                pair[0].kind,
+                pair[1].kind
+            );
+        }
+        let gap = |i: usize| atoms[i + 1].x - (atoms[i].x + atoms[i].width);
+        assert!(
+            (gap(0) - fs * THIN_SPACE_EM).abs() < 1e-9,
+            "△ is a prefix operator"
+        );
+        assert!((gap(1) - fs * THICK_SPACE_EM).abs() < 1e-9);
+        assert!((gap(2) - fs * THICK_SPACE_EM).abs() < 1e-9);
+    }
+
+    #[test]
+    fn 원자_간격은_부호와_첨자_및_명시_공백을_구별한다() {
+        let fs = 20.0;
+        let gaps = |script: &str| -> Vec<f64> {
+            let lb = parse_and_layout(script, fs);
+            row_children(&lb)
+                .windows(2)
+                .map(|pair| pair[1].x - (pair[0].x + pair[0].width))
+                .collect()
+        };
+        let medium = fs * MEDIUM_SPACE_EM;
+        let thick = fs * THICK_SPACE_EM;
+        let close = |a: &[f64], b: &[f64]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9)
+        };
+        assert!(close(&gaps("a+b"), &[medium, medium]));
+        // 관계 기호 뒤·행 첫머리의 -는 부호(Ord)라 피연산자에 붙는다.
+        assert!(close(&gaps("a=-b"), &[thick, thick, 0.0]));
+        assert!(close(&gaps("-a+b"), &[0.0, medium, medium]));
+        // 명시 공백(~)은 원자 간격에 더해진다.
+        let spaced = parse_and_layout("a~+b", fs);
+        let spaced = row_children(&spaced);
+        assert!(
+            (spaced[2].x - (spaced[0].x + spaced[0].width) - (fs * 0.33 + medium)).abs() < 1e-9
+        );
+        // 첨자 크기에서는 이항·관계 간격을 넣지 않는다.
+        let lb = parse_and_layout("x^{n+1}", fs);
+        let LayoutKind::Superscript { sup, .. } = &lb.kind else {
+            panic!("superscript")
+        };
+        for pair in row_children(sup).windows(2) {
+            assert!((pair[1].x - (pair[0].x + pair[0].width)).abs() < 1e-9);
+        }
+        // 함수 이름(Op) 뒤 피연산자는 thin space, 괄호(Open)는 붙는다.
+        assert!(close(&gaps("sin x"), &[fs * THIN_SPACE_EM]));
+        assert!(gaps("sin (x)")[0].abs() < 1e-9);
     }
 
     #[test]
@@ -1860,29 +2046,230 @@ mod tests {
     }
 }
 
-/// 부호로 쓰인 +/- 의 좌우 여백 (em)
-const SIGN_PAD_EM: f64 = 0.03;
+fn is_cjk_char(c: char) -> bool {
+    matches!(c, '\u{3000}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{AC00}'..='\u{D7AF}')
+}
 
-/// 행 첫머리나 다른 연산자 뒤의 +/- 는 부호이므로 붙여 쓴다.
-fn is_sign(children: &[EqNode], i: usize) -> bool {
-    if !matches!(&children[i], EqNode::Symbol(s) if s == "+" || s == "-") {
-        return false;
-    }
-    match i.checked_sub(1).map(|p| &children[p]) {
-        None | Some(EqNode::Symbol(_)) => true,
-        Some(EqNode::MathSymbol(p)) => operator_pad_em(p).is_some(),
-        _ => false,
+/// TeX 수식 원자 분류 (The TeXbook 17장).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MathClass {
+    Ord,
+    Op,
+    Bin,
+    Rel,
+    Open,
+    Close,
+    Punct,
+    Inner,
+}
+
+/// 행 안의 원자. 괄호 묶음처럼 왼쪽/오른쪽 경계의 분류가 다를 수 있다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Atom {
+    left: MathClass,
+    right: MathClass,
+    /// 큰 연산자처럼 박스 안에 이미 뒤 간격을 가진 원자.
+    trailing_space: bool,
+}
+
+impl Atom {
+    fn of(class: MathClass) -> Self {
+        Self {
+            left: class,
+            right: class,
+            trailing_space: false,
+        }
     }
 }
 
-/// 연산자 좌우 여백 (em). TeX 의 관계(5mu)·이항(4mu) 간격을 따른다.
-pub(crate) fn operator_pad_em(text: &str) -> Option<f64> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtomSlot {
+    Atom(Atom),
+    /// 명시 공백: 간격에 더해지지만 원자 관계는 유지한다.
+    Glue,
+    /// 줄바꿈: 앞뒤 원자 관계를 끊는다.
+    Break,
+}
+
+fn atom_of(node: &EqNode) -> AtomSlot {
+    let class = match node {
+        EqNode::Space(_) | EqNode::Empty => return AtomSlot::Glue,
+        EqNode::Newline => return AtomSlot::Break,
+        EqNode::Symbol(s) | EqNode::MathSymbol(s) if is_integral_symbol(s) => {
+            return AtomSlot::Atom(Atom {
+                trailing_space: true,
+                ..Atom::of(MathClass::Op)
+            })
+        }
+        EqNode::Symbol(s) | EqNode::MathSymbol(s) => symbol_class(s),
+        EqNode::Text(_) | EqNode::Number(_) | EqNode::Quoted(_) => MathClass::Ord,
+        EqNode::Function(_) | EqNode::Limit { .. } => MathClass::Op,
+        EqNode::BigOp { .. } => {
+            return AtomSlot::Atom(Atom {
+                trailing_space: true,
+                ..Atom::of(MathClass::Op)
+            })
+        }
+        // 분수선은 개체 여백(bar_inset) 안쪽에서 끝난다. TeX의 null delimiter와 같은 역할.
+        EqNode::Fraction { .. } | EqNode::Atop { .. } | EqNode::Cases { .. } => MathClass::Inner,
+        EqNode::Matrix { style, .. } => {
+            if *style == MatrixStyle::Plain {
+                MathClass::Ord
+            } else {
+                MathClass::Inner
+            }
+        }
+        EqNode::Rel { .. } => MathClass::Rel,
+        EqNode::Paren { .. } => {
+            return AtomSlot::Atom(Atom {
+                left: MathClass::Open,
+                right: MathClass::Close,
+                trailing_space: false,
+            })
+        }
+        EqNode::Superscript { base, .. }
+        | EqNode::Subscript { base, .. }
+        | EqNode::SubSup { base, .. }
+        | EqNode::Color { body: base, .. }
+        | EqNode::FontStyle { body: base, .. } => {
+            return match atom_of(base) {
+                AtomSlot::Atom(atom) => AtomSlot::Atom(atom),
+                _ => AtomSlot::Atom(Atom::of(MathClass::Ord)),
+            }
+        }
+        // 괄호로 시작·끝나는 평탄화된 괄호 행은 경계 분류를 유지하고, 그 밖의 묶음은 Ord다.
+        EqNode::Row(children) => {
+            let edge = |node: Option<&EqNode>| match node {
+                Some(EqNode::Symbol(s)) => Some(symbol_class(s)),
+                _ => None,
+            };
+            if edge(children.first()) == Some(MathClass::Open)
+                && edge(children.last()) == Some(MathClass::Close)
+            {
+                return AtomSlot::Atom(Atom {
+                    left: MathClass::Open,
+                    right: MathClass::Close,
+                    trailing_space: false,
+                });
+            }
+            MathClass::Ord
+        }
+        _ => MathClass::Ord,
+    };
+    AtomSlot::Atom(Atom::of(class))
+}
+
+/// TeX rule 5·6: 앞에 피연산자가 없는 Bin(부호)과 뒤에 피연산자가 없는 Bin은 Ord가 된다.
+fn resolve_atoms(mut slots: Vec<AtomSlot>) -> Vec<AtomSlot> {
+    let mut previous: Option<usize> = None;
+    for i in 0..slots.len() {
+        match slots[i] {
+            AtomSlot::Atom(atom) => {
+                let prev_right = previous.and_then(|p| match slots[p] {
+                    AtomSlot::Atom(prev) => Some(prev.right),
+                    _ => None,
+                });
+                if atom.left == MathClass::Bin
+                    && prev_right.map_or(true, |right| {
+                        matches!(
+                            right,
+                            MathClass::Bin
+                                | MathClass::Op
+                                | MathClass::Rel
+                                | MathClass::Open
+                                | MathClass::Punct
+                        )
+                    })
+                {
+                    slots[i] = AtomSlot::Atom(Atom::of(MathClass::Ord));
+                } else if matches!(
+                    atom.left,
+                    MathClass::Rel | MathClass::Close | MathClass::Punct
+                ) && prev_right == Some(MathClass::Bin)
+                {
+                    slots[previous.unwrap()] = AtomSlot::Atom(Atom::of(MathClass::Ord));
+                }
+                previous = Some(i);
+            }
+            AtomSlot::Break => {
+                demote_trailing_bin(&mut slots, previous);
+                previous = None;
+            }
+            AtomSlot::Glue => {}
+        }
+    }
+    demote_trailing_bin(&mut slots, previous);
+    slots
+}
+
+fn demote_trailing_bin(slots: &mut [AtomSlot], last: Option<usize>) {
+    if let Some(i) = last {
+        if matches!(slots[i], AtomSlot::Atom(atom) if atom.right == MathClass::Bin) {
+            slots[i] = AtomSlot::Atom(Atom::of(MathClass::Ord));
+        }
+    }
+}
+
+const THIN_SPACE_EM: f64 = 3.0 / 18.0;
+const MEDIUM_SPACE_EM: f64 = 4.0 / 18.0;
+const THICK_SPACE_EM: f64 = 5.0 / 18.0;
+
+/// 인접 원자 사이 간격 (em). TeX 원자 간격표를 따르며, 괄호 항목(첨자 크기에서 생략)은
+/// 음수로 적는다. 0 = 없음, 1 = thin, 2 = medium, 3 = thick.
+fn math_space_em(prev: Atom, next: Atom, script: bool) -> f64 {
+    use MathClass::*;
+    if prev.trailing_space {
+        return 0.0;
+    }
+    #[rustfmt::skip]
+    const TABLE: [[i8; 8]; 8] = [
+        //  Ord  Op  Bin  Rel Open Close Punct Inner
+        [    0,   1,  -2,  -3,   0,   0,    0,   -1], // Ord
+        [    1,   1,   0,  -3,   0,   0,    0,   -1], // Op
+        [   -2,  -2,   0,   0,  -2,   0,    0,   -2], // Bin
+        [   -3,  -3,   0,   0,  -3,   0,    0,   -3], // Rel
+        [    0,   0,   0,   0,   0,   0,    0,    0], // Open
+        [    0,   1,  -2,  -3,   0,   0,    0,   -1], // Close
+        [   -1,  -1,   0,  -1,  -1,  -1,   -1,   -1], // Punct
+        [   -1,   1,  -2,  -3,  -1,   0,   -1,   -1], // Inner
+    ];
+    let index = |class: MathClass| match class {
+        Ord => 0,
+        Op => 1,
+        Bin => 2,
+        Rel => 3,
+        Open => 4,
+        Close => 5,
+        Punct => 6,
+        Inner => 7,
+    };
+    let entry = TABLE[index(prev.right)][index(next.left)];
+    if entry < 0 && script {
+        return 0.0;
+    }
+    match entry.abs() {
+        1 => THIN_SPACE_EM,
+        2 => MEDIUM_SPACE_EM,
+        3 => THICK_SPACE_EM,
+        _ => 0.0,
+    }
+}
+
+/// 기호의 TeX 원자 분류.
+pub(crate) fn symbol_class(text: &str) -> MathClass {
     match text {
-        "=" | "<" | ">" | "<=" | ">=" | "!=" | "==" | "->" | "<<" | ">>" | "<<<" | ">>>" | "≤"
-        | "≥" | "≠" | "≈" | "≡" | "∼" | "≃" | "≅" | "∝" | "≪" | "≫" | "→" | "←" | "↔" | "⇒"
-        | "⇐" | "⇔" | "∈" | "∉" | "∋" | "⊂" | "⊃" | "⊆" | "⊇" => Some(0.28),
-        "+" | "-" | "−" | "×" | "÷" | "±" | "∓" | "·" | "∙" | "∘" | "⊕" | "⊖" | "⊗" | "∪" | "∩"
-        | "∧" | "∨" => Some(0.22),
-        _ => None,
+        "=" | "<" | ">" | "<=" | ">=" | "!=" | "==" | "->" | "<<" | ">>" | "<<<" | ">>>" | ":"
+        | "≤" | "≥" | "≠" | "≈" | "≡" | "∼" | "≃" | "≅" | "∝" | "≪" | "≫" | "→" | "←" | "↔"
+        | "⇒" | "⇐" | "⇔" | "∈" | "∉" | "∋" | "⊂" | "⊃" | "⊆" | "⊇" | "≒" | "≐" | "∥" | "↦"
+        | "⟶" | "⟵" | "⟹" | "⟸" | "⟺" => MathClass::Rel,
+        "+" | "-" | "−" | "*" | "×" | "÷" | "±" | "∓" | "·" | "∙" | "∘" | "⊕" | "⊖" | "⊗" | "⊙"
+        | "∪" | "∩" | "∧" | "∨" | "⊔" | "⊓" | "∖" => MathClass::Bin,
+        "(" | "[" | "{" | "⟨" | "⌈" | "⌊" => MathClass::Open,
+        ")" | "]" | "}" | "⟩" | "⌉" | "⌋" | "!" => MathClass::Close,
+        "," | ";" => MathClass::Punct,
+        // 도형 접두 기호(△ABC, ∠ABC, △x)는 뒤 피연산자와 thin space로 떨어진다.
+        // 대체 서체의 도형 글립은 오른쪽 여백이 거의 없어 Ord로 두면 변수에 붙는다.
+        "△" | "▽" | "∠" | "∡" | "∢" | "□" | "◇" | "○" | "⊿" => MathClass::Op,
+        _ => MathClass::Ord,
     }
 }

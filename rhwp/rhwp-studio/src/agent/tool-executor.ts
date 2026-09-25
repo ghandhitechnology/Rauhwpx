@@ -906,8 +906,7 @@ export class AgentToolExecutor {
     const cursor = inputHandler.getCursorPosition();
     const sel = inputHandler.getSelection();
     // 커서/선택의 charOffset 은 논리 오프셋(텍스트 문자 + 앞선 인라인 컨트롤 1개당 +1)이다.
-    // 다른 툴은 텍스트 오프셋을 쓰므로 본문 문단은 logicalToTextOffset 로 변환해 반환한다.
-    // (셀 안쪽 문단은 변환 API 가 없어 논리 오프셋 그대로 — 응답 note 참고)
+    // 다른 툴은 텍스트 오프셋을 쓰므로 본문·셀 문단 모두 텍스트 오프셋으로 변환해 반환한다.
     interface SelPoint {
       sectionIdx: number;
       paraIdx: number;
@@ -921,6 +920,18 @@ export class AgentToolExecutor {
     const toTextOffset = (sec: number, para: number, logical: number): number => {
       try {
         return wasm.logicalToTextOffset(sec, para, logical);
+      } catch {
+        return logical; // 구버전 wasm 호환 — 변환 실패 시 원값 유지
+      }
+    };
+    const toCellTextOffset = (
+      sec: number,
+      parentPara: number,
+      path: CellPathEntry[],
+      logical: number,
+    ): number => {
+      try {
+        return wasm.logicalToTextOffsetInCellByPath(sec, parentPara, JSON.stringify(path), logical);
       } catch {
         return logical; // 구버전 wasm 호환 — 변환 실패 시 원값 유지
       }
@@ -940,7 +951,7 @@ export class AgentToolExecutor {
               cellIdx: p.cellIndex ?? path[0].cellIndex,
             },
             paraIdx: path[path.length - 1].cellParaIndex,
-            charOffset: p.charOffset,
+            charOffset: toCellTextOffset(p.sectionIndex, p.parentParaIndex, path, p.charOffset),
             nested: true,
             cellPath: path,
           };
@@ -948,6 +959,11 @@ export class AgentToolExecutor {
         const cellParaIdx = path.length > 0
           ? path[path.length - 1].cellParaIndex
           : p.cellParaIndex ?? 0;
+        const cellPath = path.length > 0 ? path : [{
+          controlIndex: p.controlIndex ?? 0,
+          cellIndex: p.cellIndex ?? 0,
+          cellParaIndex: cellParaIdx,
+        }];
         return {
           sectionIdx: p.sectionIndex,
           cell: {
@@ -956,7 +972,7 @@ export class AgentToolExecutor {
             cellIdx: p.cellIndex ?? 0,
           },
           paraIdx: cellParaIdx,
-          charOffset: p.charOffset,
+          charOffset: toCellTextOffset(p.sectionIndex, p.parentParaIndex, cellPath, p.charOffset),
         };
       }
       return {
@@ -982,7 +998,6 @@ export class AgentToolExecutor {
     };
     if (inCell) {
       result['inCell'] = true;
-      result['note'] = 'charOffset inside table cells is a logical offset (text chars + 1 per preceding inline control); body paragraph offsets are converted text offsets';
     }
     if (nested) {
       result['nested'] = true;

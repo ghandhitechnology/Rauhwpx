@@ -335,6 +335,78 @@ export function cellAxisPath(pos: DocumentPosition): CellPathEntry[] {
   }];
 }
 
+/**
+ * 캐럿 문단의 논리 길이 — 글자처럼 취급 개체(수식·그림 등)를 1칸으로 센다.
+ *
+ * 캐럿·히트 테스트 좌표와 같은 축이다. `getParagraphLength` 류는 텍스트 글자만 세므로
+ * 개체가 있는 문단에서 캐럿 끝 판정에 쓰면 마지막 글자 앞에서 문단 끝으로 오판한다.
+ */
+export function caretParagraphLength(wasm: WasmBridge, pos: DocumentPosition): number {
+  if (isCell(pos)) {
+    return wasm.getCellLogicalLengthByPath(
+      pos.sectionIndex, pos.parentParaIndex!, JSON.stringify(cellAxisPath(pos)),
+    );
+  }
+  return wasm.getLogicalLength(pos.sectionIndex, pos.paragraphIndex);
+}
+
+/** `pos.charOffset` 의 한 칸이 텍스트 글자가 아니라 인라인 개체인지 판정한다. */
+export function isInlineObjectSlot(wasm: WasmBridge, pos: DocumentPosition): boolean {
+  if (pos.charOffset < 0 || pos.charOffset >= caretParagraphLength(wasm, pos)) return false;
+  const toText = (offset: number): number => isCell(pos)
+    ? wasm.logicalToTextOffsetInCellByPath(
+      pos.sectionIndex, pos.parentParaIndex!, JSON.stringify(cellAxisPath(pos)), offset,
+    )
+    : wasm.logicalToTextOffset(pos.sectionIndex, pos.paragraphIndex, offset);
+  return toText(pos.charOffset) === toText(pos.charOffset + 1);
+}
+
+/**
+ * 캐럿 논리 오프셋을 텍스트 오프셋으로 바꾼다. 글자 속성·서식 API 는 텍스트 오프셋을 받는다.
+ * 변환 API 가 없는 대역(테스트 목, 구버전 wasm)에서는 원값을 쓴다.
+ */
+export function caretTextOffset(
+  wasm: WasmBridge,
+  pos: DocumentPosition,
+  logical: number = pos.charOffset,
+): number {
+  try {
+    return isCell(pos)
+      ? wasm.logicalToTextOffsetInCellByPath(
+        pos.sectionIndex, pos.parentParaIndex!, JSON.stringify(cellAxisPath(pos)), logical,
+      )
+      : wasm.logicalToTextOffset(pos.sectionIndex, pos.paragraphIndex, logical);
+  } catch {
+    return logical;
+  }
+}
+
+/** 캐럿 좌표의 서식 범위를 텍스트 오프셋 범위로 바꾼다. 머리말/꼬리말·각주는 그대로 둔다. */
+export function caretRangeToTextRange(wasm: WasmBridge, range: EditableTextRange): EditableTextRange {
+  const { target } = range;
+  const toText = (logical: number): number => {
+    try {
+      if (target.kind === 'body') {
+        return wasm.logicalToTextOffset(target.sectionIndex, target.paragraphIndex, logical);
+      }
+      if (target.kind === 'container') {
+        return useContainerPath(target)
+          ? wasm.logicalToTextOffsetInCellByPath(
+            target.sectionIndex, target.parentParagraphIndex, targetCellPathJson(target), logical,
+          )
+          : wasm.logicalToTextOffsetInCell(
+            target.sectionIndex, target.parentParagraphIndex, target.controlIndex,
+            target.cellIndex, target.paragraphIndex, logical,
+          );
+      }
+    } catch {
+      // 변환 API 가 없는 대역 — 원값 유지
+    }
+    return logical;
+  };
+  return { target, startOffset: toText(range.startOffset), endOffset: toText(range.endOffset) };
+}
+
 /** 셀 문단 구조 편집 뒤 flat/path 커서 위치를 같은 문단으로 맞춘다. */
 function cellParagraphPosition(
   pos: DocumentPosition,
@@ -360,22 +432,22 @@ export function insertTextWithMutationEffects(
   text: string,
 ): TextMutationEffects {
   if (isNestedCell(pos)) {
-    wasm.insertTextInCellByPath(pos.sectionIndex, pos.parentParaIndex!, cellPathJson(pos), pos.charOffset, text);
+    wasm.insertTextInCellByPath(pos.sectionIndex, pos.parentParaIndex!, cellPathJson(pos), pos.charOffset, text, true);
   } else if (isCell(pos)) {
     if (canUseDeferredCellTextInsert(pos, text)) {
-      const result = wasm.insertTextInCellDeferredPagination(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, text);
+      const result = wasm.insertTextInCellDeferredPagination(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, text, true);
       return {
         documentPaginationPending: result.paginationDeferred,
         flowChanged: result.cellFlowChanged,
         paginationCompleted: !result.paginationDeferred,
       };
     } else {
-      wasm.insertTextInCell(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, text);
+      wasm.insertTextInCell(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, text, true);
     }
   } else if (canUseLocalBodyTextReplace(pos, 0, text)) {
     return replaceBodyTextWithMutationEffects(wasm, pos, 0, text);
   } else {
-    wasm.insertText(pos.sectionIndex, pos.paragraphIndex, pos.charOffset, text);
+    wasm.insertText(pos.sectionIndex, pos.paragraphIndex, pos.charOffset, text, true);
   }
   return IMMEDIATE_TEXT_MUTATION_EFFECTS;
 }
@@ -392,6 +464,7 @@ export function replaceBodyTextWithMutationEffects(
     pos.charOffset,
     deleteCount,
     text,
+    true,
   );
   return {
     documentPaginationPending: result.documentPaginationPending,
@@ -415,6 +488,7 @@ export function replaceCellTextWithMutationEffects(
     pos.charOffset,
     deleteCount,
     text,
+    true,
   );
   return {
     documentPaginationPending: result.paginationDeferred,
@@ -426,11 +500,11 @@ export function replaceCellTextWithMutationEffects(
 /** undo/구조 명령의 full-refresh 복원은 flat cell에서도 immediate pagination을 사용한다. */
 function doInsertTextImmediate(wasm: WasmBridge, pos: DocumentPosition, text: string): void {
   if (isNestedCell(pos)) {
-    wasm.insertTextInCellByPath(pos.sectionIndex, pos.parentParaIndex!, cellPathJson(pos), pos.charOffset, text);
+    wasm.insertTextInCellByPath(pos.sectionIndex, pos.parentParaIndex!, cellPathJson(pos), pos.charOffset, text, true);
   } else if (isCell(pos)) {
-    wasm.insertTextInCell(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, text);
+    wasm.insertTextInCell(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, text, true);
   } else {
-    wasm.insertText(pos.sectionIndex, pos.paragraphIndex, pos.charOffset, text);
+    wasm.insertText(pos.sectionIndex, pos.paragraphIndex, pos.charOffset, text, true);
   }
 }
 
@@ -440,42 +514,42 @@ export function deleteTextWithMutationEffects(
   count: number,
 ): TextMutationEffects {
   if (isNestedCell(pos)) {
-    wasm.deleteTextInCellByPath(pos.sectionIndex, pos.parentParaIndex!, cellPathJson(pos), pos.charOffset, count);
+    wasm.deleteTextInCellByPath(pos.sectionIndex, pos.parentParaIndex!, cellPathJson(pos), pos.charOffset, count, true);
   } else if (isCell(pos)) {
     if (canUseDeferredCellTextDelete(pos, count)) {
-      const result = wasm.deleteTextInCellDeferredPagination(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, count);
+      const result = wasm.deleteTextInCellDeferredPagination(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, count, true);
       return {
         documentPaginationPending: result.paginationDeferred,
         flowChanged: result.cellFlowChanged,
         paginationCompleted: !result.paginationDeferred,
       };
     }
-    wasm.deleteTextInCell(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, count);
+    wasm.deleteTextInCell(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, count, true);
   } else if (canUseLocalBodyTextReplace(pos, count, '')) {
     return replaceBodyTextWithMutationEffects(wasm, pos, count, '');
   } else {
-    wasm.deleteText(pos.sectionIndex, pos.paragraphIndex, pos.charOffset, count);
+    wasm.deleteText(pos.sectionIndex, pos.paragraphIndex, pos.charOffset, count, true);
   }
   return IMMEDIATE_TEXT_MUTATION_EFFECTS;
 }
 
 function doDeleteTextImmediate(wasm: WasmBridge, pos: DocumentPosition, count: number): void {
   if (isNestedCell(pos)) {
-    wasm.deleteTextInCellByPath(pos.sectionIndex, pos.parentParaIndex!, cellPathJson(pos), pos.charOffset, count);
+    wasm.deleteTextInCellByPath(pos.sectionIndex, pos.parentParaIndex!, cellPathJson(pos), pos.charOffset, count, true);
   } else if (isCell(pos)) {
-    wasm.deleteTextInCell(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, count);
+    wasm.deleteTextInCell(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, count, true);
   } else {
-    wasm.deleteText(pos.sectionIndex, pos.paragraphIndex, pos.charOffset, count);
+    wasm.deleteText(pos.sectionIndex, pos.paragraphIndex, pos.charOffset, count, true);
   }
 }
 
 function doGetTextRange(wasm: WasmBridge, pos: DocumentPosition, count: number): string {
   if (isNestedCell(pos)) {
-    return wasm.getTextInCellByPath(pos.sectionIndex, pos.parentParaIndex!, cellPathJson(pos), pos.charOffset, count);
+    return wasm.getTextInCellByPath(pos.sectionIndex, pos.parentParaIndex!, cellPathJson(pos), pos.charOffset, count, true);
   } else if (isCell(pos)) {
-    return wasm.getTextInCell(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, count);
+    return wasm.getTextInCell(pos.sectionIndex, pos.parentParaIndex!, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, count, true);
   } else {
-    return wasm.getTextRange(pos.sectionIndex, pos.paragraphIndex, pos.charOffset, count);
+    return wasm.getTextRange(pos.sectionIndex, pos.paragraphIndex, pos.charOffset, count, true);
   }
 }
 
@@ -498,11 +572,11 @@ export function applyCharFormatToInsertedText(
   const startOffset = position.charOffset;
   const endOffset = startOffset + charCount(text);
   if (endOffset <= startOffset) return;
-  applyCharFormatToTarget(wasm, {
+  applyCharFormatToTarget(wasm, caretRangeToTextRange(wasm, {
     target: editableTargetFromPosition(position),
     startOffset,
     endOffset,
-  }, JSON.stringify(charFormat));
+  }), JSON.stringify(charFormat));
 }
 
 export class InsertTextCommand implements EditCommand {
@@ -738,8 +812,8 @@ export class MergeParagraphCommand implements EditCommand {
 
   execute(wasm: WasmBridge): DocumentPosition {
     const { sectionIndex: sec, paragraphIndex: para } = this.position;
-    // 병합 전 이전 문단 길이 기억
-    this.mergePointOffset = wasm.getParagraphLength(sec, para - 1);
+    // 캐럿과 undo 분할은 인라인 개체를 포함한 논리 오프셋을 쓴다.
+    this.mergePointOffset = wasm.getLogicalLength(sec, para - 1);
     this.removedParaMeta = JSON.parse(wasm.mergeParagraph(sec, para)).removedParaMeta;
     return { sectionIndex: sec, paragraphIndex: para - 1, charOffset: this.mergePointOffset };
   }
@@ -768,17 +842,17 @@ export function deleteSelectionImmediate(
     // 중첩 셀은 flat 좌표가 최외곽 셀을 가리키므로 경로 API를 쓴다.
     wasm.deleteRangeInCellByPath(
       start.sectionIndex, start.parentParaIndex!, cellPathJson(start),
-      cellParaIndexOf(start), start.charOffset, cellParaIndexOf(end), end.charOffset,
+      cellParaIndexOf(start), start.charOffset, cellParaIndexOf(end), end.charOffset, true,
     );
   } else if (start.sectionIndex === end.sectionIndex) {
     wasm.deleteRange(
       start.sectionIndex, start.paragraphIndex, start.charOffset,
-      end.paragraphIndex, end.charOffset,
+      end.paragraphIndex, end.charOffset, true,
     );
   } else {
     wasm.deleteRangeAcrossSections(
       start.sectionIndex, start.paragraphIndex, start.charOffset,
-      end.sectionIndex, end.paragraphIndex, end.charOffset,
+      end.sectionIndex, end.paragraphIndex, end.charOffset, true,
     );
   }
   return { ...start };
@@ -805,10 +879,14 @@ export class DeleteSelectionCommand implements EditCommand {
    */
   private readonly snapshot: SnapshotCommand;
 
-  constructor(start: DocumentPosition, end: DocumentPosition) {
-    // 삭제 후 커서는 선택 시작으로 모이고, undo 후에는 선택 끝으로 되돌아간다.
+  /**
+   * @param undoCursor undo 후 커서. 기본은 선택 끝이다. Delete 로 앞 개체를 지운 경우처럼
+   *   삭제 전 캐럿이 범위 시작에 있었으면 시작을 넘긴다.
+   */
+  constructor(start: DocumentPosition, end: DocumentPosition, undoCursor: DocumentPosition = end) {
+    // 삭제 후 커서는 선택 시작으로 모인다.
     this.snapshot = new SnapshotCommand(
-      'deleteSelection', end, start,
+      'deleteSelection', undoCursor, start,
       (wasm) => deleteSelectionImmediate(wasm, start, end),
     );
   }
@@ -909,12 +987,14 @@ export class ApplyCharFormatCommand implements EditCommand {
 
     this.entries = [];
     for (const range of this.ranges) {
-      if (range.endOffset <= range.startOffset) continue;
+      // 선택 범위는 캐럿 좌표다. run 조회·적용·복원은 모두 텍스트 오프셋으로 한다.
+      const { startOffset, endOffset } = caretRangeToTextRange(wasm, range);
+      if (endOffset <= startOffset) continue;
       this.entries.push({
         target: range.target,
-        startOffset: range.startOffset,
-        endOffset: range.endOffset,
-        beforeRuns: this.readRuns(wasm, range.target, range.startOffset, range.endOffset),
+        startOffset,
+        endOffset,
+        beforeRuns: this.readRuns(wasm, range.target, startOffset, endOffset),
       });
     }
 
@@ -1396,6 +1476,12 @@ function restoreParaShapeId(wasm: WasmBridge, target: ParaFormatTarget, paraShap
   setParaShapeIdAtTarget(wasm, target, paraShapeId);
 }
 
+/** 문단마다 현재 속성을 보고 바꿀 값을 정한다 (들여쓰기·수준처럼 상대 변경). null 이면 그 문단은 그대로. */
+export type ParaFormatForTarget = (
+  current: ParaProperties,
+  target: ParaFormatTarget,
+) => Partial<ParaProperties> | null;
+
 export class ApplyParaFormatCommand implements EditCommand {
   readonly type = 'applyParaFormat';
   readonly timestamp = Date.now();
@@ -1404,7 +1490,7 @@ export class ApplyParaFormatCommand implements EditCommand {
 
   constructor(
     private targets: ParaFormatTarget[],
-    private props: Partial<ParaProperties>,
+    private props: Partial<ParaProperties> | ParaFormatForTarget,
     private cursorBefore: DocumentPosition,
     private contextBefore?: EditContext,
   ) {}
@@ -1417,14 +1503,20 @@ export class ApplyParaFormatCommand implements EditCommand {
       return { ...this.cursorBefore };
     }
 
-    const propsJson = JSON.stringify(this.props);
+    const props = this.props;
+    const fixedJson = typeof props === 'function' ? null : JSON.stringify(props);
     const entries: ParaShapeHistoryEntry[] = this.targets.map(target => ({
       target,
       beforeParaShapeId: getParaShapeId(wasm, target),
     }));
 
     for (const entry of entries) {
-      applyParaFormatToTarget(wasm, entry.target, propsJson);
+      if (fixedJson !== null) {
+        applyParaFormatToTarget(wasm, entry.target, fixedJson);
+        continue;
+      }
+      const perTarget = (props as ParaFormatForTarget)(getParaPropertiesAtTarget(wasm, entry.target), entry.target);
+      if (perTarget) applyParaFormatToTarget(wasm, entry.target, JSON.stringify(perTarget));
     }
     for (const entry of entries) {
       entry.afterParaShapeId = getParaShapeId(wasm, entry.target);
@@ -1925,19 +2017,12 @@ export class MergeParagraphInCellCommand implements EditCommand {
     const sec = pos.sectionIndex;
     const ppi = pos.parentParaIndex!;
     const cpi = cellParaIndexOf(pos);
-    // 병합 전 이전 셀 문단 길이 기억.
-    // flat 필드(controlIndex/cellIndex)는 "외부 표 기준" 레거시 좌표라(types.ts DocumentPosition)
-    // 중첩 셀에서는 안쪽 셀을 가리키지 못한다. 뮤테이션이 ByPath 로 분기하는 만큼 길이 조회도
-    // 같은 축으로 맞춘다(cursor.ts 의 useCellPath 분기와 동형). 어긋나면 undo 가 바깥 셀에서
-    // 읽은 길이로 안쪽 셀을 분할해 문단이 엉뚱한 지점에서 잘린다.
+    // 안쪽 셀의 논리 길이를 보존해 수식 뒤 캐럿과 undo 분할 위치를 맞춘다.
+    const previous = cellParagraphPosition(pos, cpi - 1, 0);
+    this.mergePointOffset = wasm.getCellLogicalLengthByPath(sec, ppi, cellPathJson(previous));
     if (isNestedCell(pos)) {
-      const prevPath = pos.cellPath!.map((entry, index, path) =>
-        index + 1 === path.length ? { ...entry, cellParaIndex: cpi - 1 } : entry,
-      );
-      this.mergePointOffset = wasm.getCellParagraphLengthByPath(sec, ppi, JSON.stringify(prevPath));
       this.removedParaMeta = JSON.parse(wasm.mergeParagraphInCellByPath(sec, ppi, cellPathJson(pos))).removedParaMeta;
     } else {
-      this.mergePointOffset = wasm.getCellParagraphLength(sec, ppi, pos.controlIndex!, pos.cellIndex!, cpi - 1);
       this.removedParaMeta = JSON.parse(wasm.mergeParagraphInCell(sec, ppi, pos.controlIndex!, pos.cellIndex!, cpi)).removedParaMeta;
     }
     return cellParagraphPosition(pos, cpi - 1, this.mergePointOffset);

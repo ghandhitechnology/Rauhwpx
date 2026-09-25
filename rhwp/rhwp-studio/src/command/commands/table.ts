@@ -720,6 +720,32 @@ export const tableCommands: CommandDef[] = [
       const ih = services.getInputHandler();
       if (!ih) return;
       const ref = ih.getSelectedTableRef();
+      const pos = ih.getCursorPosition();
+      const path = ref ? ref.cellPath : pos.cellPath;
+      // 안쪽 표를 지운 뒤에는 그 표를 담던 셀 문단으로 돌아간다.
+      if (path && path.length > 1) {
+        const parentPath = path.slice(0, -1);
+        const outer = parentPath[0];
+        const host = parentPath[parentPath.length - 1];
+        safeTableOp(() => ih.executeOperation({
+          kind: 'snapshot',
+          operationType: 'deleteTable',
+          operation: (wasm) => {
+            wasm.deleteCellTableControlByPath(
+              ref?.sec ?? pos.sectionIndex, ref?.ppi ?? pos.parentParaIndex!,
+              JSON.stringify(parentPath), path[path.length - 1].controlIndex,
+            );
+            return {
+              ...pos, sectionIndex: ref?.sec ?? pos.sectionIndex,
+              parentParaIndex: ref?.ppi ?? pos.parentParaIndex,
+              paragraphIndex: host.cellParaIndex, charOffset: 0,
+              controlIndex: outer.controlIndex, cellIndex: outer.cellIndex,
+              cellParaIndex: outer.cellParaIndex, cellPath: parentPath,
+            };
+          },
+        }), '표 지우기');
+        return;
+      }
       if (ref) {
         safeTableOp(() => ih.executeOperation({
           kind: 'snapshot',
@@ -731,7 +757,6 @@ export const tableCommands: CommandDef[] = [
         }), '표 지우기');
         return;
       }
-      const pos = ih.getCursorPosition();
       if (pos.parentParaIndex === undefined || pos.controlIndex === undefined) return;
       safeTableOp(() => ih.executeOperation({
         kind: 'snapshot',

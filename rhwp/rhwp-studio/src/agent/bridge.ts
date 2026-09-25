@@ -23,7 +23,7 @@ import { PendingEditManager } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
 import { readProviderQuota, readRemoteBalance } from './provider-quota-protocol.ts';
 import { PendingRequestRegistry } from './pending-requests.ts';
-import { AgentTypewriterReveal } from './typewriter-reveal.ts';
+import { AgentEditFollow } from './agent-edit-follow.ts';
 import { deriveAgentEditingLease, planModeAllowsUserEditing } from './editing-lease.ts';
 import {
   setModelCatalog,
@@ -1223,8 +1223,8 @@ export class AgentBridgeImpl implements AgentBridge {
 
   private revision: RevisionTracker;
   private overlay: PendingOverlayRenderer;
-  private reveal: AgentTypewriterReveal;
-  private revealUnsub: (() => void) | null = null;
+  private editFollow: AgentEditFollow;
+  private pendingChangeUnsub: (() => void) | null = null;
   private executor: AgentToolExecutor;
 
   private url = '';
@@ -1354,15 +1354,15 @@ export class AgentBridgeImpl implements AgentBridge {
       canvasView: deps.canvasView,
       overlay: this.overlay,
     });
-    this.reveal = new AgentTypewriterReveal({
+    this.editFollow = new AgentEditFollow({
       canvasView: deps.canvasView,
       wasm: deps.wasm,
       eventBus: deps.eventBus,
     });
-    // 검토 대기/승인/거절/무효화 시 타자기 커버를 걷어 최종 텍스트를 보여 준다.
-    this.revealUnsub = this.pendingEdits.onChange((e) => {
+    // 검토 대기/승인/거절/무효화 뒤에는 대기 중인 편집 위치 이동을 버린다.
+    this.pendingChangeUnsub = this.pendingEdits.onChange((e) => {
       if (e.type === 'set-finalized' || e.type === 'approved' || e.type === 'rejected' || e.type === 'invalidated') {
-        this.reveal.finishAll();
+        this.editFollow.cancel();
       }
       this.handlePlanEditChange(e);
     });
@@ -3859,11 +3859,11 @@ export class AgentBridgeImpl implements AgentBridge {
     this.pendingInterrupt = false;
     this.abortSocket();
     this.listeners.clear();
-    this.revealUnsub?.();
-    this.revealUnsub = null;
+    this.pendingChangeUnsub?.();
+    this.pendingChangeUnsub = null;
     for (const off of this.documentNotifyUnsubs) off();
     this.documentNotifyUnsubs = [];
-    this.reveal.dispose();
+    this.editFollow.dispose();
     this.pendingEdits.dispose();
     this.overlay.dispose();
     this.revision.dispose();

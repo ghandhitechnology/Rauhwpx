@@ -115,6 +115,25 @@ fn partial_cell_inline_start_x(
     }
 }
 
+/// 텍스트가 있는 문단에서 글자처럼 취급 개체가 놓인 composed 줄. 전 줄이 빈
+/// (그림만 있는) 문단은 기존처럼 문단 시작 위치를 쓰므로 `None`.
+fn partial_cell_tac_host_line(composed: &ComposedParagraph, ctrl_idx: usize) -> Option<usize> {
+    if composed.lines.iter().all(|line| line.runs.is_empty()) {
+        return None;
+    }
+    let &(pos, _, _) = composed
+        .tac_controls
+        .iter()
+        .find(|&&(_, _, ci)| ci == ctrl_idx)?;
+    if let Some(host) = super::paragraph_layout::empty_tac_host_before_text(composed, pos) {
+        return Some(host);
+    }
+    composed
+        .lines
+        .iter()
+        .rposition(|line| pos >= line.char_start)
+}
+
 #[cfg(test)]
 mod inline_fallback_alignment_tests {
     use super::*;
@@ -530,31 +549,18 @@ impl LayoutEngine {
                     .zip(ranges.iter())
                     .enumerate()
                 {
-                    let para_style = styles.para_styles.get(para.para_shape_id as usize);
-                    let is_last_para = pi + 1 == split_para_count;
-                    // spacing_before: 셀 첫 문단(pi==0) 제외
-                    if start == 0 && end > 0 && pi > 0 {
-                        let spacing_before = para_style.map(|s| s.spacing_before).unwrap_or(0.0);
-                        total += spacing_before;
-                    }
-                    let line_count = comp.lines.len();
-                    for li in start..end {
-                        if li < line_count {
-                            let line = &comp.lines[li];
-                            let h = hwpunit_to_px(line.line_height, self.dpi);
-                            let is_cell_last_line = is_last_para && li + 1 == line_count;
-                            if !is_cell_last_line {
-                                total += h + hwpunit_to_px(line.line_spacing, self.dpi);
-                            } else {
-                                total += h;
-                            }
-                        }
-                    }
-                    // spacing_after: 셀 마지막 문단 제외
-                    if end == comp.lines.len() && end > start && !is_last_para {
-                        let spacing_after = para_style.map(|s| s.spacing_after).unwrap_or(0.0);
-                        total += spacing_after;
-                    }
+                    // 렌더러가 줄을 놓는 보정 줄높이와 같은 규칙으로 잰다. 합성 줄
+                    // (LINE_SEG 없음)의 원시 줄높이(400HU)로 재면 가운데 정렬 여유가
+                    // 부풀어 조각의 마지막 줄이 셀 아래 테두리 밖으로 밀린다.
+                    total += self.calc_para_line_range_height(
+                        comp,
+                        para,
+                        start,
+                        end,
+                        pi,
+                        split_para_count,
+                        styles,
+                    );
                     if start < end {
                         total += self.paragraph_cell_non_inline_controls_flow_height(
                             &para.controls,
@@ -629,15 +635,14 @@ impl LayoutEngine {
             } else {
                 cell.vertical_align
             };
-            let text_y_start = match effective_align {
-                VerticalAlign::Top => cell_y + pad_top,
-                VerticalAlign::Center => {
-                    cell_y + pad_top + (inner_height - total_content_height).max(0.0) / 2.0
-                }
-                VerticalAlign::Bottom => {
-                    cell_y + pad_top + (inner_height - total_content_height).max(0.0)
-                }
-            };
+            let text_y_start = cell_y
+                + super::table_layout::cell_valign_top_offset(
+                    effective_align,
+                    cell_h,
+                    pad_top,
+                    pad_bottom,
+                    total_content_height,
+                );
 
             // 세로쓰기 셀: 별도 레이아웃 경로 (가로 레이아웃 루프 대신)
             if cell.text_direction != 0 {
@@ -952,7 +957,42 @@ impl LayoutEngine {
                                             Some(&cell_context),
                                         )
                                         .is_some();
+                                    // 텍스트가 있는 문단에서는 그림이 놓인 줄을 찾아 그 줄에
+                                    // 그린다. 문단 첫 줄에 그리면 글자를 덮고, 그 줄이 이 조각
+                                    // 밖(다른 쪽)이면 여기서 그리지 않는다 — 쪽 경계에서 그림이
+                                    // 앞 쪽 끝에 잘려 한 번 더 보이던 문제.
+                                    let host_line = partial_cell_tac_host_line(composed, ctrl_idx);
+                                    if !will_render_inline
+                                        && host_line
+                                            .is_some_and(|li| li < start_line || li >= end_line)
+                                    {
+                                        continue;
+                                    }
                                     if !will_render_inline {
+                                        let pic_y = match host_line {
+                                            Some(li) if li > start_line => {
+                                                let vpos = |i: usize| {
+                                                    para.line_segs
+                                                        .get(i)
+                                                        .map(|seg| seg.vertical_pos)
+                                                        .unwrap_or(0)
+                                                };
+                                                inline_x = inner_area.x
+                                                    + effective_margin_left_line(
+                                                        para_style
+                                                            .map(|s| s.margin_left)
+                                                            .unwrap_or(0.0),
+                                                        para_style.map(|s| s.indent).unwrap_or(0.0),
+                                                        li,
+                                                    );
+                                                para_y_before_compose
+                                                    + hwpunit_to_px(
+                                                        vpos(li) - vpos(start_line),
+                                                        self.dpi,
+                                                    )
+                                            }
+                                            _ => para_y_before_compose,
+                                        };
                                         // 단독 이미지(텍스트 없는 문단): 직접 렌더링
                                         let pic_h =
                                             hwpunit_to_px(pic.common.height as i32, self.dpi);
@@ -968,7 +1008,7 @@ impl LayoutEngine {
                                         };
                                         let pic_area = LayoutRect {
                                             x: inline_x + margin_left,
-                                            y: para_y_before_compose,
+                                            y: pic_y,
                                             width: clamped_w,
                                             height: clamped_h,
                                         };
@@ -1567,8 +1607,13 @@ impl LayoutEngine {
                     );
                 }
 
-                if has_table_ctrl && mixed_nested_split.is_none() {
-                    // LINE_SEG vpos 기반으로 para_y 보정.
+                if has_table_ctrl
+                    && mixed_nested_split.is_none()
+                    && cut_units.is_none_or(|(start, _)| start == 0)
+                {
+                    // 저장 vpos는 셀 전체의 좌표다. 이어진 조각은 앞쪽 내용이 이미
+                    // 이전 쪽에 있으므로 중첩 표의 실제 흐름 높이만큼만 전진한다.
+                    // 첫 조각에서만 LINE_SEG vpos 기반으로 para_y를 보정한다.
                     let is_last_para = cp_idx + 1 == composed_paras.len();
                     if !is_last_para {
                         if let Some(next_para) = cell.paragraphs.get(cp_idx + 1) {
@@ -1990,7 +2035,7 @@ impl LayoutEngine {
             }
             // [#2287/PR #2290 P1] 블록-합 보정: 컷 블록에 걸친 rowspan 셀의 컷
             // 가시 높이(su..eu 유닛 합 + pad)가 rs=1 기반 행높이 합보다 크면
-            // 블록 마지막 행에 차액을 가산한다 — rowspan 셀 bbox 가 컷 가시
+            // 그 셀이 걸친 마지막 행에 차액을 가산한다 — rowspan 셀 bbox 가 컷 가시
             // 높이와 정합해야 클립/valign 이 컷 의미대로 동작한다 (typeset 의
             // consumed_height 와 동일 좌표계).
             if is_block_split {
@@ -2001,35 +2046,50 @@ impl LayoutEngine {
                     }
                 }
                 for (bs, be) in blocks {
-                    let mut target = 0.0f64;
-                    for c in table.cells.iter().filter(|c| {
-                        c.row_span > 1 && (c.row as usize) >= bs && (c.row as usize) < be
-                    }) {
-                        let su = if start_block == Some((bs, be)) {
-                            block_cut_index(table, bs, be, c)
-                                .and_then(|i| start_cut.get(i).copied())
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        let eu = if end_block == Some((bs, be)) {
-                            block_cut_index(table, bs, be, c)
-                                .and_then(|i| end_cut.get(i).copied())
-                                .unwrap_or(usize::MAX)
-                        } else {
-                            usize::MAX
-                        };
-                        target = target.max(self.cell_cut_visible_height(c, table, styles, su, eu));
-                    }
-                    if target <= 0.0 {
-                        continue;
-                    }
-                    let cur: f64 = (bs..be.min(row_count))
-                        .map(|r| row_heights.get(r).copied().unwrap_or(0.0))
-                        .sum();
-                    if target > cur + 0.5 {
-                        if let Some(last) = (bs..be.min(row_count)).next_back() {
-                            row_heights[last] += target - cur;
+                    // 각 rowspan 셀은 자기 행 범위 안에서 컷 가시 높이를 받아야 한다.
+                    // 블록 합만 맞추고 차액을 블록 마지막 행에 몰면, 블록보다 짧게 걸친
+                    // 셀(80168 pi=271 r8c1 rs2: 가시 51.1px vs 행 8~9 합 44px)은 자기
+                    // 영역 밖으로 줄이 넘쳐 아래 행 괘선과 겹친다. 끝 행이 이른 셀부터
+                    // 채워 뒤 셀이 앞 셀의 보정을 이어받게 한다.
+                    let mut spans: Vec<(usize, usize, f64)> = table
+                        .cells
+                        .iter()
+                        .filter(|c| {
+                            c.row_span > 1 && (c.row as usize) >= bs && (c.row as usize) < be
+                        })
+                        .filter_map(|c| {
+                            let su = if start_block == Some((bs, be)) {
+                                block_cut_index(table, bs, be, c)
+                                    .and_then(|i| start_cut.get(i).copied())
+                                    .unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            let eu = if end_block == Some((bs, be)) {
+                                block_cut_index(table, bs, be, c)
+                                    .and_then(|i| end_cut.get(i).copied())
+                                    .unwrap_or(usize::MAX)
+                            } else {
+                                usize::MAX
+                            };
+                            let target = self.cell_cut_visible_height(c, table, styles, su, eu);
+                            let span_end = (c.row as usize + c.row_span as usize)
+                                .min(be)
+                                .min(row_count);
+                            (target > 0.0 && span_end > c.row as usize).then_some((
+                                c.row as usize,
+                                span_end,
+                                target,
+                            ))
+                        })
+                        .collect();
+                    spans.sort_by_key(|&(start, end, _)| (end, start));
+                    for (span_start, span_end, target) in spans {
+                        let cur: f64 = (span_start..span_end)
+                            .map(|r| row_heights.get(r).copied().unwrap_or(0.0))
+                            .sum();
+                        if target > cur + 0.5 {
+                            row_heights[span_end - 1] += target - cur;
                         }
                     }
                 }

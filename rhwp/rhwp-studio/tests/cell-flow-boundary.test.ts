@@ -359,7 +359,7 @@ test('depth-1 IME replace는 atomic deferred mutation 한 번만 사용한다', 
   );
   assert.deepEqual(wasm.calls, [{
     name: 'replace-deferred',
-    args: [0, 5, 2, 3, 0, 7, 1, '하'],
+    args: [0, 5, 2, 3, 0, 7, 1, '하', true],
   }]);
 });
 
@@ -414,7 +414,7 @@ test('본문 insert와 delete command는 stable local replace effect를 반환�
   });
   assert.deepEqual(wasm.calls.at(-1), {
     name: 'body-local',
-    args: [0, 2, 3, 0, '가'],
+    args: [0, 2, 3, 0, '가', true],
   });
 
   const deletion = new DeleteTextCommand(position, 1, 'forward');
@@ -426,7 +426,7 @@ test('본문 insert와 delete command는 stable local replace effect를 반환�
   });
   assert.deepEqual(wasm.calls.at(-1), {
     name: 'body-local',
-    args: [0, 2, 3, 1, ''],
+    args: [0, 2, 3, 1, '', true],
   });
 });
 

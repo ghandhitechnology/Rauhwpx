@@ -1477,6 +1477,7 @@ impl DocumentCore {
         // 셀 높이 지정으로 본문보다 커진 쪽나눔=None 표는 자동으로 "나눔"으로 승격한다.
         self.auto_enable_table_page_split(section_idx, parent_para_idx, control_idx);
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_table_host_paragraph_changed(section_idx, parent_para_idx);
         self.recompose_section(section_idx);
         self.paginate_if_needed();
 
@@ -1715,6 +1716,7 @@ impl DocumentCore {
         table.dirty = true;
 
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_table_host_paragraph_changed(section_idx, parent_para_idx);
         self.recompose_section(section_idx);
         self.paginate_if_needed();
 
@@ -1865,6 +1867,78 @@ impl DocumentCore {
         // 스타일 재계산
         self.styles =
             crate::renderer::style_resolver::resolve_styles(&self.document.doc_info, self.dpi);
+    }
+
+    /// 표를 담은 본문 문단의 IR 이 바뀌었음을 revision 에 남긴다.
+    ///
+    /// 이벤트를 쌓지 않는 표 편집(크기·속성·캡션·위치)이 이것을 빠뜨리면 스냅샷이
+    /// 직전 스냅샷의 문단을 그대로 공유해, redo 가 편집 전 상태를 복원한다.
+    pub(crate) fn mark_table_host_paragraph_changed(
+        &mut self,
+        section_idx: usize,
+        para_idx: usize,
+    ) {
+        self.event_log.mark_paragraph_changed(section_idx, para_idx);
+    }
+
+    /// 폭이 바뀐 셀의 문단을 새 폭으로 다시 줄나눔하고 셀 안 문단 vpos 를 다시 잇는다.
+    ///
+    /// `cells` 는 `(셀 번호, 문단 수)`. `path` 의 마지막 항목이 대상 표이고, 깊이 1이면
+    /// 평면 경로를 쓴다. 줄나눔만 하고 vpos 를 잇지 않으면 늘어난 줄이 다음 문단의
+    /// 저장된 첫 줄 위치와 겹쳐 그려진다 (표 폭 축소 시 문단이 겹치는 원인).
+    fn reflow_table_cells_by_cell_path(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        cells: &[(usize, usize)],
+    ) {
+        let Some(&(control_idx, _, _)) = path.last() else {
+            return;
+        };
+        if path.len() == 1 {
+            for &(cell_idx, para_count) in cells {
+                for cell_para_idx in 0..para_count {
+                    self.reflow_cell_paragraph(
+                        section_idx,
+                        parent_para_idx,
+                        control_idx,
+                        cell_idx,
+                        cell_para_idx,
+                    );
+                }
+                self.recalculate_cell_paragraph_vpos_native(
+                    section_idx,
+                    parent_para_idx,
+                    control_idx,
+                    cell_idx,
+                    0,
+                    None,
+                );
+            }
+            return;
+        }
+        let depth = path.len() - 1;
+        let mut inner_path: Vec<(usize, usize, usize)> = path.to_vec();
+        for &(cell_idx, para_count) in cells {
+            for cell_para_idx in 0..para_count {
+                inner_path[depth] = (control_idx, cell_idx, cell_para_idx);
+                self.reflow_cell_paragraph_by_path(
+                    section_idx,
+                    parent_para_idx,
+                    &inner_path,
+                    cell_para_idx,
+                );
+            }
+            inner_path[depth] = (control_idx, cell_idx, 0);
+            self.recalculate_cell_paragraph_vpos_by_path(
+                section_idx,
+                parent_para_idx,
+                &inner_path,
+                0,
+                None,
+            );
+        }
     }
 
     /// 셀 크기 갱신을 표에 반영하고, 폭이 바뀐 셀의 `(셀 번호, 문단 수)` 를 돌려준다.
@@ -2151,22 +2225,10 @@ impl DocumentCore {
         let table = self.resolve_table_mut_by_cell_path(section_idx, parent_para_idx, path)?;
         let reflow_cells = Self::apply_cell_resize_updates(table, &updates, force_local_resize);
 
-        let depth = path.len() - 1;
-        let mut inner_path: Vec<(usize, usize, usize)> = path[..depth].to_vec();
-        inner_path.push((control_idx, 0, 0));
-        for (cell_idx, para_count) in reflow_cells {
-            for cell_para_idx in 0..para_count {
-                inner_path[depth] = (control_idx, cell_idx, cell_para_idx);
-                self.reflow_cell_paragraph_by_path(
-                    section_idx,
-                    parent_para_idx,
-                    &inner_path,
-                    cell_para_idx,
-                );
-            }
-        }
+        self.reflow_table_cells_by_cell_path(section_idx, parent_para_idx, path, &reflow_cells);
 
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_table_host_paragraph_changed(section_idx, parent_para_idx);
         self.recompose_section(section_idx);
         self.paginate_if_needed();
 
@@ -2190,22 +2252,17 @@ impl DocumentCore {
 
         let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
         let reflow_cells = Self::apply_cell_resize_updates(table, &updates, force_local_resize);
-
-        for (cell_idx, para_count) in reflow_cells {
-            for cell_para_idx in 0..para_count {
-                self.reflow_cell_paragraph(
-                    section_idx,
-                    parent_para_idx,
-                    control_idx,
-                    cell_idx,
-                    cell_para_idx,
-                );
-            }
-        }
+        self.reflow_table_cells_by_cell_path(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, 0, 0)],
+            &reflow_cells,
+        );
 
         // 리사이즈로 본문보다 커진 쪽나눔=None 표는 자동으로 "나눔"으로 승격한다.
         self.auto_enable_table_page_split(section_idx, parent_para_idx, control_idx);
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_table_host_paragraph_changed(section_idx, parent_para_idx);
         self.recompose_section(section_idx);
         self.paginate_if_needed();
 
@@ -2245,19 +2302,15 @@ impl DocumentCore {
                 Vec::new()
             }
         };
-        for (cell_idx, para_count) in reflow {
-            for cell_para_idx in 0..para_count {
-                self.reflow_cell_paragraph(
-                    section_idx,
-                    parent_para_idx,
-                    control_idx,
-                    cell_idx,
-                    cell_para_idx,
-                );
-            }
-        }
+        self.reflow_table_cells_by_cell_path(
+            section_idx,
+            parent_para_idx,
+            &[(control_idx, 0, 0)],
+            &reflow,
+        );
 
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_table_host_paragraph_changed(section_idx, parent_para_idx);
         self.recompose_section(section_idx);
         self.paginate_if_needed();
 
@@ -2437,6 +2490,10 @@ impl DocumentCore {
             }
         }
 
+        // 문단 교환까지 포함해 바뀐 문단 전부를 표시한다.
+        for para_idx in parent_para_idx.min(result_ppi)..=parent_para_idx.max(result_ppi) {
+            self.mark_table_host_paragraph_changed(section_idx, para_idx);
+        }
         self.document.sections[section_idx].raw_stream = None;
         self.recompose_section(section_idx);
         self.paginate_if_needed();
@@ -2991,6 +3048,7 @@ impl DocumentCore {
         }
 
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_table_host_paragraph_changed(section_idx, parent_para_idx);
         self.recompose_section(section_idx);
         self.paginate_if_needed();
 
@@ -3179,6 +3237,7 @@ impl DocumentCore {
         if let Some(sec) = self.document.sections.get_mut(section_idx) {
             sec.raw_stream = None;
         }
+        self.mark_table_host_paragraph_changed(section_idx, parent_para_idx);
         self.recompose_section(section_idx);
         self.paginate_if_needed();
 

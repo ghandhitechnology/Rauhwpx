@@ -312,8 +312,7 @@ fn long_cell_edit_keeps_table_fragments_inside_pages() {
         ),
         (
             "jinan",
-            include_bytes!("../../../samples/task2319/20544835_jinan_apt_form.hwp")
-                .as_slice(),
+            include_bytes!("../../../samples/task2319/20544835_jinan_apt_form.hwp").as_slice(),
             0,
             2,
             0,
@@ -393,8 +392,7 @@ fn long_cell_edit_keeps_table_fragments_inside_pages() {
             let mut boxes = Vec::new();
             top_level_tables(&tree.root, false, &mut boxes);
             let info: serde_json::Value =
-                serde_json::from_str(&core.get_page_info_native(page).expect("page info"))
-                    .unwrap();
+                serde_json::from_str(&core.get_page_info_native(page).expect("page info")).unwrap();
             let content_bottom = info["footerArea"]["y"].as_f64().expect("body bottom");
             if name == "jinan" && page == 0 {
                 let first = boxes[0];
@@ -413,11 +411,15 @@ fn long_cell_edit_keeps_table_fragments_inside_pages() {
         let saved = core.export_hwpx_native().expect("save the grown table");
         let reopened = DocumentCore::from_bytes(&saved).expect("reopen the grown table");
         for page in 0..reopened.page_count() {
-            let tree = reopened.build_page_tree_cached(page).expect("render reopened page");
+            let tree = reopened
+                .build_page_tree_cached(page)
+                .expect("render reopened page");
             let mut boxes = Vec::new();
             top_level_tables(&tree.root, false, &mut boxes);
             let info: serde_json::Value = serde_json::from_str(
-                &reopened.get_page_info_native(page).expect("reopened page info"),
+                &reopened
+                    .get_page_info_native(page)
+                    .expect("reopened page info"),
             )
             .unwrap();
             let content_bottom = info["footerArea"]["y"].as_f64().expect("body bottom");

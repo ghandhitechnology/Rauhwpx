@@ -10,7 +10,7 @@ const TYPING_IDLE_MS = 500;
  *
  * 위치는 transform 으로 즉시 옮긴다. 사용자 입력과 키보드 이동에 보간을
  * 두지 않아, 입력 결과와 캐럿이 같은 프레임에 도착하는 고전적인 동작을
- * 유지한다. 에이전트 편집의 typewriter reveal은 별도 렌더러가 담당한다.
+ * 유지한다.
  */
 export class CaretRenderer {
   private caretEl: HTMLDivElement;

@@ -123,7 +123,7 @@ assert.equal(
 );
 
 const require = createRequire(import.meta.url);
-const { InsertTextCommand } = require(path.join(runtimeRoot, 'engine', 'command.js'));
+const { InsertTextCommand, ApplyCharFormatCommand, applyCharFormatToInsertedText } = require(path.join(runtimeRoot, 'engine', 'command.js'));
 
 after(() => {
   rmSync(runtimeRoot, { recursive: true, force: true });
@@ -168,7 +168,7 @@ test('InsertTextCommand 는 삽입 범위에 타이핑 글꼴을 적용하고 re
   command.execute(wasm);
   assert.deepEqual(wasm.calls[0], {
     name: 'body-local',
-    args: [0, 1, 4, 0, '가'],
+    args: [0, 1, 4, 0, '가', true],
   });
   assert.deepEqual(wasm.calls[1], {
     name: 'applyCharFormat',
@@ -192,4 +192,41 @@ test('InsertTextCommand 는 charFormat 이 없으면 applyCharFormat 을 호출�
   );
   command.execute(wasm);
   assert.equal(wasm.calls.some((call) => call.name === 'applyCharFormat'), false);
+});
+
+test('수식 뒤 선택 서식과 undo는 같은 텍스트 범위에 적용된다', () => {
+  const wasm = new FakeWasm();
+  // ab[수식]cd: c의 논리 위치는 3, 텍스트 위치는 2다.
+  wasm.logicalToTextOffset = (_sec, _para, offset) => offset > 2 ? offset - 1 : offset;
+  wasm.getCharShapeRuns = (_sec, _para, start, end) => [{ startOffset: start, endOffset: end, charShapeId: 0 }];
+  wasm.setCharShapeRuns = (...args) => wasm.calls.push({ name: 'restore', args });
+  const command = new ApplyCharFormatCommand([
+    { target: { kind: 'body', sectionIndex: 0, paragraphIndex: 0 }, startOffset: 3, endOffset: 4 },
+  ], { bold: true }, { sectionIndex: 0, paragraphIndex: 0, charOffset: 4 });
+  command.execute(wasm);
+  assert.deepEqual(wasm.calls[0].args.slice(0, 4), [0, 0, 2, 3]);
+  command.undo(wasm);
+  assert.deepEqual(wasm.calls[1].args.slice(0, 4), [0, 0, 2, 3]);
+  command.execute(wasm);
+  assert.deepEqual(wasm.calls[2].args.slice(0, 4), [0, 0, 2, 3]);
+});
+
+test('중첩 셀 수식 뒤 입력 서식은 삽입한 글자만 바꾼다', () => {
+  const calls = [];
+  const cellPath = [
+    { controlIndex: 1, cellIndex: 2, cellParaIndex: 3 },
+    { controlIndex: 0, cellIndex: 1, cellParaIndex: 4 },
+  ];
+  const wasm = {
+    logicalToTextOffsetInCellByPath: (_sec, _para, path, offset) => {
+      assert.deepEqual(JSON.parse(path), cellPath);
+      return offset > 2 ? offset - 1 : offset;
+    },
+    applyCharFormatInCellByPath: (...args) => calls.push(args),
+  };
+  applyCharFormatToInsertedText(wasm, {
+    sectionIndex: 0, paragraphIndex: 4, parentParaIndex: 1,
+    controlIndex: 1, cellIndex: 2, cellParaIndex: 3, cellPath, charOffset: 3,
+  }, '가', { bold: true });
+  assert.deepEqual(calls[0].slice(3, 5), [2, 3]);
 });

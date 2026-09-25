@@ -153,6 +153,12 @@ function cellPathAt(cell: CellAddr, paraIdx: number): string {
     : entry));
 }
 
+/** flat 셀 주소도 경로 API 로 조회할 수 있게 1-depth 경로를 만든다. */
+function cellAxisPathAt(cell: CellAddr, paraIdx: number): string {
+  if (cell.path?.length) return cellPathAt(cell, paraIdx);
+  return JSON.stringify([{ controlIndex: cell.controlIdx, cellIndex: cell.cellIdx, cellParaIndex: paraIdx }]);
+}
+
 /**
  * 에이전트 대기 편집(pending edit)을 표시하는 오버레이.
  * replace 는 view-only exact diff 로 쪼개고, 나머지 op 는 기존 범위 렌더링을 유지한다.
@@ -371,24 +377,55 @@ export class PendingOverlayRenderer {
     return result;
   }
 
+  /**
+   * 에이전트 범위(텍스트 오프셋)를 rect 조회용 캐럿 좌표(인라인 개체 = 1칸)로 바꾼다.
+   *
+   * 텍스트 오프셋 t 앞에 개체가 있으면 캐럿 좌표가 두 개다. 범위 시작(`after`)은 글자 t 에
+   * 붙도록 개체 뒤, 범위 끝·삽입 지점(`before`)은 개체 앞이다. 변환 API 가 없는 대역에서는
+   * 원값을 쓴다.
+   */
+  private caretOffset(
+    range: DocRange,
+    paraIdx: number,
+    textOffset: number,
+    side: 'before' | 'after' = 'before',
+  ): number {
+    const cell = range.cell;
+    const toLogical = (offset: number): number => cell
+      ? this.deps.wasm.textToLogicalOffsetInCellByPath(
+        range.sectionIdx, cell.paraIdx, cellAxisPathAt(cell, paraIdx), offset,
+      )
+      : this.deps.wasm.textToLogicalOffset(range.sectionIdx, paraIdx, offset);
+    try {
+      if (side === 'after' && textOffset < this.paragraphLength(range, paraIdx)) {
+        return toLogical(textOffset + 1) - 1;
+      }
+      return toLogical(textOffset);
+    } catch {
+      return textOffset;
+    }
+  }
+
   private rangeRects(range: DocRange): SelectionRect[] {
     const cell = range.cell;
+    const start = this.caretOffset(range, range.startParaIdx, range.startCharOffset, 'after');
+    const end = this.caretOffset(range, range.endParaIdx, range.endCharOffset);
     return cell?.path
       ? this.deps.wasm.getSelectionRectsByPath(
         range.sectionIdx, cell.paraIdx, cell.path,
-        range.startParaIdx, range.startCharOffset,
-        range.endParaIdx, range.endCharOffset,
+        range.startParaIdx, start,
+        range.endParaIdx, end,
       )
       : cell
       ? this.deps.wasm.getSelectionRectsInCell(
         range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
-        range.startParaIdx, range.startCharOffset,
-        range.endParaIdx, range.endCharOffset,
+        range.startParaIdx, start,
+        range.endParaIdx, end,
       )
       : this.deps.wasm.getSelectionRects(
         range.sectionIdx,
-        range.startParaIdx, range.startCharOffset,
-        range.endParaIdx, range.endCharOffset,
+        range.startParaIdx, start,
+        range.endParaIdx, end,
       );
   }
 
@@ -403,8 +440,9 @@ export class PendingOverlayRenderer {
       : this.deps.wasm.getParagraphLength(range.sectionIdx, paraIdx);
   }
 
-  private caretRectAt(range: DocRange, paraIdx: number, charOffset: number): SelectionRect {
+  private caretRectAt(range: DocRange, paraIdx: number, textOffset: number): SelectionRect {
     const cell = range.cell;
+    const charOffset = this.caretOffset(range, paraIdx, textOffset);
     const rect = cell?.path
       ? this.deps.wasm.getCursorRectByPath(range.sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), charOffset)
       : cell
@@ -455,16 +493,17 @@ export class PendingOverlayRenderer {
   private cursorRect(op: ReplaceOverlayOp, scalarOffset: number): SelectionRect {
     const point = pointAtNewScalarOffset(op.range, op.newText, scalarOffset);
     const cell = op.range.cell;
+    const charOffset = this.caretOffset(op.range, point.paraIdx, point.charOffset);
     const rect = cell?.path
       ? this.deps.wasm.getCursorRectByPath(
-        op.range.sectionIdx, cell.paraIdx, cellPathAt(cell, point.paraIdx), point.charOffset,
+        op.range.sectionIdx, cell.paraIdx, cellPathAt(cell, point.paraIdx), charOffset,
       )
       : cell
       ? this.deps.wasm.getCursorRectInCell(
         op.range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
-        point.paraIdx, point.charOffset,
+        point.paraIdx, charOffset,
       )
-      : this.deps.wasm.getCursorRect(op.range.sectionIdx, point.paraIdx, point.charOffset);
+      : this.deps.wasm.getCursorRect(op.range.sectionIdx, point.paraIdx, charOffset);
     return { pageIndex: rect.pageIndex, x: rect.x, y: rect.y, width: 0, height: rect.height };
   }
 
@@ -768,9 +807,16 @@ export class PendingOverlayRenderer {
     } else if (position.parentParaIndex !== undefined) {
       return false;
     }
+    // 캐럿은 논리 좌표, 범위는 텍스트 좌표다. 범위 끝점을 캐럿 좌표로 바꿔 비교한다.
     const point = { paraIdx, charOffset: position.charOffset };
-    const start = { paraIdx: range.startParaIdx, charOffset: range.startCharOffset };
-    const end = { paraIdx: range.endParaIdx, charOffset: range.endCharOffset };
+    const start = {
+      paraIdx: range.startParaIdx,
+      charOffset: this.caretOffset(range, range.startParaIdx, range.startCharOffset, 'after'),
+    };
+    const end = {
+      paraIdx: range.endParaIdx,
+      charOffset: this.caretOffset(range, range.endParaIdx, range.endCharOffset),
+    };
     return comparePoint(point, start) >= 0 && comparePoint(point, end) <= 0;
   }
 
@@ -852,7 +898,7 @@ export class PendingOverlayRenderer {
       case 'para': {
         if (ref.cell) {
           if (ref.cell.path) {
-            const len = wasm.getCellParagraphLengthByPath(
+            const len = wasm.getCellLogicalLengthByPath(
               ref.sectionIdx, ref.cell.paraIdx, cellPathAt(ref.cell, ref.paraIdx),
             );
             return wasm.getSelectionRectsByPath(
@@ -860,13 +906,15 @@ export class PendingOverlayRenderer {
               ref.paraIdx, 0, ref.paraIdx, len,
             );
           }
-          const len = wasm.getCellParagraphLength(ref.sectionIdx, ref.cell.paraIdx, ref.cell.controlIdx, ref.cell.cellIdx, ref.paraIdx);
+          const len = wasm.getCellLogicalLengthByPath(
+            ref.sectionIdx, ref.cell.paraIdx, cellAxisPathAt(ref.cell, ref.paraIdx),
+          );
           return wasm.getSelectionRectsInCell(
             ref.sectionIdx, ref.cell.paraIdx, ref.cell.controlIdx, ref.cell.cellIdx,
             ref.paraIdx, 0, ref.paraIdx, len,
           );
         }
-        const len = wasm.getParagraphLength(ref.sectionIdx, ref.paraIdx);
+        const len = wasm.getLogicalLength(ref.sectionIdx, ref.paraIdx);
         return wasm.getSelectionRects(ref.sectionIdx, ref.paraIdx, 0, ref.paraIdx, len);
       }
     }

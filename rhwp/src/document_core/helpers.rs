@@ -18,6 +18,14 @@ pub(crate) fn is_treat_as_char_object_control(ctrl: &Control) -> bool {
     }
 }
 
+pub(crate) fn is_block_table_control(ctrl: &Control) -> bool {
+    matches!(ctrl, Control::Table(table) if !table.common.treat_as_char)
+}
+
+pub(crate) fn has_block_table(para: &Paragraph) -> bool {
+    para.controls.iter().any(is_block_table_control)
+}
+
 fn is_logical_inline_control(ctrl: &Control) -> bool {
     is_treat_as_char_object_control(ctrl)
         || matches!(ctrl, Control::Footnote(_) | Control::Endnote(_))
@@ -40,48 +48,26 @@ pub(crate) fn navigable_text_len(para: &Paragraph) -> usize {
 /// 논리적 오프셋: 텍스트 문자 + 인라인 컨트롤을 각각 1로 세는 위치.
 /// 반환: (텍스트 char_offset, 컨트롤 직후 여부)
 pub(crate) fn logical_to_text_offset(para: &Paragraph, logical_offset: usize) -> (usize, bool) {
-    let ctrl_positions = find_control_text_positions(para);
-    if ctrl_positions.is_empty() {
+    if para.controls.is_empty() {
         return (logical_offset, false);
     }
-
-    // 논리적 위치에서 컨트롤 슬롯을 구성
-    // 텍스트 "abc[ctrl]XYZ" → 논리적: a(0) b(1) c(2) [ctrl](3) X(4) Y(5) Z(6)
-    // ctrl_positions = [3] (텍스트 인덱스 3에 컨트롤 삽입)
-    // 정렬된 (텍스트위치, 컨트롤인덱스) 목록
-    let mut sorted_ctrls: Vec<(usize, usize)> = para
-        .controls
-        .iter()
-        .enumerate()
-        .filter(|(_, ctrl)| is_logical_inline_control(ctrl))
-        .filter_map(|(ci, _)| ctrl_positions.get(ci).copied().map(|pos| (pos, ci)))
-        .collect();
-    sorted_ctrls.sort_by_key(|(pos, _)| *pos);
-
-    let text_len = para.text.chars().count();
-    let mut text_idx = 0usize;
-    let mut logical_idx = 0usize;
-    let mut ctrl_cursor = 0usize; // sorted_ctrls 내 현재 위치
-
-    while logical_idx < logical_offset {
-        // 현재 text_idx 위치에 컨트롤이 있는지 확인
-        if ctrl_cursor < sorted_ctrls.len() && sorted_ctrls[ctrl_cursor].0 == text_idx {
-            // 컨트롤 슬롯
-            logical_idx += 1;
-            ctrl_cursor += 1;
-            if logical_idx == logical_offset {
-                return (text_idx, true);
-            }
-        }
-        // 텍스트 문자
-        if text_idx < text_len {
-            text_idx += 1;
-            logical_idx += 1;
-        } else {
-            break;
+    // 같은 텍스트 위치의 연속 개체도 각각 한 칸이다. 텍스트를 먼저 전진시키면
+    // 두 번째 개체를 글자로 세므로, 탐색과 같은 논리 개체 위치에서 역변환한다.
+    let positions = find_logical_control_positions(para);
+    let mut before_count = 0;
+    let mut after_control = false;
+    for (ctrl, position) in para.controls.iter().zip(positions) {
+        if is_logical_inline_control(ctrl) && position < logical_offset {
+            before_count += 1;
+            after_control |= position + 1 == logical_offset;
         }
     }
-    (text_idx, false)
+    (
+        logical_offset
+            .saturating_sub(before_count)
+            .min(para.text.chars().count()),
+        after_control,
+    )
 }
 
 /// 텍스트 오프셋 → 논리적 오프셋 변환.
@@ -104,6 +90,72 @@ pub(crate) fn text_to_logical_offset(para: &Paragraph, text_offset: usize) -> us
         .filter(|&&pos| pos < text_offset)
         .count();
     text_offset + before_count
+}
+
+/// 편집 캐럿 범위(논리 오프셋)를 텍스트 오프셋 범위로 바꾼 결과.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CaretTextRange {
+    pub start: usize,
+    pub end: usize,
+    /// 범위 시작이 인라인 개체 바로 뒤이면 그 개체의 컨트롤 인덱스.
+    /// 텍스트 오프셋만으로는 같은 위치의 개체 앞/뒤를 구분할 수 없어 삽입 지점을 따로 알린다.
+    pub after_control: Option<usize>,
+}
+
+/// 편집 캐럿의 논리 범위 `[logical_start, logical_start + logical_len)` 를 텍스트 범위로 바꾼다.
+///
+/// Studio 캐럿·히트 테스트·커서 좌표는 인라인 개체를 1칸으로 세지만, 텍스트 편집 API 는
+/// 텍스트 오프셋을 받는다. 두 좌표계를 섞으면 수식 뒤에서 입력한 글자가 한 칸 밀리거나
+/// 문단 끝 입력의 char_offsets 가 문단 범위를 벗어난다.
+pub(crate) fn caret_text_range(
+    para: &Paragraph,
+    logical_start: usize,
+    logical_len: usize,
+) -> CaretTextRange {
+    let (start, after) = logical_to_text_offset(para, logical_start);
+    let (end, _) = logical_to_text_offset(para, logical_start + logical_len);
+    let after_control = if after && logical_start > 0 {
+        let positions = find_logical_control_positions(para);
+        para.controls
+            .iter()
+            .enumerate()
+            .filter(|(_, ctrl)| is_logical_inline_control(ctrl))
+            .find(|(ci, _)| positions.get(*ci) == Some(&(logical_start - 1)))
+            .map(|(ci, _)| ci)
+    } else {
+        None
+    };
+    CaretTextRange {
+        start,
+        end: end.max(start),
+        after_control,
+    }
+}
+
+/// 논리 범위 `[start, end)` 안의 글자처럼 취급 개체 컨트롤 인덱스를 내림차순으로 반환한다.
+///
+/// 내림차순이라 앞에서부터 지워도 남은 인덱스가 밀리지 않는다. 각주/미주는 번호 체계가
+/// 따로 있어 범위 삭제로 지우지 않는다.
+pub(crate) fn inline_objects_in_logical_range(
+    para: &Paragraph,
+    start: usize,
+    end: usize,
+) -> Vec<usize> {
+    let positions = find_logical_control_positions(para);
+    let mut indices: Vec<usize> = para
+        .controls
+        .iter()
+        .enumerate()
+        .filter(|(ci, ctrl)| {
+            is_treat_as_char_object_control(ctrl)
+                && positions
+                    .get(*ci)
+                    .is_some_and(|pos| *pos >= start && *pos < end)
+        })
+        .map(|(ci, _)| ci)
+        .collect();
+    indices.reverse();
+    indices
 }
 
 /// 논리적 문단 길이 (텍스트 문자 + 텍스트 흐름에 위치하는 컨트롤 수).
@@ -1542,6 +1594,27 @@ mod tests {
     use crate::model::image::Picture;
     use crate::model::page::ColumnDef;
     use crate::model::shape::TextWrap;
+
+    #[test]
+    fn 연속_수식의_논리_칸을_텍스트로_잘못_세지_않는다() {
+        let mut equation = crate::model::control::Equation::default();
+        equation.common.treat_as_char = true;
+        let mut para = Paragraph {
+            text: "ab".into(),
+            char_offsets: vec![0, 17],
+            controls: vec![
+                Control::Equation(Box::new(equation.clone())),
+                Control::Equation(Box::new(equation)),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(logical_to_text_offset(&para, 2), (1, true));
+        assert_eq!(logical_to_text_offset(&para, 3), (1, true));
+        assert_eq!(logical_to_text_offset(&para, 4), (2, false));
+        para.text.clear();
+        para.char_offsets.clear();
+        assert_eq!(logical_to_text_offset(&para, 2), (0, true));
+    }
 
     #[test]
     fn navigable_text_len_counts_trailing_footnote_marker() {

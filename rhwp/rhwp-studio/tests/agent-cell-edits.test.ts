@@ -719,3 +719,17 @@ test('safe mode apply_char_format targets a nested table cell', async () => {
   h.pending.reject(result.changeSetId);
   assert.equal(h.nested[0], 'inner');
 });
+
+test('pending: 셀 안에서 자신의 앞선 삽입을 다시 교체해도 reject 가 원문을 정확히 복원한다', () => {
+  const { mgr, cells } = makeManager();
+  mgr.beginTurn('claude');
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 3, cell: CELL_FOO }, '에이전트');
+  const at = (s: number, e: number) => ({
+    sectionIdx: 0, startParaIdx: 0, startCharOffset: s, endParaIdx: 0, endCharOffset: e, cell: CELL_FOO,
+  });
+  mgr.replaceText(at(3, 5), '교체', 'claude');
+  mgr.replaceText(at(1, 4), 'X', 'claude');
+  assert.equal(cells[2][0], 'fX체전트');
+  mgr.reject(mgr.getChangeSets()[0].id);
+  assert.equal(cells[2][0], 'foo');
+});

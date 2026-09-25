@@ -261,7 +261,7 @@ function userEdit(
 
 // ─── 원자적 교체 ─────────────────────────────────────────
 
-test('replaceText: 타자기 공개에 원문(oldText)을 함께 emit 한다', () => {
+test('replaceText: 편집 알림에 원문(oldText)을 함께 emit 한다', () => {
   const { mgr, eventBus } = makeManager([paraOf('검토 후 제출한다.')]);
   const payloads: Array<{ text?: string; oldText?: string }> = [];
   eventBus.on('agent-text-inserted', (payload) => {
@@ -1035,7 +1035,7 @@ test('atomic text previews notify only after final layout and retain shifted ran
   assert.deepEqual(inserted.map((event) => event.range.startCharOffset), [1, 0]);
 });
 
-test('failed atomic text previews do not animate rolled-back insertions', () => {
+test('failed atomic text previews do not notify rolled-back insertions', () => {
   const { mgr, fake, eventBus } = makeManager([paraOf('hello')]);
   let inserted = 0;
   eventBus.on('agent-text-inserted', () => inserted++);
@@ -1114,4 +1114,76 @@ test('failed multiline body insertion closes pagination before reversing its par
   assert.equal(fake.text(0), 'hello');
   assert.equal(fake.paraCount(), 1);
   assert.equal(mgr.getChangeSets().length, 0);
+});
+
+// ─── 턴 안의 재작성: 자신의 앞선 삽입/교체를 다시 교체 ─────────
+
+/** 삽입 → 그 삽입 위 교체 → 교체 위 교체 → 삽입 끝과 원문 앞을 걸친 교체. */
+function rewriteOwnText(
+  mgr: ReturnType<typeof makeManager>['mgr'], retainSnapshot: boolean,
+): string {
+  const at = (s: number, e: number): DocRange => ({
+    sectionIdx: 0, startParaIdx: 0, startCharOffset: s, endParaIdx: 0, endCharOffset: e,
+  });
+  mgr.beginTurn('claude');
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, '에이전트0 ');
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, '에이전트1 ');
+  mgr.replaceText(at(0, 4), '교체0함', 'claude', { retainSnapshot });
+  mgr.replaceText(at(0, 4), '교체1함', 'claude', { retainSnapshot });
+  // '에이전트0 hello' 의 '0 he' 를 교체 — 삽입 끝과 원문 앞을 함께 지운다
+  mgr.replaceText(at(10, 14), 'X', 'claude', { retainSnapshot });
+  return mgr.getChangeSets()[0].id;
+}
+
+for (const retainSnapshot of [true, false]) {
+  const mode = retainSnapshot ? 'snapshot' : 'inverse';
+  test(`rewriting own text in one turn: reject restores the exact original (${mode})`, () => {
+    const { mgr, fake } = makeManager([paraOf('hello world')]);
+    const id = rewriteOwnText(mgr, retainSnapshot);
+    assert.equal(fake.text(0), '교체1함1 에이전트Xllo world');
+    mgr.reject(id);
+    assert.equal(fake.text(0), 'hello world');
+    assert.equal(mgr.hasPending(), false);
+  });
+
+  test(`rewriting own text in one turn: approve records one exact undo/redo step (${mode})`, () => {
+    const { mgr, fake, recorded } = makeManager([paraOf('hello world')]);
+    const id = rewriteOwnText(mgr, retainSnapshot);
+    assert.equal(mgr.approve(id), true);
+    assert.equal(recorded.length, 1);
+    recorded[0].command.undo(fake.wasm);
+    assert.equal(fake.text(0), 'hello world');
+    recorded[0].command.execute(fake.wasm);
+    assert.equal(fake.text(0), '교체1함1 에이전트Xllo world');
+  });
+}
+
+test('overlapping edits inside one atomic batch revert exactly', () => {
+  const { mgr, fake } = makeManager([paraOf('hello')]);
+  mgr.beginTurn('claude');
+  mgr.runAtomicBatch(() => {
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 5 }, ' 추가 문장');
+    mgr.replaceText({
+      sectionIdx: 0, startParaIdx: 0, startCharOffset: 3, endParaIdx: 0, endCharOffset: 8,
+    }, '교체', 'claude');
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 4 }, '\n둘째 줄');
+  });
+  assert.equal(fake.text(0), 'hel교');
+  assert.equal(fake.text(1), '둘째 줄체 문장');
+  mgr.reject(mgr.getChangeSets()[0].id);
+  assert.equal(fake.paraCount(), 1);
+  assert.equal(fake.text(0), 'hello');
+});
+
+test('a user edit after an overwritten op keeps the old drift fallback', () => {
+  const { mgr, fake, eventBus } = makeManager([paraOf('hello')]);
+  mgr.beginTurn('claude');
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'AB');
+  mgr.replaceText({
+    sectionIdx: 0, startParaIdx: 0, startCharOffset: 1, endParaIdx: 0, endCharOffset: 3,
+  }, 'Z', 'claude');
+  userEdit(fake, eventBus, 0, (p) => { p.chars.push('!'); p.shapes.push(0); });
+  mgr.reject(mgr.getChangeSets()[0].id);
+  // 사용자 편집 이후에는 적용 직후 좌표를 믿지 않는다 — 사용자 글자를 지우지 않는다.
+  assert.ok(fake.text(0).endsWith('hello!'));
 });

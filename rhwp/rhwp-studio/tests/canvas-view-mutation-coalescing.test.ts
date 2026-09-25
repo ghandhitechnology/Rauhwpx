@@ -50,6 +50,4 @@ test('오버레이/pending 편집도 버스트를 합친다', () => {
   assert.match(pendingSrc, /private beginBulk\(\): void/);
   assert.match(pendingSrc, /private endBulk\(\): void/);
   assert.match(pendingSrc, /runAtomicBatch<T>\(fn: \(\) => T\): T/);
-  // 타자기 공개의 실제 버스트 동작은 agent-typewriter-pressure.test.ts 가
-  // 100개 삽입의 단일 rAF, 선택 rect 프로브 0회, 오래된 큐 정리를 검증한다.
 });

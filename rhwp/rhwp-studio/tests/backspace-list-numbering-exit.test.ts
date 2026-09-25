@@ -50,7 +50,14 @@ function makeHost(headType) {
     calls,
     host: {
       cursor: { isInHeaderFooter: () => false },
-      wasm: { getFieldInfoAt() { throw new Error('no field'); } },
+      wasm: {
+        getFieldInfoAt() { throw new Error('no field'); },
+        // 인라인 개체가 없는 문단: 논리 오프셋 = 텍스트 오프셋.
+        getLogicalLength: () => 10,
+        getCellLogicalLengthByPath: () => 10,
+        logicalToTextOffset: (_sec, _para, offset) => offset,
+        logicalToTextOffsetInCellByPath: (_sec, _para, _path, offset) => offset,
+      },
       getParaProperties: () => ({ headType }),
       clearParaNumbering() { calls.push('clearParaNumbering'); },
       executeOperation(op) { ops.push(op.command?.type ?? op.operationType); },

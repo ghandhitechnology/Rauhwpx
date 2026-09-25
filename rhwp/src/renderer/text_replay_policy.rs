@@ -19,6 +19,10 @@ pub(crate) fn preserves_symbol_ink_shape(cluster: &str) -> bool {
 ///
 /// 음수 자간은 다음 글자의 시작 위치만 당기는 속성이다. 이를 글자 자체의 폭 제한으로
 /// 사용하면 한글 glyph가 가로로 눌리므로, 음수 자간에서는 폭 맞춤을 적용하지 않는다.
+///
+/// 배율은 축소만 한다. 대체 글꼴의 좁은 글자(예: Pretendard의 '1')를 원본 글꼴
+/// advance까지 늘리면 획이 그만큼 굵어져 옆 글자와 굵기가 달라 보인다. 남는 폭은
+/// 호출부가 슬롯 안에서 가운데 정렬로 처리한다.
 pub(crate) fn canvas_cluster_fit_scale(
     cluster_advance: f64,
     visual_width: f64,
@@ -29,7 +33,8 @@ pub(crate) fn canvas_cluster_fit_scale(
         return None;
     }
     if pin_ascii_advance {
-        return Some((cluster_advance / visual_width).clamp(0.1, 2.0));
+        return (visual_width > cluster_advance)
+            .then(|| (cluster_advance / visual_width).clamp(0.1, 1.0));
     }
     if visual_width > cluster_advance + 0.25 {
         return Some((cluster_advance / visual_width).clamp(0.1, 1.0));
@@ -138,6 +143,12 @@ mod tests {
         assert_eq!(canvas_cluster_fit_scale(7.5, 15.0, 0.0, false), Some(0.5));
         assert_eq!(canvas_cluster_fit_scale(7.5, 15.0, 0.0, true), Some(0.5));
         assert_eq!(canvas_cluster_fit_scale(15.0, 14.9, 0.0, false), None);
+    }
+
+    #[test]
+    fn narrow_fallback_ascii_glyph_is_not_stretched_to_the_advance() {
+        // 맑은 고딕 '1'(0.55em) 슬롯에 Pretendard '1'(0.4em)을 그리면 늘리지 않는다.
+        assert_eq!(canvas_cluster_fit_scale(8.1, 5.9, 0.0, true), None);
     }
 
     #[test]

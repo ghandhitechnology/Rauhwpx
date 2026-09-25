@@ -8,6 +8,7 @@ pub(crate) use helpers::*;
 
 pub mod builders;
 mod commands;
+pub(crate) use commands::caret_edit::CaretParagraph;
 pub mod converters;
 pub(crate) mod html_table_import;
 /// 한글 클립보드 문서모델(hwpjson) → HWPX 변환
@@ -423,6 +424,11 @@ pub struct DocumentCore {
     /// 현재 활성 필드 위치 (커서가 진입한 누름틀 — 안내문 렌더링 스킵용)
     /// (section_idx, para_idx, field_control_idx)
     pub(crate) active_field: Option<ActiveFieldInfo>,
+    /// 다음 캐럿 텍스트 삽입 한 번을 이 인라인 개체 **뒤**에 둔다.
+    ///
+    /// 논리 오프셋 wasm 래퍼만 설정하고 삽입 네이티브가 `take()` 한다. 텍스트 오프셋으로는
+    /// 같은 위치의 개체 앞/뒤를 구분할 수 없어 공개 네이티브 시그니처 대신 여기로 전달한다.
+    pub(crate) caret_insert_after_control: Option<usize>,
     /// 구역별 문단 인덱스 오프셋 (삽입=+N, 삭제=-N, 페이지네이션 수렴 감지용)
     /// paginate() 후 리셋.
     pub(crate) para_offset: Vec<i32>,
@@ -637,6 +643,7 @@ impl DocumentCore {
             hidden_header_footer: std::collections::HashSet::new(),
             file_name: String::new(),
             active_field: None,
+            caret_insert_after_control: None,
             para_offset: Vec::new(),
             source_format: crate::parser::FileFormat::Hwp,
             hml_metadata: None,

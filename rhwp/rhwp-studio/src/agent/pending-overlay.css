@@ -249,52 +249,11 @@
   }
 }
 
-/* 공개 지점에 붙어 움직이는 에이전트 캐럿. 위치는 rAF 루프가 transform 으로
-   프레임마다 갱신하므로 transform 에는 트랜지션을 걸지 않는다. */
-.ag-typewriter-caret {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 2px;
-  border-radius: 1px;
-  z-index: 10;
-  pointer-events: none;
-  transform-origin: 0 0;
-  background: rgb(var(--ag-pending-ink, 168, 79, 49));
-  box-shadow: 0 0 6px rgba(var(--ag-pending-ink, 168, 79, 49), 0.35);
-  opacity: 0;
-  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.ag-typewriter-caret.is-writing {
-  opacity: 1;
-}
-
-.ag-typewriter-caret.ag-rau {
-  --ag-pending-ink: 141, 134, 128;
-}
-
-.ag-typewriter-caret.ag-claude {
-  --ag-pending-ink: 168, 79, 49;
-}
-
-.ag-typewriter-caret.ag-codex {
-  --ag-pending-ink: 53, 105, 168;
-}
-
-.ag-typewriter-caret.ag-cursor {
-  --ag-pending-ink: 127, 124, 164;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .ag-liquid-anchor-in {
     animation: none;
     filter: none;
     opacity: 1;
     transform: none;
-  }
-
-  .ag-typewriter-caret {
-    display: none;
   }
 }

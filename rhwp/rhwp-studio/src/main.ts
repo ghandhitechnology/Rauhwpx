@@ -98,6 +98,7 @@ import {
 } from '@/recovery/autosave-store';
 import { recoveryFileName } from '@/recovery/recovery-format';
 import { showAutosaveRecoveryDialog } from '@/recovery/recovery-ui';
+import { isPinnedDocumentEnabled, startPinnedDocument } from '@/recovery/pinned-document';
 import { CellSelectionRenderer } from '@/engine/cell-selection-renderer';
 import { TableObjectRenderer } from '@/engine/table-object-renderer';
 import { TableResizeRenderer } from '@/engine/table-resize-renderer';
@@ -1312,7 +1313,8 @@ async function initialize(): Promise<void> {
     installDesktopPlainTextPasteHandling((text) => {
       inputHandler?.performPlainTextPaste(text);
     });
-    void loadFromUrlParam();
+    if (isPinnedDocumentEnabled()) void loadPinnedDocument();
+    else void loadFromUrlParam();
     void offerAutosaveRecoveryIfIdle();
     installPwaFileHandling(window as FileHandlingWindowLike, {
       openDocumentBytes(payload) {
@@ -2365,7 +2367,27 @@ async function renderRecentSubmenu(): Promise<void> {
 
 function shouldSkipInitialAutosaveRecovery(): boolean {
   const params = new URLSearchParams(window.location.search);
-  return params.has('url');
+  return params.has('url') || isPinnedDocumentEnabled();
+}
+
+async function loadPinnedDocument(): Promise<void> {
+  try {
+    await startPinnedDocument({
+      eventBus,
+      // 글꼴 구성은 서버 쪽 번들 글꼴을 그대로 쓰므로 기기별 로컬 글꼴 안내를 띄우지 않는다.
+      loadBytes: (data, fileName) => loadBytes(data, fileName, null, performance.now(), {
+        skipRecent: true,
+        suppressDialogs: true,
+      }),
+      exportBytes: () => wasm.exportHwp(),
+      markSaved: () => {
+        documentState.markClean('pinned-save');
+        void autosaveManager.discardCurrentDraft('pinned-save');
+      },
+    });
+  } catch (error) {
+    showLoadError(error);
+  }
 }
 
 async function offerAutosaveRecoveryIfIdle(): Promise<void> {

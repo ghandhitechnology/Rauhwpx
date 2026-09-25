@@ -1121,7 +1121,16 @@ fn fill_lines(
                 if lw + width_hwp > eff_w(is_first_line) + LINE_BREAK_TOLERANCE
                     && *idx > line_start_idx
                 {
-                    if last_break_token_idx.is_some() {
+                    // 개체 바로 앞 글자 뒤가 원래 줄을 나눌 수 있는 자리(닫는 문장부호,
+                    // 글자 단위 한글, 한자)이면 개체 앞에서 바로 나눈다. 마지막 공백까지
+                    // 되돌리면 "형성한다." 의 마침표처럼 줄 머리 금칙 글자나 어절 조각이
+                    // 개체와 함께 다음 줄로 넘어가 앞 줄만 짧게 남는다.
+                    let break_before_object = text_chars.get(*idx - 1).is_some_and(|&c| {
+                        (is_line_start_forbidden(c) && !is_line_end_forbidden(c))
+                            || (is_hangul(c) && korean_break_unit == 1)
+                            || is_cjk_ideograph(c)
+                    });
+                    if last_break_token_idx.is_some() && !break_before_object {
                         let mut break_char = last_break_char_idx;
                         let mut next_start = break_char;
                         while next_start < text_chars.len() && text_chars[next_start] == ' ' {
@@ -1728,13 +1737,36 @@ fn inline_control_metrics_hwp(ctrl: &Control) -> Option<InlineControlMetricsHwp>
             let image_height = pic.common.height as i32;
             let top_margin = i32::from(pic.common.margin.top);
             let bottom_margin = i32::from(pic.common.margin.bottom);
+            // 위/아래 캡션은 개체 상자에 들어간다 — 한컴 저장 줄 높이도 그림 + 캡션 간격 +
+            // 캡션이다. 빠뜨리면 그림을 글 문단으로 옮겼을 때 캡션이 다음 줄/쪽 끝과 겹친다.
+            let (caption_above, caption_below) = match pic.caption.as_ref() {
+                Some(cap) if !cap.paragraphs.is_empty() => {
+                    let caption_px = crate::renderer::layout::caption_height_px(&pic.caption, 96.0);
+                    let box_hu = if caption_px > 0.0 {
+                        crate::renderer::px_to_hwpunit_round(caption_px, 96.0)
+                            .saturating_add(i32::from(cap.spacing))
+                    } else {
+                        0
+                    };
+                    match cap.direction {
+                        crate::model::shape::CaptionDirection::Top => (box_hu, 0),
+                        crate::model::shape::CaptionDirection::Bottom => (0, box_hu),
+                        _ => (0, 0),
+                    }
+                }
+                _ => (0, 0),
+            };
             let height = image_height
                 .saturating_add(top_margin)
-                .saturating_add(bottom_margin);
+                .saturating_add(bottom_margin)
+                .saturating_add(caption_above)
+                .saturating_add(caption_below);
             (
                 super::inline_picture_occupied_width_hu(pic),
                 height,
-                top_margin.saturating_add((image_height as f64 * 0.85).round() as i32),
+                top_margin
+                    .saturating_add(caption_above)
+                    .saturating_add((image_height as f64 * 0.85).round() as i32),
             )
         }
         Control::Shape(shape) if shape.common().treat_as_char => {
@@ -1750,7 +1782,7 @@ fn inline_control_metrics_hwp(ctrl: &Control) -> Option<InlineControlMetricsHwp>
             (width, height, (height as f64 * 0.85).round() as i32)
         }
         Control::Equation(eq) if eq.common.treat_as_char => {
-            let (natural_width, natural_height, natural_baseline) =
+            let (_, natural_height, natural_baseline) =
                 crate::renderer::equation::intrinsic_metrics_hwp_with_version(
                     &eq.script,
                     eq.font_size,
@@ -1758,8 +1790,9 @@ fn inline_control_metrics_hwp(ctrl: &Control) -> Option<InlineControlMetricsHwp>
                     &eq.version_info,
                 );
             let margin = &eq.common.margin;
+            let painted_width = crate::renderer::equation::fitted_width_hwp(eq);
             let width = crate::renderer::equation::occupied_width_hwp(eq)
-                .saturating_add(natural_width.saturating_sub(eq.common.width) as i32);
+                .saturating_add(painted_width.saturating_sub(eq.common.width) as i32);
             let height = (eq.common.height as i32).max(natural_height as i32);
             let baseline =
                 crate::renderer::equation::control_baseline_hwp(eq, natural_baseline as f64);

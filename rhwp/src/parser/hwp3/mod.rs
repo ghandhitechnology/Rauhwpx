@@ -2494,19 +2494,18 @@ pub(crate) fn parse_paragraph_list(
         // [Task #604 Stage D-2] HWP5 IR 정합: percent 줄간격도 lh=th, ls=th*(ratio-100)/100
         // 분리 인코딩. 시각 줄 높이 (item h) 는 lh 값 → HWP5 변환본과 동등 (lh=900/ls=540
         // 가 lh=1440/ls=0 보다 60% 작은 시각 높이 → 페이지 회귀 해소).
-        let (mut fallback_line_height, fallback_line_spacing) =
-            if let Some(fixed) = fixed_line_spacing {
-                // fixed: lh=fixed, ls=fixed-th (추가 간격)
-                (fixed, fixed - fallback_text_height)
-            } else {
-                // percent: lh=th, ls=th*(ratio-100)/100
-                (
-                    fallback_text_height,
-                    fallback_text_height
-                        .saturating_mul(line_spacing_ratio.saturating_sub(100))
-                        / 100,
-                )
-            };
+        let (mut fallback_line_height, fallback_line_spacing) = if let Some(fixed) =
+            fixed_line_spacing
+        {
+            // fixed: lh=fixed, ls=fixed-th (추가 간격)
+            (fixed, fixed - fallback_text_height)
+        } else {
+            // percent: lh=th, ls=th*(ratio-100)/100
+            (
+                fallback_text_height,
+                fallback_text_height.saturating_mul(line_spacing_ratio.saturating_sub(100)) / 100,
+            )
+        };
         fallback_line_height = fallback_line_height.max(100); // 0 방지
         let fallback_baseline_distance = (fallback_text_height as f32 * 0.85) as i32;
 

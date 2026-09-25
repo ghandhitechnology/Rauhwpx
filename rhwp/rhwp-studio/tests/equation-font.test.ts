@@ -102,18 +102,21 @@ test('legacy Unicode literals use actual font cell metrics rather than a fixed s
   assert.equal(resolve('Δ'), null, 'missing Unicode literal keeps fallback');
 });
 
-test('equation measurement uses the same loaded source glyph as paint and keeps missing-font fallback', async () => {
+test('수식 측정은 실제 글립의 잉크와 굵기 및 run 커닝을 보존한다', async () => {
   const { createEquationTextMeasurer } = await import('../src/core/equation-font.ts');
   const original = Object.getOwnPropertyDescriptor(globalThis, 'document');
   const calls: Array<{ text: string; font: string }> = [];
-  const context = { font: '', measureText(text: string) { calls.push({ text, font: this.font }); return { width: 8 }; } };
+  const context = { font: '', measureText(text: string) { calls.push({ text, font: this.font }); return { width: text.length === 2 ? 13 : 8, actualBoundingBoxRight: text.length === 2 ? 15 : 10 }; } };
   Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => ({ getContext: () => context }) } });
   try {
     const record: LocalFontRecord = { family: 'HYhwpEQ', fullName: 'HYhwpEQ', postscriptName: 'HYhwpEQ', style: 'Regular', displayName: 'HYhwpEQ', aliases: [], runtimeFamily: '__hy' };
     const measure = createEquationTextMeasurer(name => name === 'HYhwpEQ' ? record : null, () => fontWithGlyph(0xe0f4));
-    assert.equal(measure('HYhwpEQ', 'p', 16, true, false, true), 8);
+    assert.deepEqual(measure('HYhwpEQ', 'p', 16, true, false, true), { advance: 8, inkRight: 10 });
+    assert.deepEqual(measure('HYhwpEQ', 'pp', 16, true, false, true, true), { advance: 13, inkRight: 15 });
+    assert.equal(calls[1].text, '\ue0f4\ue0f4');
+    assert.equal(calls[1].font, 'bold 16.000px "__hy"');
     assert.equal(calls[0].text, '\ue0f4');
-    assert.equal(calls[0].font, '16px "__hy"', 'intrinsic italic glyph must not be slanted twice');
+    assert.equal(calls[0].font, '16.000px "__hy"', 'intrinsic italic glyph must not be slanted twice');
     assert.equal(measure('HYhwpEQ', 'i', 16, true, false, true), null);
     assert.equal(measure('HYhwpEQ', 'p', 16, true, true, true), null, 'missing HFT keeps offline layout fallback');
   } finally {

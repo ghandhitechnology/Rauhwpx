@@ -2,7 +2,8 @@
 
 use super::super::helpers::{
     find_logical_control_positions, get_textbox_from_shape, has_table_control,
-    is_treat_as_char_object_control, navigable_text_len, utf16_pos_to_char_idx, LineInfoResult,
+    is_treat_as_char_object_control, logical_to_text_offset, navigable_text_len,
+    utf16_pos_to_char_idx, LineInfoResult,
 };
 use crate::document_core::DocumentCore;
 use crate::error::HwpError;
@@ -226,7 +227,9 @@ impl DocumentCore {
         // (End 키가 다음 줄로 넘어가는 것을 방지)
         let char_end = if line_index + 1 < line_count && raw_char_end > char_start {
             let chars: Vec<char> = para.text.chars().collect();
-            if raw_char_end > 0 && chars.get(raw_char_end - 1) == Some(&'\n') {
+            let text_end = logical_to_text_offset(para, raw_char_end).0;
+            let text_before = logical_to_text_offset(para, raw_char_end - 1).0;
+            if text_end > text_before && chars.get(text_before) == Some(&'\n') {
                 raw_char_end - 1
             } else {
                 raw_char_end
@@ -246,6 +249,30 @@ impl DocumentCore {
     /// 문단의 line_segs에서 각 줄의 시작 char index 배열을 구한다.
     pub(crate) fn build_line_char_starts(para: &crate::model::paragraph::Paragraph) -> Vec<usize> {
         let char_offsets = &para.char_offsets;
+        // 줄 시작은 원본 UTF-16 위치다. 텍스트 인덱스에 앞선 인라인 개체 수를 더하되,
+        // 같은 텍스트 위치의 개체 앞/뒤 줄 경계도 원본 위치로 구분한다.
+        let chars: Vec<char> = para.text.chars().collect();
+        let positions = para.control_text_positions();
+        let mut previous_position = None;
+        let mut controls_at_position = 0;
+        let inline_starts: Vec<u32> = para
+            .controls
+            .iter()
+            .zip(positions)
+            .filter_map(|(ctrl, pos)| {
+                if previous_position != Some(pos) {
+                    previous_position = Some(pos);
+                    controls_at_position = 0;
+                }
+                let gap_start = pos
+                    .checked_sub(1)
+                    .and_then(|i| Some(char_offsets.get(i)? + chars.get(i)?.len_utf16() as u32))
+                    .unwrap_or(0);
+                let raw_start = gap_start + controls_at_position * 8;
+                controls_at_position += 1;
+                is_caret_logical_inline_control(ctrl).then_some(raw_start)
+            })
+            .collect();
         let mut starts: Vec<usize> = para
             .line_segs
             .iter()
@@ -256,6 +283,10 @@ impl DocumentCore {
                     control_only_caret_utf16_to_char_idx(para, ls.text_start)
                 } else {
                     utf16_pos_to_char_idx(char_offsets, ls.text_start)
+                        + inline_starts
+                            .iter()
+                            .filter(|&&start| start < ls.text_start)
+                            .count()
                 }
             })
             .collect();
@@ -1723,6 +1754,236 @@ impl DocumentCore {
 
     // ─── Phase 4 네이티브: Selection API ─────────────────────
 
+    /// 선택 범위에 포함된 표(문단 `para_idx` 에 붙은 표)의 셀 사각형을 선택 잉크로 만든다.
+    ///
+    /// 글자처럼 취급한 표는 표 컨트롤 자리가 범위 안이면, 블록 표는 범위가 문단을 통째로
+    /// 지나가면(`covers_whole_para`) 포함한다. 셀 사각형은 표 셀 bbox 질의를 그대로 쓴다.
+    #[allow(clippy::too_many_arguments)]
+    fn selected_table_ink(
+        &self,
+        section_idx: usize,
+        cell_ctx: Option<&SelCellAddr>,
+        para_idx: usize,
+        para: &Paragraph,
+        sel_start: usize,
+        sel_end: usize,
+        covers_whole_para: bool,
+        page_hint: u32,
+    ) -> Vec<SelectionInkRect> {
+        let positions = find_logical_control_positions(para);
+        let mut ink = Vec::new();
+        for (ci, ctrl) in para.controls.iter().enumerate() {
+            if !matches!(ctrl, Control::Table(_)) {
+                continue;
+            }
+            let included = if is_treat_as_char_object_control(ctrl) {
+                positions
+                    .get(ci)
+                    .is_some_and(|&pos| pos >= sel_start && pos < sel_end)
+            } else {
+                covers_whole_para
+            };
+            if !included {
+                continue;
+            }
+            let bboxes = match cell_ctx {
+                None => self.get_table_cell_bboxes_from_page(
+                    section_idx,
+                    para_idx,
+                    ci,
+                    page_hint as usize,
+                ),
+                Some(addr) => {
+                    let (ppi, mut path) = match addr {
+                        SelCellAddr::Flat(ppi, outer_ci, cei) => {
+                            (*ppi, vec![(*outer_ci, *cei, para_idx)])
+                        }
+                        SelCellAddr::Path(ppi, path) => (*ppi, path.clone()),
+                    };
+                    if let Some(last) = path.last_mut() {
+                        last.2 = para_idx;
+                    }
+                    path.push((ci, 0, 0));
+                    let json = format!(
+                        "[{}]",
+                        path.iter()
+                            .map(|(c, cell, cp)| format!(
+                                "{{\"controlIndex\":{c},\"cellIndex\":{cell},\"cellParaIndex\":{cp}}}"
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+                    self.get_table_cell_bboxes_by_path_native(section_idx, ppi, &json)
+                }
+            };
+            let Ok(bboxes) = bboxes else { continue };
+            let Ok(serde_json::Value::Array(cells)) = serde_json::from_str(&bboxes) else {
+                continue;
+            };
+            for cell in cells {
+                let num = |key: &str| cell.get(key).and_then(serde_json::Value::as_f64);
+                if let (Some(page), Some(x), Some(y), Some(w), Some(h)) =
+                    (num("pageIndex"), num("x"), num("y"), num("w"), num("h"))
+                {
+                    ink.push(SelectionInkRect {
+                        page: page as u32,
+                        x,
+                        y,
+                        width: w,
+                        height: h,
+                        is_text: false,
+                    });
+                }
+            }
+        }
+        ink
+    }
+
+    /// 표 바깥에서 시작해 표 안으로 들어간 선택 끝점을 표를 품은 컨테이너 좌표로 올린다.
+    ///
+    /// `container_path` 가 비면 본문, 아니면 표를 품은 셀 경로다 (마지막 entry 의
+    /// cellParaIndex 는 `host_para` 로 대체된다). 반환 `(paraIdx, charOffset)` 는 그 컨테이너의
+    /// 논리 좌표이며, 선택 범위가 표 전체를 한 단위로 덮도록 잡는다.
+    /// - 글자처럼 취급한 표: 표 컨트롤 바로 앞(`after=false`) 또는 바로 뒤(`after=true`)
+    /// - 문단에 붙은 블록 표: 이웃 문단 경계. 표를 품은 문단이 범위의 중간 문단이 되어
+    ///   복사·삭제가 표를 통째로 다룬다. 마지막 문단에서는 텍스트 길이 다음의
+    ///   가상 오프셋을 쓴다. 끝 오프셋 0 은 표 문단을 지나가지 않은 범위다.
+    pub(crate) fn table_boundary_position_native(
+        &self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        container_path: &[(usize, usize, usize)],
+        host_para: usize,
+        control_idx: usize,
+        after: bool,
+    ) -> Result<(usize, usize), HwpError> {
+        let para_at = |idx: usize| -> Result<&Paragraph, HwpError> {
+            if container_path.is_empty() {
+                self.document
+                    .sections
+                    .get(section_idx)
+                    .and_then(|sec| sec.paragraphs.get(idx))
+                    .ok_or_else(|| HwpError::RenderError(format!("문단 {} 범위 초과", idx)))
+            } else {
+                let mut path = container_path.to_vec();
+                if let Some(last) = path.last_mut() {
+                    last.2 = idx;
+                }
+                self.resolve_paragraph_by_path(section_idx, parent_para_idx, &path)
+            }
+        };
+        let para_count = if container_path.is_empty() {
+            self.document
+                .sections
+                .get(section_idx)
+                .map_or(0, |sec| sec.paragraphs.len())
+        } else {
+            self.resolve_container_para_count_by_path(section_idx, parent_para_idx, container_path)?
+        };
+
+        let host = para_at(host_para)?;
+        let ctrl = host
+            .controls
+            .get(control_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("컨트롤 {} 범위 초과", control_idx)))?;
+        if is_treat_as_char_object_control(ctrl) {
+            let pos = find_logical_control_positions(host)
+                .get(control_idx)
+                .copied()
+                .unwrap_or(0);
+            return Ok((host_para, pos + usize::from(after)));
+        }
+        if after {
+            if host_para + 1 < para_count {
+                Ok((host_para + 1, 0))
+            } else {
+                Ok((
+                    host_para,
+                    navigable_text_len(host)
+                        + usize::from(crate::document_core::helpers::is_block_table_control(ctrl)),
+                ))
+            }
+        } else if host_para > 0 {
+            Ok((host_para - 1, navigable_text_len(para_at(host_para - 1)?)))
+        } else {
+            Ok((host_para, 0))
+        }
+    }
+
+    /// 한 컨테이너의 선택 범위에 통째로 든 표 주소를 돌려준다.
+    /// 본문과 중첩 셀 모두 문단/컨트롤 모델에서 찾으므로 렌더 트리의 주소 누락에 의존하지 않는다.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn table_controls_in_selection_native(
+        &self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        container_path: &[(usize, usize, usize)],
+        start_para: usize,
+        start_offset: usize,
+        end_para: usize,
+        end_offset: usize,
+    ) -> Result<String, HwpError> {
+        if start_para > end_para || (start_para == end_para && start_offset > end_offset) {
+            return Err(HwpError::RenderError("표 선택 범위가 뒤집혔습니다".into()));
+        }
+        let mut refs = Vec::new();
+        for para_idx in start_para..=end_para {
+            let mut path = container_path.to_vec();
+            let para = if path.is_empty() {
+                self.document
+                    .sections
+                    .get(section_idx)
+                    .and_then(|sec| sec.paragraphs.get(para_idx))
+                    .ok_or_else(|| HwpError::RenderError("표 선택 문단 범위 초과".into()))?
+            } else {
+                path.last_mut().unwrap().2 = para_idx;
+                self.resolve_paragraph_by_path(section_idx, parent_para_idx, &path)?
+            };
+            let positions = find_logical_control_positions(para);
+            let length = navigable_text_len(para);
+            for (control_idx, control) in para.controls.iter().enumerate() {
+                let Control::Table(table) = control else {
+                    continue;
+                };
+                let position = positions.get(control_idx).copied().unwrap_or(0);
+                let after_start = para_idx > start_para || start_offset <= position;
+                let before_end = para_idx < end_para
+                    || if table.common.treat_as_char {
+                        end_offset > position
+                    } else {
+                        end_offset > length
+                    };
+                if !after_start || !before_end {
+                    continue;
+                }
+                let cell_path = if path.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    path.push((control_idx, 0, 0));
+                    serde_json::Value::Array(
+                        path.iter()
+                            .map(|(ci, cell, cp)| {
+                                serde_json::json!({
+                                    "controlIndex": ci, "cellIndex": cell, "cellParaIndex": cp,
+                                })
+                            })
+                            .collect(),
+                    )
+                };
+                refs.push(serde_json::json!({
+                    "sec": section_idx,
+                    "ppi": if container_path.is_empty() { para_idx } else { parent_para_idx },
+                    "ci": if container_path.is_empty() { control_idx } else { container_path[0].0 },
+                    "cellPath": cell_path,
+                }));
+                if !container_path.is_empty() {
+                    path.pop();
+                }
+            }
+        }
+        serde_json::to_string(&refs).map_err(|err| HwpError::RenderError(err.to_string()))
+    }
+
     /// 선택 영역의 줄별 사각형을 계산한다 (본문/셀 공통).
     ///
     /// cell_ctx: Some((ppi, ci, cei)) 면 셀 내부, None 이면 본문.
@@ -1748,6 +2009,44 @@ impl DocumentCore {
             x: f64,
             y: f64,
             h: f64,
+            /// 캐럿이 속한 TextLine 의 기하. 선택 잉크를 줄 단위로 그릴 때 쓴다.
+            line: Option<LineGeom>,
+        }
+
+        /// 렌더 트리 TextLine 의 세로 범위와 실제 내용(텍스트 run·인라인 수식)의 오른쪽 끝.
+        #[derive(Clone, Copy)]
+        struct LineGeom {
+            y: f64,
+            h: f64,
+            content_right: Option<f64>,
+        }
+
+        fn line_geom(node: &RenderNode) -> LineGeom {
+            let content_right = node
+                .children
+                .iter()
+                .filter(|child| match &child.node_type {
+                    RenderNodeType::TextRun(tr) => !tr.text.is_empty(),
+                    RenderNodeType::Equation(_) => true,
+                    _ => false,
+                })
+                .map(|child| child.bbox.x + child.bbox.width)
+                .fold(None, |acc: Option<f64>, right| {
+                    Some(acc.map_or(right, |a| a.max(right)))
+                });
+            LineGeom {
+                y: node.bbox.y,
+                h: node.bbox.height,
+                content_right,
+            }
+        }
+
+        fn enclosing_line(node: &RenderNode, line: Option<LineGeom>) -> Option<LineGeom> {
+            if matches!(node.node_type, RenderNodeType::TextLine(_)) {
+                Some(line_geom(node))
+            } else {
+                line
+            }
         }
 
         #[derive(Clone, Copy)]
@@ -1803,8 +2102,10 @@ impl DocumentCore {
                 offset: usize,
                 page: u32,
                 bias: CursorBias,
+                line: Option<LineGeom>,
                 best: &mut Option<(u8, CursorHit)>,
             ) {
+                let line = enclosing_line(node, line);
                 if let RenderNodeType::Equation(ref eq) = node.node_type {
                     if eq.section_index == Some(sec)
                         && eq.para_index == Some(para)
@@ -1826,6 +2127,7 @@ impl DocumentCore {
                                             x,
                                             y: node.bbox.y,
                                             h: node.bbox.height.max(10.0),
+                                            line,
                                         },
                                     );
                                 }
@@ -1859,6 +2161,7 @@ impl DocumentCore {
                                     x: node.bbox.x + xr,
                                     y: node.bbox.y,
                                     h: node.bbox.height,
+                                    line,
                                 },
                             );
                         }
@@ -1873,6 +2176,7 @@ impl DocumentCore {
                         offset,
                         page,
                         bias,
+                        line,
                         best,
                     );
                 }
@@ -1887,6 +2191,7 @@ impl DocumentCore {
                 offset,
                 page,
                 bias,
+                None,
                 &mut best,
             );
             best.map(|(_, hit)| hit)
@@ -1907,8 +2212,10 @@ impl DocumentCore {
                 offset: usize,
                 page: u32,
                 bias: CursorBias,
+                line: Option<LineGeom>,
                 best: &mut Option<(u8, CursorHit)>,
             ) {
+                let line = enclosing_line(node, line);
                 if let RenderNodeType::TextRun(ref tr) = node.node_type {
                     let matches_cell = tr
                         .cell_context
@@ -1935,18 +2242,19 @@ impl DocumentCore {
                                     x: node.bbox.x + xr,
                                     y: node.bbox.y,
                                     h: node.bbox.height,
+                                    line,
                                 },
                             );
                         }
                     }
                 }
                 for child in &node.children {
-                    visit(child, addr, cpi, offset, page, bias, best);
+                    visit(child, addr, cpi, offset, page, bias, line, best);
                 }
             }
 
             let mut best = None;
-            visit(node, addr, cpi, offset, page, bias, &mut best);
+            visit(node, addr, cpi, offset, page, bias, None, &mut best);
             best.map(|(_, hit)| hit)
         }
 
@@ -1974,6 +2282,7 @@ impl DocumentCore {
                             x: node.bbox.x + node.bbox.width,
                             y: node.bbox.y,
                             h: node.bbox.height,
+                            line: Some(line_geom(node)),
                         });
                     }
                 }
@@ -2058,7 +2367,7 @@ impl DocumentCore {
         };
 
         // ── 메인 루프 ──
-        let mut rects: Vec<String> = Vec::new();
+        let mut rects: Vec<SelectionInkRect> = Vec::new();
         let mut expected_segments = 0usize;
         let mut rendered_segments = 0usize;
         let mut last_segment_page: Option<u32> = None;
@@ -2096,7 +2405,25 @@ impl DocumentCore {
             } else {
                 char_count
             };
-            if sel_start >= sel_end {
+            // 선택이 이 문단의 끝(문단 나눔)을 지나가는지. 빈 문단이나 문단 끝에서 시작한
+            // 선택도 줄 표시를 남겨야 선택 잉크가 중간에 끊기지 않는다.
+            let crosses_para_break = para_idx < end_para_idx;
+            // 범위가 이 문단을 통째로 지나가면 문단에 붙은 표도 선택에 포함된다.
+            let covers_whole_para = start_para_idx < end_para_idx
+                && (para_idx > start_para_idx || sel_start == 0)
+                && (para_idx < end_para_idx || (char_count > 0 && sel_end >= char_count));
+            let table_ink = self.selected_table_ink(
+                section_idx,
+                cell_ctx.as_ref(),
+                para_idx,
+                para,
+                sel_start,
+                sel_end,
+                covers_whole_para,
+                last_segment_page.unwrap_or(0),
+            );
+            if sel_start >= sel_end && !(crosses_para_break && sel_start >= char_count) {
+                rects.extend(table_ink);
                 continue;
             }
 
@@ -2116,6 +2443,44 @@ impl DocumentCore {
                 }
             }
 
+            if sel_start >= sel_end {
+                // 선택된 글자가 없는 문단 끝: 문단 나눔 자리에 좁은 표시를 둔다.
+                expected_segments += 1;
+                let hit = tree_cache.iter().find_map(|(pn, tree)| {
+                    if last_segment_page.is_some_and(|last| *pn < last) {
+                        return None;
+                    }
+                    find_cursor_in_tree(tree, *pn, para_idx, sel_start, CursorBias::Trailing)
+                        .or_else(|| {
+                            find_cursor_in_tree(
+                                tree,
+                                *pn,
+                                para_idx,
+                                sel_start.min(para.text.chars().count()),
+                                CursorBias::Trailing,
+                            )
+                        })
+                });
+                if !table_ink.is_empty() {
+                    // 표를 품은 빈 문단은 표 셀 잉크가 대신한다.
+                    rendered_segments += 1;
+                } else if let Some(hit) = hit {
+                    last_segment_page = Some(hit.page);
+                    rendered_segments += 1;
+                    let (y, h) = hit.line.map_or((hit.y, hit.h), |line| (line.y, line.h));
+                    rects.push(SelectionInkRect {
+                        page: hit.page,
+                        x: hit.x,
+                        y,
+                        width: paragraph_break_mark_width(h),
+                        height: h,
+                        is_text: true,
+                    });
+                }
+                rects.extend(table_ink);
+                continue;
+            }
+
             for line_idx in 0..line_count {
                 let (line_char_start, line_char_end) = Self::get_line_char_range(para, line_idx);
                 let range_start = sel_start.max(line_char_start);
@@ -2124,13 +2489,43 @@ impl DocumentCore {
                     continue;
                 }
                 expected_segments += 1;
+                // 선택이 이 줄 끝을 넘어 다음 줄/문단으로 이어지면 오른쪽 끝은 끝 캐럿이
+                // 아니라 줄 내용(텍스트 run·인라인 수식)의 실제 끝이다. 문단 끝 오프셋은
+                // 논리 길이(인라인 컨트롤 포함)라 캐럿으로 해소되지 않을 수 있다.
+                let continues_past_line =
+                    range_end == line_char_end && (line_idx + 1 < line_count || crosses_para_break);
 
                 let cursor_pair = tree_cache.iter().find_map(|(pn, tree)| {
                     if last_segment_page.is_some_and(|last| *pn < last) {
                         return None;
                     }
                     let left_hit =
-                        find_cursor_in_tree(tree, *pn, para_idx, range_start, CursorBias::Leading);
+                        find_cursor_in_tree(tree, *pn, para_idx, range_start, CursorBias::Leading)?;
+                    if continues_past_line {
+                        // 줄 끝 캐럿이 같은 줄에서 해소되면 캐럿 x 를, 아니면(문단 끝 논리
+                        // 오프셋이 run 밖이거나 다음 줄에서 잡힌 경우) 줄 내용 끝을 쓴다.
+                        let same_line = |hit: &CursorHit| {
+                            hit.page == left_hit.page
+                                && match (hit.line, left_hit.line) {
+                                    (Some(a), Some(b)) => (a.y - b.y).abs() < 0.5,
+                                    _ => false,
+                                }
+                        };
+                        let end_hit = find_cursor_in_tree(
+                            tree,
+                            *pn,
+                            para_idx,
+                            range_end,
+                            CursorBias::Trailing,
+                        )
+                        .filter(same_line);
+                        let right_x = end_hit
+                            .map(|hit| hit.x)
+                            .or_else(|| left_hit.line.and_then(|line| line.content_right));
+                        if let Some(right_x) = right_x {
+                            return Some((left_hit, right_x));
+                        }
+                    }
                     // range_end가 줄바꿈 등 비렌더링 문자 위치이면 같은 page tree에서 한 칸
                     // 앞으로 재시도한다. body line-end fallback도 같은 page로 제한한다.
                     let right_hit =
@@ -2161,30 +2556,35 @@ impl DocumentCore {
                                     None
                                 }
                             });
-                    left_hit.zip(right_hit)
+                    right_hit.map(|rh| {
+                        debug_assert_eq!(left_hit.page, rh.page);
+                        (left_hit, rh.x)
+                    })
                 });
 
-                if let Some((lh, rh)) = cursor_pair {
-                    debug_assert_eq!(lh.page, rh.page);
+                if let Some((lh, right_x)) = cursor_pair {
                     last_segment_page = Some(lh.page);
-                    // 선택 잉크는 줄/단의 가용 폭이 아니라 실제 시작·끝 캐럿 사이만 덮는다.
-                    // 문단 경계나 다음 줄로 선택이 이어져도 오른쪽 여백은 선택된 텍스트가 아니다.
-                    // y/h는 항상 left_hit 기준 (right_hit가 다음 줄에 있을 수 있음).
-                    let page_idx = lh.page;
-                    let rect_x = lh.x.min(rh.x);
-                    let rect_y = lh.y;
-                    let rect_h = lh.h;
-                    let width = (rh.x - lh.x).abs();
+                    // 선택 잉크는 줄/단의 가용 폭이 아니라 실제 시작·끝 캐럿(또는 줄 내용 끝)
+                    // 사이만 덮는다. 오른쪽 여백은 선택된 텍스트가 아니다.
+                    // 세로는 캐럿이 속한 줄 전체 높이를 쓴다 (인라인 수식 등 키 큰 줄 포함).
+                    let (rect_y, rect_h) = lh.line.map_or((lh.y, lh.h), |line| (line.y, line.h));
+                    let rect_x = lh.x.min(right_x);
+                    let width = (right_x - lh.x).abs();
 
                     if width > 0.01 {
                         rendered_segments += 1;
-                        rects.push(format!(
-                            "{{\"pageIndex\":{},\"x\":{:.1},\"y\":{:.1},\"width\":{:.1},\"height\":{:.1}}}",
-                            page_idx, rect_x, rect_y, width, rect_h
-                        ));
+                        rects.push(SelectionInkRect {
+                            page: lh.page,
+                            x: rect_x,
+                            y: rect_y,
+                            width,
+                            height: rect_h,
+                            is_text: true,
+                        });
                     }
                 }
             }
+            rects.extend(table_ink);
         }
 
         // page hint는 성능 힌트다. 후보 범위에서 필요한 segment를 모두 해소하지 못하면
@@ -2201,7 +2601,54 @@ impl DocumentCore {
             );
         }
 
+        close_selection_line_gaps(&mut rects);
+        let rects: Vec<String> = rects
+            .iter()
+            .map(|r| {
+                format!(
+                    "{{\"pageIndex\":{},\"x\":{:.1},\"y\":{:.1},\"width\":{:.1},\"height\":{:.1}}}",
+                    r.page, r.x, r.y, r.width, r.height
+                )
+            })
+            .collect();
         Ok(format!("[{}]", rects.join(",")))
+    }
+}
+
+/// 선택 잉크 한 줄 조각 (페이지 좌표, px).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SelectionInkRect {
+    page: u32,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    /// 텍스트 줄 조각이면 true, 선택에 포함된 표 셀이면 false.
+    is_text: bool,
+}
+
+/// 빈 문단/문단 끝 표시 폭. 줄 높이에 비례한 좁은 막대로 문단 나눔을 표시한다.
+fn paragraph_break_mark_width(line_height: f64) -> f64 {
+    (line_height * 0.3).max(3.0)
+}
+
+/// 같은 쪽에서 위아래로 이어지는 선택 줄 사이의 줄 간격을 메운다.
+///
+/// 줄 rect 는 글자 높이만 덮으므로 줄 간격만큼 틈이 생긴다. 다음 줄이 바로 아래에서
+/// 시작하면(틈이 두 줄 높이 이하) 윗줄을 다음 줄 top 까지 늘려 선택을 연속된 띠로 만든다.
+/// 단 이동·쪽 넘김처럼 다음 조각이 위로 올라가거나 멀리 떨어지면 그대로 둔다.
+fn close_selection_line_gaps(rects: &mut [SelectionInkRect]) {
+    for i in 0..rects.len().saturating_sub(1) {
+        let next = rects[i + 1];
+        let cur = &mut rects[i];
+        if cur.page != next.page || !cur.is_text || !next.is_text {
+            continue;
+        }
+        let bottom = cur.y + cur.height;
+        let gap = next.y - bottom;
+        if gap > 0.0 && gap <= 2.0 * cur.height.max(next.height) {
+            cur.height = next.y - cur.y;
+        }
     }
 }
 
@@ -2358,6 +2805,63 @@ mod issue_2215_selection_page_plan_tests {
         assert_eq!(
             plan_selection_pages(&[2, 4, 9, 10], Some(4), Some(10)),
             SelectionPagePlan::Hinted(vec![4, 9, 10])
+        );
+    }
+}
+
+#[cfg(test)]
+mod caret_line_offsets_tests {
+    use super::*;
+    use crate::model::control::Equation;
+    use crate::model::paragraph::LineSeg;
+
+    #[test]
+    fn 수식_전후_줄_경계를_논리_오프셋으로_반환한다() {
+        let mut equation = Equation::default();
+        equation.common.treat_as_char = true;
+        let mut para = Paragraph::default();
+        para.text = "ab\ncd".into();
+        para.char_offsets = vec![0, 1, 10, 11, 12];
+        para.char_count = 14;
+        para.controls = vec![Control::Equation(Box::new(equation))];
+        para.line_segs = [0, 2, 11]
+            .into_iter()
+            .map(|text_start| LineSeg {
+                text_start,
+                ..Default::default()
+            })
+            .collect();
+        assert_eq!(DocumentCore::build_line_char_starts(&para), vec![0, 2, 4]);
+        let middle = DocumentCore::compute_line_info_struct(&para, 2).unwrap();
+        assert_eq!((middle.char_start, middle.char_end), (2, 3));
+        let last = DocumentCore::compute_line_info_struct(&para, 4).unwrap();
+        assert_eq!((last.char_start, last.char_end), (4, 6));
+    }
+
+    #[test]
+    fn 연속_수식과_보조평면_문자의_줄_경계를_보존한다() {
+        let mut equation = Equation::default();
+        equation.common.treat_as_char = true;
+        let para = Paragraph {
+            text: "😀x".into(),
+            char_offsets: vec![0, 18],
+            char_count: 20,
+            controls: vec![
+                Control::Equation(Box::new(equation.clone())),
+                Control::Equation(Box::new(equation)),
+            ],
+            line_segs: [0, 2, 10, 18]
+                .into_iter()
+                .map(|text_start| LineSeg {
+                    text_start,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            DocumentCore::build_line_char_starts(&para),
+            vec![0, 1, 2, 3]
         );
     }
 }

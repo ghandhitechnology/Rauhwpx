@@ -48,7 +48,7 @@ fn first_copyable_char(doc: &HwpDocument) -> (u32, u32, String) {
             .unwrap_or_else(|e| panic!("get_paragraph_length({para_idx}): {e:?}"));
         for offset in 0..len {
             let text = doc
-                .get_text_range(0, para_idx, offset, 1)
+                .get_text_range(0, para_idx, offset, 1, None)
                 .unwrap_or_default();
             if text
                 .chars()

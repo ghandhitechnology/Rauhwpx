@@ -8264,6 +8264,7 @@ fn edit_set_cell(args: &[String]) -> i32 {
                 pi as u32,
                 0,
                 *len as u32,
+                None,
             ) {
                 eprintln!("오류: 셀 비우기 실패(문단 {}) - {:?}", pi, e);
                 return EXIT_RUNTIME;
@@ -8278,6 +8279,7 @@ fn edit_set_cell(args: &[String]) -> i32 {
                 0,
                 0,
                 new_text,
+                None,
             ) {
                 eprintln!("오류: 셀 쓰기 실패 - {:?}", e);
                 // 실패 시 원본 불변 — 출력 파일을 쓰지 않고 즉시 끝낸다.

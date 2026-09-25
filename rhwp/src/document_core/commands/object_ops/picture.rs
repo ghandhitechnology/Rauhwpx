@@ -1503,27 +1503,7 @@ impl DocumentCore {
 
         let section = &mut self.document.sections[section_idx];
         let source = Self::resolve_cell_paragraph_mut(section, from_para_idx, from_path)?;
-        let gap = Self::remove_inline_control_and_shift(source, from_control_idx);
-        // 글자 모양과 영역 태그도 삭제한 8 UTF-16 유닛만큼 이동한다.
-        let remove_gap = |pos: u32| {
-            if pos > gap {
-                pos.saturating_sub(8).max(gap)
-            } else {
-                pos
-            }
-        };
-        for shape in &mut source.char_shapes {
-            shape.start_pos = remove_gap(shape.start_pos);
-        }
-        for tag in &mut source.range_tags {
-            tag.start = remove_gap(tag.start);
-            tag.end = remove_gap(tag.end);
-        }
-        for field in &mut source.field_ranges {
-            if field.control_idx > from_control_idx {
-                field.control_idx -= 1;
-            }
-        }
+        Self::remove_inline_control_with_metadata(source, from_control_idx);
         let mut target_path = to_path.to_vec();
         if from_para_idx == to_para_idx
             && target_path.len() > from_path.len()

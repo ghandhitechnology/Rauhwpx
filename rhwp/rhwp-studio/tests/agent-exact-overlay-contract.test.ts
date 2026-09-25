@@ -5,7 +5,6 @@ import { readFileSync } from 'node:fs';
 const pendingSrc = readFileSync(new URL('../src/agent/pending-edits.ts', import.meta.url), 'utf8');
 const overlaySrc = readFileSync(new URL('../src/agent/pending-overlay.ts', import.meta.url), 'utf8');
 const overlayCss = readFileSync(new URL('../src/agent/pending-overlay.css', import.meta.url), 'utf8');
-const revealSrc = readFileSync(new URL('../src/agent/typewriter-reveal.ts', import.meta.url), 'utf8');
 
 test('replace overlay receives both sides without changing the pending operation model', () => {
   assert.match(pendingSrc, /kind: 'replace',[\s\S]*id: op\.id,[\s\S]*oldText: op\.deletedText,[\s\S]*newText: op\.text/);
@@ -24,16 +23,7 @@ test('inspection observes pointer and caret state without intercepting editor in
   assert.match(overlaySrc, /event\.key !== 'Escape'/);
 });
 
-test('agent caret motion is bounded, one-shot, and reduced-motion safe', () => {
-  // 청크 하나의 캐럿 이동 시간은 상한이 있고, reduced-motion 은 이동을 건너뛴다.
-  assert.match(revealSrc, /const REVEAL_MAX_MS = 900/);
-  assert.match(revealSrc, /this\.reduceMotion\?\.matches/);
-  // 교체는 exact diff 의 추가 훙크만 따라간다. 원문 접두/접미는 다시 타자하지 않는다.
-  assert.match(revealSrc, /computeExactTextDiff\(oldText, text\)/);
-  assert.match(pendingSrc, /emitTextInserted\(\{[\s\S]*oldText: deletedText/);
-  // 용지색 커버는 배경·개체를 지울 수 있으므로 생성하지 않는다.
-  assert.doesNotMatch(revealSrc, /ag-reveal-cover|placeCover|probeRects/);
-  assert.match(overlayCss, /\.ag-typewriter-caret[\s\S]*z-index: 10/);
+test('delete anchors animate once and respect reduced motion', () => {
   // 앵커 등장 애니메이션은 노드 생성 시 1회만 재생된다 (노드는 렌더 간 재사용).
   assert.match(overlaySrc, /marker\.classList\.add\('ag-liquid-anchor-in'\)/);
   assert.match(overlaySrc, /animationend[\s\S]*ag-liquid-anchor-in/);
@@ -66,5 +56,4 @@ test('pending markers clamp forced line-end spaces', () => {
     overlaySrc,
     /if \(range\.endParaIdx <= range\.startParaIdx\) return \{ rects, enters: \[\] \}/,
   );
-  assert.doesNotMatch(revealSrc, /measureInkRange/);
 });

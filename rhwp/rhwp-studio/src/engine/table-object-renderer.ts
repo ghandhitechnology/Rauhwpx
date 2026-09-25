@@ -76,6 +76,7 @@ export class TableObjectRenderer {
   private handles: HandleInfo[] = [];
   private extraEls: HTMLElement[] = [];  // 회전 연결선 등 부가 요소
   private previewEl: HTMLDivElement | null = null;
+  private dropCaretEl: HTMLDivElement | null = null;
   private static readonly HANDLE_SIZE = 8; // px (화면 고정)
   private static readonly ROTATE_HANDLE_SIZE = 10; // px
   private static readonly ROTATE_HANDLE_GAP = 20; // px (상단 중앙에서 위로)
@@ -381,12 +382,39 @@ export class TableObjectRenderer {
     this.borders = [];
   }
 
-  /** 드래그 예비선을 제거한다 */
+  /** 드래그 예비선과 드롭 캐럿을 제거한다 */
   clearDragPreview(): void {
     if (this.previewEl) {
       this.previewEl.remove();
       this.previewEl = null;
     }
+    this.renderDropCaret(null, 1);
+  }
+
+  /** 인라인 개체를 놓을 캐럿 위치를 표시한다. null 이면 숨긴다. */
+  renderDropCaret(
+    caret: { pageIndex: number; x: number; y: number; height: number } | null,
+    zoom: number,
+  ): void {
+    if (!caret) {
+      this.dropCaretEl?.remove();
+      this.dropCaretEl = null;
+      return;
+    }
+    this.ensureAttached();
+    const scrollContent = this.container.querySelector('#scroll-content');
+    const contentWidth = scrollContent?.clientWidth ?? 0;
+    const pageOffset = this.virtualScroll.getPageOffset(caret.pageIndex);
+    const pageLeft = this.virtualScroll.getPageLeftResolved(caret.pageIndex, contentWidth);
+    if (!this.dropCaretEl) {
+      this.dropCaretEl = document.createElement('div');
+      this.dropCaretEl.style.cssText =
+        'position:absolute;width:2px;background:var(--caret-color,#000);pointer-events:none;';
+      this.layer.appendChild(this.dropCaretEl);
+    }
+    this.dropCaretEl.style.left = `${pageLeft + caret.x * zoom - 1}px`;
+    this.dropCaretEl.style.top = `${pageOffset + caret.y * zoom}px`;
+    this.dropCaretEl.style.height = `${Math.max(caret.height, 1) * zoom}px`;
   }
 
   /** 핸들은 그대로 두고 회전각이 적용된 드래그 예비 테두리만 렌더링한다 */

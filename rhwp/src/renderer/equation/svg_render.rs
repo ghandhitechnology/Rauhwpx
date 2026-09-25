@@ -118,9 +118,15 @@ fn render_box(
                 let text_x = x;
                 let text_y = y + lb.baseline;
                 let esc = escape_xml(text);
+                // canvas painter·layout 측정과 같이 그리스 변수만 이탤릭.
+                let italic_attr = if italic && super::font::is_greek_variable(text) {
+                    " font-style=\"italic\""
+                } else {
+                    ""
+                };
                 svg.push_str(&format!(
-                    "<text x=\"{:.2}\" y=\"{:.2}\" font-size=\"{:.2}\" fill=\"{}\"{}>{}</text>\n",
-                    text_x, text_y, fs, color, EQ_FONT_FAMILY, esc,
+                    "<text x=\"{:.2}\" y=\"{:.2}\" font-size=\"{:.2}\" fill=\"{}\"{}{}>{}</text>\n",
+                    text_x, text_y, fs, color, italic_attr, EQ_FONT_FAMILY, esc,
                 ));
             }
         }

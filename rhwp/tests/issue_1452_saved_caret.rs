@@ -323,7 +323,7 @@ fn arrow_up_after_enter_before_first_tac_picture_moves_to_previous_picture_end()
 fn transparency_test_sample_text_line_boundaries_keep_visual_affinity() {
     let mut doc = rhwp::wasm_api::HwpDocument::create_empty();
     let text = "1".repeat(240);
-    doc.insert_text(0, 0, 0, &text)
+    doc.insert_text(0, 0, 0, &text, None)
         .expect("insert wrapped text");
     let para = 0;
 

@@ -1,6 +1,7 @@
 //! Diagnostic tooling for HWP/HWPX compatibility work.
 
 pub mod bench;
+pub mod cell_text_overflow;
 pub mod edit_stress;
 pub mod hwp5_inventory;
 pub mod hwp5_roundtrip_batch;

@@ -8,6 +8,7 @@ import {
   MergeNextParagraphCommand,
   MergeParagraphInCellCommand,
   MergeNextParagraphInCellCommand,
+  DeleteSelectionCommand,
   InsertTextInHeaderFooterCommand,
   DeleteTextInHeaderFooterCommand,
   MergeParagraphInHeaderFooterCommand,
@@ -19,6 +20,8 @@ import {
   replaceCellTextWithMutationEffects,
   canUseLocalBodyTextReplace,
   cellParaIndexOf,
+  caretParagraphLength,
+  isInlineObjectSlot,
   IMMEDIATE_TEXT_MUTATION_EFFECTS,
   NO_TEXT_MUTATION_EFFECTS,
   TextMutationEffectAccumulator,
@@ -213,6 +216,25 @@ function tryDeleteBodyFootnoteAtCursor(
   }
 }
 
+/**
+ * 캐럿 한 칸 `[slot, slot+1)` 을 지운다. 그 칸이 수식·그림 같은 글자처럼 취급 개체면
+ * 텍스트 삭제로는 지울 수 없으므로 개체까지 지우는 범위 삭제(스냅샷 undo)로 보낸다.
+ */
+function deleteCaretSlot(
+  this: any,
+  slot: DocumentPosition,
+  direction: 'backward' | 'forward',
+): void {
+  if (isInlineObjectSlot(this.wasm, slot)) {
+    const end = { ...slot, charOffset: slot.charOffset + 1 };
+    // undo 뒤 캐럿은 삭제 전 자리 — Backspace 는 개체 뒤, Delete 는 개체 앞.
+    const undoCursor = direction === 'forward' ? slot : end;
+    this.executeOperation({ kind: 'command', command: new DeleteSelectionCommand(slot, end, undoCursor) });
+    return;
+  }
+  this.executeOperation({ kind: 'command', command: new DeleteTextCommand(slot, 1, direction) });
+}
+
 export function handleBackspace(this: any, pos: DocumentPosition, inCell: boolean): void {
   if (this.isFormMode?.() && !this.canEditCurrentFormField?.()) return;
   // 머리말/꼬리말 편집 모드
@@ -274,8 +296,7 @@ export function handleBackspace(this: any, pos: DocumentPosition, inCell: boolea
 
   if (inCell) {
     if (charOffset > 0) {
-      const deletePos = { ...pos, charOffset: charOffset - 1 };
-      this.executeOperation({ kind: 'command', command: new DeleteTextCommand(deletePos, 1, 'backward') });
+      deleteCaretSlot.call(this, { ...pos, charOffset: charOffset - 1 }, 'backward');
     } else if (cellParaIndexOf(pos) > 0) {
       // 셀 문단 시작에서 Backspace → 이전 셀 문단과 병합.
       // [#2717] 중첩 셀에서 flat `pos.cellParaIndex` 는 hit-test 가 cellPath[0](최외곽)로 채운
@@ -288,8 +309,7 @@ export function handleBackspace(this: any, pos: DocumentPosition, inCell: boolea
     const { sectionIndex: sec, paragraphIndex: para } = pos;
     if (tryDeleteBodyFootnoteAtCursor.call(this, pos, 'backward')) return;
     if (charOffset > 0) {
-      const deletePos = { ...pos, charOffset: charOffset - 1 };
-      this.executeOperation({ kind: 'command', command: new DeleteTextCommand(deletePos, 1, 'backward') });
+      deleteCaretSlot.call(this, { ...pos, charOffset: charOffset - 1 }, 'backward');
     } else if (para > 0) {
       // 문단 시작에서 Backspace → 이전 문단과 병합
       this.executeOperation({ kind: 'command', command: new MergeParagraphCommand({ sectionIndex: sec, paragraphIndex: para, charOffset: 0 }) });
@@ -347,11 +367,9 @@ export function handleDelete(this: any, pos: DocumentPosition, inCell: boolean):
     const useCellPath = (pos.cellPath?.length ?? 0) > 0;
     const cpi = useCellPath ? pos.cellPath![pos.cellPath!.length - 1].cellParaIndex : pos.cellParaIndex!;
     const pathJson = useCellPath ? JSON.stringify(pos.cellPath) : '';
-    const paraLen = useCellPath
-      ? this.wasm.getCellParagraphLengthByPath(sec, ppi, pathJson)
-      : this.wasm.getCellParagraphLength(sec, ppi, ci, cei, cpi);
+    const paraLen = caretParagraphLength(this.wasm, pos);
     if (charOffset < paraLen) {
-      this.executeOperation({ kind: 'command', command: new DeleteTextCommand(pos, 1, 'forward') });
+      deleteCaretSlot.call(this, pos, 'forward');
     } else {
       // 셀 문단 끝에서 Delete → 다음 셀 문단과 병합
       const paraCount = useCellPath
@@ -364,9 +382,9 @@ export function handleDelete(this: any, pos: DocumentPosition, inCell: boolean):
   } else {
     const { sectionIndex: sec, paragraphIndex: para } = pos;
     if (tryDeleteBodyFootnoteAtCursor.call(this, pos, 'forward')) return;
-    const paraLen = this.wasm.getParagraphLength(sec, para);
+    const paraLen = caretParagraphLength(this.wasm, pos);
     if (charOffset < paraLen) {
-      this.executeOperation({ kind: 'command', command: new DeleteTextCommand(pos, 1, 'forward') });
+      deleteCaretSlot.call(this, pos, 'forward');
     } else {
       // 문단 끝에서 Delete → 다음 문단과 병합
       const paraCount = this.wasm.getParagraphCount(sec);

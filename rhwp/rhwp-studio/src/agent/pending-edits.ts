@@ -7,12 +7,12 @@ import { replacementCharShapes } from './replacement-format.ts';
 import { PreparedSnapshotCommand } from '../engine/prepared-snapshot-command.ts';
 import type {
   AgentName, CellAddr, CharFormatProps, DocPoint, DocRange,
-  ObjectAnchor, ObjectOp, PendingChangeSet, PendingEditsChangeEvent, PendingOp,
+  ObjectAnchor, ObjectOp, PendingAppliedAt, PendingChangeSet, PendingEditsChangeEvent, PendingOp,
   PendingStructureOpInfo,
 } from './types.ts';
 import { AgentToolError, isDestructiveTableMark, isObjectOpApplied, sameCell } from './types.ts';
 import type { OverlayOp, PendingOverlayRenderer } from './pending-overlay.ts';
-import type { AgentTextInsertedEvent } from './typewriter-reveal.ts';
+import type { AgentTextInsertedEvent } from './agent-edit-follow.ts';
 
 export interface PendingEditDeps {
   wasm: WasmBridge;
@@ -75,6 +75,19 @@ const CHAR_FORMAT_KEYS = ['bold', 'italic', 'underline', 'strikethrough', 'fontS
  * (Unicode scalar) 단위다. JS String.length(UTF-16 code unit)를 쓰면 😀 같은 astral
  * 문자에서 오프셋이 어긋나 삽입/삭제/검증이 모두 깨진다 → 코드포인트 수로 계산한다.
  */
+function comparePoints(a: DocPoint, b: DocPoint): number {
+  return a.paraIdx - b.paraIdx || a.charOffset - b.charOffset;
+}
+
+/** 두 범위가 글자 하나 이상 겹치는가 (경계만 맞닿는 것은 제외). */
+function rangesOverlap(a: DocRange, b: DocRange): boolean {
+  const aStart = { paraIdx: a.startParaIdx, charOffset: a.startCharOffset };
+  const aEnd = { paraIdx: a.endParaIdx, charOffset: a.endCharOffset };
+  const bStart = { paraIdx: b.startParaIdx, charOffset: b.startCharOffset };
+  const bEnd = { paraIdx: b.endParaIdx, charOffset: b.endCharOffset };
+  return comparePoints(aStart, bEnd) < 0 && comparePoints(bStart, aEnd) < 0;
+}
+
 function scalarLen(s: string): number {
   return [...s].length;
 }
@@ -195,7 +208,9 @@ export class PendingEditManager {
     if (text.length === 0) throw new AgentToolError('INVALID_ARGS', 'text must not be empty');
     const { range, addedParas } = this.performInsert(addr.sectionIdx, addr.paraIdx, addr.charOffset, text, addr.cell);
     const set = this.ensureOpenSet(agent);
-    const op: PendingOp = { kind: 'insert', id: this.nextId('op'), agent: set.agent, range, text };
+    const op: PendingOp = {
+      kind: 'insert', id: this.nextId('op'), agent: set.agent, range, text, applied: this.appliedAt(range),
+    };
     this.pushOp(set, op);
     this.shiftAllAfterInsert(range.sectionIdx, {
       paraIdx: addr.paraIdx, charOffset: addr.charOffset, addedParas,
@@ -204,7 +219,7 @@ export class PendingEditManager {
     this.reconcilePreviewLayout();
     this.emitDocEvents('agent-pending-edit');
     this.syncOverlay();
-    // 타자기 공개용 — op.range 라이브 참조를 넘겨 이후 shift 가 반영되게 한다.
+    // 편집 위치 따라가기용 — op.range 라이브 참조를 넘겨 이후 shift 가 반영되게 한다.
     this.emitTextInserted({ agent: op.agent, range: op.range, text }, op.id);
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, insertedRange: { ...range } };
@@ -339,6 +354,7 @@ export class PendingEditManager {
         snapshotId: retainSnapshot ? snapshotId : null,
         userEditSeqAtSnapshot: this.userEditSeq,
         settledSetSeqAtSnapshot: this.settledSetSeq,
+        applied: this.appliedAt(ins.range),
       };
       this.pushOp(set, op);
       if (text.length > 0) {
@@ -2354,10 +2370,20 @@ export class PendingEditManager {
   private partitionDriftedOps(set: PendingChangeSet): { kept: PendingOp[]; dropped: PendingOp[] } {
     const kept: PendingOp[] = [];
     const dropped: PendingOp[] = [];
+    // 텍스트가 어긋났지만 그 사이 사용자 편집이 없었던 op — 나중 에이전트 op 이
+    // 겹쳐 덮어쓴 것이다. 나중 op 이 모두 함께 되돌려지면 적용 직후 범위로 정확히
+    // 되돌릴 수 있으므로 드리프트로 남기지 않는다.
+    const overwritten = new Set<PendingOp>();
     for (const op of set.ops) {
       if ((op.kind === 'insert' || op.kind === 'delete' || op.kind === 'replace' || op.kind === 'format')
         && !this.verifyOpText(op)) {
-        dropped.push(op);
+        if ((op.kind === 'insert' || op.kind === 'replace')
+          && op.applied?.overwritten === true && this.appliedAtIsCurrent(op, this.userEditSeq)) {
+          overwritten.add(op);
+          kept.push(op);
+        } else {
+          dropped.push(op);
+        }
         continue;
       }
       if (op.kind === 'field' && !this.verifyFieldOp(op)) {
@@ -2373,7 +2399,55 @@ export class PendingEditManager {
       // the structural preview in the document without approval or undo history.
       kept.push(op);
     }
+    // 덮어쓴 나중 op 이 남는다면(드리프트/다른 set) 정확한 되돌림이 불가능하다.
+    for (let moved = true; moved;) {
+      moved = false;
+      for (const op of overwritten) {
+        if (!this.hasLaterAppliedOpsOutside(op, kept, dropped)) continue;
+        overwritten.delete(op);
+        kept.splice(kept.indexOf(op), 1);
+        dropped.push(op);
+        moved = true;
+      }
+    }
+    if (dropped.length > 1) dropped.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
     return { kept, dropped };
+  }
+
+  private appliedAt(range: DocRange): PendingAppliedAt {
+    return { range: structuredClone(range), userEditSeq: this.userEditSeq, settledSetSeq: this.settledSetSeq };
+  }
+
+  /** 적용 이후 사용자 편집도, 다른 set 의 확정도 없었는가. */
+  private appliedAtIsCurrent(
+    op: Extract<PendingOp, { kind: 'insert' | 'replace' }>, userEditSeqNow: number,
+  ): boolean {
+    return op.applied !== undefined
+      && op.applied.userEditSeq === userEditSeqNow
+      && op.applied.settledSetSeq === this.settledSetSeq;
+  }
+
+  /**
+   * 역순 되돌림 중 나중 op 이 모두 되돌려졌다면 문서는 이 op 의 적용 직후 상태다.
+   * 그때 live range 대신 적용 직후 범위를 쓴다 — 나중 op 이 이 범위를 덮어써
+   * live range 가 무너졌어도 정확히 되돌린다. 텍스트가 다르면 live range 를 유지한다.
+   */
+  private restoreAppliedRange(
+    op: Extract<PendingOp, { kind: 'insert' | 'replace' }>,
+    revertSet: PendingOp[], keepPreviewsOf: PendingOp[], userEditSeqNow: number,
+  ): void {
+    const applied = op.applied;
+    if (!applied || !this.appliedAtIsCurrent(op, userEditSeqNow)) return;
+    if (this.hasLaterAppliedOpsOutside(op, revertSet, keepPreviewsOf)) return;
+    if (this.readRangeText(applied.range) !== op.text) return;
+    const range = op.range;
+    range.sectionIdx = applied.range.sectionIdx;
+    range.startParaIdx = applied.range.startParaIdx;
+    range.startCharOffset = applied.range.startCharOffset;
+    range.endParaIdx = applied.range.endParaIdx;
+    range.endCharOffset = applied.range.endCharOffset;
+    if (applied.range.cell) range.cell = structuredClone(applied.range.cell);
+    else delete range.cell;
   }
 
   /**
@@ -2392,6 +2466,7 @@ export class PendingEditManager {
       const op = ops[i];
       try {
         if (op.kind === 'insert') {
+          this.restoreAppliedRange(op, ops, keepPreviewsOf, userEditSeqNow);
           const r = { ...op.range };
           const res = this.deleteRangeRaw(r);
           if (res?.ok !== true) continue;
@@ -2453,6 +2528,7 @@ export class PendingEditManager {
     userEditSeqNow: number,
   ): void {
     const wasm = this.deps.wasm;
+    this.restoreAppliedRange(op, revertSet, keepPreviewsOf, userEditSeqNow);
     const start: DocPoint = { paraIdx: op.range.startParaIdx, charOffset: op.range.startCharOffset };
     const reinsertShift = this.insertShiftFor(start, op.deletedText);
     const userEditedSinceSnapshot = (op.userEditSeqAtSnapshot ?? -1) !== userEditSeqNow;
@@ -2793,6 +2869,9 @@ export class PendingEditManager {
         }
         if (op.range.sectionIdx !== del.sectionIdx) continue;
         if (sameCell(op.range.cell, del.cell)) {
+          if ((op.kind === 'insert' || op.kind === 'replace') && op.applied && rangesOverlap(op.range, del)) {
+            op.applied.overwritten = true;
+          }
           this.shiftRange(op.range, (p) => shiftPointAfterDelete(p, del));
         } else if (!del.cell && op.range.cell && removedParas > 0 && del.endParaIdx < op.range.cell.paraIdx) {
           // 본문 문단 삭제가 표 앞에서 일어나면 셀 op 의 부모 문단 인덱스만 당긴다.

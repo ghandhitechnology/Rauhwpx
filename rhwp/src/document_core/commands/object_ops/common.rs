@@ -132,6 +132,38 @@ impl DocumentCore {
         gap_start
     }
 
+    /// 인라인 컨트롤을 지우고 글자 모양·영역 태그·필드 범위의 컨트롤 참조까지 맞춘다.
+    ///
+    /// `remove_inline_control_and_shift` 는 char_offsets 만 당긴다. 개체가 사라진 뒤에도
+    /// 문단이 남는 경로(개체 이동의 원본, 범위 삭제)는 이 함수로 메타데이터를 함께 옮긴다.
+    pub(crate) fn remove_inline_control_with_metadata(
+        para: &mut Paragraph,
+        control_idx: usize,
+    ) -> u32 {
+        let gap = Self::remove_inline_control_and_shift(para, control_idx);
+        // 글자 모양과 영역 태그도 삭제한 8 UTF-16 유닛만큼 이동한다.
+        let remove_gap = |pos: u32| {
+            if pos > gap {
+                pos.saturating_sub(8).max(gap)
+            } else {
+                pos
+            }
+        };
+        for shape in &mut para.char_shapes {
+            shape.start_pos = remove_gap(shape.start_pos);
+        }
+        for tag in &mut para.range_tags {
+            tag.start = remove_gap(tag.start);
+            tag.end = remove_gap(tag.end);
+        }
+        for field in &mut para.field_ranges {
+            if field.control_idx > control_idx {
+                field.control_idx -= 1;
+            }
+        }
+        gap
+    }
+
     /// 컨트롤 삭제 후 문단의 line_segs를 재계산한다.
     ///
     /// 그림/도형 삭제 시 문단의 line_segs에 컨트롤 높이가 그대로 남아,

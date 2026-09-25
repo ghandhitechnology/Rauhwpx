@@ -16,6 +16,16 @@ import {
 } from './table-resize-updates';
 
 const MIN_TABLE_CELL_SIZE_HWP = 200;
+// 마우스로 열을 좁힐 때의 최소 폭(px, 100% 기준). 기본 안 여백 양쪽 + 10pt 글자 하나가
+// 들어가는 폭이다. 이미 이보다 좁은 열은 현재 폭에서 멈춘다 (넓히도록 강제하지 않음).
+const MIN_DRAG_COLUMN_PX = 28;
+
+/** 현재 크기 `current`(px)인 칸을 끌어서 줄일 수 있는 하한 크기. */
+function minDragSizePx(edge: BorderEdge, current: number): number {
+  const base = MIN_TABLE_CELL_SIZE_HWP / 75;
+  if (edge.type !== 'col') return base;
+  return Math.max(base, Math.min(MIN_DRAG_COLUMN_PX, current));
+}
 
 function isOuterResizeEdge(self: any, edge: BorderEdge, pageBboxes: CellBbox[]): boolean {
   try {
@@ -50,15 +60,17 @@ function computeResizePositionBounds(
       const maxY = Math.max(...bboxes.map(b => b.y + b.h));
 
       if (edge.type === 'col') {
+        const targetMin = minDragSizePx(edge, targetBox.w);
+        const neighborMin = neighborBox ? minDragSizePx(edge, neighborBox.w) : 0;
         if (singleCellTarget.side === 'end') {
           return {
-            min: targetBox.x + minSizePx,
-            max: neighborBox ? neighborBox.x + neighborBox.w - minSizePx : maxX,
+            min: targetBox.x + targetMin,
+            max: neighborBox ? neighborBox.x + neighborBox.w - neighborMin : maxX,
           };
         }
         return {
-          min: neighborBox ? neighborBox.x + minSizePx : minX,
-          max: targetBox.x + targetBox.w - minSizePx,
+          min: neighborBox ? neighborBox.x + neighborMin : minX,
+          max: targetBox.x + targetBox.w - targetMin,
         };
       }
 
@@ -82,11 +94,12 @@ function computeResizePositionBounds(
   const lineIdx = lines.findIndex((line: any) => line.index === edge.index);
   if (lineIdx < 0) return { min: -Infinity, max: Infinity };
 
+  const pos = lines[lineIdx].pos;
   const prev = lines[lineIdx - 1]?.pos;
   const next = lines[lineIdx + 1]?.pos;
   return {
-    min: prev === undefined ? -Infinity : prev + minSizePx,
-    max: next === undefined ? Infinity : next - minSizePx,
+    min: prev === undefined ? -Infinity : prev + minDragSizePx(edge, pos - prev),
+    max: next === undefined ? Infinity : next - minDragSizePx(edge, next - pos),
   };
 }
 
@@ -110,11 +123,11 @@ function computeAffectedResizePositionBounds(
     const neighborBoxes = findResizeCompensationNeighbors(edge, targetBox, bboxes);
 
     if (edge.type === 'col') {
-      min = Math.max(min, targetBox.x + minSizePx);
+      min = Math.max(min, targetBox.x + minDragSizePx(edge, targetBox.w));
       max = Math.min(
         max,
         neighborBoxes.length > 0
-          ? Math.min(...neighborBoxes.map(b => b.x + b.w - minSizePx))
+          ? Math.min(...neighborBoxes.map(b => b.x + b.w - minDragSizePx(edge, b.w)))
           : maxX,
       );
     } else {
@@ -241,6 +254,42 @@ function findSingleCellResizeNeighbor(
     ? bboxes.find(b => b.col === targetBox.col && b.row === targetBox.row + targetBox.rowSpan)
     : bboxes.find(b => b.col === targetBox.col && b.row + b.rowSpan === targetBox.row);
   return neighbor?.cellIdx ?? null;
+}
+
+/**
+ * 열 경계 한계를 이 쪽의 경계선뿐 아니라 실제로 크기가 바뀌는 셀(다른 쪽 행 포함)로도
+ * 좁힌다. 쪽 경계선만 보면 여러 열에 걸친 병합 셀만 있는 쪽에서 끌 때 다른 쪽의 좁은
+ * 열이 0에 가깝게 눌린다.
+ */
+function intersectColumnCellBounds(
+  edge: BorderEdge,
+  bounds: { min: number; max: number },
+  affectedCellIndices: number[],
+  bboxes: CellBbox[],
+): { min: number; max: number } {
+  if (edge.type !== 'col') return bounds;
+  let { min, max } = bounds;
+  for (const cellIdx of affectedCellIndices) {
+    const box = bboxes.find(b => b.cellIdx === cellIdx);
+    if (!box) continue;
+    min = Math.max(min, box.x + minDragSizePx(edge, box.w));
+    for (const neighbor of findResizeCompensationNeighbors(edge, box, bboxes)) {
+      max = Math.min(max, neighbor.x + neighbor.w - minDragSizePx(edge, neighbor.w));
+    }
+  }
+  return min <= max ? { min, max } : bounds;
+}
+
+/** 표 전체(모든 쪽)의 셀 bbox. 실패하면 null. */
+function wholeTableCellBboxes(wasm: any, tableRef: TableRef): CellBbox[] | null {
+  try {
+    const bboxes: CellBbox[] = tableRef.path && tableRef.path.length > 1
+      ? wasm.getTableCellBboxesByPath(tableRef.sec, tableRef.ppi, JSON.stringify(tableRef.path))
+      : wasm.getTableCellBboxes(tableRef.sec, tableRef.ppi, tableRef.ci, 0);
+    return bboxes.length > 0 ? bboxes : null;
+  } catch {
+    return null;
+  }
 }
 
 function findAlignedLogicalResizeAffectedCells(
@@ -633,29 +682,37 @@ export function startResizeDrag(this: any,
   const shouldResizeSingleCell = shiftResize ||
     isKnownLocalResizeSegment(this, this.cachedTableRef, edge, resizeTarget, this.cachedCellBboxes);
   const singleCellTarget = shouldResizeSingleCell ? resizeTarget : null;
+  // 열 경계는 표 전체(모든 쪽)의 셀에 걸린다. hover 캐시는 hint 쪽부터만 담으므로
+  // 여러 쪽에 걸친 표의 뒤쪽에서 끌면 앞쪽 행의 셀이 빠져 열 격자와 셀 폭이 어긋난다.
+  const stateBboxes: CellBbox[] = edge.type === 'col' && !shouldResizeSingleCell
+    ? wholeTableCellBboxes(this.wasm, this.cachedTableRef) ?? this.cachedCellBboxes
+    : this.cachedCellBboxes;
   const logicalAffectedCellIndices = !shouldResizeSingleCell
-    ? findAlignedLogicalResizeAffectedCells(edge, resizeTarget, this.cachedCellBboxes)
+    ? findAlignedLogicalResizeAffectedCells(edge, resizeTarget, stateBboxes)
     : [];
   const affectedCellIndices = logicalAffectedCellIndices.length > 0
     ? logicalAffectedCellIndices
     : coordinateAffectedCellIndices;
   if (affectedCellIndices.length === 0 && !singleCellTarget) return;
   const affectedBounds = !singleCellTarget && hasLocalResizeHistory(this, this.cachedTableRef)
-    ? computeAffectedResizePositionBounds(edge, affectedCellIndices, this.cachedCellBboxes)
+    ? computeAffectedResizePositionBounds(edge, affectedCellIndices, stateBboxes)
     : null;
-  const resizeBounds = affectedBounds ?? computeResizePositionBounds(
+  const pageBounds = affectedBounds ?? computeResizePositionBounds(
     this,
     edge,
     pageBboxes,
     singleCellTarget,
     this.cachedCellBboxes,
   );
+  const resizeBounds = !singleCellTarget
+    ? intersectColumnCellBounds(edge, pageBounds, affectedCellIndices, stateBboxes)
+    : pageBounds;
 
   this.isResizeDragging = true;
   this.resizeDragState = {
     edge,
     tableRef: { ...this.cachedTableRef },
-    bboxes: this.cachedCellBboxes,
+    bboxes: stateBboxes,
     pageBboxes,
     affectedCellIndices,
     borderOriginalPos,
@@ -694,7 +751,7 @@ export function updateResizeDrag(this: any, e: MouseEvent): void {
   });
   const markerBboxes = singleCellTarget
     ? this.resizeDragState.bboxes.filter((b: CellBbox) =>
-      b.cellIdx === singleCellTarget.cellIdx)
+      b.cellIdx === singleCellTarget.cellIdx && b.pageIndex === pageIdx)
     : undefined;
 
   // 드래그 마커 표시

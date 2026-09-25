@@ -83,6 +83,7 @@ fn long_text_cursor_stays_in_fixed_cell_for_direct_and_path_queries() {
         0,
         0,
         &text,
+        None,
     )
     .expect("insert long text in college cell with deferred pagination");
 

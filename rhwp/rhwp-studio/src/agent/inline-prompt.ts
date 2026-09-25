@@ -10,6 +10,8 @@ import type { CanvasView } from '../view/canvas-view.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import type { CellPathLike, ControlLayoutItem, CursorRect, DocumentPosition } from '../core/types.ts';
 import type { AgentBridge } from './bridge.ts';
+import { selectedTablesInRange } from '../engine/selected-tables.ts';
+import { cellChain } from '../engine/table-selection-rects.ts';
 import {
   buildInlineElementSelection,
   buildInlineSelection,
@@ -208,6 +210,8 @@ class InlinePromptController {
       'cursor-rect-updated',
       'picture-object-selection-changed',
       'table-object-selection-changed',
+      // 셀 블록은 캐럿 없이 키보드(Shift+방향키·F5·모두 선택)로도 바뀐다.
+      'cell-selection-changed',
     ]) {
       this.unsubs.push(eventBus.on(name, () => this.scheduleCheck()));
     }
@@ -316,7 +320,8 @@ class InlinePromptController {
         && sel.start.parentParaIndex === sel.end.parentParaIndex
         && sel.start.controlIndex === sel.end.controlIndex
         && sel.start.cellIndex === sel.end.cellIndex
-        && this.sameCellPath(sel.start.cellPath, sel.end.cellPath);
+        && ((!sel.start.cellPath?.length && !sel.end.cellPath?.length)
+          || this.sameCellPath(sel.start.cellPath, sel.end.cellPath, { ignoreLastParagraph: true }));
       if (!sameContainer) return null;
       const zeroWidth = (sel.start.cellParaIndex ?? sel.start.paragraphIndex) === (sel.end.cellParaIndex ?? sel.end.paragraphIndex)
         && sel.start.charOffset === sel.end.charOffset;
@@ -332,12 +337,41 @@ class InlinePromptController {
     try {
       if (source.kind === 'text') {
         const end = source.end;
+        // 문단 끝의 블록 표는 논리 길이 다음 칸이 선택 끝이다. 캐럿 사각형은
+        // 표의 첫 쪽에 있으므로 칩은 마지막 쪽 표 선택 영역에 맞춘다.
+        if (end.charOffset > this.deps.wasm.getParagraphLength(end.sectionIndex, end.paragraphIndex)) {
+          const lastTable = selectedTablesInRange(this.deps.wasm, source.start, end).at(-1);
+          if (lastTable && lastTable.sec === end.sectionIndex && lastTable.ppi === end.paragraphIndex) {
+            const tableAnchor = this.tableAnchor(lastTable);
+            if (tableAnchor) return tableAnchor;
+          }
+        }
         const rect = this.deps.wasm.getCursorRect(end.sectionIndex, end.paragraphIndex, end.charOffset);
         return rect && rect.pageIndex !== undefined ? rect : null;
       }
       if (source.kind === 'cell-text') {
         const end = source.end;
         const path = end.cellPath;
+        const endChain = cellChain(end);
+        const endPara = end.cellParaIndex ?? end.paragraphIndex;
+        const logicalLength = path?.length
+          ? this.deps.wasm.getCellParagraphLengthByPath(
+              end.sectionIndex, end.parentParaIndex!, JSON.stringify(path),
+            )
+          : this.deps.wasm.getCellParagraphLength(
+              end.sectionIndex, end.parentParaIndex!, end.controlIndex!, end.cellIndex!, endPara,
+            );
+        if (end.charOffset > logicalLength) {
+          const lastTable = selectedTablesInRange(this.deps.wasm, source.start, end).at(-1);
+          const hostPath = lastTable?.cellPath?.slice(0, -1);
+          if (lastTable && hostPath?.length === endChain.length
+            && hostPath.every((entry, index) => entry.controlIndex === endChain[index].controlIndex
+              && entry.cellIndex === endChain[index].cellIndex
+              && entry.cellParaIndex === endChain[index].cellParaIndex)) {
+            const tableAnchor = this.tableAnchor(lastTable);
+            if (tableAnchor) return tableAnchor;
+          }
+        }
         const rect = path?.length
           ? this.deps.wasm.getCursorRectByPath(
               end.sectionIndex,
@@ -361,10 +395,29 @@ class InlinePromptController {
         const last = found[found.length - 1]!;
         return { pageIndex: last.pageIndex, x: last.item.x + last.item.w, y: last.item.y, height: last.item.h };
       }
-      const boxes = this.tableBoxes(source.ref, source.range);
+      return this.tableAnchor(source.ref, source.range);
+    } catch {
+      return null;
+    }
+  }
+
+  private tableAnchor(
+    ref: { sec: number; ppi: number; ci: number; cellPath?: CellPathLike },
+    range?: { startRow: number; startCol: number; endRow: number; endCol: number },
+  ): CursorRect | null {
+    try {
+      const boxes = this.tableBoxes(ref, range);
       if (boxes.length === 0) return null;
-      const last = boxes[boxes.length - 1]!;
-      return { pageIndex: last.pageIndex, x: last.x + last.w, y: last.y, height: last.h };
+      // 표 선택의 끝은 마지막 쪽 선택 영역의 오른쪽 아래다. 칩을 그 오른쪽 끝에 맞춰
+      // 선택 바로 아래에 둔다 — 셀 오른쪽 바깥에 붙이면 넓은 표에서 쪽 밖으로 나간다.
+      const lastPage = boxes[boxes.length - 1]!.pageIndex;
+      const onLastPage = boxes.filter((box) => box.pageIndex === lastPage);
+      const left = Math.min(...onLastPage.map((box) => box.x));
+      const right = Math.max(...onLastPage.map((box) => box.x + box.w));
+      const bottom = Math.max(...onLastPage.map((box) => box.y + box.h));
+      const zoom = this.deps.canvasView.getViewportManager().getZoom();
+      const chipWidth = (CHIP_WIDTH_ESTIMATE_PX + 6) / zoom;
+      return { pageIndex: lastPage, x: Math.max(left, right - chipWidth), y: bottom, height: 0 };
     } catch {
       return null;
     }
@@ -468,7 +521,13 @@ class InlinePromptController {
         const item = this.captureTable(source.ref, source.range);
         return item ? buildInlineElementSelection([item]) : null;
       }
-      if (source.kind === 'cell-text') return this.captureCellText(source.start, source.end);
+      const tables = selectedTablesInRange(wasm, source.start, source.end)
+        .map(ref => this.captureTable(ref))
+        .filter((item): item is Extract<InlinePromptItem, { kind: 'table' }> => item !== null);
+      if (source.kind === 'cell-text') {
+        const text = this.captureCellText(source.start, source.end);
+        return text && tables.length ? buildInlineElementSelection([...text.items, ...tables]) : text;
+      }
       const extracted = extractSelectionText(source.start, source.end, {
         paragraphCount: (sec) => wasm.getParagraphCount(sec),
         paragraphLength: (sec, para) => wasm.getParagraphLength(sec, para),
@@ -482,19 +541,11 @@ class InlinePromptController {
         },
       });
       const textSelection = buildInlineSelection(extracted);
-      const embedded = this.findEmbeddedBodyObjects(source.start, source.end);
-      if (embedded.length === 0) return textSelection;
-      const items: InlinePromptItem[] = [...textSelection.items];
+      const embedded = this.findEmbeddedBodyObjects(source.start, source.end).filter(ref => ref.type !== 'table');
+      if (embedded.length === 0 && tables.length === 0) return textSelection;
+      const items: InlinePromptItem[] = [...textSelection.items, ...tables];
       const attachments: File[] = [];
       for (const ref of embedded) {
-        if (ref.type === 'table') {
-          const table = this.captureTable(ref);
-          if (table) {
-            table.address.logicalOffset = ref.logicalOffset;
-            items.push(table);
-          }
-          continue;
-        }
         const captured = await this.captureObjects([ref]);
         if (!captured) return null;
         items.push(...captured.items);
@@ -553,6 +604,22 @@ class InlinePromptController {
     const paraPath = (para: number) => path?.map((entry, index) => index === path.length - 1
       ? { ...entry, cellParaIndex: para }
       : entry);
+    // 에이전트 도구는 텍스트 오프셋을 받는다. 캐럿 좌표(인라인 개체 = 1칸)를 그대로 넘기면
+    // 수식이 있는 셀 문단에서 편집 범위가 개체 수만큼 밀린다.
+    const toTextOffset = (para: number, logical: number): number => {
+      const currentPath = paraPath(para);
+      try {
+        return currentPath
+          ? wasm.logicalToTextOffsetInCellByPath(
+              start.sectionIndex, parentPara, JSON.stringify(currentPath), logical,
+            )
+          : wasm.logicalToTextOffsetInCell(
+              start.sectionIndex, parentPara, controlIdx, cellIdx, para, logical,
+            );
+      } catch {
+        return logical; // 구버전 wasm 호환 — 변환 실패 시 원값 유지
+      }
+    };
     const extractedText = extractCellSelectionText(
       firstPara,
       lastPara,
@@ -571,21 +638,20 @@ class InlinePromptController {
             ? wasm.getTextInCellByPath(start.sectionIndex, parentPara, JSON.stringify(currentPath), from, count)
             : wasm.getTextInCell(start.sectionIndex, parentPara, controlIdx, cellIdx, para, from, count);
         },
-        toTextOffset: (para, logical) => {
-          const currentPath = paraPath(para);
-          return currentPath
-            ? wasm.logicalToTextOffsetInCellByPath(
-                start.sectionIndex, parentPara, JSON.stringify(currentPath), logical,
-              )
-            : wasm.logicalToTextOffsetInCell(
-                start.sectionIndex, parentPara, controlIdx, cellIdx, para, logical,
-              );
-        },
+        toTextOffset,
       },
     );
     const extracted = {
-      start: { sectionIdx: start.sectionIndex, paraIdx: firstPara, charOffset: start.charOffset },
-      end: { sectionIdx: end.sectionIndex, paraIdx: lastPara, charOffset: end.charOffset },
+      start: {
+        sectionIdx: start.sectionIndex,
+        paraIdx: firstPara,
+        charOffset: toTextOffset(firstPara, start.charOffset),
+      },
+      end: {
+        sectionIdx: end.sectionIndex,
+        paraIdx: lastPara,
+        charOffset: toTextOffset(lastPara, end.charOffset),
+      },
       text: extractedText.text,
       truncated: extractedText.truncated,
     };
@@ -601,18 +667,24 @@ class InlinePromptController {
         cellParaIdx: firstPara,
         endCellParaIdx: lastPara,
       },
-      offsetConvention: 'logical',
+      offsetConvention: 'text',
     }]);
   }
 
-  private sameCellPath(a: unknown, b: unknown): boolean {
+  /**
+   * 두 셀 경로가 같은 셀을 가리키는지 본다. 선택 양 끝처럼 같은 셀 안의 다른 문단을
+   * 가리키는 경로는 마지막 entry 의 cellParaIndex 만 다르므로 ignoreLastParagraph 로 비교한다.
+   */
+  private sameCellPath(a: unknown, b: unknown, options: { ignoreLastParagraph?: boolean } = {}): boolean {
     if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
     return a.every((entry, index) => {
       const other = b[index] as Record<string, unknown> | undefined;
       const current = entry as Record<string, unknown>;
+      const skipParagraph = options.ignoreLastParagraph && index === a.length - 1;
       return (current['controlIndex'] ?? current['controlIdx']) === (other?.['controlIndex'] ?? other?.['controlIdx'])
         && (current['cellIndex'] ?? current['cellIdx']) === (other?.['cellIndex'] ?? other?.['cellIdx'])
-        && (current['cellParaIndex'] ?? current['cellParaIdx']) === (other?.['cellParaIndex'] ?? other?.['cellParaIdx']);
+        && (skipParagraph
+          || (current['cellParaIndex'] ?? current['cellParaIdx']) === (other?.['cellParaIndex'] ?? other?.['cellParaIdx']));
     });
   }
 
