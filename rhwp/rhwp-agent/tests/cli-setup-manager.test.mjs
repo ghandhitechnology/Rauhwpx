@@ -206,3 +206,23 @@ test('cancel stops an in-flight OAuth login', async (t) => {
   await assert.rejects(pending, /로그인/);
   assert.equal(process.killed, true);
 });
+
+test('bundled Claude runtime reports a newer registry release as an update', async (t) => {
+  const fetchImpl = async (url) => {
+    assert.match(String(url), /claude-code\/latest$/);
+    return new Response(JSON.stringify({ version: '2.1.282' }), { status: 200 });
+  };
+  const manager = await createCliSetupManager({ rootDir: await tmpRoot(t), fetchImpl, bundledClaudeVersion: '2.1.241' }).init();
+
+  const before = await manager.status('claude');
+  assert.equal(before.version, '2.1.241');
+  assert.equal(before.updateRequired, false);
+
+  const after = await manager.automaticUpdate('claude');
+  assert.equal(after.latestVersion, '2.1.282');
+  assert.equal(after.updateRequired, true);
+
+  // Codex 는 앱이 관리하는 설치본이 없으면 사용자의 CLI 이므로 확인하지 않는다.
+  const codex = await manager.automaticUpdate('codex');
+  assert.equal(codex.updateRequired, false);
+});

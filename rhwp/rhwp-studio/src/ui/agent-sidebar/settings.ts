@@ -2,6 +2,7 @@ import { createSetupTerminal } from './setup-terminal.ts';
 /** 설정 허브의 탐색과 AI·연결 목적지를 소유한다. 편집 설정은 전용 모듈이 맡는다. */
 import './settings.css';
 import { confirmSheet } from './sheet.ts';
+import { showToast } from '../toast.ts';
 
 import {
   availableModelsForAgent,
@@ -422,6 +423,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let setupProgressCreepTimer: ReturnType<typeof setInterval> | null = null;
   let setupProgressResetTimer: ReturnType<typeof setTimeout> | null = null;
   const openedAuthUrls = new Set<string>();
+  const announcedUpdates = new Set<string>();
 
   // Browserbase — 앱에서 입력한 키는 이 탭이 사는 동안만 허브 환경 변수를 덮는다.
   let browserbaseStatus: BrowserbaseStatus | null = null;
@@ -797,24 +799,40 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupDialog.setAttribute('aria-modal', 'true');
   setupDialog.setAttribute('aria-labelledby', 'ag-agent-setup-title');
   setupDialog.tabIndex = -1;
+  // 머리: 프로바이더 아이콘 · 이름 · 상태 한 줄. 본문에 따로 큰 제목을 두지 않는다.
   const setupChrome = el('header', 'ag-agent-setup-chrome');
+  const setupHeroIcon = el('div', 'ag-agent-setup-icon');
+  setupHeroIcon.setAttribute('aria-hidden', 'true');
   const setupTitleWrap = el('div', 'ag-agent-setup-title-wrap');
   const setupTitle = el('h2', 'ag-agent-setup-title');
   setupTitle.id = 'ag-agent-setup-title';
-  setupTitleWrap.append(setupTitle);
+  const setupState = el('p', 'ag-agent-setup-state');
+  const setupStateDot = el('span', 'ag-settings-dot');
+  setupStateDot.setAttribute('aria-hidden', 'true');
+  const setupStateText = el('span', '');
+  setupState.append(setupStateDot, setupStateText);
+  setupTitleWrap.append(setupTitle, setupState);
   const setupClose = el('button', 'ag-agent-setup-close');
   setupClose.type = 'button';
   setupClose.setAttribute('aria-label', '설정 닫기');
   setupClose.appendChild(createIcon('close'));
-  setupChrome.append(setupTitleWrap, setupClose);
+  setupChrome.append(setupHeroIcon, setupTitleWrap, setupClose);
   const setupBody = el('div', 'ag-agent-setup-body');
   const setupGeneric = el('div', 'ag-agent-setup-generic');
-  const setupHero = el('div', 'ag-agent-setup-hero');
-  const setupHeroIcon = el('div', 'ag-agent-setup-hero-icon');
-  const setupHeroCopy = el('div', 'ag-agent-setup-hero-copy');
-  const setupHeroTitle = el('strong', 'ag-agent-setup-hero-title');
-  setupHeroCopy.append(setupHeroTitle);
-  setupHero.append(setupHeroIcon, setupHeroCopy);
+
+  // 연결 상태 카드 — 계정 줄과 버전 줄. 새 버전이 있으면 버전 줄에서 바로 업데이트한다.
+  const setupStatusCard = el('div', 'ag-agent-setup-card');
+  const setupAccountRow = el('div', 'ag-agent-setup-row');
+  const setupAccountValue = el('span', 'ag-agent-setup-row-value');
+  const setupDoneChange = el('button', 'ag-settings-btn', '로그인 방식 변경');
+  setupDoneChange.type = 'button';
+  setupAccountRow.append(el('span', 'ag-agent-setup-row-label', '계정'), setupAccountValue, setupDoneChange);
+  const setupVersionRow = el('div', 'ag-agent-setup-row');
+  const setupVersionValue = el('span', 'ag-agent-setup-row-value');
+  const setupUpdate = el('button', 'ag-settings-btn ag-agent-setup-update', '업데이트');
+  setupUpdate.type = 'button';
+  setupVersionRow.append(el('span', 'ag-agent-setup-row-label', '버전'), setupVersionValue, setupUpdate);
+  setupStatusCard.append(setupAccountRow, setupVersionRow);
   const setupProgress = el('div', 'ag-agent-setup-progress');
   setupProgress.setAttribute('role', 'progressbar');
   setupProgress.setAttribute('aria-valuemin', '0');
@@ -887,10 +905,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const setupCodeSubmit = el('button', 'ag-agent-setup-primary', '코드 확인');
   setupCodeSubmit.type = 'button';
   setupCodeBox.append(setupCodeNote, setupCode.field, setupCodeSubmit);
+  // 로그인 방법 두 가지는 연결 목록과 같은 한 장의 카드 안 행으로 묶는다.
+  const setupAuthChoices = el('div', 'ag-agent-auth-list');
+  setupAuthChoices.append(setupOauth, setupApiToggle);
   setupAuthPane.append(
     setupAuthHeading,
-    setupOauth,
-    setupApiToggle,
+    setupAuthChoices,
     setupKeyBox,
     setupLoginBox,
     setupCodeBox,
@@ -919,23 +939,19 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupAccountEmpty.hidden = true;
   setupAccountPane.append(setupAccountTitle, setupAccountEmail, setupAccountRows, setupAccountEmpty);
 
+  // 완료 줄은 Rau 전용(계속·로그아웃). 다른 프로바이더는 닫기(×)로 끝낸다.
   const setupDonePane = el('div', 'ag-agent-setup-pane ag-agent-setup-done');
-  const setupDoneMark = el('span', 'ag-agent-setup-done-mark', '✓');
-  const setupDoneTitle = el('strong', '', '연결되었습니다');
-  const setupDoneDetail = el('p', 'ag-agent-setup-copy');
   const setupDoneClose = el('button', 'ag-agent-setup-primary', '완료');
   setupDoneClose.type = 'button';
-  const setupDoneChange = el('button', 'ag-settings-btn', '로그인 방식 변경');
-  setupDoneChange.type = 'button';
   const setupDoneDisconnect = el('button', 'ag-settings-btn', '로그아웃');
   setupDoneDisconnect.type = 'button';
   setupDoneDisconnect.hidden = true;
-  setupDonePane.append(setupDoneMark, setupDoneTitle, setupDoneDetail, setupDoneChange, setupDoneDisconnect, setupDoneClose);
+  setupDonePane.append(setupDoneDisconnect, setupDoneClose);
 
   setupGeneric.append(
-    setupHero,
     setupRauAuthFeedback,
     setupAccountPane,
+    setupStatusCard,
     setupProgress,
     setupProgressLine,
     setupError,
@@ -954,6 +970,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       }
     });
   });
+  setupUpdate.addEventListener('click', () => void installSelectedAgent());
   setupOauth.addEventListener('click', () => void startSetupAuth('oauth'));
   setupApiToggle.addEventListener('click', () => {
     setupKeyBox.hidden = false;
@@ -2289,6 +2306,22 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }
   }
 
+  /** 새 Claude/Codex 버전을 세션마다 한 번 조용히 알린다. 놓쳐도 연결 목록에 업데이트 버튼이 남는다. */
+  function announceProviderUpdates(statuses: AgentSetupStatusMap): void {
+    for (const agent of ['claude', 'codex'] as const) {
+      const status = statuses[agent];
+      if (!status?.updateRequired || !status.latestVersion) continue;
+      const key = `${agent}@${status.latestVersion}`;
+      if (announcedUpdates.has(key)) continue;
+      announcedUpdates.add(key);
+      showToast({
+        message: `${AGENT_LABEL[agent]} ${status.latestVersion} 업데이트가 있습니다.`,
+        durationMs: 10_000,
+        action: { label: '업데이트', onClick: () => openAgentSetup(agent) },
+      });
+    }
+  }
+
   function maybeOpenAuthUrl(url: string | null | undefined): void {
     if (!url || openedAuthUrls.has(url)) return;
     openedAuthUrls.add(url);
@@ -2581,12 +2614,31 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupDialog.focus();
   }
 
+  /**
+   * 대화상자는 <body> 에 붙어 사이드바의 프로바이더 색 변수를 물려받지 못한다.
+   * 사이드바 루트에서 해당 프로바이더 색을 읽어 강조색으로 옮긴다.
+   */
+  function syncSetupAccent(agent: AgentName): void {
+    const root = providerList.closest('.ag-root');
+    if (!root) return;
+    const styles = getComputedStyle(root);
+    const accent = styles.getPropertyValue(`--ag-${agent}`).trim();
+    const onAccent = styles.getPropertyValue('--ag-on-accent').trim();
+    if (accent) setupDialog.style.setProperty('--accent-primary', accent);
+    if (onAccent) setupDialog.style.setProperty('--n-on-accent', onAccent);
+  }
+
   function renderAgentSetup(): void {
     if (!setupAgent) return;
     const agent = setupAgent;
-    setupTitle.textContent = `${AGENT_LABEL[agent]} 설정`;
+    // Pi 카드는 자체 머리(아이콘·상태)를 가지므로 대화상자 머리는 제목만 둔다.
+    setupTitle.textContent = agent === 'pi' ? `${AGENT_LABEL[agent]} 설정` : AGENT_LABEL[agent];
+    setupHeroIcon.hidden = agent === 'pi';
+    setupHeroIcon.replaceChildren(createProviderIcon(agent));
+    syncSetupAccent(agent);
     setupBody.replaceChildren(agent === 'pi' ? piCard : setupGeneric);
     if (agent === 'pi') {
+      setupState.hidden = true;
       if (setupMessage) piMessage = setupMessage;
       renderPi();
       restoreSetupFocus();
@@ -2601,8 +2653,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     // OpenCode도 바이너리 감지만으로 실행할 수 없다. API 키나 사용자의
     // `opencode auth login`을 허브가 확인한 뒤에만 완료 화면으로 보낸다.
     const connected = configured || (available && status?.authenticated === true);
-    setupHeroIcon.replaceChildren(createProviderIcon(agent));
-    setupHeroTitle.textContent = AGENT_LABEL[agent];
+    const showConnected = connected && !setupReauth;
+    const updateVersion = agent !== 'rau' && available && status?.updateRequired ? status.latestVersion : null;
+    const installing = setupBusy && setupProgressPercent > 0;
     setupKey.input.placeholder = API_KEY_PLACEHOLDER[agent];
     setupAuthHeading.textContent = '로그인 방법';
     setupOauth.hidden = status?.terminalAuthSupported === false;
@@ -2614,28 +2667,54 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       setupInstallPane.hidden = true;
       setupApiToggle.hidden = true;
       setupKeyBox.hidden = true;
-      setupAuthPane.hidden = connected && !setupReauth;
+      setupAuthPane.hidden = showConnected;
     } else {
       if (oauthTitle) oauthTitle.textContent = supportsTerminalSetup(agent) ? '로그인 시작' : '브라우저로 로그인';
       if (oauthDetail) oauthDetail.textContent = supportsTerminalSetup(agent) ? '이 창에서 계정 연결' : '구독 계정 또는 웹 계정 연결';
       setupApiToggle.hidden = false;
       setupInstallPane.hidden = available;
-      setupAuthPane.hidden = !available || (connected && !setupReauth);
+      setupAuthPane.hidden = !available || showConnected;
     }
-    setupHero.hidden = connected && !setupReauth;
-    setupDonePane.hidden = !connected || setupReauth;
+    setupAuthChoices.hidden = setupOauth.hidden && setupApiToggle.hidden;
+
+    // 머리 상태 줄 — 목록의 점 색과 같은 규칙.
+    const [stateDot, stateText] = installing
+      ? ['connecting', available ? '업데이트 중' : '설치 중']
+      : setupBusy
+        ? ['connecting', '로그인 중']
+        : connected
+          ? updateVersion ? ['replaced', '업데이트 있음'] : ['connected', '연결됨']
+          : agent !== 'rau' && !available ? ['unknown', '설치 필요'] : ['unknown', '로그인 필요'];
+    setupState.hidden = false;
+    setupStateDot.dataset.state = stateDot;
+    setupStateText.textContent = stateText;
+
+    // 상태 카드: 연결됐으면 계정·버전, 로그인 전이라도 새 버전이 있으면 버전 줄만.
+    setupAccountRow.hidden = agent === 'rau' || !showConnected;
+    setupAccountValue.textContent = status?.authMethod === 'api-key' && status.keyTail
+      ? `API 키 ····${status.keyTail}`
+      : status?.account
+        ? status.account
+        : status?.authenticated
+          ? agent === 'opencode' ? 'CLI 자격 증명' : '웹 계정'
+          : 'CLI 로그인';
+    setupAccountValue.title = setupAccountValue.textContent;
+    setupDoneChange.hidden = agent === 'rau';
+    setupDoneChange.disabled = setupBusy;
+    setupVersionRow.hidden = agent === 'rau' || !(updateVersion || (showConnected && status?.version));
+    setupVersionValue.replaceChildren(status?.version ?? '');
+    if (updateVersion) {
+      setupVersionValue.append(el('span', 'ag-agent-setup-row-note', `새 버전 ${updateVersion}`));
+    }
+    setupUpdate.hidden = !updateVersion;
+    setupUpdate.textContent = installing ? '업데이트 중' : '업데이트';
+    setupUpdate.disabled = setupBusy || connectionState !== 'connected';
+    setupStatusCard.hidden = setupAccountRow.hidden && setupVersionRow.hidden;
+
+    setupDonePane.hidden = agent !== 'rau' || !showConnected;
     setupDonePane.classList.toggle('ag-agent-setup-rau-actions', agent === 'rau' && connected && !setupReauth);
     setupDoneClose.textContent = agent === 'rau' && rauAuthFeedback === 'success' ? '계속' : '완료';
-    setupDoneChange.textContent = '로그인 방식 변경';
-    setupDoneChange.hidden = agent === 'rau';
     setupDoneDisconnect.hidden = agent !== 'rau' || !connected || setupReauth;
-    setupDoneDetail.textContent = status?.authMethod === 'api-key' && status.keyTail
-      ? `API 키 ****${status.keyTail}`
-      : status?.authenticated
-        ? agent === 'opencode'
-          ? 'OpenCode CLI 자격 증명을 확인했습니다.'
-          : `${AGENT_LABEL[agent]} 웹 계정으로 로그인했습니다.`
-        : `${AGENT_LABEL[agent]} CLI 연결이 확인되었습니다.`;
     setupRauAuthFeedback.hidden = agent !== 'rau' || rauAuthFeedback !== 'success';
     setupError.textContent = setupMessage;
     setupError.hidden = !setupMessage;
@@ -3646,6 +3725,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           const rauWasIncomplete = setupStatuses !== null
             && setupStatuses.rau?.setupComplete !== true;
           setupStatuses = ev.statuses;
+          announceProviderUpdates(ev.statuses);
           const selectedStatus = setupAgent ? ev.statuses[setupAgent] : null;
           if (setupAgent && selectedStatus?.authOwnedByThisSession && selectedStatus.authRunId) {
             const resumeTerminal = supportsTerminalSetup(setupAgent) && setupAuthRunId !== selectedStatus.authRunId;

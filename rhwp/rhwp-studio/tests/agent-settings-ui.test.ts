@@ -292,7 +292,7 @@ test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에
   assert.match(settings, /const detected = providers\?\.\[agent\]\?\.available === true/);
   assert.match(settings, /const available = detected \|\| status\?\.available === true \|\| status\?\.installed === true/);
   assert.match(settings, /const connected = configured \|\| \(available && status\?\.authenticated === true\)/);
-  assert.match(settings, /CLI 연결이 확인되었습니다/);
+  assert.match(settings, /: 'CLI 로그인'/);
   assert.doesNotMatch(settings, /필요한 CLI와 인증을 한 번에 설정합니다/);
   assert.match(settings, /piOauth\.addEventListener\('click', \(\) => void startSetupAuth\('oauth'\)\)/);
   assert.doesNotMatch(settings, /body\.append\([\s\S]*piSection\.root/);
@@ -588,10 +588,10 @@ test('Rau 재설정은 압축 동작만 두고 OAuth 완료를 잠깐 알린다'
   assert.match(settings, /function openAgentSetup[\s\S]*resetRauAuthFeedback\(\);[\s\S]*function closeAgentSetup[\s\S]*resetRauAuthFeedback\(\)/);
   assert.match(settings, /async function startSetupAuth[\s\S]*resetRauAuthFeedback\(\);[\s\S]*rauOauthFlowInProgress = setupAgent === 'rau' && method === 'oauth'/);
   assert.match(settings, /dispose\(\): void \{[\s\S]*if \(rauAuthFeedbackTimer\) \{[\s\S]*clearTimeout\(rauAuthFeedbackTimer\)/);
-  // 기존 성공 제목과 큰 체크는 다른 프로바이더용으로 남고 Rau에서만 숨는다.
+  // 완료 줄은 Rau 전용이고, 다른 프로바이더는 상태 카드와 닫기(×)로 끝난다.
+  assert.match(settings, /setupDonePane\.hidden = agent !== 'rau' \|\| !showConnected/);
   assert.match(settings, /setupDonePane\.classList\.toggle\('ag-agent-setup-rau-actions', agent === 'rau'/);
   assert.match(settingsCss, /\.ag-agent-setup-done\.ag-agent-setup-rau-actions \{[\s\S]*flex-direction: row/);
-  assert.match(settingsCss, /\.ag-agent-setup-rau-actions \.ag-agent-setup-done-mark,[\s\S]*display: none/);
   assert.match(settingsCss, /\.ag-agent-setup-rau-actions > \[hidden\] \{\s*display: none/);
   assert.match(settingsCss, /\.ag-agent-setup-auth-feedback-mark \{[\s\S]*width: 20px;[\s\S]*border-radius: 5px/);
 });
@@ -613,6 +613,9 @@ test('Rau 로그아웃 뒤 설치된 런타임을 연결 상태로 오인하지 
 test('설정 모달은 설치 진행 동작과 프로바이더별 API 키 힌트를 갖는다', () => {
   assert.match(settings, /const setupInstall = el\('button', 'ag-agent-setup-primary', '설치하고 계속'\)/);
   assert.match(settings, /setupInstallPane\.hidden = available/);
+  // 새 버전은 상태 카드의 버전 줄에서 조용히 업데이트한다.
+  assert.match(settings, /setupUpdate\.addEventListener\('click', \(\) => void installSelectedAgent\(\)\)/);
+  assert.match(settings, /setupUpdate\.hidden = !updateVersion/);
   assert.match(settings, /const API_KEY_PLACEHOLDER: Record<AgentName, string>/);
   assert.match(settings, /grok: 'xai-…'/);
   assert.match(settings, /cursor: 'API 키'/);
@@ -629,7 +632,7 @@ test('OpenCode 설정은 허브의 터미널 로그인 지원 여부를 따르�
   );
   assert.match(bridgeSource, /requestAgentSetupStatus\(refresh = false\)/);
   assert.match(bridgeSource, /type: 'agent-setup-status-request', \.\.\.\(refresh \? \{ refresh: true \} : \{\}\)/);
-  assert.match(settings, /agent === 'opencode'[\s\S]{0,80}'OpenCode CLI 자격 증명을 확인했습니다\.'/);
+  assert.match(settings, /agent === 'opencode' \? 'CLI 자격 증명' : '웹 계정'/);
   // 설치 감지만으로 완료하지 않고 허브가 확인한 인증 상태를 요구한다.
   assert.match(settings, /const connected = configured \|\| \(available && status\?\.authenticated === true\)/);
   assert.match(settings, /label = detected \? '로그인 필요' : '연결하기'/);
