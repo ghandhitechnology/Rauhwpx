@@ -430,6 +430,7 @@ const sessions = new HubSessionRegistry({
       copyLayoutStorageUncertain: false,
       pendingTemplateCompletions: [],
       pendingDocumentSaved: null,
+      pendingEditReport: null,
       browserbaseSession: new BrowserbaseFleet({ log }),
       downloadManager,
       documentSnapshotManager,
@@ -2561,6 +2562,28 @@ function addAgentInstructionsContext(prompt) {
   return `${agentInstructionsStore.promptBlock()}\n\n${prompt}`;
 }
 
+/**
+ * Studio 가 알린, 버려지거나 되돌리지 못한 대기 편집. 턴 밖에서 생긴 일이라 다음 사용자
+ * 메시지 맥락에 한 번 붙인다 (턴 안의 일은 Studio 가 다음 도구 결과에 직접 싣는다).
+ */
+function queueEditReport(record, msg) {
+  const activeSession = record.agentSession;
+  const notes = Array.isArray(msg.notes)
+    ? msg.notes.filter((note) => typeof note === 'string' && note.length > 0).map((note) => note.slice(0, 800))
+    : [];
+  if (!activeSession || notes.length === 0) return;
+  const earlier = record.pendingEditReport?.threadId === activeSession.threadId ? record.pendingEditReport.notes : [];
+  record.pendingEditReport = { threadId: activeSession.threadId, notes: [...earlier, ...notes].slice(-6) };
+}
+
+function addEditReportContext(record, activeSession, prompt) {
+  const report = record.pendingEditReport;
+  record.pendingEditReport = null;
+  if (!report || report.threadId !== activeSession.threadId) return prompt;
+  const block = ['<staged_edit_report trust="application-state">', ...report.notes, '</staged_edit_report>'].join('\n');
+  return `${block}\n\n${prompt}`;
+}
+
 function addTemplateContext(record, activeSession, prompt) {
   if (!activeSession?.activeTemplateId) return prompt;
   try {
@@ -2639,7 +2662,7 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
           addTemplateContext(
             record,
             activeSession,
-            addReferenceContext(activeSession, msg.text, prompt, messageAttachments),
+            addEditReportContext(record, activeSession, addReferenceContext(activeSession, msg.text, prompt, messageAttachments)),
           ),
         ),
       )));
@@ -2991,11 +3014,11 @@ async function approveImplementationPlan(record, sock, msg) {
     activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
       record,
       activeSession,
-      addReferenceContext(
+      addEditReportContext(record, activeSession, addReferenceContext(
         activeSession,
         JSON.stringify(transition.approvedPlan.plan),
         approvedPrompt,
-      ),
+      )),
     )));
   } catch (error) {
     if (record.agentSession === activeSession) {
@@ -3563,6 +3586,10 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'chat-document-saved': {
       queuePlanningDocumentSaved(record, msg);
+      return;
+    }
+    case 'chat-edit-report': {
+      queueEditReport(record, msg);
       return;
     }
     case 'chat-plan-execution-result': {

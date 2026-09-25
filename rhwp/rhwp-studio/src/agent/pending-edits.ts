@@ -7,10 +7,10 @@ import { replacementCharShapes } from './replacement-format.ts';
 import { PreparedSnapshotCommand } from '../engine/prepared-snapshot-command.ts';
 import type {
   AgentName, CellAddr, CharFormatProps, DocPoint, DocRange,
-  ObjectAnchor, ObjectOp, PendingAppliedAt, PendingChangeSet, PendingEditsChangeEvent, PendingOp,
-  PendingStructureOpInfo,
+  ObjectAnchor, ObjectOp, ParagraphCaptureRef, PendingAppliedAt, PendingChangeSet,
+  PendingDrop, PendingDropCause, PendingEditsChangeEvent, PendingOp,
 } from './types.ts';
-import { AgentToolError, isDestructiveTableMark, isObjectOpApplied, sameCell } from './types.ts';
+import { AgentToolError, objectOverlayKind, sameCell } from './types.ts';
 import type { OverlayOp, PendingOverlayRenderer } from './pending-overlay.ts';
 import type { AgentTextInsertedEvent } from './agent-edit-follow.ts';
 
@@ -53,6 +53,52 @@ export function shiftPointAfterInsert(
   return { paraIdx: p.paraIdx + ins.addedParas, charOffset: p.charOffset };
 }
 
+/**
+ * 본문 문단 분할/병합 뒤 컨트롤 주소 재배치. 엔진은 분할 지점 뒤의 개체를 새 문단으로
+ * 옮기고(인덱스 0부터 재번호), 병합 시 뒤 문단의 개체를 앞 문단 끝에 이어 붙인다.
+ * 반환: 범위 밖 문단이면 undefined(문단 이동만 적용), 사라진 컨트롤이면 null.
+ */
+export type ControlRemap = (paraIdx: number, controlIdx: number) =>
+  { paraIdx: number; controlIdx: number } | null | undefined;
+
+/**
+ * 변이 전후 문단별 컨트롤 수로 재배치 함수를 만든다. 텍스트 변이는 컨트롤 순서를
+ * 바꾸지 않으므로, 전후 총수가 같으면 범위 전체를 평탄화한 순번이 그대로 보존된다.
+ * 병합에서 가운데 문단이 통째로 지워지면 그 문단의 컨트롤만 사라진다.
+ */
+export function controlRemapFromCounts(
+  firstPara: number, before: number[], after: number[],
+): ControlRemap | undefined {
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  const lastBefore = firstPara + before.length - 1;
+  const locate = (flat: number): { paraIdx: number; controlIdx: number } => {
+    let rest = flat;
+    for (let i = 0; i < after.length; i++) {
+      if (rest < after[i] || i === after.length - 1) return { paraIdx: firstPara + i, controlIdx: rest };
+      rest -= after[i];
+    }
+    return { paraIdx: firstPara, controlIdx: flat };
+  };
+  let removedMid = false;
+  if (sum(before) !== sum(after)) {
+    // 병합: 가운데 문단의 컨트롤만 사라지고 첫/끝 문단의 컨트롤은 이어 붙는다
+    if (after.length !== 1 || before.length < 3
+      || after[0] !== before[0] + before[before.length - 1]) return undefined;
+    removedMid = true;
+  }
+  return (paraIdx, controlIdx) => {
+    if (paraIdx < firstPara || paraIdx > lastBefore) return undefined;
+    const rel = paraIdx - firstPara;
+    if (removedMid && rel > 0 && rel < before.length - 1) return null;
+    let flat = controlIdx;
+    for (let i = 0; i < rel; i++) {
+      if (removedMid && i > 0) continue;
+      flat += before[i];
+    }
+    return locate(flat);
+  };
+}
+
 /** 삭제 이후 좌표 이동 — 범위 내부는 삭제 시작점으로 clamp */
 export function shiftPointAfterDelete(p: DocPoint, del: DocRange): DocPoint {
   if (p.paraIdx < del.startParaIdx
@@ -69,6 +115,39 @@ export function shiftPointAfterDelete(p: DocPoint, del: DocRange): DocPoint {
 }
 
 const CHAR_FORMAT_KEYS = ['bold', 'italic', 'underline', 'strikethrough', 'fontSize', 'textColor'] as const;
+
+const DROP_CAUSE_LABELS: Record<PendingDropCause, string> = {
+  'text-changed': 'text changed',
+  'field-changed': 'field changed',
+  'table-changed': 'table changed',
+  'paragraph-changed': 'paragraph changed',
+  'object-changed': 'object changed or missing',
+  'revert-failed': 'edited after staging',
+};
+
+/**
+ * 에이전트에게 알릴 한 줄 보고 — 편집이 사용자 몫으로 문서에 남았거나 통째로 버려졌을 때.
+ * 승인에서 undo 항목만 빠진 경우와 승인 실패는 편집이 그대로 반영됐으므로 알리지 않는다.
+ */
+export function editReportNote(e: PendingEditsChangeEvent): string | null {
+  if (e.type !== 'invalidated' || e.reason === 'approval failed') return null;
+  const left = e.leftInDocument === true && e.drops && e.drops.length > 0
+    ? `${e.drops.slice(0, 6).map((drop) => `${drop.summary} (${DROP_CAUSE_LABELS[drop.cause]})`).join('; ')}${e.drops.length > 6 ? '; …' : ''}`
+    : '';
+  if (e.droppedOpIds) {
+    return left ? `Rejected staged edits were rolled back, but these stay in the document: ${left}.` : null;
+  }
+  return `Your staged edits were discarded (${e.reason})${left ? `; these could not be rolled back and stay in the document: ${left}` : ''}. Re-read the document before editing it again.`;
+}
+
+/** 드리프트 이벤트의 한 줄 이유 — 실제 원인별 개수를 적는다 ("text drift" 일괄 표기 대신). */
+export function describeDrops(drops: readonly PendingDrop[], leftInDocument: boolean): string {
+  const counts = new Map<PendingDropCause, number>();
+  for (const drop of drops) counts.set(drop.cause, (counts.get(drop.cause) ?? 0) + 1);
+  const causes = [...counts].map(([cause, n]) => `${DROP_CAUSE_LABELS[cause]}${n > 1 ? ` ×${n}` : ''}`).join(', ');
+  const ops = `${drops.length} op${drops.length === 1 ? '' : 's'}`;
+  return leftInDocument ? `${ops} left in the document: ${causes}` : `${ops} outside the undo step: ${causes}`;
+}
 
 /**
  * [Task #2337-review 와 동일 원칙] wasm 텍스트 API 의 charOffset/count 는 Rust char
@@ -92,6 +171,13 @@ function scalarLen(s: string): number {
   return [...s].length;
 }
 
+type TableTargetOp = Extract<ObjectOp, { tableParaIdx: number }>;
+
+/** 기존 표를 (tableParaIdx, controlIdx) 로 가리키는 객체 op 인가 */
+function isTableTargetOp(obj: ObjectOp): obj is TableTargetOp {
+  return 'tableParaIdx' in obj;
+}
+
 /**
  * 에이전트 대기 편집(pending edit) 관리자.
  *
@@ -111,8 +197,6 @@ export class PendingEditManager {
   private counter = 0;
   /** op 등록 순번 — 같은/다른 set 을 가로지르는 적용 순서 판별용 */
   private opSeq = 0;
-  /** withMarkedOpsApplied 로 mark-only op 이 현재 적용 중인 set id (재진입 가드) */
-  private speculativeSets = new Set<string>();
   private lastDigest: string | null;
   /**
    * 사용자(비-에이전트) 문서 변이 카운터. replace op 의 스냅샷은 문서 전체 클론이라
@@ -206,16 +290,37 @@ export class PendingEditManager {
     text: string,
   ): { changeSetId: string; insertedRange: DocRange } {
     if (text.length === 0) throw new AgentToolError('INVALID_ARGS', 'text must not be empty');
-    const { range, addedParas } = this.performInsert(addr.sectionIdx, addr.paraIdx, addr.charOffset, text, addr.cell);
+    const splits = text.includes('\n');
+    const fixControls = splits
+      ? this.trackControls(addr.sectionIdx, addr.paraIdx, addr.paraIdx, addr.cell)
+      : undefined;
+    // 본문 문단을 나누는 삽입은 원래 문단을 보관한다 — 되돌림 병합은 문단을 다시 흘려
+    // 개체가 있는 문단의 줄 배치가 원래와 달라질 수 있다.
+    let paraCapture: ParagraphCaptureRef | null = null;
+    if (splits && !addr.cell) {
+      const digest = this.paragraphDigest(addr.sectionIdx, addr.paraIdx);
+      const id = digest === null ? null : this.captureParagraph(addr.sectionIdx, addr.paraIdx);
+      if (id !== null) paraCapture = { id, digest };
+    }
+    let inserted: { range: DocRange; addedParas: number };
+    try {
+      inserted = this.performInsert(addr.sectionIdx, addr.paraIdx, addr.charOffset, text, addr.cell);
+    } catch (error) {
+      if (paraCapture) this.deps.wasm.discardParagraphCapture(paraCapture.id);
+      throw error;
+    }
+    const { range, addedParas } = inserted;
     const set = this.ensureOpenSet(agent);
     const op: PendingOp = {
       kind: 'insert', id: this.nextId('op'), agent: set.agent, range, text, applied: this.appliedAt(range),
+      ...(paraCapture ? { paraCapture } : {}),
     };
     this.pushOp(set, op);
     this.shiftAllAfterInsert(range.sectionIdx, {
       paraIdx: addr.paraIdx, charOffset: addr.charOffset, addedParas,
       endParaIdx: range.endParaIdx, endCharOffset: range.endCharOffset, textLen: scalarLen(text),
     }, op, addr.cell);
+    fixControls?.(range.endParaIdx);
     this.reconcilePreviewLayout();
     this.emitDocEvents('agent-pending-edit');
     this.syncOverlay();
@@ -223,26 +328,6 @@ export class PendingEditManager {
     this.emitTextInserted({ agent: op.agent, range: op.range, text }, op.id);
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, insertedRange: { ...range } };
-  }
-
-  /**
-   * [legacy] 마크 전용 삭제 — 도구 경로는 더 이상 쓰지 않는다(delete_range 는
-   * replaceText(range, '') 로 즉시 적용된다). 마크가 원문을 레이아웃에 남겨
-   * 편집이 많은 턴에서 미리보기 쪽나눔이 최종본과 크게 어긋났기 때문이다.
-   */
-  markDelete(agent: AgentName, range: DocRange): { changeSetId: string; markedText: string } {
-    if (range.endParaIdx < range.startParaIdx
-      || (range.endParaIdx === range.startParaIdx && range.endCharOffset <= range.startCharOffset)) {
-      throw new AgentToolError('INVALID_ARGS', 'delete range is empty or reversed');
-    }
-    // 문서 변이 없음(revision 불변): 텍스트만 캡처하고 마크만 기록한다.
-    const text = this.captureRangeText(range);
-    const set = this.ensureOpenSet(agent);
-    const op: PendingOp = { kind: 'delete', id: this.nextId('op'), agent: set.agent, range: { ...range }, text };
-    this.pushOp(set, op);
-    this.syncOverlay();
-    this.emitChange({ type: 'ops-changed' });
-    return { changeSetId: set.id, markedText: text.slice(0, 300) };
   }
 
   /**
@@ -323,11 +408,18 @@ export class PendingEditManager {
     }
     let deleteShifted = false;
     try {
+      const fixDeleted = range.endParaIdx > range.startParaIdx
+        ? this.trackControls(range.sectionIdx, range.startParaIdx, range.endParaIdx, range.cell)
+        : undefined;
       const res = this.deleteRangeRaw(range);
       if (res?.ok !== true) throw new AgentToolError('RPC_ERROR', 'replaceText: deleteRange failed');
       this.shiftAllAfterDelete(range);
+      fixDeleted?.(range.startParaIdx);
       deleteShifted = true;
       const start: DocPoint = { paraIdx: range.startParaIdx, charOffset: range.startCharOffset };
+      const fixInserted = text.includes('\n')
+        ? this.trackControls(range.sectionIdx, start.paraIdx, start.paraIdx, range.cell)
+        : undefined;
       const ins = text.length > 0
         ? this.performInsert(range.sectionIdx, start.paraIdx, start.charOffset, text, range.cell)
         : {
@@ -359,6 +451,7 @@ export class PendingEditManager {
       this.pushOp(set, op);
       if (text.length > 0) {
         this.shiftAllAfterInsert(range.sectionIdx, this.insertShiftFor(start, text), op, range.cell);
+        fixInserted?.(ins.range.endParaIdx);
       }
       this.reconcilePreviewLayout();
       this.emitDocEvents('agent-pending-edit');
@@ -438,6 +531,7 @@ export class PendingEditManager {
     const op: PendingOp = {
       kind: 'format', id: this.nextId('op'), agent: set.agent, range: { ...range }, format: { ...format }, inverse,
       text: rangeText,
+      ...(rangeText !== undefined ? { applied: this.appliedAt(range) } : {}),
     };
     this.pushOp(set, op);
     this.reconcilePreviewLayout();
@@ -467,30 +561,66 @@ export class PendingEditManager {
   }
 
   /**
-   * 객체 연산 등록. applied-now 유형은 즉시 적용(reject 시 역연산),
-   * mark-only 유형은 approve 시 실행된다.
+   * 객체 연산 등록 — 모든 유형이 호출 시점에 엔진에 적용된다 (미리보기 = 승인 결과).
+   * 적용 전에 되돌림 수단을 잡는다: 한 본문 문단 안에서 끝나는 변경은 그 문단의
+   * 보관본, 그림/수식은 문서 스냅샷(보관을 지원하지 않는 WASM 이면 보관 대상도 스냅샷).
+   * 엔진 실패는 이 호출에서 던지고 문서는 적용 전으로 돌아간다.
    */
   addObjectOp(agent: AgentName, obj: ObjectOp): { changeSetId: string; obj: ObjectOp } {
     const wasm = this.deps.wasm;
+    this.resolveCaptureHost(obj);
+    const host = this.captureHost(obj);
+    let paraCapture: ParagraphCaptureRef | null = null;
+    if (host !== null) {
+      const id = this.captureParagraph(obj.sectionIdx, host);
+      if (id !== null) paraCapture = { id, digest: null };
+    }
     let snapshotId: number | null = null;
     // Deleting an inserted object cannot recover the host's saved line metrics.
     // Keep its original layout for reject and the approved change's undo entry.
-    if (obj.type === 'insertImage' || obj.type === 'insertEquation') {
+    // 문단 보관을 못 잡은 보관 대상(구버전 WASM, HF 위치 조회 실패)도 스냅샷으로 되돌린다.
+    if (obj.type === 'insertImage' || obj.type === 'insertEquation'
+      || (paraCapture === null && this.revertsByParagraph(obj))) {
       this.deps.inputHandler.prepareSnapshotCapacity?.(1);
       snapshotId = wasm.saveSnapshot();
       this.deps.inputHandler.retainExternalSnapshot?.();
     }
+    const dimsBefore = this.tableDims(obj);
+    // 지워지는 행/열/표는 적용 후엔 읽을 수 없다 — 앵커 팝오버와 diff 에 쓸
+    // 내용과 위치를 먼저 보관한다 (표시용, best-effort).
+    if (obj.type === 'deleteTable'
+      || (obj.type === 'tableStructure' && (obj.op === 'delete_row' || obj.op === 'delete_col'))) {
+      try {
+        obj.removedText = this.removedTargetText(obj);
+        if (obj.type === 'deleteTable') {
+          const positions = typeof wasm.getControlTextPositions === 'function'
+            ? wasm.getControlTextPositions(obj.sectionIdx, obj.tableParaIdx)
+            : undefined;
+          obj.removedOffset = positions?.[obj.controlIdx] ?? 0;
+        }
+      } catch { /* 보관 실패 시 앵커만 놓는다 */ }
+    }
     try {
-      if (isObjectOpApplied(obj)) this.applyObjectOp(obj);
+      this.applyObjectOp(obj);
     } catch (error) {
-      if (snapshotId !== null) {
-        try { wasm.restoreSnapshot(snapshotId); } finally {
+      try {
+        if (snapshotId !== null) wasm.restoreSnapshot(snapshotId);
+        else if (paraCapture && host !== null) wasm.restoreCapturedParagraph(paraCapture.id, obj.sectionIdx, host);
+      } catch { /* best effort */ } finally {
+        if (snapshotId !== null) {
           wasm.discardSnapshot(snapshotId);
           this.deps.inputHandler.releaseExternalSnapshot?.();
         }
+        if (paraCapture) wasm.discardParagraphCapture(paraCapture.id);
       }
+      this.reconcilePreviewLayout();
       throw error;
     }
+    if (paraCapture) {
+      const after = this.captureHost(obj);
+      paraCapture.digest = after === null ? null : this.paragraphDigest(obj.sectionIdx, after);
+    }
+    this.adjustSiblingDims(obj, dimsBefore, this.tableDims(obj));
     if (obj.type === 'insertEquation') {
       try {
         const preview = JSON.parse(wasm.renderEquationPreview(obj.script, obj.fontSizeHu, obj.colorRef));
@@ -499,13 +629,11 @@ export class PendingEditManager {
     }
     const set = this.ensureOpenSet(agent);
     const op: PendingOp = { kind: 'object', id: this.nextId('op'), agent: set.agent, obj,
-      snapshotId, userEditSeqAtSnapshot: this.userEditSeq,
+      snapshotId, paraCapture, userEditSeqAtSnapshot: this.userEditSeq,
       settledSetSeqAtSnapshot: this.settledSetSeq };
     this.pushOp(set, op);
-    if (isObjectOpApplied(obj)) {
-      this.reconcilePreviewLayout();
-      this.emitDocEvents('agent-pending-edit');
-    }
+    this.reconcilePreviewLayout();
+    this.emitDocEvents('agent-pending-edit');
     this.syncOverlay();
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, obj };
@@ -554,52 +682,6 @@ export class PendingEditManager {
     this.syncOverlay();
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, report };
-  }
-
-  /**
-   * executor 가드: 삽입 지점이 pending 삭제 마크 범위의 **내부**(경계 제외)에
-   * 있으면 그 마크의 요약을 반환한다. 마크 내부에 삽입된 텍스트는 승인 시 마크와
-   * 함께 삭제되므로, 명확한 에러로 막아 에이전트의 작업 유실을 예방한다.
-   */
-  findDeleteMarkContaining(
-    sectionIdx: number, paraIdx: number, charOffset: number, cell?: CellAddr,
-  ): { range: DocRange; text: string } | null {
-    const after = (aPara: number, aOff: number, bPara: number, bOff: number): boolean =>
-      aPara > bPara || (aPara === bPara && aOff > bOff);
-    for (const set of this.sets) {
-      for (const op of set.ops) {
-        if (op.kind !== 'delete') continue;
-        const r = op.range;
-        if (r.sectionIdx !== sectionIdx || !sameCell(r.cell, cell)) continue;
-        if (after(paraIdx, charOffset, r.startParaIdx, r.startCharOffset)
-          && after(r.endParaIdx, r.endCharOffset, paraIdx, charOffset)) {
-          return { range: { ...r }, text: op.text };
-        }
-      }
-    }
-    return null;
-  }
-
-  /**
-   * executor 가드: 범위가 pending 삭제 마크와 **겹치면** 그 마크의 요약을 반환한다
-   * (경계 접촉은 겹침이 아니다). 마크와 겹치는 교체는 마크 텍스트를 부분 삭제해
-   * 마크를 드리프트시키거나, 승인 시 교체 텍스트 일부까지 지우므로 사전에 막는다.
-   */
-  findDeleteMarkOverlapping(range: DocRange): { range: DocRange; text: string } | null {
-    const atOrBefore = (aPara: number, aOff: number, bPara: number, bOff: number): boolean =>
-      aPara < bPara || (aPara === bPara && aOff <= bOff);
-    for (const set of this.sets) {
-      for (const op of set.ops) {
-        if (op.kind !== 'delete') continue;
-        const r = op.range;
-        if (r.sectionIdx !== range.sectionIdx || !sameCell(r.cell, range.cell)) continue;
-        const disjoint =
-          atOrBefore(range.endParaIdx, range.endCharOffset, r.startParaIdx, r.startCharOffset)
-          || atOrBefore(r.endParaIdx, r.endCharOffset, range.startParaIdx, range.startCharOffset);
-        if (!disjoint) return { range: { ...r }, text: op.text };
-      }
-    }
-    return null;
   }
 
   /**
@@ -704,61 +786,6 @@ export class PendingEditManager {
     if (opsChanged) this.emitChange({ type: 'ops-changed' });
   }
 
-  /** executor 가드: 해당 표에 파괴적 마크(delete_row/col, merge, delete_table)가 걸려 있는가 */
-  hasDestructiveTableMark(sectionIdx: number, tableParaIdx: number, controlIdx: number): boolean {
-    for (const set of this.sets) {
-      for (const op of set.ops) {
-        if (op.kind === 'object' && isDestructiveTableMark(op.obj, sectionIdx, tableParaIdx, controlIdx)) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  /**
-   * executor 가드: 해당 표에 pending 구조 op(insert_row/col 적용됨 또는
-   * delete/merge/delete_table 마크)이 하나라도 있으면 true — 구조 op 이 있으면
-   * cellIdx 가 재번호 매겨지므로 승인 전 추가 표 편집을 막는 데 쓴다.
-   */
-  hasPendingStructureOp(sectionIdx: number, tableParaIdx: number, controlIdx: number): boolean {
-    return this.listPendingStructureOps(sectionIdx, tableParaIdx, controlIdx).length > 0;
-  }
-
-  /**
-   * executor 가드용: 해당 표에 걸린 pending 구조 op 목록을 요약해 돌려준다.
-   *
-   * 행 단위 op(insert_row/delete_row)은 affectedRow 를 채운다 — flat cellIdx 가
-   * 행 우선이라 그 행보다 앞선 행의 셀은 번호가 유지되고, executor 는 그런 셀의
-   * 편집만 통과시킨다. 열 단위·병합·나눔·표 삭제는 모든 행의 번호를 흔들므로
-   * affectedRow 를 null 로 두어 표 전체를 잠근다.
-   */
-  listPendingStructureOps(
-    sectionIdx: number, tableParaIdx: number, controlIdx: number,
-  ): PendingStructureOpInfo[] {
-    const out: PendingStructureOpInfo[] = [];
-    for (const set of this.sets) {
-      for (const op of set.ops) {
-        if (op.kind !== 'object') continue;
-        const o = op.obj;
-        if (o.type !== 'tableStructure' && o.type !== 'tableStructureMarked' && o.type !== 'deleteTable') continue;
-        if (o.sectionIdx !== sectionIdx || o.tableParaIdx !== tableParaIdx || o.controlIdx !== controlIdx) continue;
-        if (o.type === 'deleteTable') {
-          out.push({ op: 'delete_table', affectedRow: null });
-        } else if (o.type === 'tableStructure') {
-          const affectedRow = o.op === 'insert_row'
-            ? (o.insertedIndex ?? (o.after ? o.index + 1 : o.index))
-            : null;
-          out.push({ op: o.op, affectedRow });
-        } else {
-          const affectedRow = o.op === 'delete_row' && typeof o.rowIdx === 'number' ? o.rowIdx : null;
-          out.push({ op: o.op, affectedRow });
-        }
-      }
-    }
-    return out;
-  }
-
   /**
    * 검증 루프용 change-set 요약. changeSetId 생략 시 가장 최근 set 을 대상으로 한다.
    * summary 는 종류 + 짧은 텍스트 다이제스트(~80자) + 좌표 정보다.
@@ -767,7 +794,7 @@ export class PendingEditManager {
     changeSetId: string | null;
     status: string;
     agent: string;
-    ops: Array<{ id: string; kind: string; applied: boolean; summary: string }>;
+    ops: Array<{ id: string; kind: string; summary: string }>;
   } {
     const set = changeSetId !== undefined
       ? this.sets.find((s) => s.id === changeSetId)
@@ -782,47 +809,9 @@ export class PendingEditManager {
         kind: op.kind === 'object' ? `object:${op.obj.type}`
           : op.kind === 'replace' && op.text.length === 0 ? 'delete'
           : op.kind,
-        applied: op.kind === 'delete' ? false
-          : op.kind === 'object' ? isObjectOpApplied(op.obj)
-          : true,
         summary: this.summarizeOp(op),
       })),
     };
-  }
-
-  /**
-   * 검증 루프용: set 의 mark-only op(삭제 마크/표 구조 마크 등)을 임시로 적용한
-   * 상태에서 fn() 을 실행하고, 반드시 원래 문서로 복원한다 (fn 이 throw 하든).
-   * approve 경로와 같은 plumbing(applyApprovalOnlyOps)을 쓰되 스냅샷으로 되돌리므로
-   * 문서에는 아무 흔적도 남지 않는다. 같은 set 에 대한 재진입은 fn 만 실행한다.
-   */
-  withMarkedOpsApplied<T>(changeSetId: string, fn: () => T): T {
-    const set = this.sets.find((s) => s.id === changeSetId);
-    if (!set) throw new AgentToolError('INVALID_ARGS', `unknown change set: ${changeSetId}`);
-    // 재진입 — 이미 이 set 의 마크 op 이 적용된 상태이므로 그대로 실행한다.
-    if (this.speculativeSets.has(changeSetId)) return fn();
-    const wasm = this.deps.wasm;
-    const pendingState = this.capturePendingState();
-    this.speculativeSets.add(changeSetId);
-    let snapId: number | null = null;
-    try {
-      this.deps.inputHandler.prepareSnapshotCapacity?.(1);
-      snapId = wasm.saveSnapshot();
-      this.deps.inputHandler.retainExternalSnapshot?.();
-      this.applyApprovalOnlyOps(set.ops);
-      this.reconcilePreviewLayout();
-      this.emitDocEvents('agent-preview');
-      return fn();
-    } finally {
-      this.speculativeSets.delete(changeSetId);
-      if (snapId !== null) {
-        try { wasm.restoreSnapshot(snapId); } catch { /* best effort */ }
-        wasm.discardSnapshot(snapId);
-        this.deps.inputHandler.releaseExternalSnapshot?.();
-      }
-      this.restorePendingState(pendingState);
-      this.emitDocEvents('agent-preview');
-    }
   }
 
   getChangeSets(): ReadonlyArray<PendingChangeSet> {
@@ -837,7 +826,10 @@ export class PendingEditManager {
     return this.sets.some((set) => set.ops.some((op) => op.kind === 'template'));
   }
 
-  /** approve — 적용된 미리보기는 재생성하지 않고 그대로 단일 undo 항목으로 채택한다. */
+  /**
+   * approve — 모든 op 은 이미 적용돼 있으므로 문서는 그대로 두고, 되돌린 before 상태를
+   * 잠시 캡처해 단일 undo 항목으로 채택한다 ("이미 적용된 것을 유지").
+   */
   approve(changeSetId: string): boolean {
     const set = this.sets.find((s) => s.id === changeSetId);
     if (!set) return false;
@@ -857,8 +849,7 @@ export class PendingEditManager {
     // 승인 직전에도 현재 IR에서 권위 조판을 다시 만든다. 미리보기 캐시가 어긋난
     // 상태를 after snapshot으로 굳히거나, 승인 뒤에만 우연히 고쳐지는 일을 막는다.
     this.reconcilePreviewLayout();
-    const { kept, dropped } = this.partitionDriftedOps(set);
-    const skipped = dropped.length;
+    const { kept, dropped, causes, deferred } = this.partitionDriftedOps(set);
 
     if (kept.length === 0 && dropped.length === 0) {
       this.removeSet(set);
@@ -870,19 +861,17 @@ export class PendingEditManager {
 
     // kept 가 남았으면 kept 만 되돌려 before 를 캡처한다 (드리프트 미리보기는
     // 사용자 소유로 before 에 남긴다). 전부 드리프트됐으면 되돌릴 것이 없다 —
-    // 드리프트 미리보기는 이미 사용자가 손댄 텍스트라, 이를 지워 before 를 만들면
+    // 드리프트 미리보기는 이미 사용자가 손댄 내용이라, 이를 지워 before 를 만들면
     // undo 가 사용자 글자까지 잘라낸다. 현재 상태를 before 로 잡아 undo 를 무해한
     // no-op 으로 만들고 히스토리 항목만 남긴다(미리보기 방치 방지).
     const keepPreviewsOf = kept.length > 0 ? dropped : [];
-    // all-drifted 경로에서는 set.ops 를 원본 그대로 유지한다
-    // (승인 시점 연산은 kept 가 없으면 실행되지 않는다).
-    if (kept.length > 0) set.ops = kept;
 
     const wasm = this.deps.wasm;
     const cursor = this.deps.inputHandler.getCursorPosition();
     const previewState = this.capturePendingState();
     let previewId: number | null = null;
     let beforeId: number | null = null;
+    let failed = new Map<string, PendingDropCause>();
     // 히스토리 밖에서 점유 중인 id 수 (preview/before) — 예산 정합용
     let heldExternal = 0;
     const retainExternal = (): void => {
@@ -905,7 +894,7 @@ export class PendingEditManager {
       previewId = wasm.saveSnapshot();
       retainExternal();
       if (kept.length > 0) {
-        this.revertAppliedOps(kept, keepPreviewsOf, userEditSeqNow);
+        failed = this.revertAppliedOps(kept, keepPreviewsOf, userEditSeqNow, deferred);
         beforeId = wasm.saveSnapshot();
         retainExternal();
         wasm.restoreSnapshot(previewId);
@@ -916,16 +905,8 @@ export class PendingEditManager {
         retainExternal();
       }
 
-      command = new PreparedSnapshotCommand(
-        'agentApplyChangeSet', cursor, cursor, beforeId,
-        // 되돌림 과정에서 op 좌표가 before 상태로 이동했으므로, 미리보기 좌표로
-        // 복원된(restorePendingState) set.ops 의 클론을 대상으로 실행해야 한다.
-        () => {
-          const position = this.applyApprovalOnlyOps(kept.length > 0 ? set.ops : []);
-          this.reconcilePreviewLayout();
-          return position;
-        },
-      );
+      // 미리보기가 곧 승인 결과다 — 채택만 하고 문서에 더 적용할 것은 없다.
+      command = new PreparedSnapshotCommand('agentApplyChangeSet', cursor, cursor, beforeId, () => cursor);
       beforeId = null; // command가 소유권을 인수했다.
       command.execute(wasm);
       this.settledSetSeq++;
@@ -958,15 +939,17 @@ export class PendingEditManager {
       return false;
     }
 
-    this.discardOpSnapshots([...kept, ...dropped]);
+    const all = [...kept, ...dropped];
+    this.discardOpSnapshots(all);
     this.removeSet(set);
     this.syncOverlay();
-    if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)`, changeSetId, droppedOpIds: dropped.map((op) => op.id) });
+    // 승인은 모든 편집을 문서에 남긴다 — 빠진 op 은 이번 undo 항목에서만 제외된다.
+    this.emitDrops(changeSetId, set, dropped, causes, failed, false);
     this.emitChange({ type: 'approved', changeSetId });
     return true;
   }
 
-  /** reject — 적용된 op 을 되돌리고 삭제 마크를 해제한다. 히스토리 항목 없음. */
+  /** reject — 적용된 op 을 되돌린다. 되돌리지 못한 op 은 문서에 남기고 보고한다. 히스토리 항목 없음. */
   reject(changeSetId: string): void {
     const set = this.sets.find((s) => s.id === changeSetId);
     if (!set) return;
@@ -975,21 +958,47 @@ export class PendingEditManager {
     const userEditSeqNow = this.userEditSeq;
     this.selfMutating++;
     try {
-      const { kept, dropped } = this.partitionDriftedOps(set);
-      const skipped = dropped.length;
+      const { kept, dropped, causes, deferred } = this.partitionDriftedOps(set);
+      const all = [...set.ops];
       set.ops = kept;
-      this.revertAppliedOps(kept, dropped, userEditSeqNow);
+      const failed = this.revertAppliedOps(kept, dropped, userEditSeqNow, deferred);
       this.settledSetSeq++;
       this.reconcilePreviewLayout();
       this.emitDocEvents('agent-reject');
       this.discardOpSnapshots([...kept, ...dropped]);
       this.removeSet(set);
       this.syncOverlay();
-      if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)`, changeSetId, droppedOpIds: dropped.map((op) => op.id) });
+      this.emitDrops(changeSetId, { ...set, ops: all }, dropped, causes, failed, true);
       this.emitChange({ type: 'rejected', changeSetId });
     } finally {
       this.selfMutating--;
     }
+  }
+
+  /**
+   * 드리프트/되돌림 실패를 원인과 함께 알린다. leftInDocument=true 는 거절·무효화로
+   * 되돌리지 못해 문서에 남았다는 뜻이고, false(승인)는 undo 항목에서만 빠졌다는 뜻이다.
+   */
+  private emitDrops(
+    changeSetId: string, set: PendingChangeSet, dropped: PendingOp[],
+    causes: Map<PendingOp, PendingDropCause>, failed: Map<string, PendingDropCause>, leftInDocument: boolean,
+  ): void {
+    const drops: PendingDrop[] = [];
+    for (const op of set.ops) {
+      const cause = causes.get(op) ?? failed.get(op.id);
+      if (!cause) continue;
+      if (!dropped.includes(op) && !failed.has(op.id)) continue;
+      drops.push({ opId: op.id, cause, summary: this.summarizeOp(op) });
+    }
+    if (drops.length === 0) return;
+    this.emitChange({
+      type: 'invalidated',
+      reason: describeDrops(drops, leftInDocument),
+      changeSetId,
+      droppedOpIds: drops.map((d) => d.opId),
+      drops,
+      leftInDocument,
+    });
   }
 
   onChange(cb: (e: PendingEditsChangeEvent) => void): () => void {
@@ -1076,12 +1085,17 @@ export class PendingEditManager {
    */
   private revertAllAndDiscard(reason: string): void {
     let reverted = false;
+    const drops: PendingDrop[] = [];
     for (let i = this.sets.length - 1; i >= 0; i--) {
       const set = this.sets[i];
-      const { kept, dropped } = this.partitionDriftedOps(set);
+      const { kept, dropped, causes, deferred } = this.partitionDriftedOps(set);
       set.ops = kept;
-      if (set.ops.some((op) => op.kind !== 'delete')) reverted = true;
-      this.revertAppliedOps(kept, dropped);
+      if (set.ops.length > 0) reverted = true;
+      const failed = this.revertAppliedOps(kept, dropped, this.userEditSeq, deferred);
+      for (const op of [...kept, ...dropped]) {
+        const cause = causes.get(op) ?? failed.get(op.id);
+        if (cause) drops.push({ opId: op.id, cause, summary: this.summarizeOp(op) });
+      }
       this.discardOpSnapshots([...kept, ...dropped]);
     }
     if (reverted) this.reconcilePreviewLayout();
@@ -1090,7 +1104,10 @@ export class PendingEditManager {
     this.syncTemplateLock();
     this.deps.overlay.clear();
     if (reverted) this.emitDocEvents('agent-invalidate');
-    this.emitChange({ type: 'invalidated', reason });
+    this.emitChange({
+      type: 'invalidated', reason,
+      ...(drops.length > 0 ? { drops, leftInDocument: true } : {}),
+    });
   }
 
   /** op 에 전역 등록 순번을 부여하고 set 에 추가한다 */
@@ -1099,9 +1116,13 @@ export class PendingEditManager {
     set.ops.push(op);
   }
 
-  /** set 제거/폐기 시점에 pending op 들이 잡고 있는 wasm 스냅샷을 해제한다 */
+  /** set 제거/폐기 시점에 pending op 들이 잡고 있는 wasm 스냅샷과 문단 보관본을 해제한다 */
   private discardOpSnapshots(ops: PendingOp[]): void {
     for (const op of ops) {
+      if ((op.kind === 'object' || op.kind === 'insert') && op.paraCapture) {
+        try { this.deps.wasm.discardParagraphCapture(op.paraCapture.id); } catch { /* best effort */ }
+        op.paraCapture = null;
+      }
       if ((op.kind !== 'replace' && op.kind !== 'template' && op.kind !== 'object') || op.snapshotId == null) continue;
       try { this.deps.wasm.discardSnapshot(op.snapshotId); } catch { /* best effort */ }
       op.snapshotId = null;
@@ -1167,9 +1188,10 @@ export class PendingEditManager {
           const ref = this.objectOverlayRef(op.obj);
           if (ref) {
             ops.push({
-              kind: isObjectOpApplied(op.obj) ? 'insert' : 'delete',
+              kind: objectOverlayKind(op.obj),
               agent: op.agent,
               objRef: ref,
+              removedText: 'removedText' in op.obj ? op.obj.removedText : undefined,
             });
           }
           continue;
@@ -1191,7 +1213,7 @@ export class PendingEditManager {
     this.deps.overlay.setOps(ops);
   }
 
-  /** 객체 op → overlay 좌표 해석 참조 (pageLayout/headerFooter 는 사이드바 전용) */
+  /** 객체 op → overlay 좌표 해석 참조 (bookmark 처럼 시각 위치가 애매한 것은 null) */
   private objectOverlayRef(obj: ObjectOp): import('./pending-overlay.ts').ObjectOverlayRef | null {
     switch (obj.type) {
       case 'createTable':
@@ -1215,9 +1237,13 @@ export class PendingEditManager {
         return obj.anchor
           ? { sort: 'agentObject', kind: 'equation', sectionIdx: obj.sectionIdx, paraIdx: obj.anchor.paraIdx, controlIdx: obj.anchor.controlIdx }
           : null;
-      case 'tableStructure':
-      case 'setTableProps':
       case 'deleteTable':
+        // 표는 이미 없다 — 삭제 전에 보관한 문단 오프셋에 빨간 앵커를 놓는다.
+        return {
+          sort: 'removed', what: 'table', sectionIdx: obj.sectionIdx,
+          paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx, offset: obj.removedOffset,
+        };
+      case 'setTableProps':
       case 'setColumnWidths':
       case 'fitToPage':
       case 'setCaption':
@@ -1234,12 +1260,23 @@ export class PendingEditManager {
             sort: 'cells', sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx,
             rect: { startRow: obj.row, startCol: obj.col, endRow: obj.row, endCol: obj.col },
           };
-      case 'tableStructureMarked': {
+      case 'tableStructure': {
+        // 적용 후 표 기준 — 지워진 행/열 자리는 앵커, 삽입된 행/열은 새 셀,
+        // 병합/나눔은 결과 셀을 표시한다
         const base = { sort: 'cells' as const, sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx };
-        if (obj.op === 'delete_row') return { ...base, rowIdx: obj.rowIdx };
-        if (obj.op === 'delete_col') return { ...base, colIdx: obj.colIdx };
-        if (obj.op === 'split_cell') return { ...base, rect: { startRow: obj.rowIdx!, startCol: obj.colIdx!, endRow: obj.rowIdx!, endCol: obj.colIdx! } };
-        return { ...base, rect: { startRow: obj.startRow!, startCol: obj.startCol!, endRow: obj.endRow!, endCol: obj.endCol! } };
+        if (obj.op === 'delete_row' || obj.op === 'delete_col') {
+          return {
+            sort: 'removed', what: obj.op === 'delete_row' ? 'row' : 'col',
+            sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx,
+            rowIdx: obj.rowIdx, colIdx: obj.colIdx,
+          };
+        }
+        if (obj.op === 'insert_row') return { ...base, rowIdx: obj.insertedIndex ?? obj.index };
+        if (obj.op === 'insert_col') return { ...base, colIdx: obj.insertedIndex ?? obj.index };
+        if (obj.op === 'merge_cells') {
+          return { ...base, rect: { startRow: obj.startRow!, startCol: obj.startCol!, endRow: obj.startRow!, endCol: obj.startCol! } };
+        }
+        return { ...base, rect: { startRow: obj.rowIdx!, startCol: obj.colIdx!, endRow: obj.rowIdx!, endCol: obj.colIdx! } };
       }
       case 'setCellProps':
         return { sort: 'cells', sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx, cellIdx: obj.cellIdx };
@@ -1253,6 +1290,10 @@ export class PendingEditManager {
           : null;
       case 'setNoteText':
         return { sort: 'para', sectionIdx: obj.sectionIdx, paraIdx: obj.paraIdx };
+      case 'headerFooter':
+        return { sort: 'hf', sectionIdx: obj.sectionIdx, isHeader: obj.isHeader, applyTo: obj.applyTo };
+      case 'pageLayout':
+        return { sort: 'page', sectionIdx: obj.sectionIdx };
       default:
         return null;
     }
@@ -1271,8 +1312,6 @@ export class PendingEditManager {
     switch (op.kind) {
       case 'insert':
         return `insert "${digest(op.text)}" @${coord(op.range)}`;
-      case 'delete':
-        return `delete "${digest(op.text)}" @${coord(op.range)}`;
       case 'replace':
         // 빈 새 텍스트 = 즉시 적용된 삭제 (delete_range 경로)
         if (op.text.length === 0) return `delete "${digest(op.deletedText)}" @${coord(op.range)}`;
@@ -1285,8 +1324,13 @@ export class PendingEditManager {
         return `${op.label} (template revision ${op.templateRevision})`;
       case 'object': {
         const o = op.obj;
-        const at = 'tableParaIdx' in o ? `s${o.sectionIdx} p${o.tableParaIdx}` : `s${o.sectionIdx}`;
-        return `${o.type} @${at}`;
+        const para = this.objectBodyParaIdx(o);
+        const at = para === null ? `s${o.sectionIdx}` : `s${o.sectionIdx} p${para}`;
+        const detail = o.type === 'tableStructure' ? `(${o.op})`
+          : o.type === 'headerFooter' ? `(${o.isHeader ? 'header' : 'footer'})`
+          : o.type === 'bookmark' ? `(${o.op})`
+          : '';
+        return `${o.type}${detail} @${at}`;
       }
     }
   }
@@ -1393,8 +1437,8 @@ export class PendingEditManager {
   // ─── 객체 연산 (Pair-Editing Phase 2) ─────────────────────
 
   /**
-   * applied-now 객체 연산의 적용. 실패는 throw — 호출자(addObjectOp/replay)가 처리.
-   * 성공 시 앵커를 op 데이터에 기록한다(replay 재바인딩 포함).
+   * 객체 연산의 적용. 실패는 throw — 호출자(addObjectOp)가 되돌림 수단으로 복원한다.
+   * 성공 시 앵커를 op 데이터에 기록한다.
    */
   private applyObjectOp(obj: ObjectOp): void {
     const wasm = this.deps.wasm;
@@ -1411,7 +1455,6 @@ export class PendingEditManager {
         obj.anchor = { paraIdx: res.paraIdx, controlIdx: res.controlIdx, charOffset: obj.charOffset };
         obj.expectedRows = obj.rows;
         obj.expectedCols = obj.cols;
-        this.shiftControlIdxRefs(obj.sectionIdx, res.paraIdx, res.controlIdx, 1, obj);
         if (obj.cells) {
           for (let r = 0; r < obj.cells.length; r++) {
             const row = obj.cells[r];
@@ -1441,6 +1484,9 @@ export class PendingEditManager {
           }
           wasm.setTableProperties(obj.sectionIdx, res.paraIdx, res.controlIdx, { repeatHeader: true });
         }
+        // 셀 채우기까지 끝난 뒤에만 다른 op 의 컨트롤 인덱스를 민다 — 도중 실패는
+        // 문단 보관본 복원으로 통째로 되돌아가므로 인덱스도 그대로여야 한다.
+        this.shiftControlIdxRefs(obj.sectionIdx, res.paraIdx, res.controlIdx, 1, obj);
         return;
       }
       case 'insertImage': {
@@ -1483,17 +1529,98 @@ export class PendingEditManager {
         return;
       }
       case 'tableStructure': {
-        const r = obj.op === 'insert_row'
-          ? wasm.insertTableRow(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.index, obj.after)
-          : wasm.insertTableColumn(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.index, obj.after);
-        if (!r.ok) throw new AgentToolError('RPC_ERROR', `${obj.op} failed`);
-        obj.insertedIndex = obj.after ? obj.index + 1 : obj.index;
-        obj.dims = { rowCount: r.rowCount, colCount: r.colCount };
-        // 같은 표를 참조하는 모든 pending op 의 기대 크기를 갱신 (드리프트 오탐 방지)
-        this.adjustExpectedDimsForTable(
-          obj.sectionIdx, obj.tableParaIdx, obj.controlIdx,
-          obj.op === 'insert_row' ? 1 : 0, obj.op === 'insert_col' ? 1 : 0, obj,
+        const { sectionIdx: sec, tableParaIdx: para, controlIdx: ctrl } = obj;
+        let ok = false;
+        switch (obj.op) {
+          case 'insert_row':
+          case 'insert_col': {
+            const r = obj.op === 'insert_row'
+              ? wasm.insertTableRow(sec, para, ctrl, obj.index!, obj.after!)
+              : wasm.insertTableColumn(sec, para, ctrl, obj.index!, obj.after!);
+            ok = r?.ok === true;
+            if (ok) obj.insertedIndex = obj.after ? obj.index! + 1 : obj.index;
+            break;
+          }
+          case 'delete_row':
+            ok = wasm.deleteTableRow(sec, para, ctrl, obj.rowIdx!)?.ok === true;
+            break;
+          case 'delete_col':
+            ok = wasm.deleteTableColumn(sec, para, ctrl, obj.colIdx!)?.ok === true;
+            break;
+          case 'merge_cells':
+            ok = wasm.mergeTableCells(sec, para, ctrl, obj.startRow!, obj.startCol!, obj.endRow!, obj.endCol!)?.ok === true;
+            break;
+          case 'split_cell':
+            ok = wasm.splitTableCellInto(
+              sec, para, ctrl, obj.rowIdx!, obj.colIdx!, obj.splitRows!, obj.splitCols!, true, false,
+            )?.ok === true;
+            break;
+        }
+        if (!ok) throw new AgentToolError('RPC_ERROR', `${obj.op} failed`);
+        const d = wasm.getTableDimensions(sec, para, ctrl);
+        obj.dims = { rowCount: d.rowCount, colCount: d.colCount };
+        return;
+      }
+      case 'deleteTable': {
+        const ok = wasm.deleteTableControl(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx)?.ok === true;
+        if (!ok) throw new AgentToolError('RPC_ERROR', 'delete_table failed');
+        this.shiftControlIdxRefs(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, -1, obj);
+        return;
+      }
+      case 'setCellProps':
+        if (wasm.setCellProperties(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.cellIdx, obj.props)?.ok === false) {
+          throw new AgentToolError('RPC_ERROR', 'set_cell_props failed');
+        }
+        return;
+      case 'setTableProps':
+        if (wasm.setTableProperties(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.props)?.ok === false) {
+          throw new AgentToolError('RPC_ERROR', 'set_table_props failed');
+        }
+        return;
+      case 'setColumnWidths': {
+        const result = wasm.setTableColumnWidths(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.widthsHu);
+        if (!result?.ok) throw new AgentToolError('RPC_ERROR', 'set_column_widths failed');
+        return;
+      }
+      case 'fitToPage': {
+        const result = wasm.fitTableToPage(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx);
+        if (!result?.ok) throw new AgentToolError('RPC_ERROR', 'fit_to_page failed');
+        return;
+      }
+      case 'setZoneProps': {
+        const result = wasm.setCellZoneProperties(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.range, obj.props);
+        if (result?.ok === false) throw new AgentToolError('RPC_ERROR', 'set_zone_borders failed');
+        return;
+      }
+      case 'applyFormula': {
+        const result = wasm.evaluateTableFormulaEx({
+          sectionIdx: obj.sectionIdx,
+          parentParaIdx: obj.tableParaIdx,
+          controlIdx: obj.controlIdx,
+          targetRow: obj.row,
+          targetCol: obj.col,
+          formula: obj.formula,
+          writeResult: true,
+          ...(obj.format?.decimalPlaces !== undefined ? { decimalPlaces: obj.format.decimalPlaces } : {}),
+          ...(obj.format?.thousandsSeparator !== undefined ? { thousandsSeparator: obj.format.thousandsSeparator } : {}),
+          ...(obj.format?.prefix !== undefined ? { prefix: obj.format.prefix } : {}),
+          ...(obj.format?.suffix !== undefined ? { suffix: obj.format.suffix } : {}),
+        });
+        if (!result?.ok) throw new AgentToolError('RPC_ERROR', `apply_formula failed: ${obj.formula}`);
+        return;
+      }
+      case 'setCaption': {
+        const result = wasm.setTableCaptionText(
+          obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.text, obj.withNumber,
         );
+        if (!result?.ok) throw new AgentToolError('RPC_ERROR', 'set_caption failed');
+        return;
+      }
+      case 'applyStyle': {
+        const result = obj.cell
+          ? wasm.applyCellStyle(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx, obj.styleId)
+          : wasm.applyStyle(obj.sectionIdx, obj.paraIdx, obj.styleId);
+        if (result?.ok === false) throw new AgentToolError('RPC_ERROR', 'apply_style failed');
         return;
       }
       case 'paraFormat': {
@@ -1522,9 +1649,11 @@ export class PendingEditManager {
         return;
       }
       case 'headerFooter': {
-        // applied-now 는 신규 생성 케이스만 (기존 HF 수정은 mark-only)
-        this.parseOk(wasm.createHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo), 'createHeaderFooter');
-        this.writeHeaderFooterContent(obj);
+        // 기존 HF 는 문단 0 텍스트를 교체하고(문단 보관본으로 되돌림), 없으면 새로 만든다
+        if (!obj.existedBefore) {
+          this.parseOk(wasm.createHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo), 'createHeaderFooter');
+        }
+        this.writeHeaderFooterContent(obj, obj.existedBefore);
         return;
       }
       case 'insertNote': {
@@ -1584,7 +1713,11 @@ export class PendingEditManager {
           const added = wasm.getBookmarks().find(
             (b) => b.sec === obj.sectionIdx && b.para === obj.paraIdx && b.name === obj.name,
           );
-          if (added) obj.ctrlIdx = added.ctrlIdx;
+          if (added) {
+            obj.ctrlIdx = added.ctrlIdx;
+            // 책갈피도 컨트롤이다 — 같은 문단의 뒤쪽 개체 번호가 하나씩 밀린다
+            this.shiftControlIdxRefs(obj.sectionIdx, obj.paraIdx, added.ctrlIdx, 1, obj);
+          }
           return;
         }
         const target = wasm.getBookmarks().find(
@@ -1597,19 +1730,18 @@ export class PendingEditManager {
         if (obj.op === 'delete') {
           const r = wasm.deleteBookmark(obj.sectionIdx, obj.paraIdx, obj.ctrlIdx!);
           if (r?.ok !== true) throw new AgentToolError('BOOKMARK_FAILED', 'deleteBookmark failed');
+          this.shiftControlIdxRefs(obj.sectionIdx, obj.paraIdx, obj.ctrlIdx!, -1, obj);
         } else {
           const r = wasm.renameBookmark(obj.sectionIdx, obj.paraIdx, obj.ctrlIdx!, obj.name ?? '');
           if (r?.ok !== true) throw new AgentToolError('BOOKMARK_FAILED', 'renameBookmark failed');
         }
         return;
       }
-      default:
-        throw new AgentToolError('RPC_ERROR', `applyObjectOp: ${obj.type} is mark-only`);
     }
   }
 
-  /** applied-now 객체 연산의 역연산. 성공 여부 반환 (실패 op 은 replay 에서 제외). */
-  private revertObjectOp(obj: ObjectOp): boolean {
+  /** 객체 연산의 역연산 (보관본/스냅샷을 쓸 수 없을 때의 폴백). 성공 여부 반환. */
+  private revertObjectOp(obj: ObjectOp, seq?: number): boolean {
     const wasm = this.deps.wasm;
     try {
       switch (obj.type) {
@@ -1645,7 +1777,8 @@ export class PendingEditManager {
           return ok;
         }
         case 'tableStructure': {
-          if (obj.insertedIndex === undefined) return false;
+          // 행/열 삽입만 역연산이 있다 — 나머지 구조 op 는 문단 보관본으로만 되돌린다
+          if ((obj.op !== 'insert_row' && obj.op !== 'insert_col') || obj.insertedIndex === undefined) return false;
           const r = obj.op === 'insert_row'
             ? wasm.deleteTableRow(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.insertedIndex)
             : wasm.deleteTableColumn(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.insertedIndex);
@@ -1676,6 +1809,8 @@ export class PendingEditManager {
           return true;
         }
         case 'headerFooter': {
+          // 새로 만든 HF 만 지워서 되돌린다 (기존 HF 교체는 문단 보관본 전용)
+          if (obj.existedBefore) return false;
           wasm.deleteHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo);
           return true;
         }
@@ -1701,16 +1836,22 @@ export class PendingEditManager {
         case 'bookmark': {
           if (obj.op === 'add') {
             if (obj.ctrlIdx === undefined) return false;
-            return wasm.deleteBookmark(obj.sectionIdx, obj.paraIdx, obj.ctrlIdx)?.ok === true;
+            if (wasm.deleteBookmark(obj.sectionIdx, obj.paraIdx, obj.ctrlIdx)?.ok !== true) return false;
+            this.shiftControlIdxRefs(obj.sectionIdx, obj.paraIdx, obj.ctrlIdx, -1, obj);
+            return true;
           }
           if (!obj.prev) return false;
           if (obj.op === 'delete') {
-            return wasm.addBookmark(obj.sectionIdx, obj.prev.para, obj.prev.charPos, obj.prev.name)?.ok === true;
+            const prev = obj.prev;
+            if (wasm.addBookmark(obj.sectionIdx, prev.para, prev.charPos, prev.name)?.ok !== true) return false;
+            const restored = wasm.getBookmarks().find((b) => b.sec === obj.sectionIdx && b.name === prev.name);
+            if (restored) this.shiftControlIdxRefs(obj.sectionIdx, restored.para, restored.ctrlIdx, 1, obj, seq);
+            return true;
           }
           return wasm.renameBookmark(obj.sectionIdx, obj.paraIdx, obj.prev.ctrlIdx, obj.prev.name)?.ok === true;
         }
         default:
-          return true; // mark-only 는 되돌릴 것이 없다
+          return false; // 역연산이 없다 — 문단 보관본/스냅샷으로만 되돌린다
       }
     } catch (err) {
       console.warn('[pending-edits] object revert failed', obj.type, err);
@@ -1718,92 +1859,125 @@ export class PendingEditManager {
     }
   }
 
-  /** mark-only 객체 연산의 실행 (approve replay 시점) */
-  private executeMarkedObjectOp(obj: ObjectOp): void {
-    const wasm = this.deps.wasm;
+  // ─── 문단 보관본 (문단 단위 되돌림) ─────────────────────
+
+  /** 적용 전에 보관 대상 문단을 확정한다 — 기존 머리말/꼬리말은 HF 컨트롤을 품은 문단 */
+  private resolveCaptureHost(obj: ObjectOp): void {
+    if (obj.type !== 'headerFooter' || !obj.existedBefore || obj.hostParaIdx !== undefined) return;
+    try {
+      const info = JSON.parse(this.deps.wasm.getHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo)) as { paraIndex?: unknown };
+      if (typeof info?.paraIndex === 'number') obj.hostParaIdx = info.paraIndex;
+    } catch { /* 보관 없이 스냅샷으로 되돌린다 */ }
+  }
+
+  /**
+   * 문단 보관본으로 되돌릴 본문 문단 — 한 문단 안에서 끝나는 변경만 해당한다.
+   * 표를 만들거나 고치는 op, 스타일, 기존 머리말/꼬리말 교체. (null = 보관 대상 아님)
+   */
+  private captureHost(obj: ObjectOp): number | null {
     switch (obj.type) {
-      case 'tableStructureMarked': {
-        if (obj.op === 'delete_row') {
-          wasm.deleteTableRow(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.rowIdx!);
-        } else if (obj.op === 'delete_col') {
-          wasm.deleteTableColumn(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.colIdx!);
-        } else if (obj.op === 'split_cell') {
-          const result = wasm.splitTableCellInto(
-            obj.sectionIdx, obj.tableParaIdx, obj.controlIdx,
-            obj.rowIdx!, obj.colIdx!, obj.splitRows!, obj.splitCols!, true, false,
-          );
-          if (!result.ok) throw new AgentToolError('RPC_ERROR', 'split_cell failed');
-        } else {
-          wasm.mergeTableCells(
-            obj.sectionIdx, obj.tableParaIdx, obj.controlIdx,
-            obj.startRow!, obj.startCol!, obj.endRow!, obj.endCol!,
-          );
-        }
-        return;
-      }
-      case 'deleteTable': {
-        const ok = wasm.deleteTableControl(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx)?.ok === true;
-        if (ok) this.shiftControlIdxRefs(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, -1, obj);
-        return;
-      }
-      case 'setCellProps':
-        wasm.setCellProperties(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.cellIdx, obj.props);
-        return;
-      case 'setTableProps':
-        wasm.setTableProperties(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.props);
-        return;
-      case 'setColumnWidths': {
-        const result = wasm.setTableColumnWidths(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.widthsHu);
-        if (!result?.ok) throw new AgentToolError('RPC_ERROR', 'set_column_widths failed');
-        return;
-      }
-      case 'fitToPage': {
-        const result = wasm.fitTableToPage(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx);
-        if (!result?.ok) throw new AgentToolError('RPC_ERROR', 'fit_to_page failed');
-        return;
-      }
-      case 'setZoneProps':
-        wasm.setCellZoneProperties(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.range, obj.props);
-        return;
-      case 'applyFormula': {
-        const result = wasm.evaluateTableFormulaEx({
-          sectionIdx: obj.sectionIdx,
-          parentParaIdx: obj.tableParaIdx,
-          controlIdx: obj.controlIdx,
-          targetRow: obj.row,
-          targetCol: obj.col,
-          formula: obj.formula,
-          writeResult: true,
-          ...(obj.format?.decimalPlaces !== undefined ? { decimalPlaces: obj.format.decimalPlaces } : {}),
-          ...(obj.format?.thousandsSeparator !== undefined ? { thousandsSeparator: obj.format.thousandsSeparator } : {}),
-          ...(obj.format?.prefix !== undefined ? { prefix: obj.format.prefix } : {}),
-          ...(obj.format?.suffix !== undefined ? { suffix: obj.format.suffix } : {}),
-        });
-        if (!result?.ok) throw new AgentToolError('RPC_ERROR', `apply_formula failed: ${obj.formula}`);
-        return;
-      }
-      case 'setCaption': {
-        const result = wasm.setTableCaptionText(
-          obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.text, obj.withNumber,
-        );
-        if (!result?.ok) throw new AgentToolError('RPC_ERROR', 'set_caption failed');
-        return;
-      }
-      case 'applyStyle':
-        if (obj.cell) {
-          wasm.applyCellStyle(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx, obj.styleId);
-        } else {
-          wasm.applyStyle(obj.sectionIdx, obj.paraIdx, obj.styleId);
-        }
-        return;
-      case 'headerFooter': {
-        // 기존 HF 수정: 문단 0 텍스트 교체 (필드/서식 보존은 Phase-2 한계, approve 시점에만 실행)
-        this.writeHeaderFooterContent(obj, true);
-        return;
-      }
-      default:
-        console.warn('[pending-edits] executeMarkedObjectOp: unexpected applied-now op', obj.type);
+      case 'createTable': return obj.anchor ? obj.anchor.paraIdx : obj.paraIdx;
+      case 'applyStyle': return obj.cell ? obj.cell.paraIdx : obj.paraIdx;
+      case 'headerFooter': return obj.existedBefore ? obj.hostParaIdx ?? null : null;
+      default: return isTableTargetOp(obj) ? obj.tableParaIdx : null;
     }
+  }
+
+  /** 문단 보관본(없으면 스냅샷)으로 되돌리는 op 인가 — createTable 외에는 역연산이 없다 */
+  private revertsByParagraph(obj: ObjectOp): boolean {
+    return obj.type === 'createTable' || obj.type === 'applyStyle'
+      || (obj.type === 'headerFooter' && obj.existedBefore)
+      || isTableTargetOp(obj);
+  }
+
+  private captureParagraph(sectionIdx: number, paraIdx: number): number | null {
+    const wasm = this.deps.wasm;
+    if (typeof wasm.captureParagraph !== 'function') return null;
+    try {
+      return wasm.captureParagraph(sectionIdx, paraIdx);
+    } catch (error) {
+      console.warn('[pending-edits] paragraph capture failed; using a document snapshot', error);
+      return null;
+    }
+  }
+
+  private paragraphDigest(sectionIdx: number, paraIdx: number): string | null {
+    const wasm = this.deps.wasm;
+    if (typeof wasm.getParagraphContentDigest !== 'function') return null;
+    try {
+      return wasm.getParagraphContentDigest(sectionIdx, paraIdx);
+    } catch {
+      return null;
+    }
+  }
+
+  /** 표 op 의 대상 표 크기 (표가 아니거나 없으면 null) */
+  private tableDims(obj: ObjectOp): { rowCount: number; colCount: number } | null {
+    if (!isTableTargetOp(obj) || obj.type === 'deleteTable') return null;
+    try {
+      const d = this.deps.wasm.getTableDimensions(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx);
+      return { rowCount: d.rowCount, colCount: d.colCount };
+    } catch {
+      return null;
+    }
+  }
+
+  /** 구조 op 가 표 크기를 바꿨으면 같은 표를 보는 다른 op 의 기대 크기를 맞춘다 (드리프트 오탐 방지) */
+  private adjustSiblingDims(
+    obj: ObjectOp,
+    before: { rowCount: number; colCount: number } | null,
+    after: { rowCount: number; colCount: number } | null,
+  ): void {
+    if (!before || !after || !isTableTargetOp(obj)) return;
+    this.adjustExpectedDimsForTable(
+      obj.sectionIdx, obj.tableParaIdx, obj.controlIdx,
+      after.rowCount - before.rowCount, after.colCount - before.colCount, obj,
+    );
+  }
+
+  /** 이 op 이 해당 본문 문단(또는 그 문단의 표/셀)을 바꾸는가 — 문단 보관본 복원 가부 판정용 */
+  private opTouchesBodyPara(op: PendingOp, sectionIdx: number, paraIdx: number): boolean {
+    switch (op.kind) {
+      case 'template':
+      case 'field':
+        return true; // 위치를 모른다 — 보수적으로 겹친다고 본다
+      case 'object': {
+        const o = op.obj;
+        if (o.type === 'pageLayout') return o.sectionIdx === sectionIdx; // 구역 전체를 다시 흘린다
+        if (o.sectionIdx !== sectionIdx) return false;
+        const host = this.captureHost(o) ?? this.objectBodyParaIdx(o);
+        return host === paraIdx;
+      }
+      default: {
+        const r = op.range;
+        if (r.sectionIdx !== sectionIdx) return false;
+        return r.cell ? r.cell.paraIdx === paraIdx : r.startParaIdx <= paraIdx && paraIdx <= r.endParaIdx;
+      }
+    }
+  }
+
+  /**
+   * 문단 보관본으로 되돌려도 되는가. 보관본은 문단 전체를 덮으므로 (1) 그 문단을 바꾼
+   * 나중 op 이 되돌림 대상 밖에 남아 있으면 안 되고, (2) 문단이 적용 직후 그대로(지문
+   * 일치)여야 한다 — 사용자 편집을 지우거나, 주소 추적이 어긋나 엉뚱한 문단을 덮는 일을 막는다.
+   */
+  private canRestoreParagraph(
+    op: Extract<PendingOp, { kind: 'object' }>, host: number,
+    revertSet: PendingOp[], keepPreviewsOf: PendingOp[], userEditSeqNow: number,
+  ): boolean {
+    const sec = op.obj.sectionIdx;
+    const isLaterOutside = (cand: PendingOp): boolean =>
+      cand !== op && (cand.seq ?? 0) > (op.seq ?? 0) && !revertSet.includes(cand)
+      && this.opTouchesBodyPara(cand, sec, host);
+    for (const set of this.sets) {
+      if (set.ops.some(isLaterOutside)) return false;
+    }
+    if (keepPreviewsOf.some(isLaterOutside)) return false;
+    const digest = op.paraCapture?.digest ?? null;
+    if (digest === null) {
+      return op.userEditSeqAtSnapshot === userEditSeqNow && op.settledSetSeqAtSnapshot === this.settledSetSeq;
+    }
+    return this.paragraphDigest(sec, host) === digest;
   }
 
   /** 같은 셀 문단의 다른 pending 셀 수식 anchor 인덱스를 이동한다 */
@@ -1830,7 +2004,7 @@ export class PendingEditManager {
       for (const op of set.ops) {
         if (op.kind !== 'object') continue;
         const o = op.obj;
-        if ((o.type === 'tableStructure' || o.type === 'tableStructureMarked' || o.type === 'deleteTable')
+        if ((o.type === 'tableStructure' || o.type === 'deleteTable')
           && o.sectionIdx === sectionIdx
           && o.tableParaIdx === anchor.paraIdx && o.controlIdx === anchor.controlIdx) {
           return true;
@@ -1845,7 +2019,7 @@ export class PendingEditManager {
     const touched = new Set<number>();
     for (const set of this.sets) {
       for (const op of set.ops) {
-        if (op.kind === 'insert' || op.kind === 'delete' || op.kind === 'format' || op.kind === 'replace') {
+        if (op.kind === 'insert' || op.kind === 'format' || op.kind === 'replace') {
           const c = op.range.cell;
           if (c && op.range.sectionIdx === sectionIdx
             && c.paraIdx === anchor.paraIdx && c.controlIdx === anchor.controlIdx) {
@@ -1855,10 +2029,50 @@ export class PendingEditManager {
           && op.obj.sectionIdx === sectionIdx
           && op.obj.cell.paraIdx === anchor.paraIdx && op.obj.cell.controlIdx === anchor.controlIdx) {
           touched.add(op.obj.cell.cellIdx);
+        } else if (op.kind === 'object' && op.obj.type === 'applyFormula' && op.obj.cellIdx !== undefined
+          && op.obj.sectionIdx === sectionIdx
+          && op.obj.tableParaIdx === anchor.paraIdx && op.obj.controlIdx === anchor.controlIdx) {
+          touched.add(op.obj.cellIdx);
         }
       }
     }
     return touched;
+  }
+
+  /**
+   * 삭제될 표/행/열의 내용을 읽어 둔다 — 지워진 뒤에는 엔진에 물어볼 수 없다.
+   * 행 안 셀은 ' | ', 행 사이는 줄바꿈으로 잇는다. 팝오버·diff 표시용이라
+   * 큰 표는 일부만 읽는다.
+   */
+  private removedTargetText(
+    obj: Extract<ObjectOp, { type: 'tableStructure' | 'deleteTable' }>,
+  ): string {
+    const wasm = this.deps.wasm;
+    if (typeof wasm.getTableCellBboxes !== 'function') return '';
+    const boxes = wasm.getTableCellBboxes(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx);
+    const at = obj.type === 'tableStructure'
+      ? ((obj.op === 'delete_row' ? obj.rowIdx : obj.colIdx) ?? -1)
+      : -1;
+    const picked = boxes
+      .filter((c) => obj.type === 'deleteTable'
+        || (obj.op === 'delete_row' ? c.row <= at && at < c.row + c.rowSpan
+          : c.col <= at && at < c.col + c.colSpan))
+      .sort((a, b) => a.row - b.row || a.col - b.col);
+    const anchor = { paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx, charOffset: 0 };
+    const rows = new Map<number, string[]>();
+    let total = 0;
+    for (const c of picked) {
+      let text = '';
+      try {
+        text = this.cellFullText(obj.sectionIdx, anchor, c.cellIdx);
+      } catch { /* 셀 하나의 실패는 건너뛴다 */ }
+      const row = rows.get(c.row) ?? [];
+      row.push(text);
+      rows.set(c.row, row);
+      total += text.length;
+      if (total > 640) break;
+    }
+    return [...rows.values()].map((cells) => cells.join(' | ')).join('\n');
   }
 
   /** 셀 전체 텍스트(문단 \n 결합) — createTable 내용 지문용 */
@@ -1873,21 +2087,25 @@ export class PendingEditManager {
     return parts.join('\n');
   }
 
-  /** 드리프트 프로브: 객체 op 이 여전히 유효한가 (approve/reject 직전) */
-  private verifyObjectOp(obj: ObjectOp): boolean {
+  /** 드리프트 프로브: 객체 op 이 여전히 유효한가 (approve/reject 직전). 유효하면 null. */
+  private objectDriftCause(obj: ObjectOp): PendingDropCause | null {
     const wasm = this.deps.wasm;
+    const tableCause = (sec: number, para: number, ctrl: number, dims?: { rowCount: number; colCount: number }) => {
+      const d = wasm.getTableDimensions(sec, para, ctrl);
+      return !dims || (d.rowCount === dims.rowCount && d.colCount === dims.colCount) ? null : 'table-changed' as const;
+    };
     try {
       switch (obj.type) {
         case 'createTable': {
-          if (!obj.anchor) return false;
+          if (!obj.anchor) return 'table-changed';
           const d = wasm.getTableDimensions(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx);
           if (d.rowCount !== (obj.expectedRows ?? obj.rows) || d.colCount !== (obj.expectedCols ?? obj.cols)) {
-            return false;
+            return 'table-changed';
           }
           // 내용 지문: 사용자가 pending 표 안에 입력했다면 revert 로 지우지 않고
           // op 을 드리프트로 폐기해 표(와 사용자 내용)를 남긴다 (리뷰 확정 결함 수정).
-          // 단, 같은 pending 상태의 에이전트 셀 텍스트 op 이 만진 셀은 지문에서 제외하고,
-          // 구조 op(행/열 삽입)이 셀 배치를 바꿨다면 지문 검사를 건너뛴다 (크기 검사로 충분).
+          // 단, 같은 pending 상태의 에이전트 셀 op 이 만진 셀은 지문에서 제외하고,
+          // 구조 op(행/열 삽입 등)이 셀 배치를 바꿨다면 지문 검사를 건너뛴다 (크기 검사로 충분).
           if (obj.cells && !this.hasStructuralSibling(obj.sectionIdx, obj.anchor)) {
             const touched = this.agentTouchedCells(obj.sectionIdx, obj.anchor);
             for (let r = 0; r < obj.rows; r++) {
@@ -1895,125 +2113,129 @@ export class PendingEditManager {
                 const cellIdx = r * obj.cols + c;
                 if (touched.has(cellIdx)) continue;
                 const expected = obj.cells[r]?.[c] ?? '';
-                if (this.cellFullText(obj.sectionIdx, obj.anchor, cellIdx) !== expected) return false;
+                if (this.cellFullText(obj.sectionIdx, obj.anchor, cellIdx) !== expected) return 'table-changed';
               }
             }
           }
-          return true;
+          return null;
         }
         case 'insertImage': {
-          if (!obj.anchor) return false;
+          if (!obj.anchor) return 'object-changed';
           // 존재만 보면 같은 자리의 사용자 그림을 지울 수 있다 — 크기 판별자 비교 (리뷰 확정 결함 수정)
           const p = wasm.getPictureProperties(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx);
-          if (p === null || typeof p !== 'object') return false;
+          if (p === null || typeof p !== 'object') return 'object-changed';
           const rec = p as unknown as { width?: number; height?: number; description?: string };
           if (typeof rec.width === 'number' && typeof rec.height === 'number') {
-            if (rec.width !== obj.widthHu || rec.height !== obj.heightHu) return false;
+            if (rec.width !== obj.widthHu || rec.height !== obj.heightHu) return 'object-changed';
           }
           if (typeof rec.description === 'string' && obj.description && rec.description !== obj.description) {
-            return false;
+            return 'object-changed';
           }
-          return true;
+          return null;
         }
         case 'insertEquation': {
-          if (!obj.anchor) return false;
+          if (!obj.anchor) return 'object-changed';
+          let script: string | null | undefined;
           if (obj.cell) {
             if (obj.cell.path) {
-              return wasm.getEquationPropertiesByPath(
+              script = wasm.getEquationPropertiesByPath(
                 obj.sectionIdx, obj.cell.paraIdx,
                 this.cellPathEntriesAt(obj.cell, obj.paraIdx), obj.anchor.controlIdx,
-              )?.script === obj.script;
+              )?.script;
+            } else {
+              // 인덱스 지정 조회 (신규 wasm API; 구버전/스텁은 첫-수식 조회로 폴백)
+              script = typeof wasm.getEquationScriptInCellAt === 'function'
+                ? wasm.getEquationScriptInCellAt(
+                  obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx,
+                  obj.paraIdx, obj.anchor.controlIdx,
+                )
+                : null;
+              if (script === null) {
+                script = wasm.getEquationProperties(
+                  obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx,
+                )?.script;
+              }
             }
-            // 인덱스 지정 조회 (신규 wasm API; 구버전/스텁은 첫-수식 조회로 폴백)
-            const script = typeof wasm.getEquationScriptInCellAt === 'function'
-              ? wasm.getEquationScriptInCellAt(
-                obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx,
-                obj.paraIdx, obj.anchor.controlIdx,
-              )
-              : null;
-            if (script !== null) return script === obj.script;
-            const p = wasm.getEquationProperties(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx);
-            return p?.script === obj.script;
+          } else {
+            script = wasm.getEquationProperties(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx)?.script;
           }
-          const p = wasm.getEquationProperties(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx);
-          return p?.script === obj.script;
+          return script === obj.script ? null : 'object-changed';
         }
-        case 'tableStructure': {
-          if (!obj.dims) return false;
-          const d = wasm.getTableDimensions(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx);
-          return d.rowCount === obj.dims.rowCount && d.colCount === obj.dims.colCount;
-        }
-        case 'tableStructureMarked':
-        case 'deleteTable':
+        case 'tableStructure':
         case 'setCellProps':
         case 'setTableProps':
         case 'setColumnWidths':
         case 'fitToPage':
         case 'setZoneProps':
         case 'applyFormula':
-        case 'setCaption': {
-          const d = wasm.getTableDimensions(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx);
-          return d.rowCount === obj.dims.rowCount && d.colCount === obj.dims.colCount;
-        }
+        case 'setCaption':
+          return tableCause(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.dims);
+        case 'deleteTable':
+          // 표는 이미 없다 — 되돌림 직전에 문단 지문으로 사용자 수정을 가린다
+          return obj.tableParaIdx < wasm.getParagraphCount(obj.sectionIdx) ? null : 'paragraph-changed';
         case 'paraFormat':
         case 'applyStyle': {
           if (obj.cell) {
             const n = wasm.getCellParagraphCount(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx);
-            if (obj.paraIdx >= n) return false;
+            if (obj.paraIdx >= n) return 'paragraph-changed';
           } else if (obj.paraIdx >= wasm.getParagraphCount(obj.sectionIdx)) {
-            return false;
+            return 'paragraph-changed';
           }
           // 텍스트 지문: 문단 삽입/삭제로 인덱스가 다른 문단을 가리키면 드리프트 (리뷰 확정 결함 수정)
-          if (obj.textSample !== undefined) {
-            const len = obj.cell
-              ? wasm.getCellParagraphLength(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx)
-              : wasm.getParagraphLength(obj.sectionIdx, obj.paraIdx);
-            const n = Math.min(len, 24);
-            const cur = n === 0 ? '' : (obj.cell
-              ? wasm.getTextInCell(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx, 0, n)
-              : wasm.getTextRange(obj.sectionIdx, obj.paraIdx, 0, n));
-            if (cur !== obj.textSample) return false;
-          }
-          return true;
+          if (obj.textSample !== undefined && this.paraTextSample(obj) !== obj.textSample) return 'paragraph-changed';
+          return null;
         }
         case 'pageLayout':
-          return obj.sectionIdx < wasm.getSectionCount();
+          return obj.sectionIdx < wasm.getSectionCount() ? null : 'object-changed';
         case 'headerFooter': {
           // 신규 생성이든 기존 수정이든 검증 시점에 HF 가 존재해야 한다 (리뷰 확정 결함 수정)
           const raw = JSON.parse(wasm.getHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo)) as { exists?: boolean };
-          return raw?.exists === true;
+          return raw?.exists === true ? null : 'object-changed';
         }
         case 'insertNote': {
-          if (!obj.anchor) return false;
+          if (!obj.anchor) return 'object-changed';
           const info = wasm.getFootnoteInfo(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx);
-          if (info?.ok !== true) return false;
+          if (info?.ok !== true) return 'object-changed';
           // 내용 지문 — 사용자가 각주 내용을 손댔으면 드리프트로 남긴다.
           // 기준은 적용 직후 실제 텍스트(appliedText) — 엔진 기본 내용이 붙을 수 있다.
-          return (info.texts[0] ?? '') === (obj.appliedText ?? obj.text);
+          return (info.texts[0] ?? '') === (obj.appliedText ?? obj.text) ? null : 'text-changed';
         }
         case 'setNoteText': {
           const info = wasm.getFootnoteInfo(obj.sectionIdx, obj.paraIdx, obj.controlIdx);
-          if (info?.ok !== true || info.paraCount !== 1) return false;
-          return (info.texts[0] ?? '') === obj.text;
+          if (info?.ok !== true || info.paraCount !== 1) return 'object-changed';
+          return (info.texts[0] ?? '') === obj.text ? null : 'text-changed';
         }
         case 'bookmark': {
           if (obj.op === 'add' || obj.op === 'rename') {
             return wasm.getBookmarks().some(
               (b) => b.sec === obj.sectionIdx && b.para === obj.paraIdx && b.name === obj.name,
-            );
+            ) ? null : 'object-changed';
           }
           // delete: 대상이 다시 나타났으면(사용자 재추가 등) 드리프트
-          return !wasm.getBookmarks().some(
+          return wasm.getBookmarks().some(
             (b) => b.sec === obj.sectionIdx && b.para === obj.paraIdx
               && obj.prev !== undefined && b.name === obj.prev.name && b.charPos === obj.prev.charPos,
-          );
+          ) ? 'object-changed' : null;
         }
-        default:
-          return false;
       }
     } catch {
-      return false;
+      return obj.type === 'createTable' || obj.type === 'tableStructure' || obj.type === 'setCellProps'
+        || obj.type === 'setTableProps' || obj.type === 'setColumnWidths' || obj.type === 'fitToPage'
+        || obj.type === 'setZoneProps' || obj.type === 'applyFormula' || obj.type === 'setCaption'
+        ? 'table-changed' : 'object-changed';
     }
+  }
+
+  /** paraFormat/applyStyle 대상 문단의 앞 24자 (드리프트 지문) */
+  private paraTextSample(obj: Extract<ObjectOp, { type: 'paraFormat' | 'applyStyle' }>): string {
+    const wasm = this.deps.wasm;
+    const len = obj.cell
+      ? wasm.getCellParagraphLength(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx)
+      : wasm.getParagraphLength(obj.sectionIdx, obj.paraIdx);
+    const n = Math.min(len, 24);
+    return n === 0 ? '' : (obj.cell
+      ? wasm.getTextInCell(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx, 0, n)
+      : wasm.getTextRange(obj.sectionIdx, obj.paraIdx, 0, n));
   }
 
   /**
@@ -2038,10 +2260,7 @@ export class PendingEditManager {
             o.expectedRows = (o.expectedRows ?? o.rows) + dRows;
             o.expectedCols = (o.expectedCols ?? o.cols) + dCols;
           }
-        } else if (o.type === 'tableStructure' || o.type === 'tableStructureMarked'
-          || o.type === 'deleteTable' || o.type === 'setCellProps' || o.type === 'setTableProps'
-          || o.type === 'setColumnWidths' || o.type === 'fitToPage' || o.type === 'setZoneProps'
-          || o.type === 'applyFormula' || o.type === 'setCaption') {
+        } else if (isTableTargetOp(o) && o.type !== 'deleteTable') {
           if (o.sectionIdx === sectionIdx && o.tableParaIdx === tableParaIdx
             && o.controlIdx === controlIdx && o.dims) {
             o.dims = { rowCount: o.dims.rowCount + dRows, colCount: o.dims.colCount + dCols };
@@ -2059,8 +2278,14 @@ export class PendingEditManager {
    */
   private shiftControlIdxRefs(
     sectionIdx: number, paraIdx: number, atIdx: number, delta: 1 | -1, exclude?: ObjectOp,
+    reinsertedAfterSeq?: number,
   ): void {
-    const hit = (idx: number): boolean => (delta === 1 ? idx >= atIdx : idx > atIdx);
+    const hit = (idx: number, op: PendingOp): boolean => {
+      if (delta === -1) return idx > atIdx;
+      if (idx !== atIdx) return idx > atIdx;
+      // 지워졌던 컨트롤이 되살아난 자리: 그 컨트롤을 가리키던 더 이른 op 은 그대로 둔다
+      return reinsertedAfterSeq === undefined || (op.seq ?? 0) > reinsertedAfterSeq;
+    };
     for (const set of this.sets) {
       for (const op of set.ops) {
         if (op.kind === 'field') continue;
@@ -2069,39 +2294,36 @@ export class PendingEditManager {
           if (o === exclude) continue;
           if ((o.type === 'createTable' || o.type === 'insertImage')
             && o.sectionIdx === sectionIdx && o.anchor
-            && o.anchor.paraIdx === paraIdx && hit(o.anchor.controlIdx)) {
+            && o.anchor.paraIdx === paraIdx && hit(o.anchor.controlIdx, op)) {
             o.anchor = { ...o.anchor, controlIdx: o.anchor.controlIdx + delta };
           } else if (o.type === 'insertEquation' && !o.cell
             && o.sectionIdx === sectionIdx && o.anchor
-            && o.anchor.paraIdx === paraIdx && hit(o.anchor.controlIdx)) {
+            && o.anchor.paraIdx === paraIdx && hit(o.anchor.controlIdx, op)) {
             o.anchor = { ...o.anchor, controlIdx: o.anchor.controlIdx + delta };
-          } else if ((o.type === 'tableStructure' || o.type === 'tableStructureMarked'
-            || o.type === 'deleteTable' || o.type === 'setCellProps' || o.type === 'setTableProps'
-            || o.type === 'setColumnWidths' || o.type === 'fitToPage' || o.type === 'setZoneProps'
-            || o.type === 'applyFormula' || o.type === 'setCaption')
-            && o.sectionIdx === sectionIdx && o.tableParaIdx === paraIdx && hit(o.controlIdx)) {
+          } else if (isTableTargetOp(o)
+            && o.sectionIdx === sectionIdx && o.tableParaIdx === paraIdx && hit(o.controlIdx, op)) {
             o.controlIdx += delta;
           } else if ((o.type === 'paraFormat' || o.type === 'applyStyle' || o.type === 'insertEquation')
             && o.cell && o.sectionIdx === sectionIdx
-            && o.cell.paraIdx === paraIdx && hit(o.cell.controlIdx)) {
+            && o.cell.paraIdx === paraIdx && hit(o.cell.controlIdx, op)) {
             o.cell = this.shiftCellControl(o.cell, delta);
           } else if (o.type === 'insertNote'
             && o.sectionIdx === sectionIdx && o.anchor
-            && o.anchor.paraIdx === paraIdx && hit(o.anchor.controlIdx)) {
+            && o.anchor.paraIdx === paraIdx && hit(o.anchor.controlIdx, op)) {
             o.anchor = { ...o.anchor, controlIdx: o.anchor.controlIdx + delta };
           } else if (o.type === 'setNoteText'
-            && o.sectionIdx === sectionIdx && o.paraIdx === paraIdx && hit(o.controlIdx)) {
+            && o.sectionIdx === sectionIdx && o.paraIdx === paraIdx && hit(o.controlIdx, op)) {
             o.controlIdx += delta;
           } else if (o.type === 'bookmark'
             && o.sectionIdx === sectionIdx && o.paraIdx === paraIdx
-            && o.ctrlIdx !== undefined && hit(o.ctrlIdx)) {
+            && o.ctrlIdx !== undefined && hit(o.ctrlIdx, op)) {
             o.ctrlIdx += delta;
           }
           continue;
         }
         if (op.kind === 'template') continue;
         const c = op.range.cell;
-        if (c && op.range.sectionIdx === sectionIdx && c.paraIdx === paraIdx && hit(c.controlIdx)) {
+        if (c && op.range.sectionIdx === sectionIdx && c.paraIdx === paraIdx && hit(c.controlIdx, op)) {
           op.range.cell = this.shiftCellControl(c, delta);
         }
       }
@@ -2170,6 +2392,25 @@ export class PendingEditManager {
     }
   }
 
+  /**
+   * 텍스트 오프셋 → 편집 캐럿 좌표(인라인 개체 = 1칸). 앞선 인라인 개체만큼 보정하지
+   * 않으면 개체가 있는 문단에서 엉뚱한 글자 앞이 잘린다. 같은 자리의 개체는 캐럿
+   * 뒤에 남는다 — 텍스트는 개체 앞에 들어간다는 OFFSET_CAVEAT 규칙과 같다.
+   */
+  private caretOffset(sec: number, para: number, textOffset: number, cell?: CellAddr): number {
+    const wasm = this.deps.wasm;
+    try {
+      if (cell) {
+        return typeof wasm.textToLogicalOffsetInCellByPath === 'function'
+          ? wasm.textToLogicalOffsetInCellByPath(sec, cell.paraIdx, this.charShapeCellPath(cell, para), textOffset)
+          : textOffset;
+      }
+      return typeof wasm.textToLogicalOffset === 'function' ? wasm.textToLogicalOffset(sec, para, textOffset) : textOffset;
+    } catch {
+      return textOffset;
+    }
+  }
+
   /** §5.4 멀티라인 삽입 — 실패 시 부분 적용분을 best-effort 롤백한다 */
   private performInsert(sec: number, para: number, off: number, text: string, cell?: CellAddr):
       { range: DocRange; addedParas: number } {
@@ -2195,19 +2436,21 @@ export class PendingEditManager {
     };
     // 에이전트의 `\n`은 한 논리 삽입 안의 줄 경계다. 논리 분할은 Enter 상속에서
     // 강제 쪽/단 나눔만 빼고 엔진이 처리하므로, 분할 뒤 교정 서식 호출이 없다.
+    // 분할 API 는 편집 캐럿 좌표(인라인 개체 = 1칸)를 받으므로 텍스트 오프셋을 바꿔 넘긴다.
     const splitPara = (p: number, o: number) => {
+      const at = this.caretOffset(sec, p, o, cell);
       if (cell?.path) {
         this.parseOk(
-          wasm.splitParagraphInCellByPath(sec, cell.paraIdx, this.cellPathAt(cell, p), o),
+          wasm.splitParagraphInCellByPath(sec, cell.paraIdx, this.cellPathAt(cell, p), at),
           'splitParagraphInCellByPath',
         );
       } else if (cell) {
         this.parseOk(
-          wasm.splitParagraphInCellLogical(sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, p, o),
+          wasm.splitParagraphInCellLogical(sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, p, at),
           'splitParagraphInCellLogical',
         );
       } else {
-        this.parseOk(wasm.splitParagraphLogical(sec, p, o), 'splitParagraphLogical');
+        this.parseOk(wasm.splitParagraphLogical(sec, p, at), 'splitParagraphLogical');
       }
     };
     const insertLines = () => {
@@ -2293,18 +2536,19 @@ export class PendingEditManager {
    * 이 op 이후 적용된 텍스트 op(insert/replace)이 이 범위 안에 중첩된 경우 그
    * 기여분을 반영한 기대 텍스트를 만든다 — 에이전트 자신의 나중 편집으로 범위가
    * 커진 것을 드리프트로 오판하지 않기 위함이다. 사용자 편집은 여기에 기록되지
-   * 않으므로 여전히 불일치(=드리프트)로 잡힌다.
+   * 않으므로 여전히 불일치(=드리프트)로 잡힌다. reverted 는 이미 되돌린 op 이라 기여하지 않는다.
    */
   private expectedOpText(
-    op: Extract<PendingOp, { kind: 'insert' | 'delete' | 'replace' | 'format' }>,
+    op: Extract<PendingOp, { kind: 'insert' | 'replace' | 'format' }>,
     base: string,
+    reverted?: ReadonlySet<PendingOp>,
   ): string {
     interface Contrib { paraIdx: number; charOffset: number; ins: string; delLen: number; seq: number }
     const r = op.range;
     const contribs: Contrib[] = [];
     for (const set of this.sets) {
       for (const cand of set.ops) {
-        if (cand === op || (cand.seq ?? 0) <= (op.seq ?? 0)) continue;
+        if (cand === op || (cand.seq ?? 0) <= (op.seq ?? 0) || reverted?.has(cand)) continue;
         if (cand.kind !== 'insert' && cand.kind !== 'replace') continue;
         const cr = cand.range;
         if (cr.sectionIdx !== r.sectionIdx || !sameCell(cr.cell, r.cell)) continue;
@@ -2342,13 +2586,15 @@ export class PendingEditManager {
    * approve/reject 검증: 기대 텍스트가 아직 그 자리에 있는가.
    * 멀티 문단 op 는 첫 줄이 아니라 전체 텍스트를 비교한다.
    */
-  private verifyOpText(op: Extract<PendingOp, { kind: 'insert' | 'delete' | 'replace' | 'format' }>): boolean {
+  private verifyOpText(
+    op: Extract<PendingOp, { kind: 'insert' | 'replace' | 'format' }>, reverted?: ReadonlySet<PendingOp>,
+  ): boolean {
     // format 은 등록 시점 텍스트 지문이 없으면(캡처 실패) 검증을 건너뛴다 (기존 동작)
     if (op.kind === 'format' && op.text === undefined) return true;
     const base = op.kind === 'format' ? op.text! : op.text;
     const current = this.readRangeText(op.range);
     if (current === null) return false;
-    return current === this.expectedOpText(op, base);
+    return current === this.expectedOpText(op, base, reverted);
   }
 
   /** 필드 되돌림 전 드리프트 프로브: 현재 값이 여전히 newValue 인가 (사용자 수정 시 되돌리지 않음) */
@@ -2363,41 +2609,67 @@ export class PendingEditManager {
     }
   }
 
+  /** op 이 아직 기록한 자리에 그대로 있는가 — 어긋났으면 그 원인 (없으면 null) */
+  private driftCause(op: PendingOp, reverted?: ReadonlySet<PendingOp>): PendingDropCause | null {
+    switch (op.kind) {
+      case 'insert': case 'replace': case 'format':
+        return this.verifyOpText(op, reverted) ? null : 'text-changed';
+      case 'field':
+        return this.verifyFieldOp(op) ? null : 'field-changed';
+      case 'object':
+        return this.objectDriftCause(op.obj);
+      case 'template':
+        return null;
+    }
+  }
+
   /**
    * 드리프트된 op 을 kept/dropped 로 분할한다 (set.ops 는 호출자가 갱신한다).
-   * dropped 의 applied-now 미리보기는 사용자가 건드린 것으로 간주해 문서에 남긴다.
+   * dropped 의 미리보기는 사용자가 건드린 것으로 간주해 문서에 남긴다.
+   *
+   * 같은 set 의 나중 op 이 문단 보관본으로 되돌릴 문단을 이 op 이 건드렸다면 검증을
+   * 되돌림 시점으로 미룬다(deferred) — 보관본 복원이 그 문단을 이 op 의 적용 직후
+   * 상태로 돌려놓은 뒤에야 제대로 판정할 수 있다 (예: 셀을 채운 뒤 표 삭제).
    */
-  private partitionDriftedOps(set: PendingChangeSet): { kept: PendingOp[]; dropped: PendingOp[] } {
+  private partitionDriftedOps(set: PendingChangeSet): {
+    kept: PendingOp[]; dropped: PendingOp[];
+    causes: Map<PendingOp, PendingDropCause>; deferred: Set<PendingOp>;
+  } {
     const kept: PendingOp[] = [];
     const dropped: PendingOp[] = [];
+    const causes = new Map<PendingOp, PendingDropCause>();
+    const deferred = new Set<PendingOp>();
+    const captures = set.ops.flatMap((op) => {
+      if (op.kind !== 'object' || !op.paraCapture) return [];
+      const host = this.captureHost(op.obj);
+      return host === null ? [] : [{ seq: op.seq ?? 0, sectionIdx: op.obj.sectionIdx, host }];
+    });
     // 텍스트가 어긋났지만 그 사이 사용자 편집이 없었던 op — 나중 에이전트 op 이
     // 겹쳐 덮어쓴 것이다. 나중 op 이 모두 함께 되돌려지면 적용 직후 범위로 정확히
     // 되돌릴 수 있으므로 드리프트로 남기지 않는다.
     const overwritten = new Set<PendingOp>();
     for (const op of set.ops) {
-      if ((op.kind === 'insert' || op.kind === 'delete' || op.kind === 'replace' || op.kind === 'format')
-        && !this.verifyOpText(op)) {
-        if ((op.kind === 'insert' || op.kind === 'replace')
-          && op.applied?.overwritten === true && this.appliedAtIsCurrent(op, this.userEditSeq)) {
-          overwritten.add(op);
-          kept.push(op);
-        } else {
-          dropped.push(op);
-        }
+      if (captures.some((c) => c.seq > (op.seq ?? 0) && this.opTouchesBodyPara(op, c.sectionIdx, c.host))) {
+        deferred.add(op);
+        kept.push(op);
         continue;
       }
-      if (op.kind === 'field' && !this.verifyFieldOp(op)) {
-        dropped.push(op);
+      const cause = this.driftCause(op);
+      if (cause === null) {
+        // Template previews hold a full-document baseline while direct user and agent
+        // writes are locked. Always keep them revertible; dropping one would strand
+        // the structural preview in the document without approval or undo history.
+        kept.push(op);
         continue;
       }
-      if (op.kind === 'object' && !this.verifyObjectOp(op.obj)) {
-        dropped.push(op);
+      if ((op.kind === 'insert' || op.kind === 'replace' || op.kind === 'format')
+        && op.applied?.overwritten === true && this.appliedAtIsCurrent(op, this.userEditSeq)) {
+        overwritten.add(op);
+        kept.push(op);
         continue;
       }
-      // Template previews hold a full-document baseline while direct user and agent
-      // writes are locked. Always keep them revertible; dropping one would strand
-      // the structural preview in the document without approval or undo history.
-      kept.push(op);
+      causes.set(op, cause);
+      dropped.push(op);
     }
     // 덮어쓴 나중 op 이 남는다면(드리프트/다른 set) 정확한 되돌림이 불가능하다.
     for (let moved = true; moved;) {
@@ -2406,12 +2678,13 @@ export class PendingEditManager {
         if (!this.hasLaterAppliedOpsOutside(op, kept, dropped)) continue;
         overwritten.delete(op);
         kept.splice(kept.indexOf(op), 1);
+        causes.set(op, 'text-changed');
         dropped.push(op);
         moved = true;
       }
     }
     if (dropped.length > 1) dropped.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
-    return { kept, dropped };
+    return { kept, dropped, causes, deferred };
   }
 
   private appliedAt(range: DocRange): PendingAppliedAt {
@@ -2420,7 +2693,7 @@ export class PendingEditManager {
 
   /** 적용 이후 사용자 편집도, 다른 set 의 확정도 없었는가. */
   private appliedAtIsCurrent(
-    op: Extract<PendingOp, { kind: 'insert' | 'replace' }>, userEditSeqNow: number,
+    op: Extract<PendingOp, { kind: 'insert' | 'replace' | 'format' }>, userEditSeqNow: number,
   ): boolean {
     return op.applied !== undefined
       && op.applied.userEditSeq === userEditSeqNow
@@ -2433,11 +2706,11 @@ export class PendingEditManager {
    * live range 가 무너졌어도 정확히 되돌린다. 텍스트가 다르면 live range 를 유지한다.
    */
   private restoreAppliedRange(
-    op: Extract<PendingOp, { kind: 'insert' | 'replace' }>,
+    op: Extract<PendingOp, { kind: 'insert' | 'replace' | 'format' }>,
     revertSet: PendingOp[], keepPreviewsOf: PendingOp[], userEditSeqNow: number,
   ): void {
     const applied = op.applied;
-    if (!applied || !this.appliedAtIsCurrent(op, userEditSeqNow)) return;
+    if (!applied || op.text === undefined || !this.appliedAtIsCurrent(op, userEditSeqNow)) return;
     if (this.hasLaterAppliedOpsOutside(op, revertSet, keepPreviewsOf)) return;
     if (this.readRangeText(applied.range) !== op.text) return;
     const range = op.range;
@@ -2452,65 +2725,155 @@ export class PendingEditManager {
 
   /**
    * 적용된 op 을 역순으로 raw wasm 으로 되돌린다 (이벤트 없음).
-   * keepPreviewsOf = 되돌리지 않고 문서에 남길(드리프트) op — replace 스냅샷
+   * keepPreviewsOf = 되돌리지 않고 문서에 남길(드리프트) op — 스냅샷/문단 보관본
    * 복원이 이들의 미리보기를 지우지 않도록 안전 판별에 쓰인다.
    * userEditSeqNow = 되돌림 시작 시점의 사용자 편집 카운터 (호출자가 변이 전에
-   * 한 번만 샘플링해 넘긴다). replace 의 전체 스냅샷 복원 가부 판정에 쓰인다.
+   * 한 번만 샘플링해 넘긴다). 스냅샷/보관본 복원 가부 판정에 쓰인다.
+   * deferred = 검증을 되돌림 직전으로 미룬 op (partitionDriftedOps).
+   * 반환: 되돌리지 못한 op id → 원인.
    */
   private revertAppliedOps(
     ops: PendingOp[], keepPreviewsOf: PendingOp[] = [], userEditSeqNow: number = this.userEditSeq,
-  ): Set<string> {
+    deferred?: ReadonlySet<PendingOp>,
+  ): Map<string, PendingDropCause> {
     const wasm = this.deps.wasm;
-    const failed = new Set<string>();
+    const failed = new Map<string, PendingDropCause>();
+    // 이미 되돌린 나중 op — 미룬 검증에서 그 텍스트 기여를 기대값에 넣지 않는다
+    const reverted = new Set<PendingOp>();
     for (let i = ops.length - 1; i >= 0; i--) {
       const op = ops[i];
+      if (deferred?.has(op)) {
+        // 나중 op 이 덮어쓴 범위는 그 op 들이 모두 되돌아간 지금 적용 시점 범위로 돌려 놓고 잰다
+        if (op.kind === 'insert' || op.kind === 'replace' || op.kind === 'format') {
+          this.restoreAppliedRange(op, ops, keepPreviewsOf, userEditSeqNow);
+        }
+        const cause = this.driftCause(op, reverted);
+        if (cause !== null) {
+          failed.set(op.id, cause);
+          continue;
+        }
+      }
       try {
         if (op.kind === 'insert') {
           this.restoreAppliedRange(op, ops, keepPreviewsOf, userEditSeqNow);
           const r = { ...op.range };
+          const fixControls = r.endParaIdx > r.startParaIdx
+            ? this.trackControls(r.sectionIdx, r.startParaIdx, r.endParaIdx, r.cell)
+            : undefined;
           const res = this.deleteRangeRaw(r);
-          if (res?.ok !== true) continue;
+          if (res?.ok !== true) {
+            failed.set(op.id, 'revert-failed');
+            continue;
+          }
           // 자신 포함 모든 pending 경계를 문서의 임시 before 상태에 맞춘다.
           this.shiftAllAfterDelete(r);
+          fixControls?.(r.startParaIdx);
+          this.restoreSplitParagraph(op, r, ops, keepPreviewsOf);
         } else if (op.kind === 'replace') {
           this.revertReplaceOp(op, ops, keepPreviewsOf, userEditSeqNow);
         } else if (op.kind === 'format') {
+          this.restoreAppliedRange(op, ops, keepPreviewsOf, userEditSeqNow);
           this.applyFormatRaw(op.range, op.inverse);
         } else if (op.kind === 'field') {
           wasm.setFieldValueByName(op.name, op.oldValue);
         } else if (op.kind === 'template') {
           if (op.snapshotId === null) throw new Error('template snapshot is unavailable');
           wasm.restoreSnapshot(op.snapshotId);
-        } else if (op.kind === 'object' && isObjectOpApplied(op.obj)) {
-          let restored = false;
-          if (op.snapshotId != null && op.userEditSeqAtSnapshot === userEditSeqNow
-            && op.settledSetSeqAtSnapshot === this.settledSetSeq
-            && !this.hasLaterAppliedOpsOutside(op, ops, keepPreviewsOf)) {
-            try {
-              wasm.restoreSnapshot(op.snapshotId);
-              restored = true;
-            } catch (error) {
-              console.warn('[pending-edits] object snapshot restore failed; falling back to inverse ops', error);
-            }
-          }
-          if (restored) {
-            const obj = op.obj;
-            if ((obj.type === 'insertImage' || obj.type === 'insertEquation') && obj.anchor) {
-              if (obj.type === 'insertEquation' && obj.cell) {
-                this.shiftCellEquationRefs(obj, obj.anchor.controlIdx, -1);
-              } else {
-                this.shiftControlIdxRefs(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx, -1, obj);
-              }
-            }
-          } else if (!this.revertObjectOp(op.obj)) failed.add(op.id);
+        } else if (!this.revertObject(op, ops, keepPreviewsOf, userEditSeqNow)) {
+          failed.set(op.id, 'revert-failed');
+          continue;
         }
-        // delete/mark-only 는 되돌릴 것이 없다
+        reverted.add(op);
       } catch (err) {
         console.warn('[pending-edits] revert failed for op', op.id, err);
-        if (op.kind === 'object') failed.add(op.id);
+        failed.set(op.id, 'revert-failed');
       }
     }
     return failed;
+  }
+
+  /**
+   * 객체 op 되돌림: 문단 보관본 → 문서 스냅샷 → 역연산 순으로 시도한다.
+   * 보관본/스냅샷은 문단(문서) 전체를 덮으므로 각각의 안전 조건을 먼저 확인한다.
+   */
+  private revertObject(
+    op: Extract<PendingOp, { kind: 'object' }>, revertSet: PendingOp[],
+    keepPreviewsOf: PendingOp[], userEditSeqNow: number,
+  ): boolean {
+    const wasm = this.deps.wasm;
+    const obj = op.obj;
+    const postDims = this.tableDims(obj);
+    const host = op.paraCapture ? this.captureHost(obj) : null;
+    if (op.paraCapture && host !== null
+      && this.canRestoreParagraph(op, host, revertSet, keepPreviewsOf, userEditSeqNow)) {
+      try {
+        wasm.restoreCapturedParagraph(op.paraCapture.id, obj.sectionIdx, host);
+        this.afterObjectRestored(op, postDims);
+        return true;
+      } catch (error) {
+        console.warn('[pending-edits] paragraph restore failed; trying other inverses', error);
+      }
+    }
+    if (op.snapshotId != null && op.userEditSeqAtSnapshot === userEditSeqNow
+      && op.settledSetSeqAtSnapshot === this.settledSetSeq
+      && !this.hasLaterAppliedOpsOutside(op, revertSet, keepPreviewsOf)) {
+      try {
+        wasm.restoreSnapshot(op.snapshotId);
+        this.afterObjectRestored(op, postDims);
+        return true;
+      } catch (error) {
+        console.warn('[pending-edits] object snapshot restore failed; falling back to inverse ops', error);
+      }
+    }
+    return this.revertObjectOp(obj, op.seq);
+  }
+
+  /**
+   * 문단을 나눈 삽입을 병합으로 되돌린 뒤, 내용이 삽입 전과 같으면 보관한 원래 문단으로
+   * 바꿔 줄 배치(표·그림이 놓인 줄 높이 포함)까지 원래대로 돌린다. 그 문단을 바꾼 나중
+   * op 이 되돌림 대상 밖에 남아 있으면 건드리지 않는다.
+   */
+  private restoreSplitParagraph(
+    op: Extract<PendingOp, { kind: 'insert' }>, merged: DocRange,
+    revertSet: PendingOp[], keepPreviewsOf: PendingOp[],
+  ): void {
+    const capture = op.paraCapture;
+    if (!capture || merged.cell) return;
+    const sec = merged.sectionIdx;
+    const para = merged.startParaIdx;
+    const isLaterOutside = (cand: PendingOp): boolean =>
+      cand !== op && (cand.seq ?? 0) > (op.seq ?? 0) && !revertSet.includes(cand)
+      && this.opTouchesBodyPara(cand, sec, para);
+    if (this.sets.some((set) => set.ops.some(isLaterOutside)) || keepPreviewsOf.some(isLaterOutside)) return;
+    if (this.paragraphDigest(sec, para) !== capture.digest) return;
+    try {
+      this.deps.wasm.restoreCapturedParagraph(capture.id, sec, para);
+    } catch (error) {
+      console.warn('[pending-edits] split paragraph restore failed; keeping the merged paragraph', error);
+    }
+  }
+
+  /** 보관본/스냅샷으로 되돌린 뒤 다른 op 의 컨트롤 인덱스와 기대 표 크기를 맞춘다 */
+  private afterObjectRestored(
+    op: Extract<PendingOp, { kind: 'object' }>, postDims: { rowCount: number; colCount: number } | null,
+  ): void {
+    const obj = op.obj;
+    switch (obj.type) {
+      case 'createTable':
+      case 'insertImage':
+        if (obj.anchor) this.shiftControlIdxRefs(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx, -1, obj);
+        return;
+      case 'insertEquation':
+        if (!obj.anchor) return;
+        if (obj.cell) this.shiftCellEquationRefs(obj, obj.anchor.controlIdx, -1);
+        else this.shiftControlIdxRefs(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx, -1, obj);
+        return;
+      case 'deleteTable':
+        this.shiftControlIdxRefs(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, 1, obj, op.seq ?? 0);
+        return;
+      default:
+        this.adjustSiblingDims(obj, postDims, this.tableDims(obj));
+    }
   }
 
   /**
@@ -2532,24 +2895,35 @@ export class PendingEditManager {
     const start: DocPoint = { paraIdx: op.range.startParaIdx, charOffset: op.range.startCharOffset };
     const reinsertShift = this.insertShiftFor(start, op.deletedText);
     const userEditedSinceSnapshot = (op.userEditSeqAtSnapshot ?? -1) !== userEditSeqNow;
+    const sec = op.range.sectionIdx;
     if (op.snapshotId !== null && !userEditedSinceSnapshot
       && op.settledSetSeqAtSnapshot === this.settledSetSeq
       && !this.hasLaterAppliedOpsOutside(op, revertSet, keepPreviewsOf)) {
       try {
+        // 스냅샷 복원 전후의 개체 배치를 한 번에 잰다 (삽입분 제거 + 원본 재삽입과 동치)
+        const fixControls = this.trackControls(sec, op.range.startParaIdx, op.range.endParaIdx, op.range.cell);
         wasm.restoreSnapshot(op.snapshotId);
         // 문서가 "원본 복원" 상태로 바뀌었으므로 다른 op 들의 좌표를 맞춘다
         // (삽입분 제거 + 원본 재삽입과 동치).
         this.shiftAllAfterDelete(op.range, op);
-        this.shiftAllAfterInsert(op.range.sectionIdx, reinsertShift, op, op.range.cell);
+        this.shiftAllAfterInsert(sec, reinsertShift, op, op.range.cell);
+        fixControls?.(reinsertShift.endParaIdx);
         return;
       } catch (err) {
         console.warn('[pending-edits] replace snapshot restore failed; falling back to inverse ops', err);
       }
     }
     // 폴백: 삽입 텍스트를 지우고 원본 텍스트+캡처 서식을 다시 삽입한다
+    const fixDeleted = op.range.endParaIdx > op.range.startParaIdx
+      ? this.trackControls(sec, op.range.startParaIdx, op.range.endParaIdx, op.range.cell)
+      : undefined;
     const res = this.deleteRangeRaw(op.range);
     if (res?.ok !== true) throw new AgentToolError('RPC_ERROR', 'replace revert: deleteRange failed');
     this.shiftAllAfterDelete(op.range, op);
+    fixDeleted?.(op.range.startParaIdx);
+    const fixInserted = op.deletedText.includes('\n')
+      ? this.trackControls(sec, start.paraIdx, start.paraIdx, op.range.cell)
+      : undefined;
     if (op.deletedText.length > 0) {
       const ins = this.performInsert(op.range.sectionIdx, start.paraIdx, start.charOffset, op.deletedText, op.range.cell);
       if (op.charShapeRuns) this.applyCharShapeRuns(ins.range, op.deletedText, op.charShapeRuns);
@@ -2575,7 +2949,8 @@ export class PendingEditManager {
         } catch { /* best effort */ }
       }
     }
-    this.shiftAllAfterInsert(op.range.sectionIdx, reinsertShift, op, op.range.cell);
+    this.shiftAllAfterInsert(sec, reinsertShift, op, op.range.cell);
+    fixInserted?.(reinsertShift.endParaIdx);
   }
 
   /** 텍스트를 지점에 삽입했을 때의 shift 서술자 (스칼라 단위) */
@@ -2594,21 +2969,14 @@ export class PendingEditManager {
   }
 
   /**
-   * 이 op 이후(seq 가 더 큰) 적용된 applied-now 미리보기가 되돌림 대상 밖에 남아
-   * 있는가 — 있으면 replace 스냅샷 복원이 그 미리보기까지 지우므로 폴백 해야 한다.
+   * 이 op 이후(seq 가 더 큰) 적용된 미리보기가 되돌림 대상 밖에 남아 있는가 —
+   * 있으면 스냅샷 복원이 그 미리보기까지 지우므로 폴백 해야 한다.
    */
   private hasLaterAppliedOpsOutside(
     op: PendingOp, revertSet: PendingOp[], keepPreviewsOf: PendingOp[],
   ): boolean {
-    const isLaterApplied = (cand: PendingOp): boolean => {
-      if (cand === op || (cand.seq ?? 0) <= (op.seq ?? 0)) return false;
-      if (revertSet.includes(cand)) return false;
-      switch (cand.kind) {
-        case 'insert': case 'replace': case 'format': case 'field': case 'template': return true;
-        case 'object': return isObjectOpApplied(cand.obj);
-        default: return false; // delete/mark-only 는 문서를 바꾸지 않는다
-      }
-    };
+    const isLaterApplied = (cand: PendingOp): boolean =>
+      cand !== op && (cand.seq ?? 0) > (op.seq ?? 0) && !revertSet.includes(cand);
     for (const set of this.sets) {
       for (const cand of set.ops) {
         if (isLaterApplied(cand)) return true;
@@ -2701,74 +3069,37 @@ export class PendingEditManager {
     }
   }
 
-  /** 삭제·스타일 적용 등 승인 시점까지 mark-only 였던 연산만 현재 미리보기 위에 적용한다. */
-  private applyApprovalOnlyOps(ops: PendingOp[]): DocumentPosition {
-    const wasm = this.deps.wasm;
-    let last: { sectionIdx: number; paraIdx: number; charOffset: number } | null = null;
-    const bodyPos = (r: DocRange, paraIdx: number, charOffset: number) =>
-      r.cell
-        ? { sectionIdx: r.sectionIdx, paraIdx: r.cell.paraIdx, charOffset: 0 }
-        : { sectionIdx: r.sectionIdx, paraIdx, charOffset };
-
-    for (const op of ops) {
-      try {
-        if (op.kind === 'delete') {
-          const r: DocRange = {
-            ...op.range,
-            cell: op.range.cell ? { ...op.range.cell } : undefined,
-          };
-          const res = this.deleteRangeRaw(r);
-          if (res?.ok === true) {
-            this.shiftAllAfterDelete(r, op);
-            op.range = {
-              sectionIdx: r.sectionIdx,
-              cell: r.cell,
-              startParaIdx: r.startParaIdx,
-              startCharOffset: r.startCharOffset,
-              endParaIdx: r.startParaIdx,
-              endCharOffset: r.startCharOffset,
-            };
-            last = bodyPos(r, r.startParaIdx, r.startCharOffset);
-          }
-        } else if (op.kind === 'object' && !isObjectOpApplied(op.obj)) {
-          const obj = op.obj;
-          this.executeMarkedObjectOp(obj);
-          last = { sectionIdx: obj.sectionIdx, paraIdx: this.objectBodyParaIdx(obj), charOffset: 0 };
-        }
-      } catch (err) {
-        console.warn('[pending-edits] approval-only op failed', op.id, err);
-        throw err;
-      }
-    }
-
-    if (!last) return this.deps.inputHandler.getCursorPosition();
-    const paraCount = wasm.getParagraphCount(last.sectionIdx);
-    const paraIdx = Math.max(0, Math.min(last.paraIdx, paraCount - 1));
-    const len = wasm.getParagraphLength(last.sectionIdx, paraIdx);
-    return { sectionIndex: last.sectionIdx, paragraphIndex: paraIdx, charOffset: Math.min(last.charOffset, len) };
-  }
-
-  /** 객체 op 의 본문 기준 문단 인덱스 (커서 근사/overlay 용) */
-  private objectBodyParaIdx(obj: ObjectOp): number {
+  /** 객체 op 의 본문 기준 문단 인덱스 (요약/보관 대상 판별용 — 문단 좌표가 없으면 null) */
+  private objectBodyParaIdx(obj: ObjectOp): number | null {
     switch (obj.type) {
-      case 'createTable': case 'insertImage': case 'insertEquation':
-        return ('anchor' in obj && obj.anchor) ? obj.anchor.paraIdx : obj.paraIdx;
-      case 'tableStructure': case 'tableStructureMarked': case 'deleteTable':
-      case 'setCellProps': case 'setTableProps':
+      case 'createTable': case 'insertImage': case 'insertNote':
+        return obj.anchor ? obj.anchor.paraIdx : obj.paraIdx;
+      case 'insertEquation':
+        return obj.cell ? obj.cell.paraIdx : (obj.anchor ? obj.anchor.paraIdx : obj.paraIdx);
+      case 'tableStructure': case 'deleteTable': case 'setCellProps': case 'setTableProps':
+      case 'setColumnWidths': case 'fitToPage': case 'setZoneProps': case 'applyFormula': case 'setCaption':
         return obj.tableParaIdx;
       case 'paraFormat': case 'applyStyle':
         return obj.cell ? obj.cell.paraIdx : obj.paraIdx;
+      case 'setNoteText': case 'bookmark':
+        return obj.paraIdx;
+      case 'headerFooter':
+        return obj.hostParaIdx ?? null;
       default:
-        return 0;
+        return null;
     }
   }
 
-  /** 본문 문단 좌표를 갖는 객체 op 필드들을 shift 함수에 통과시킨다 */
+  /**
+   * 본문 문단 좌표를 갖는 객체 op 필드들을 shift 함수에 통과시킨다. 개체 주소는 문단만
+   * 텍스트 좌표 규칙으로 민다 — 문단 분할/병합으로 개체가 실제로 옮겨 간 자리는
+   * trackControls 가 엔진 기준으로 다시 잡는다.
+   */
   private shiftObjectOp(obj: ObjectOp, sectionIdx: number, shift: (p: DocPoint) => DocPoint, insCell?: CellAddr): void {
+    if (obj.sectionIdx !== sectionIdx) return;
     const shiftBody = (paraIdx: number, charOffset: number): DocPoint => shift({ paraIdx, charOffset });
     switch (obj.type) {
-      case 'createTable': case 'insertImage': case 'insertEquation': {
-        if (obj.sectionIdx !== sectionIdx) return;
+      case 'createTable': case 'insertImage': case 'insertEquation': case 'insertNote': {
         if (obj.type === 'insertEquation' && obj.cell) {
           if (insCell) {
             // 같은 셀 내부 텍스트 변화만 셀 문단 좌표를 움직인다
@@ -2792,14 +3123,7 @@ export class PendingEditManager {
         }
         return;
       }
-      case 'tableStructure': case 'tableStructureMarked': case 'deleteTable':
-      case 'setCellProps': case 'setTableProps': {
-        if (obj.sectionIdx !== sectionIdx || insCell) return;
-        obj.tableParaIdx = shiftBody(obj.tableParaIdx, 0).paraIdx;
-        return;
-      }
       case 'paraFormat': case 'applyStyle': {
-        if (obj.sectionIdx !== sectionIdx) return;
         if (obj.cell) {
           if (insCell) {
             // 같은 셀 내부의 텍스트 변화만 셀 문단 좌표를 움직인다
@@ -2819,23 +3143,36 @@ export class PendingEditManager {
         }
         return;
       }
+      case 'setNoteText':
+        if (!insCell) obj.paraIdx = shiftBody(obj.paraIdx, 0).paraIdx;
+        return;
+      case 'bookmark': {
+        if (insCell) return;
+        const p = shiftBody(obj.paraIdx, obj.charOffset ?? 0);
+        obj.paraIdx = p.paraIdx;
+        if (obj.charOffset !== undefined) obj.charOffset = p.charOffset;
+        if (obj.prev) {
+          const q = shiftBody(obj.prev.para, obj.prev.charPos);
+          obj.prev = { ...obj.prev, para: q.paraIdx, charPos: q.charOffset };
+        }
+        return;
+      }
+      case 'headerFooter':
+        // HF 컨트롤은 문단 분할에도 문단 시작에 남는다 — 문단 인덱스만 민다
+        if (!insCell && obj.hostParaIdx !== undefined) obj.hostParaIdx = shiftBody(obj.hostParaIdx, 0).paraIdx;
+        return;
+      case 'pageLayout':
+        return; // 문단 좌표가 없다
       default:
-        return; // pageLayout / headerFooter 는 문단 좌표가 없다
+        if (!insCell) obj.tableParaIdx = shiftBody(obj.tableParaIdx, 0).paraIdx;
     }
   }
 
   /** shift 로 문단 좌표/내용이 바뀐 paraFormat/applyStyle op 의 텍스트 지문을 다시 캡처한다 */
   private recaptureParaTextSample(obj: Extract<ObjectOp, { type: 'paraFormat' | 'applyStyle' }>): void {
     if (obj.textSample === undefined) return;
-    const wasm = this.deps.wasm;
     try {
-      const len = obj.cell
-        ? wasm.getCellParagraphLength(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx)
-        : wasm.getParagraphLength(obj.sectionIdx, obj.paraIdx);
-      const n = Math.min(len, 24);
-      obj.textSample = n === 0 ? '' : (obj.cell
-        ? wasm.getTextInCell(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx, 0, n)
-        : wasm.getTextRange(obj.sectionIdx, obj.paraIdx, 0, n));
+      obj.textSample = this.paraTextSample(obj);
     } catch { /* 조회 실패 시 기존 지문 유지 */ }
   }
 
@@ -2869,7 +3206,8 @@ export class PendingEditManager {
         }
         if (op.range.sectionIdx !== del.sectionIdx) continue;
         if (sameCell(op.range.cell, del.cell)) {
-          if ((op.kind === 'insert' || op.kind === 'replace') && op.applied && rangesOverlap(op.range, del)) {
+          if ((op.kind === 'insert' || op.kind === 'replace' || op.kind === 'format')
+            && op.applied && rangesOverlap(op.range, del)) {
             op.applied.overwritten = true;
           }
           this.shiftRange(op.range, (p) => shiftPointAfterDelete(p, del));
@@ -2879,6 +3217,123 @@ export class PendingEditManager {
         }
       }
     }
+  }
+
+  /**
+   * 본문 문단 분할/병합 전후로 개체 주소를 엔진 기준으로 다시 잡는다. 엔진은 분할 지점
+   * 뒤의 개체를 새 문단으로 옮겨 0부터 다시 번호 매기고, 병합 시 뒤 문단의 개체를 앞 문단
+   * 끝에 잇는다 — 오프셋 비교로 문단만 옮기는 텍스트 shift 로는 알 수 없다.
+   * 사용: const fix = this.trackControls(...); 변이 + shift; fix?.(변이 뒤 마지막 문단).
+   * 셀 내부 변이이거나 그 문단들의 개체를 가리키는 op 이 없으면 undefined.
+   */
+  private trackControls(
+    sectionIdx: number, from: number, to: number, cell?: CellAddr,
+  ): ((afterEnd: number) => void) | undefined {
+    const wasm = this.deps.wasm;
+    if (cell || typeof wasm.getControlTextPositions !== 'function') return undefined;
+    const refs = this.collectControlRefs(sectionIdx, from, to);
+    if (refs.length === 0) return undefined;
+    const positions = (para: number): number[] => wasm.getControlTextPositions(sectionIdx, para);
+    const before: number[] = [];
+    for (let p = from; p <= to; p++) before.push(positions(p).length);
+    return (afterEnd) => {
+      const after: number[][] = [];
+      for (let p = from; p <= afterEnd; p++) after.push(positions(p));
+      const remap = controlRemapFromCounts(from, before, after.map((xs) => xs.length));
+      if (!remap) return;
+      for (const ref of refs) {
+        const mapped = remap(ref.paraIdx, ref.controlIdx);
+        if (!mapped) continue; // 사라진 개체는 그대로 두어 검증에서 드리프트로 걸러진다
+        ref.set(mapped.paraIdx, mapped.controlIdx, after[mapped.paraIdx - from]?.[mapped.controlIdx] ?? 0);
+      }
+    };
+  }
+
+  /** [from..to] 본문 문단의 개체(표·그림·수식·각주·책갈피)를 주소로 가리키는 필드들 */
+  private collectControlRefs(sectionIdx: number, from: number, to: number): Array<{
+    paraIdx: number; controlIdx: number;
+    set: (paraIdx: number, controlIdx: number, textPos: number) => void;
+  }> {
+    const refs: Array<{
+      paraIdx: number; controlIdx: number;
+      set: (paraIdx: number, controlIdx: number, textPos: number) => void;
+    }> = [];
+    const inRange = (para: number): boolean => from <= para && para <= to;
+    const cellRef = (get: () => CellAddr | undefined, put: (cell: CellAddr) => void): void => {
+      const cell = get();
+      if (!cell || !inRange(cell.paraIdx)) return;
+      refs.push({
+        paraIdx: cell.paraIdx, controlIdx: cell.controlIdx,
+        set: (paraIdx, controlIdx) => {
+          const cur = get()!;
+          put({
+            ...cur, paraIdx, controlIdx,
+            ...(cur.path ? { path: cur.path.map((entry, index) => index === 0 ? { ...entry, controlIndex: controlIdx } : entry) } : {}),
+          });
+        },
+      });
+    };
+    for (const set of this.sets) {
+      for (const op of set.ops) {
+        if (op.kind === 'field' || op.kind === 'template') continue;
+        if (op.kind !== 'object') {
+          if (op.range.sectionIdx === sectionIdx) {
+            const range = op.range;
+            cellRef(() => range.cell, (cell) => { range.cell = cell; });
+          }
+          continue;
+        }
+        const o = op.obj;
+        if (o.sectionIdx !== sectionIdx) continue;
+        switch (o.type) {
+          case 'createTable': case 'insertImage': case 'insertNote': case 'insertEquation':
+            if (o.type === 'insertEquation' && o.cell) {
+              cellRef(() => o.cell, (cell) => {
+                o.cell = cell;
+                if (o.anchor) o.anchor = { ...o.anchor, paraIdx: cell.paraIdx };
+              });
+            } else if (o.anchor && inRange(o.anchor.paraIdx)) {
+              refs.push({
+                paraIdx: o.anchor.paraIdx, controlIdx: o.anchor.controlIdx,
+                set: (paraIdx, controlIdx, textPos) => { o.anchor = { paraIdx, controlIdx, charOffset: textPos }; },
+              });
+            }
+            break;
+          case 'paraFormat': case 'applyStyle':
+            cellRef(() => o.cell, (cell) => { o.cell = cell; });
+            break;
+          case 'setNoteText':
+            if (inRange(o.paraIdx)) {
+              refs.push({
+                paraIdx: o.paraIdx, controlIdx: o.controlIdx,
+                set: (paraIdx, controlIdx) => { o.paraIdx = paraIdx; o.controlIdx = controlIdx; },
+              });
+            }
+            break;
+          case 'bookmark':
+            if (o.ctrlIdx !== undefined && inRange(o.paraIdx)) {
+              refs.push({
+                paraIdx: o.paraIdx, controlIdx: o.ctrlIdx,
+                set: (paraIdx, controlIdx, textPos) => {
+                  o.paraIdx = paraIdx; o.ctrlIdx = controlIdx;
+                  if (o.charOffset !== undefined) o.charOffset = textPos;
+                },
+              });
+            }
+            break;
+          case 'pageLayout': case 'headerFooter':
+            break;
+          default:
+            if (inRange(o.tableParaIdx)) {
+              refs.push({
+                paraIdx: o.tableParaIdx, controlIdx: o.controlIdx,
+                set: (paraIdx, controlIdx) => { o.tableParaIdx = paraIdx; o.controlIdx = controlIdx; },
+              });
+            }
+        }
+      }
+    }
+    return refs;
   }
 
   private shiftRange(range: DocRange, shift: (p: DocPoint) => DocPoint): void {

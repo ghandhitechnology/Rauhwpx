@@ -724,7 +724,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'create_table',
-    description: `Create a table at charOffset, optionally filled in the same call. cells is a row-major grid (rows/cols inferred; short rows leave cells empty; "\\n" in a cell makes paragraphs). headerRow repeats row 0 as a header (bold by default, optional headerFill). Returns the table's {paraIdx, controlIdx}. Example, 4 equal columns on A4: colWidthsMm [37.5, 37.5, 37.5, 37.5]. ${WRITE_POINTER}`,
+    description: `Create a table at charOffset, optionally filled in the same call. cells is a row-major grid (rows/cols inferred; short rows leave cells empty; "\\n" in a cell makes paragraphs). headerRow repeats row 0 as a header (bold by default, optional headerFill). To merge cells afterwards call edit_table op:merge_cells — it applies immediately and renumbers cellIdx. Returns the table's {paraIdx, controlIdx}. Example, 4 equal columns on A4: colWidthsMm [37.5, 37.5, 37.5, 37.5]. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -742,7 +742,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'edit_table',
-    description: `Change an existing table's structure (address from its get_structure table line). op and its required args: insert_row(rowIdx, below=true) · insert_col(colIdx, right=true) · delete_row(rowIdx) · delete_col(colIdx) · merge_cells(startRow, startCol, endRow, endCol) · split_cell(rowIdx, colIdx, splitRows, splitCols) · set_column_widths(columnWidthsMm, one per column; the table width becomes their sum) · fit_to_page() shrinks columns to the body width, never widens · apply_formula(row, col, formula, format?) writes the result into that cell · set_caption(text, withNumber=true keeps "표 N"). To append, target the last index. Only insert_row/insert_col show live; the rest apply at commit. Structural ops renumber cellIdx, so fill text first and re-read get_structure next turn. Properties, cells and borders: set_table_props, set_cell_props, set_zone_borders. ${WRITE_POINTER}`,
+    description: `Change an existing table's structure (address from its get_structure table line). op and its required args: insert_row(rowIdx, below=true) · insert_col(colIdx, right=true) · delete_row(rowIdx) · delete_col(colIdx) · merge_cells(startRow, startCol, endRow, endCol) · split_cell(rowIdx, colIdx, splitRows, splitCols) · set_column_widths(columnWidthsMm, one per column; the table width becomes their sum) · fit_to_page() shrinks columns to the body width, never widens · apply_formula(row, col, formula, format?) writes the result into that cell · set_caption(text, withNumber=true keeps "표 N"). To append, target the last index. Every op applies immediately, returns the new rowCount/colCount/cellCount and renumbers cellIdx — address later cells from those counts or a fresh get_structure. Properties, cells and borders: set_table_props, set_cell_props, set_zone_borders. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -779,7 +779,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'set_table_props',
-    description: `Set table-level properties (address from its get_structure table line; read get_table_properties first). EASY CENTERING: {horizontalAlign:"center"} also makes the table floating, column-relative and zero-offset unless overridden. Any floating-placement key implies positionMode floating. pageBreak "row" lets a long table continue on the next page. Applies at commit. ${WRITE_POINTER}`,
+    description: `Set table-level properties (address from its get_structure table line; read get_table_properties first). EASY CENTERING: {horizontalAlign:"center"} also makes the table floating, column-relative and zero-offset unless overridden. Any floating-placement key implies positionMode floating. pageBreak "row" lets a long table continue on the next page. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -791,7 +791,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'set_cell_props',
-    description: `Set one cell's fill, vertical alignment, header flag, size, padding, text direction, protection, form editability or field name. cellIdx comes from the get_structure grid. Applies at commit. ${WRITE_POINTER}`,
+    description: `Set one cell's fill, vertical alignment, header flag, size, padding, text direction, protection, form editability or field name. cellIdx comes from the get_structure grid. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -804,7 +804,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'set_zone_borders',
-    description: `Treat the cell rectangle startCell..endCell {row, col} as one zone and set its outline borders, fill, diagonals and center line. Borders land on the zone outline, not on inner cell edges. Border sides are {type, width, color}: type 0 none, 1 solid, 2 dashed, 3 dotted, 4 dash-dot, 8 double; width step 0-6 (0 = 0.1mm). Applies at commit. ${WRITE_POINTER}`,
+    description: `Treat the cell rectangle startCell..endCell {row, col} as one zone and set its outline borders, fill, diagonals and center line. Borders land on the zone outline, not on inner cell edges. Border sides are {type, width, color}: type 0 none, 1 solid, 2 dashed, 3 dotted, 4 dash-dot, 8 double; width step 0-6 (0 = 0.1mm). ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -827,7 +827,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'delete_table',
-    description: `Delete a whole table (address from its get_structure table line). It stays mark-only until commit; meanwhile edits to that table fail with PENDING_DESTRUCTIVE_OP, and a failed turn leaves it untouched. ${WRITE_POINTER}`,
+    description: `Delete a whole table (address from its get_structure table line). The table is removed immediately; later tables in the same paragraph move down one controlIdx. Rejecting or rolling back the turn restores it. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -988,7 +988,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'edit_header_footer',
-    description: `Create or replace a section's header or footer on all pages: one line of text plus an optional page-number field. A new one shows immediately; replacing an existing one discards its content and applies at commit, so check it with render_page first. ${WRITE_POINTER}`,
+    description: `Create or replace a section's header or footer on all pages: one line of text plus an optional page-number field. The change shows immediately; replacing an existing one discards its content, so check it with render_page first. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -1008,7 +1008,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'replace_all',
-    description: `Find and replace every occurrence across body and table cells in one call; better than looping find_text + replace_range. Matches inside ranges already marked for deletion are skipped (skippedPendingDelete). Up to maxMatches (default 100, max 200); if truncated, call again. ${WRITE_POINTER}`,
+    description: `Find and replace every occurrence across body and table cells in one call; better than looping find_text + replace_range (each write shifts coordinates; this replaces back-to-front). Up to maxMatches (default 100, max 200); if truncated, call again. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       query: z.string().min(1),
@@ -1091,7 +1091,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'verify_changes',
-    description: `Self-check a batch of edits: ops staged since your last verify_changes this turn (full:true for the whole change set) with kind and applied flag (false = applies at commit), counts, post-edit text digests, affected pages and warnings. includeImage:true adds a PNG of the first affected page. Call it after a batch, fix problems, then end the turn. delete_range/replace_range results are already in the live preview; do NOT re-insert removed text.`,
+    description: `Self-check a batch of edits: ops staged since your last verify_changes this turn (full:true for the whole change set) with kind and summary, counts, post-edit text digests, affected pages and warnings. Every staged edit is already applied, so the document you read or render is what gets committed. includeImage:true adds a PNG of the first affected page. Call it after a batch, fix problems, then end the turn. delete_range/replace_range results are already in the live preview; do NOT re-insert removed text.`,
     shape: {
       changeSetId: z.string().min(1).optional().describe('Default: the open change set'),
       includeImage: z.boolean().default(false).optional(),

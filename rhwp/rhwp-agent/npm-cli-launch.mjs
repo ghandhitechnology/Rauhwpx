@@ -204,6 +204,28 @@ export function resolveNpmCliLaunch(command, deps = {}) {
 }
 
 /**
+ * bare 명령 이름을 env.PATH 에서 절대 경로로 찾는다. 이미 경로 구분자를 포함한
+ * 값은 존재할 때만 절대 경로로 돌려준다. 못 찾으면 null — 호출자가 폴백을 고른다.
+ * Agent SDK 처럼 PATH 를 스스로 탐색하지 않는 스폰 소비자가 spawn 과 같은
+ * 바이너리를 가리키게 하는 공용 해석기다.
+ *
+ * @param {string} command
+ * @param {{ env?: NodeJS.ProcessEnv, existsSync?: typeof fsExistsSync, whichSync?: Function }} [deps]
+ * @returns {string | null}
+ */
+export function resolveCommandOnPath(command, deps = {}) {
+  const existsSync = deps.existsSync ?? fsExistsSync;
+  const whichSync = deps.whichSync ?? ((cmd, opt) => which.sync(cmd, { ...opt, nothrow: true }));
+  const requested = String(command ?? '');
+  if (!requested) return null;
+  if (path.isAbsolute(requested) || requested.includes('/') || requested.includes('\\')) {
+    const resolved = path.resolve(requested);
+    return existsSync(resolved) ? resolved : null;
+  }
+  return whichSync(requested, { path: (deps.env ?? process.env).PATH }) ?? null;
+}
+
+/**
  * @param {string} command
  * @param {readonly string[]} argv
  * @param {Parameters<typeof resolveNpmCliLaunch>[1]} [deps]

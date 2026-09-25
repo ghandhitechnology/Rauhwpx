@@ -226,19 +226,30 @@ test('edit_header_footer: 신규 꼬리말 + 쪽번호 필드는 즉시 적용, 
   assert.ok(!hfs.has('false:0'));
 });
 
-test('edit_header_footer: 기존 머리말 수정은 mark-only, turn commit 시 교체', async () => {
+test('edit_header_footer: 기존 머리말은 바로 교체되고 reject 가 원래 내용을 되살린다', async () => {
   const { call, pending, hfs, calls } = makeEnv();
   hfs.set('true:0', '기존 머리말');
   const r = (await call('edit_header_footer', {
     sectionIdx: 0, which: 'header', text: '새 머리말',
   })) as { changeSetId: string; note: string };
-  assert.ok(r.note.includes('replaced at the successful turn commit'));
-  assert.equal(hfs.get('true:0'), '기존 머리말'); // 아직 그대로
-  calls.length = 0;
-  pending.approve(r.changeSetId);
+  assert.ok(r.note.includes('text was replaced'));
   assert.equal(hfs.get('true:0'), '새 머리말');
   assert.ok(calls.some((c) => c.m === 'deleteTextInHeaderFooter'));
   assert.ok(!calls.some((c) => c.m === 'createHeaderFooter')); // 재생성 아님
+  pending.reject(r.changeSetId);
+  assert.equal(hfs.get('true:0'), '기존 머리말');
+});
+
+test('edit_header_footer: 기존 머리말 교체 → approve 는 다시 쓰지 않고 채택한다', async () => {
+  const { call, pending, hfs, calls } = makeEnv();
+  hfs.set('true:0', '기존 머리말');
+  const r = (await call('edit_header_footer', {
+    sectionIdx: 0, which: 'header', text: '새 머리말',
+  })) as { changeSetId: string };
+  calls.length = 0;
+  assert.equal(pending.approve(r.changeSetId), true);
+  assert.equal(hfs.get('true:0'), '새 머리말');
+  assert.ok(!calls.some((c) => c.m === 'insertTextInHeaderFooter'));
 });
 
 test('edit_header_footer: 줄바꿈 포함 텍스트 거부', async () => {

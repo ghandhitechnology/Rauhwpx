@@ -120,6 +120,13 @@ interface PictureTransformJournalDocument {
   discardPictureTransform(id: number): void;
 }
 
+interface ParagraphCaptureDocument {
+  captureParagraph(sec: number, para: number): number;
+  restoreCapturedParagraph(id: number, sec: number, para: number): void;
+  discardParagraphCapture(id: number): void;
+  getParagraphContentDigest(sec: number, para: number): string;
+}
+
 /** [#6806] 세 함수가 모두 있는 빌드에서만 그림 리사이즈 Undo 를 저널로 기록한다. */
 function pictureTransformJournalDocument(doc: HwpDocument | null): PictureTransformJournalDocument {
   if (!doc) throw new Error('문서가 로드되지 않았습니다');
@@ -3391,6 +3398,43 @@ export class WasmBridge {
 
   discardPictureTransform(id: number): void {
     pictureTransformJournalDocument(this.doc).discardPictureTransform(id);
+  }
+
+  /**
+   * 에이전트 대기 편집의 문단 단위 역연산 — 본문 문단 하나를 통째로 보관한다.
+   * 이 기능이 없는 WASM 빌드면 null 이다 (호출자는 문서 스냅샷으로 되돌린다).
+   */
+  captureParagraph(sec: number, para: number): number | null {
+    const doc = this.paragraphCaptureDocument();
+    return doc ? doc.captureParagraph(sec, para) : null;
+  }
+
+  /** 보관한 문단으로 지정 위치의 본문 문단을 되돌린다. 보관본은 discard 전까지 남는다. */
+  restoreCapturedParagraph(id: number, sec: number, para: number): void {
+    const doc = this.paragraphCaptureDocument();
+    if (!doc) throw new Error('문단 보관을 지원하는 WASM 빌드가 필요합니다');
+    doc.restoreCapturedParagraph(id, sec, para);
+  }
+
+  discardParagraphCapture(id: number): void {
+    this.paragraphCaptureDocument()?.discardParagraphCapture(id);
+  }
+
+  /** 레이아웃을 뺀 본문 문단 내용 지문 — 기능이 없는 빌드면 null. */
+  getParagraphContentDigest(sec: number, para: number): string | null {
+    const doc = this.paragraphCaptureDocument();
+    return doc ? doc.getParagraphContentDigest(sec, para) : null;
+  }
+
+  private paragraphCaptureDocument(): ParagraphCaptureDocument | null {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const doc = this.doc as unknown as Partial<ParagraphCaptureDocument>;
+    return typeof doc.captureParagraph === 'function'
+      && typeof doc.restoreCapturedParagraph === 'function'
+      && typeof doc.discardParagraphCapture === 'function'
+      && typeof doc.getParagraphContentDigest === 'function'
+      ? doc as ParagraphCaptureDocument
+      : null;
   }
 
   saveSnapshot(): number {

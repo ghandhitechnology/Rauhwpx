@@ -336,6 +336,31 @@ function makeEnv(sourcePath: string | null = null) {
     discardSnapshot: (id: number) => { snapshots.delete(id); },
   });
 
+  // 문단 보관본 — 엔진 captureParagraph 계약: 문단 하나(텍스트·모양·그 문단의 표)를 통째로 되돌린다
+  let captureId = 0;
+  const captures = new Map<number, { body: string; shape: number; tables: FakeTable[] }>();
+  const paragraphState = (p: number) => ({
+    body: body[p], shape: bodyParaShapes[p], tables: structuredClone(tables.filter((t) => t.paraIdx === p)),
+  });
+  Object.assign(wasm, {
+    captureParagraph: (_s: number, p: number) => {
+      record('captureParagraph', p);
+      captures.set(++captureId, paragraphState(p));
+      return captureId;
+    },
+    restoreCapturedParagraph: (id: number, _s: number, p: number) => {
+      record('restoreCapturedParagraph', p);
+      const saved = captures.get(id)!;
+      body[p] = saved.body;
+      bodyParaShapes[p] = saved.shape;
+      const others = tables.filter((t) => t.paraIdx !== p);
+      tables.splice(0, tables.length, ...others,
+        ...structuredClone(saved.tables).map((t) => ({ ...t, paraIdx: p })));
+    },
+    discardParagraphCapture: (id: number) => { captures.delete(id); },
+    getParagraphContentDigest: (_s: number, p: number) => JSON.stringify(paragraphState(p)),
+  });
+
   const bus = new EventBus();
   const revision = new RevisionTracker(bus);
   let externalSnapshotIds = 0;
@@ -364,7 +389,7 @@ function makeEnv(sourcePath: string | null = null) {
   });
   const call = (tool: string, args: Record<string, unknown> = {}) =>
     executor.execute(tool, { expectedRevision: revision.revision, ...args }, 'claude');
-  return { executor, pending, revision, call, body, tables, calls, bus, wasm, snapshots,
+  return { executor, pending, revision, call, body, tables, calls, bus, wasm, snapshots, captures,
     getExternalSnapshotCount: () => externalSnapshotIds };
 }
 
@@ -448,8 +473,8 @@ test('edit_table insert_row: 즉시 적용, reject 시 원상복구', async () =
   assert.equal(tables.length, 0); // 같은 change-set 의 createTable 도 함께 reject 된다
 });
 
-test('edit_table delete_row 는 mark-only + 같은 표 후속 편집은 PENDING_DESTRUCTIVE_OP', async () => {
-  const { call, pending, tables, calls } = makeEnv();
+test('edit_table delete_row: 즉시 적용되고 새 크기를 돌려주며, reject 는 문단 보관본으로 되돌린다', async () => {
+  const { call, pending, tables, calls, captures } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a'], ['b'], ['c']],
   })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
@@ -457,77 +482,65 @@ test('edit_table delete_row 는 mark-only + 같은 표 후속 편집은 PENDING_
   const t = tables[0];
   const del = (await call('edit_table', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'delete_row', rowIdx: 1,
-  })) as { changeSetId: string };
-  assert.equal(t.rows, 3); // 아직 적용 안 됨
-  await expectErr(call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 0,
-  }), 'PENDING_DESTRUCTIVE_OP');
-  // 삭제될 행(1) 이후의 셀은 승인 시 cellIdx 가 당겨지므로 여전히 막힌다
-  const err = await expectErr(call('insert_text', {
-    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 2 },
-  }), 'PENDING_DESTRUCTIVE_OP');
-  assert.match(err.message, /delete_row at row 1/);
-  calls.length = 0;
-  pending.approve(del.changeSetId);
-  assert.equal(tables[0].rows, 2); // approve 시 실행 (snapshot restore 뒤의 현재 표)
+  })) as { changeSetId: string; rowCount: number; colCount: number; cellCount: number };
+  assert.deepEqual([del.rowCount, del.colCount, del.cellCount], [2, 1, 2]);
+  assert.equal(tables[0].rows, 2);
   assert.ok(calls.some((x) => x.m === 'deleteTableRow'));
-});
-
-test('PENDING_DESTRUCTIVE_OP 가드: 뒤쪽 행 delete_row 만 걸려 있으면 앞 행 셀은 편집된다', async () => {
-  const { call, pending, tables } = makeEnv();
-  const c = (await call('create_table', {
-    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a'], ['b'], ['c']],
-  })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
-  pending.approve(c.changeSetId);
-  const t = tables[0];
-  await call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'delete_row', rowIdx: 1,
-  });
-  // 행 0 은 삭제 대상 행보다 앞이라 flat cellIdx 가 유지된다 → 통과
+  // 표는 잠기지 않는다 — 새 좌표(행 1 = 옛 행 2)로 바로 편집한다
   await call('insert_text', {
     sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X',
-    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 },
+    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 1 },
   });
-  assert.equal(tables[0].cells[0][0], 'Xa');
+  assert.equal(tables[0].cells[1][0], 'Xc');
+  calls.length = 0;
+  pending.reject(del.changeSetId);
+  assert.equal(tables[0].rows, 3);
+  assert.deepEqual(tables[0].cells.map((cell) => cell[0]), ['a', 'b', 'c']);
+  assert.ok(calls.some((x) => x.m === 'restoreCapturedParagraph'));
+  assert.equal(captures.size, 0, '보관본은 set 이 끝나면 해제된다');
 });
 
-test('PENDING_DESTRUCTIVE_OP 가드: 열 단위 op 은 앞 행 셀도 막는다', async () => {
+test('edit_table delete_row → approve: 미리보기를 그대로 확정하고 표를 다시 만들지 않는다', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a'], ['b'], ['c']],
+  })) as { changeSetId: string };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  const del = (await call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'delete_row', rowIdx: 1,
+  })) as { changeSetId: string };
+  calls.length = 0;
+  assert.equal(pending.approve(del.changeSetId), true);
+  assert.equal(tables[0].rows, 2);
+  assert.ok(!calls.some((x) => x.m === 'deleteTableRow'), '승인은 op 을 다시 실행하지 않는다');
+  assert.equal(pending.hasPending(), false);
+});
+
+test('구조 op 뒤에도 같은 표의 셀을 바로 편집한다 (열 삭제·병합)', async () => {
   const { call, pending, tables } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
-  })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
+  })) as { changeSetId: string };
   pending.approve(c.changeSetId);
   const t = tables[0];
-  await call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'delete_col', colIdx: 1,
-  });
-  const err = await expectErr(call('insert_text', {
+  const at = { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx };
+  const col = (await call('edit_table', { ...at, op: 'delete_col', colIdx: 1 })) as { colCount: number };
+  assert.equal(col.colCount, 1);
+  await call('insert_text', {
     sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X',
+    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 1 },
+  });
+  assert.equal(tables[0].cells[1][0], 'Xc');
+  await call('edit_table', { ...at, op: 'merge_cells', startRow: 0, startCol: 0, endRow: 1, endCol: 0 });
+  await call('insert_text', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'Y',
     cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 },
-  }), 'PENDING_DESTRUCTIVE_OP');
-  assert.match(err.message, /delete_col/);
+  });
+  assert.equal(tables[0].cells[0][0], 'Ya');
 });
 
-test('PENDING_DESTRUCTIVE_OP 가드: merge_cells 는 모든 셀을 막는다', async () => {
-  const { call, pending, tables } = makeEnv();
-  const c = (await call('create_table', {
-    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
-  })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
-  pending.approve(c.changeSetId);
-  const t = tables[0];
-  await call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
-    op: 'merge_cells', startRow: 1, startCol: 0, endRow: 1, endCol: 1,
-  });
-  const err = await expectErr(call('insert_text', {
-    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X',
-    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 },
-  }), 'PENDING_DESTRUCTIVE_OP');
-  assert.match(err.message, /merge_cells/);
-});
-
-test('delete_table 는 mark-only + 같은 표 후속 편집은 PENDING_DESTRUCTIVE_OP', async () => {
+test('delete_table: 즉시 삭제되고 reject 는 표를 되살린다', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
@@ -537,34 +550,65 @@ test('delete_table 는 mark-only + 같은 표 후속 편집은 PENDING_DESTRUCTI
   const t = tables[0];
   const del = (await call('delete_table', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
-  })) as { changeSetId: string; marked: boolean; ok: boolean };
-  assert.equal(del.ok, true);
-  assert.equal(del.marked, true);
-  assert.equal(tables.length, 1); // 아직 적용 안 됨
-  assert.ok(!calls.some((x) => x.m === 'deleteTableControl'));
-  await expectErr(call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 0,
-  }), 'PENDING_DESTRUCTIVE_OP');
-  calls.length = 0;
-  pending.approve(del.changeSetId);
+  })) as { changeSetId: string; deleted: { paraIdx: number; controlIdx: number } };
+  assert.deepEqual(del.deleted, { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx });
   assert.equal(tables.length, 0);
   assert.ok(calls.some((x) => x.m === 'deleteTableControl'));
+  pending.reject(del.changeSetId);
+  assert.equal(tables.length, 1);
+  assert.deepEqual(tables[0].cells.map((cell) => cell[0]), ['a', 'b', 'c', 'd']);
 });
 
-test('delete_table → reject: 표가 남고 deleteTableControl 을 부르지 않는다', async () => {
+test('delete_table 앞에서 채운 셀 편집도 reject 하면 함께 되돌아간다 (검증 보류)', async () => {
+  const { call, pending, tables } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b']],
+  })) as { changeSetId: string };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  const fill = (await call('insert_text', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 1, text: '!',
+    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 },
+  })) as { changeSetId: string };
+  await call('delete_table', { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx });
+  assert.equal(tables.length, 0);
+  pending.reject(fill.changeSetId);
+  assert.equal(tables.length, 1);
+  assert.equal(tables[0].cells[0][0], 'a', '표 삭제를 되돌린 뒤 셀 삽입도 되돌린다');
+});
+
+test('행 삽입 앞뒤로 같은 셀 번호에 쓴 텍스트도 reject 가 모두 되돌린다 (되돌린 op 은 기대값에서 뺀다)', async () => {
+  const { call, pending, tables } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
+  })) as { changeSetId: string };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  const cell = { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 };
+  const events: string[] = [];
+  pending.onChange((e) => { if (e.type === 'invalidated') events.push(e.reason); });
+  const first = (await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'q', cell })) as { changeSetId: string };
+  await call('edit_table', { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 0, below: false });
+  await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'm', cell });
+  assert.deepEqual(tables[0].cells.map((p) => p[0]), ['m', '', 'qa', 'b', 'c', 'd']);
+  pending.reject(first.changeSetId);
+  assert.deepEqual(tables[0].cells.map((p) => p[0]), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(events, [], '아무 편집도 문서에 남지 않는다');
+});
+
+test('delete_table → approve: 삭제를 그대로 확정한다', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a']],
   })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
   pending.approve(c.changeSetId);
-  calls.length = 0;
   const t = tables[0];
   const del = (await call('delete_table', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
   })) as { changeSetId: string };
-  assert.equal(tables.length, 1);
-  pending.reject(del.changeSetId);
-  assert.equal(tables.length, 1);
+  calls.length = 0;
+  assert.equal(pending.approve(del.changeSetId), true);
+  assert.equal(tables.length, 0);
   assert.ok(!calls.some((x) => x.m === 'deleteTableControl'));
 });
 
@@ -578,7 +622,7 @@ test('delete_table: 없는 표 주소·누락 인자는 INVALID_ARGS', async () 
   }), 'INVALID_ARGS');
 });
 
-test('edit_table merge_cells: 인자 검증과 mark-only 실행', async () => {
+test('edit_table merge_cells: 인자 검증과 즉시 실행', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
@@ -592,10 +636,12 @@ test('edit_table merge_cells: 인자 검증과 mark-only 실행', async () => {
   const m = (await call('edit_table', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
     op: 'merge_cells', startRow: 0, startCol: 0, endRow: 0, endCol: 1,
-  })) as { changeSetId: string };
-  assert.ok(!calls.some((x) => x.m === 'mergeTableCells'));
-  pending.approve(m.changeSetId);
+  })) as { changeSetId: string; cellCount: number };
   assert.ok(calls.some((x) => x.m === 'mergeTableCells'));
+  assert.equal(typeof m.cellCount, 'number');
+  calls.length = 0;
+  pending.approve(m.changeSetId);
+  assert.ok(!calls.some((x) => x.m === 'mergeTableCells'), '승인은 병합을 다시 실행하지 않는다');
 });
 
 test('get_table_properties + set_table_props: 표 개체를 가로 가운데로 배치한다', async () => {
@@ -623,9 +669,8 @@ test('get_table_properties + set_table_props: 표 개체를 가로 가운데로 
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
     tableProps: { horizontalAlign: 'center' },
   })) as { changeSetId: string };
-  assert.ok(!calls.some((entry) => entry.m === 'setTableProperties'));
-  pending.approve(edit.changeSetId);
   const apply = calls.find((entry) => entry.m === 'setTableProperties')!;
+  pending.approve(edit.changeSetId);
   assert.deepEqual(apply.a[2], {
     horzAlign: 'Center', treatAsChar: false, horzRelTo: 'Column', horzOffset: 0,
   });
@@ -729,7 +774,7 @@ test('set_cell_props exposes padding, direction, protection, form field and read
   assert.equal(read.cell.fieldName, 'amount');
 });
 
-test('신규 표 op 5종은 mark-only 이고 승인 시 각 브리지 메서드로 나간다', async () => {
+test('표 op 5종은 호출 즉시 각 브리지 메서드로 나가고 승인은 다시 실행하지 않는다', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const created = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['1', '2']],
@@ -751,12 +796,15 @@ test('신규 표 op 5종은 mark-only 이고 승인 시 각 브리지 메서드�
   })) as { changeSetId: string };
   const caption = (await call('edit_table', { ...at, op: 'set_caption', text: '분기별 매출' })) as { changeSetId: string };
 
-  // mark-only: 승인 전에는 어떤 브리지 뮤테이터도 불리지 않는다.
+  // 호출 즉시 실행된다 — 모두 같은 턴 set 이라 한 번의 승인이 그대로 채택한다.
   for (const method of ['setTableColumnWidths', 'fitTableToPage', 'setCellZoneProperties', 'evaluateTableFormulaEx', 'setTableCaptionText']) {
-    assert.ok(!calls.some((entry) => entry.m === method), `${method} 가 승인 전에 실행됐다`);
+    assert.equal(calls.filter((entry) => entry.m === method).length, 1, `${method} 가 호출 시점에 한 번 실행돼야 한다`);
   }
-
-  for (const set of [widths, fit, zone, formula, caption]) pending.approve(set.changeSetId);
+  assert.deepEqual(new Set([widths, fit, zone, formula, caption].map((set) => set.changeSetId)).size, 1);
+  pending.approve(widths.changeSetId);
+  for (const method of ['setTableColumnWidths', 'fitTableToPage', 'setCellZoneProperties', 'evaluateTableFormulaEx', 'setTableCaptionText']) {
+    assert.equal(calls.filter((entry) => entry.m === method).length, 1, `${method} 가 승인 때 다시 실행됐다`);
+  }
 
   assert.deepEqual(calls.find((entry) => entry.m === 'setTableColumnWidths')!.a[2], [mmToHu(60), mmToHu(90)]);
   assert.ok(calls.some((entry) => entry.m === 'fitTableToPage'));
@@ -844,7 +892,7 @@ test('edit_table split_cell rejects covered coordinates inside a merged cell', a
   assert.match(error.message, /covered coordinates/);
 });
 
-test('edit_table split_cell is mark-only and executes on approval', async () => {
+test('edit_table split_cell runs immediately and reject restores the cell', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const created = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['wide']],
@@ -855,33 +903,27 @@ test('edit_table split_cell is mark-only and executes on approval', async () => 
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
     op: 'split_cell', rowIdx: 0, colIdx: 0, splitRows: 2, splitCols: 3,
   })) as { changeSetId: string };
-  assert.ok(!calls.some((entry) => entry.m === 'splitTableCellInto'));
-  pending.approve(split.changeSetId);
   const apply = calls.find((entry) => entry.m === 'splitTableCellInto')!;
   assert.deepEqual(apply.a, [0, 0, 2, 3, true, false]);
+  calls.length = 0;
+  pending.reject(split.changeSetId);
+  assert.ok(calls.some((entry) => entry.m === 'restoreCapturedParagraph'));
 });
 
-test('edit_table split_cell approval fails when the engine rejects the split', async () => {
-  const { call, pending, tables, wasm } = makeEnv();
+test('edit_table split_cell fails on the tool call when the engine rejects the split', async () => {
+  const { call, pending, tables, wasm, captures } = makeEnv();
   const created = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['wide']],
   })) as { changeSetId: string };
   pending.approve(created.changeSetId);
   const table = tables[0];
-  const split = (await call('edit_table', {
+  wasm.splitTableCellInto = () => ({ ok: false, cellCount: 1 });
+  await expectErr(call('edit_table', {
     sectionIdx: 0, paraIdx: table.paraIdx, controlIdx: table.controlIdx,
     op: 'split_cell', rowIdx: 0, colIdx: 0, splitRows: 2, splitCols: 2,
-  })) as { changeSetId: string };
-  wasm.splitTableCellInto = () => ({ ok: false, cellCount: 1 });
-
-  const originalWarn = console.warn;
-  console.warn = () => {};
-  try {
-    assert.equal(pending.approve(split.changeSetId), false);
-    assert.equal(pending.hasPending(), true);
-  } finally {
-    console.warn = originalWarn;
-  }
+  }), 'RPC_ERROR');
+  assert.equal(pending.hasPending(), false, '실패한 op 은 등록되지 않는다');
+  assert.equal(captures.size, 0, '실패한 op 의 보관본은 바로 해제된다');
 });
 
 // ─── apply_para_format / apply_style ────────────────────────
@@ -902,14 +944,14 @@ test('apply_para_format: pt→HWPUNIT 변환 적용, reject 는 setParaShapeId �
   assert.deepEqual(restore.a, [0, 10]); // 이전 para_shape_id 복원
 });
 
-test('apply_style: mark-only, approve 시 applyStyle 실행 + 존재하지 않는 styleId 거부', async () => {
+test('apply_style: 즉시 적용, reject 는 문단 보관본으로 복원 + 존재하지 않는 styleId 거부', async () => {
   const { call, pending, calls } = makeEnv();
   await expectErr(call('apply_style', { sectionIdx: 0, paraIdx: 0, styleId: 77 }), 'INVALID_ARGS');
   const r = (await call('apply_style', { sectionIdx: 0, paraIdx: 0, styleId: 3 })) as { changeSetId: string };
-  assert.ok(!calls.some((x) => x.m === 'applyStyle'));
-  pending.approve(r.changeSetId);
   const apply = calls.find((x) => x.m === 'applyStyle')!;
   assert.deepEqual(apply.a, [0, 0, 3]);
+  pending.reject(r.changeSetId);
+  assert.deepEqual(calls.find((x) => x.m === 'restoreCapturedParagraph')!.a, [0]);
 });
 
 test('list_styles 는 스타일 목록을 반환한다', async () => {
@@ -1199,15 +1241,14 @@ test('같은 표에 insert_row 두 번 → reject 가 둘 다 되돌린다 (형�
   const r1 = (await call('edit_table', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 1,
   })) as { changeSetId: string };
-  // executor 가드가 같은 표의 후속 구조 편집을 PENDING_DESTRUCTIVE_OP 로 막으므로,
-  // 두 번째 insert 는 매니저에 직접 등록한다 (reject 역연산 회귀 검증이 목적)
-  pending.addObjectOp('claude', {
-    type: 'tableStructure', sectionIdx: 0, tableParaIdx: t.paraIdx, controlIdx: t.controlIdx,
-    op: 'insert_row', index: 2, after: true,
-  });
-  assert.equal(t.rows, 6);
+  // 표는 잠기지 않는다 — 같은 표의 두 번째 구조 편집이 바로 통과한다
+  const r2 = (await call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 2,
+  })) as { changeSetId: string; rowCount: number };
+  assert.equal(r2.rowCount, 6);
+  assert.equal(tables[0].rows, 6);
   pending.reject(r1.changeSetId); // 두 op 은 같은 change-set 에 있다
-  assert.equal(t.rows, 4); // 둘 다 되돌아감 — 이전에는 첫 op 이 드리프트로 오판·잔류했다
+  assert.equal(tables[0].rows, 4); // 둘 다 되돌아감 — 이전에는 첫 op 이 드리프트로 오판·잔류했다
 });
 
 test('pending 표에 사용자가 입력하면 reject 는 표를 지우지 않고 남긴다 (내용 지문)', async () => {

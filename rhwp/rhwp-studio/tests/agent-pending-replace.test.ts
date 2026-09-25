@@ -516,14 +516,12 @@ test('중첩 삽입 approve: 둘 다 채택되고 단일 히스토리 항목이�
 });
 
 test('멀티 문단 검증은 전체 텍스트를 비교한다 — 두 번째 문단의 사용자 수정을 감지한다', () => {
-  const { mgr, fake, events } = makeManager([paraOf('first line'), paraOf('second line')]);
-  const del = mgr.markDelete('claude', {
-    sectionIdx: 0, startParaIdx: 0, startCharOffset: 0, endParaIdx: 1, endCharOffset: 11,
-  });
+  const { mgr, fake, events } = makeManager([paraOf('base')]);
+  const ins = mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 4 }, 'X\nsecond line');
   // 사용자가 두 번째 문단을 수정 (untracked drift) — 첫 줄 검사로는 못 잡는다
   fake.mutatePara(1, (p) => { p.chars[0] = 'S'; });
-  mgr.approve(del.changeSetId);
-  assert.equal(fake.text(0), 'first line'); // 삭제가 실행되지 않아야 한다
+  mgr.reject(ins.changeSetId);
+  assert.equal(fake.text(0), 'baseX'); // 사용자가 손댄 삽입은 되돌리지 않는다
   assert.equal(fake.text(1), 'Second line');
   assert.ok(events.includes('invalidated'));
 });
@@ -555,33 +553,6 @@ test('all-drifted approve: 미리보기를 방치하지 않고 채택하며 히�
 
 // ─── 새 public API ────────────────────────────────────────
 
-test('hasPendingStructureOp: 적용된 구조 op 과 마크된 구조 op 모두 감지한다', () => {
-  const { mgr, fake } = makeManager([paraOf('p0'), paraOf(''), paraOf('')]);
-  fake.wasm.addFakeTable(1, 0, 2, 2);
-  fake.wasm.addFakeTable(2, 0, 3, 3);
-  assert.equal(mgr.hasPendingStructureOp(0, 1, 0), false);
-
-  mgr.addObjectOp('claude', {
-    type: 'tableStructure', sectionIdx: 0, tableParaIdx: 1, controlIdx: 0,
-    op: 'insert_row', index: 0, after: true,
-  });
-  assert.equal(mgr.hasPendingStructureOp(0, 1, 0), true);  // applied-now insert_row
-  assert.equal(mgr.hasPendingStructureOp(0, 2, 0), false); // 다른 표
-
-  mgr.addObjectOp('claude', {
-    type: 'tableStructureMarked', sectionIdx: 0, tableParaIdx: 2, controlIdx: 0,
-    op: 'delete_row', rowIdx: 1, dims: { rowCount: 3, colCount: 3 },
-  });
-  assert.equal(mgr.hasPendingStructureOp(0, 2, 0), true); // 마크된 delete_row
-  fake.wasm.addFakeTable(3, 0, 2, 2);
-  mgr.addObjectOp('claude', {
-    type: 'deleteTable', sectionIdx: 0, tableParaIdx: 3, controlIdx: 0,
-    dims: { rowCount: 2, colCount: 2 },
-  });
-  assert.equal(mgr.hasPendingStructureOp(0, 3, 0), true); // 마크된 delete_table
-  assert.equal(mgr.hasPendingStructureOp(0, 9, 9), false);
-});
-
 test('setFieldValue 실패: FIELD_NOT_FOUND 와 get_fields 안내를 던진다', () => {
   const { mgr } = makeManager([paraOf('x')]);
   try {
@@ -605,55 +576,22 @@ test('setFieldValue 드리프트 프로브: 사용자가 값을 바꾸면 되돌
   assert.equal(fake.fields[0].value, 'user-edit'); // old 로 덮어쓰지 않는다
 });
 
-test('describeChangeSet: 종류/적용 여부/다이제스트/좌표를 요약한다', () => {
+test('describeChangeSet: 종류/다이제스트/좌표를 요약한다', () => {
   const { mgr } = makeManager([paraOf('base text')]);
   const ins = mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 5 }, 'NEW');
-  mgr.markDelete('claude', {
-    sectionIdx: 0, startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 4,
-  });
+  mgr.replaceText({ sectionIdx: 0, startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 4 }, '', 'claude');
   const d = mgr.describeChangeSet(ins.changeSetId);
   assert.equal(d.changeSetId, ins.changeSetId);
   assert.equal(d.status, 'open');
   assert.equal(d.agent, 'claude');
   assert.equal(d.ops.length, 2);
   assert.equal(d.ops[0].kind, 'insert');
-  assert.equal(d.ops[0].applied, true);
   assert.match(d.ops[0].summary, /insert "NEW"/);
-  assert.match(d.ops[0].summary, /p0:5-p0:8/);
   assert.equal(d.ops[1].kind, 'delete');
-  assert.equal(d.ops[1].applied, false);
+  assert.match(d.ops[1].summary, /delete "base"/);
   // 인자 생략 시 최근 set, 없는 id 는 null
   assert.equal(mgr.describeChangeSet().changeSetId, ins.changeSetId);
   assert.equal(mgr.describeChangeSet('nope').changeSetId, null);
-});
-
-test('withMarkedOpsApplied: 마크 op 을 임시 적용하고 항상 복원한다', () => {
-  const { mgr, fake } = makeManager([paraOf('keep drop rest')]);
-  const ins = mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'A ');
-  mgr.markDelete('claude', {
-    sectionIdx: 0, startParaIdx: 0, startCharOffset: 7, endParaIdx: 0, endCharOffset: 11,
-  }); // "drop" 마크 (삽입으로 인덱스 이동 반영됨)
-  mgr.endTurn();
-
-  const seen: string[] = [];
-  const out = mgr.withMarkedOpsApplied(ins.changeSetId, () => {
-    seen.push(fake.text(0));
-    // 재진입 — 같은 set 이면 다시 적용하지 않고 그대로 실행한다
-    mgr.withMarkedOpsApplied(ins.changeSetId, () => seen.push(fake.text(0)));
-    return 42;
-  });
-  assert.equal(out, 42);
-  assert.deepEqual(seen, ['A keep  rest', 'A keep  rest']); // "drop" 삭제된 상태가 보인다
-  assert.equal(fake.text(0), 'A keep drop rest'); // 복원됨
-  assert.equal(mgr.hasPending(), true); // set 은 그대로 남아 있다
-
-  // fn 이 throw 하든 복원된다
-  assert.throws(() => mgr.withMarkedOpsApplied(ins.changeSetId, () => { throw new Error('boom'); }));
-  assert.equal(fake.text(0), 'A keep drop rest');
-
-  // 복원 후 approve 는 정상 동작해야 한다 (op 좌표가 깨지지 않았다)
-  mgr.approve(ins.changeSetId);
-  assert.equal(fake.text(0), 'A keep  rest');
 });
 
 // ─── 관측되지 않는 사용자 편집(untracked drift) 보호 ──────
@@ -763,70 +701,6 @@ test('pending replace 스냅샷은 예산에 등록되어 WASM 상한을 넘기�
   assert.equal(external, 0);
 });
 
-// ─── 재작성 패턴: 삭제 마크 시작점에 삽입 (버그 수정 회귀) ─────────
-
-test('재작성 패턴 approve: 마크 시작점의 삽입 텍스트는 살아남고 옛 텍스트만 지워진다', () => {
-  const { mgr, fake } = makeManager([
-    paraOf('head'), paraOf('old1'), paraOf('old2'), paraOf('tail'),
-  ]);
-  const d = mgr.markDelete('claude', {
-    sectionIdx: 0, startParaIdx: 1, startCharOffset: 0, endParaIdx: 2, endCharOffset: 4,
-  });
-  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 1, charOffset: 0 }, 'new1\nnew2');
-  // 미리보기: 삽입은 즉시 반영, 마크는 옛 텍스트 위에만 남는다
-  assert.equal(fake.text(1), 'new1');
-  assert.equal(fake.text(2), 'new2old1');
-  // 마크 범위가 옛 텍스트를 정확히 가리켜야 한다 (삽입 텍스트를 삼키면 안 된다)
-  const mark = mgr.getChangeSets()[0].ops.find((o) => o.kind === 'delete')!;
-  assert.deepEqual(
-    [mark.range.startParaIdx, mark.range.startCharOffset, mark.range.endParaIdx, mark.range.endCharOffset],
-    [2, 4, 3, 4],
-  );
-  mgr.approve(d.changeSetId);
-  assert.equal(fake.paraCount(), 4);
-  assert.equal(fake.text(0), 'head');
-  assert.equal(fake.text(1), 'new1');
-  assert.equal(fake.text(2), 'new2');
-  assert.equal(fake.text(3), 'tail');
-});
-
-test('재작성 패턴 reject: 삽입이 되돌아가고 옛 텍스트가 그대로 남는다', () => {
-  const { mgr, fake } = makeManager([
-    paraOf('head'), paraOf('old1'), paraOf('old2'), paraOf('tail'),
-  ]);
-  const d = mgr.markDelete('claude', {
-    sectionIdx: 0, startParaIdx: 1, startCharOffset: 0, endParaIdx: 2, endCharOffset: 4,
-  });
-  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 1, charOffset: 0 }, 'new1\nnew2');
-  mgr.reject(d.changeSetId);
-  assert.equal(fake.paraCount(), 4);
-  assert.deepEqual([fake.text(0), fake.text(1), fake.text(2), fake.text(3)],
-    ['head', 'old1', 'old2', 'tail']);
-});
-
-test('재작성 패턴 (단일 문단): 마크 시작점 삽입 후 approve', () => {
-  const { mgr, fake } = makeManager([paraOf('hello world')]);
-  const d = mgr.markDelete('claude', {
-    sectionIdx: 0, startParaIdx: 0, startCharOffset: 6, endParaIdx: 0, endCharOffset: 11,
-  });
-  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 6 }, 'NEW');
-  assert.equal(fake.text(0), 'hello NEWworld');
-  mgr.approve(d.changeSetId);
-  assert.equal(fake.text(0), 'hello NEW');
-});
-
-test('findDeleteMarkContaining: 내부만 잡고 경계는 허용한다', () => {
-  const { mgr } = makeManager([paraOf('head'), paraOf('old1'), paraOf('old2'), paraOf('tail')]);
-  mgr.markDelete('claude', {
-    sectionIdx: 0, startParaIdx: 1, startCharOffset: 0, endParaIdx: 2, endCharOffset: 4,
-  });
-  assert.notEqual(mgr.findDeleteMarkContaining(0, 1, 2), null);   // 내부
-  assert.notEqual(mgr.findDeleteMarkContaining(0, 2, 0), null);   // 내부 (둘째 문단)
-  assert.equal(mgr.findDeleteMarkContaining(0, 1, 0), null);      // 시작 경계
-  assert.equal(mgr.findDeleteMarkContaining(0, 2, 4), null);      // 끝 경계
-  assert.equal(mgr.findDeleteMarkContaining(0, 0, 2), null);      // 범위 밖
-});
-
 // ─── 즉시 적용 삭제 (delete_range = replaceText(range, '')) ─────────────
 // 마크 전용 삭제는 원문을 레이아웃에 남겨, 편집이 많은 턴에서 미리보기 쪽나눔이
 // 최종본과 어긋났다(문서가 부풀어 여러 쪽으로 쪼개짐). delete_range 는 이제
@@ -849,8 +723,7 @@ test('빈 교체(삭제): 텍스트가 즉시 제거되고 op 은 replace 로 �
   assert.equal(last[0].kind, 'replace'); // exact diff 가 삭제 앵커로 렌더한다
   // describeChangeSet 은 에이전트에게 delete 로 보고한다
   const d = mgr.describeChangeSet(r.changeSetId);
-  assert.deepEqual(d.ops.map((o) => ({ kind: o.kind, applied: o.applied })),
-    [{ kind: 'delete', applied: true }]);
+  assert.deepEqual(d.ops.map((o) => o.kind), ['delete']);
 });
 
 test('빈 교체(삭제) reject: 스냅샷 복원으로 원본 텍스트/서식이 돌아온다', () => {
@@ -1186,4 +1059,18 @@ test('a user edit after an overwritten op keeps the old drift fallback', () => {
   mgr.reject(mgr.getChangeSets()[0].id);
   // 사용자 편집 이후에는 적용 직후 좌표를 믿지 않는다 — 사용자 글자를 지우지 않는다.
   assert.ok(fake.text(0).endsWith('hello!'));
+});
+
+test('a format whose range a later replace overwrote reverts on its original range', () => {
+  const { mgr, fake, calls, events } = makeManager([paraOf('hello world')]);
+  mgr.beginTurn('claude');
+  const range: DocRange = { sectionIdx: 0, startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 5 };
+  mgr.applyCharFormat('claude', range, { bold: true });
+  mgr.replaceText({ ...range }, 'HELLO!', 'claude');
+  calls.length = 0;
+  mgr.reject(mgr.getChangeSets()[0].id);
+  assert.equal(fake.text(0), 'hello world');
+  // 교체가 먼저 되돌아간 뒤, 서식 역연산은 무너진 live 범위가 아니라 적용 시점 범위에 걸린다
+  assert.deepEqual(calls.filter((c) => c.m === 'applyCharFormat').map((c) => c.args.slice(0, 3)), [[0, 0, 5]]);
+  assert.ok(!events.includes('invalidated'), 'the format is not dropped as drift');
 });

@@ -122,10 +122,6 @@ function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']])
         },
       };
     },
-    markDelete: (agent: string, range: unknown) => {
-      calls.push({ method: 'markDelete', args: [agent, range] });
-      return { changeSetId: 'cs-1', markedText: 'marked' };
-    },
     replaceText: (range: { sectionIdx: number; startParaIdx: number; startCharOffset: number }, text: string, agent: string) => {
       calls.push({ method: 'replaceText', args: [range, text, agent] });
       bus.emit('document-mutated', 'agent-pending-edit');
@@ -152,7 +148,6 @@ function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']])
       bus.emit('document-mutated', 'agent-pending-edit');
       return { changeSetId: 'cs-1', fieldId: 7, oldValue: 'old', newValue: value };
     },
-    hasPendingStructureOp: () => false,
     hasTemplateMutation: () => false,
     runAtomicBatch: <T,>(fn: () => T): T => {
       calls.push({ method: 'runAtomicBatch', args: [] });

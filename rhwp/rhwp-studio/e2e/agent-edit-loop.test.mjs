@@ -609,8 +609,8 @@ try {
         `per-op 요약 13건 (insert 1 / format 2 / replace 1 / paraFormat 8 / insertEquation 1): ${JSON.stringify(v1.ops.map((o) => o.kind))}`,
       );
       assert(
-        v1.ops.every((o) => o.id && typeof o.applied === 'boolean' && typeof o.summary === 'string'),
-        '모든 op 에 id/applied/summary 존재',
+        v1.ops.every((o) => o.id && typeof o.summary === 'string'),
+        '모든 op 에 id/summary 존재',
       );
       assert(
         Array.isArray(v1.postEditText) && v1.postEditText.length > 0

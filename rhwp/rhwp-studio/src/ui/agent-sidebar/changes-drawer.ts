@@ -208,8 +208,10 @@ function pendingObjectDetail(op: PendingOp): string {
     case 'createTable': return `표 삽입 · ${obj.rows}행 × ${obj.cols}열`;
     case 'insertImage': return `그림 삽입${obj.description ? ` · ${obj.description}` : ''}`;
     case 'insertEquation': return `수식 삽입 · ${obj.script}`;
-    case 'tableStructure': return `표 ${obj.op === 'insert_row' ? '행' : '열'} 삽입`;
-    case 'tableStructureMarked': return `표 ${({ delete_row: '행 삭제', delete_col: '열 삭제', merge_cells: '셀 병합', split_cell: '셀 나누기' } as const)[obj.op]}`;
+    case 'tableStructure': return `표 ${({
+      insert_row: '행 삽입', insert_col: '열 삽입', delete_row: '행 삭제',
+      delete_col: '열 삭제', merge_cells: '셀 병합', split_cell: '셀 나누기',
+    } as const)[obj.op]}`;
     case 'deleteTable': return `표 삭제 · ${obj.dims.rowCount}행 × ${obj.dims.colCount}열`;
     case 'setCellProps': return '셀 속성 변경';
     case 'setTableProps': return '표 속성 변경';
@@ -219,12 +221,19 @@ function pendingObjectDetail(op: PendingOp): string {
     case 'applyFormula': return `표 계산식 · ${obj.formula}`;
     case 'setCaption': return `표 캡션 · ${obj.text}`;
     case 'paraFormat': return '문단 서식 변경';
-    case 'applyStyle': return `문단 스타일 적용 · ${obj.styleId}`;
+    case 'applyStyle': return '문단 스타일 적용';
     case 'pageLayout': return '쪽 설정 변경';
-    case 'headerFooter': return `${obj.isHeader ? '머리말' : '꼬리말'} 변경 · ${obj.text}`;
+    case 'headerFooter': {
+      const kind = obj.isHeader ? '머리말' : '꼬리말';
+      return `${kind} ${obj.existedBefore ? '변경' : '삽입'}${obj.text ? ` · ${obj.text}` : ''}`;
+    }
     case 'insertNote': return `${obj.noteKind === 'endnote' ? '미주' : '각주'} 삽입 · ${obj.text}`;
     case 'setNoteText': return `각주/미주 변경 · ${obj.text}`;
-    case 'bookmark': return `책갈피 ${obj.op}${obj.name ? ` · ${obj.name}` : ''}`;
+    case 'bookmark': {
+      const label = ({ add: '추가', delete: '삭제', rename: '이름 변경' } as const)[obj.op];
+      const name = obj.name ?? obj.prev?.name;
+      return `책갈피 ${label}${name ? ` · ${name}` : ''}`;
+    }
     default: return '개체 변경';
   }
 }
@@ -236,7 +245,6 @@ export function renderPendingOpDiff(op: PendingOp, imageUrls?: Map<string, strin
   item.dataset.location = pendingAddress(op);
   const lines = el('div', 'ag-changes-lines');
   if (op.kind === 'insert') lines.append(diffLine('+', [{ text: op.text, changed: false }], `${op.id}:add`));
-  else if (op.kind === 'delete') lines.append(diffLine('−', [{ text: op.text, changed: false }], `${op.id}:del`));
   else if (op.kind === 'replace') {
     const parts = inlineParts(op.deletedText, op.text);
     lines.append(diffLine('−', parts.before, `${op.id}:del`));
@@ -246,6 +254,10 @@ export function renderPendingOpDiff(op: PendingOp, imageUrls?: Map<string, strin
     lines.append(diffLine('−', parts.before, `${op.id}:del`), diffLine('+', parts.after, `${op.id}:add`));
   } else {
     lines.append(diffLine('·', [{ text: pendingObjectDetail(op), changed: false }], `${op.id}:ctx`));
+    // 행/열/표 삭제 — 지워진 내용을 삭제 줄로 보여 준다.
+    if (op.kind === 'object' && 'removedText' in op.obj && op.obj.removedText?.trim()) {
+      lines.append(diffLine('−', [{ text: op.obj.removedText, changed: true }], `${op.id}:del`));
+    }
     if (op.kind === 'object' && op.obj.type === 'insertImage' && imageUrls) {
       const preview = el('div', 'ag-object-preview ag-image-preview');
       const image = el('img', '');

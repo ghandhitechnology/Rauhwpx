@@ -1008,18 +1008,6 @@ export interface CharFormatProps {
   fontId?: number;
 }
 
-/**
- * pending 구조 op 요약 — executor 의 PENDING_DESTRUCTIVE_OP 가드가 쓴다.
- * flat cellIdx 는 행 우선(row-major)이라, 영향 행보다 앞선 행의 셀은 번호가 그대로다.
- * 그래서 행 단위 op 만 affectedRow 를 채우고 열/병합/표 삭제는 null 로 둔다.
- */
-export interface PendingStructureOpInfo {
-  /** 'insert_row' | 'delete_row' | 'insert_col' | ... | 'delete_table' */
-  op: string;
-  /** 행 단위 op 이 건드리는 행 인덱스. 행 단위가 아니면 null (= 표 전체 차단) */
-  affectedRow: number | null;
-}
-
 /** 표 등 컨트롤 앵커 — replay 후 재바인딩된다 */
 export interface ObjectAnchor {
   paraIdx: number;
@@ -1032,13 +1020,12 @@ export interface ObjectAnchor {
  * 객체 연산 (Pair-Editing Phase 2). 데이터 전용 — apply/revert/verify 는
  * pending-edits 의 switch 가 수행한다.
  *
- * 분류(설계 리뷰 확정):
- * - applied-now(즉시 적용, reject 시 역연산): createTable(treatAsChar 경로),
- *   insertImage, insertEquation, tableStructure(insert_row/col), paraFormat, pageLayout,
- *   headerFooter(신규 생성일 때)
- * - mark-only(approve 시 적용): tableStructure(delete_row/col/merge_cells/split_cell),
- *   deleteTable(표 전체 삭제), setCellProps, setTableProps, setColumnWidths, fitToPage,
- *   setZoneProps, applyFormula, setCaption, applyStyle, headerFooter(기존 HF 수정)
+ * 모든 객체 연산은 도구 호출 시점에 엔진에 적용된다 (미리보기 = 승인 결과).
+ * 되돌림 수단은 연산마다 정해진다:
+ * - 문단 보관본(captureParagraph): 표 생성·구조·속성, 표 삭제, 스타일, 기존 머리말/꼬리말
+ *   — 한 본문 문단 안에서 끝나는 변경을 그 문단째로 되돌린다.
+ * - 문서 스냅샷: 그림/수식 (문단 보관을 지원하지 않는 WASM 에서는 위 연산도)
+ * - 역연산: 문단 서식, 쪽 설정, 새 머리말/꼬리말, 각주, 책갈피 (보관본이 거부될 때의 폴백 포함)
  */
 export type ObjectOp =
   | {
@@ -1072,32 +1059,34 @@ export type ObjectOp =
       anchor?: ObjectAnchor;
     }
   | {
+      /** 행/열 삽입·삭제, 셀 병합·나눔 */
       type: 'tableStructure';
       sectionIdx: number; tableParaIdx: number; controlIdx: number;
-      op: 'insert_row' | 'insert_col';
-      index: number; after: boolean;
-      /** 적용 후 역연산용 삽입 결과 인덱스 (after ? index+1 : index) */
+      op: TableStructureOpName;
+      /** insert_row/insert_col 기준 인덱스와 방향 */
+      index?: number; after?: boolean;
+      /** insert 역연산용 삽입 결과 인덱스 (after ? index+1 : index) */
       insertedIndex?: number;
-      /** 드리프트 프로브용 적용 직후 크기 */
-      dims?: { rowCount: number; colCount: number };
-    }
-  | {
-      type: 'tableStructureMarked';
-      sectionIdx: number; tableParaIdx: number; controlIdx: number;
-      op: 'delete_row' | 'delete_col' | 'merge_cells' | 'split_cell';
       rowIdx?: number; colIdx?: number;
       startRow?: number; startCol?: number; endRow?: number; endCol?: number;
       splitRows?: number; splitCols?: number;
-      /** 마크 시점 크기 — 드리프트 프로브 */
-      dims: { rowCount: number; colCount: number };
+      /** 적용 직후 크기 — 드리프트 프로브 (같은 표의 나중 구조 op 이 갱신) */
+      dims?: { rowCount: number; colCount: number };
+      /** delete_row/delete_col: 삭제 전에 보관한 대상의 텍스트 (오버레이 팝오버·diff) */
+      removedText?: string;
     }
   | {
-      /** 표 전체 삭제 — mark-only, 승인 시 wasm.deleteTableControl */
+      /** 표 전체 삭제 — 문단 보관본으로 되돌린다 */
       type: 'deleteTable';
       sectionIdx: number;
       tableParaIdx: number;
       controlIdx: number;
+      /** 삭제 직전 크기 (요약용) */
       dims: { rowCount: number; colCount: number };
+      /** 삭제 전에 보관한 표 텍스트 (오버레이 팝오버·diff) */
+      removedText?: string;
+      /** 삭제된 컨트롤의 문단 내 텍스트 오프셋 — 삭제 후 표는 없으므로 마커 위치로 쓴다 */
+      removedOffset?: number;
     }
   | {
       type: 'setCellProps';
@@ -1112,21 +1101,21 @@ export type ObjectOp =
       dims: { rowCount: number; colCount: number };
     }
   | {
-      /** 열 폭 절대 지정 — mark-only, 승인 시 wasm.setTableColumnWidths */
+      /** 열 폭 절대 지정 — wasm.setTableColumnWidths */
       type: 'setColumnWidths';
       sectionIdx: number; tableParaIdx: number; controlIdx: number;
-      /** HWPUNIT 열 폭 — 길이는 마크 시점 열 수와 같다 */
+      /** HWPUNIT 열 폭 — 길이는 호출 시점 열 수와 같다 */
       widthsHu: number[];
       dims: { rowCount: number; colCount: number };
     }
   | {
-      /** 본문 폭 맞춤(축소 전용) — mark-only, 승인 시 wasm.fitTableToPage */
+      /** 본문 폭 맞춤(축소 전용) — wasm.fitTableToPage */
       type: 'fitToPage';
       sectionIdx: number; tableParaIdx: number; controlIdx: number;
       dims: { rowCount: number; colCount: number };
     }
   | {
-      /** 셀 범위 테두리/배경 — mark-only, 승인 시 wasm.setCellZoneProperties */
+      /** 셀 범위 테두리/배경 — wasm.setCellZoneProperties */
       type: 'setZoneProps';
       sectionIdx: number; tableParaIdx: number; controlIdx: number;
       range: { startRow: number; startCol: number; endRow: number; endCol: number };
@@ -1134,18 +1123,18 @@ export type ObjectOp =
       dims: { rowCount: number; colCount: number };
     }
   | {
-      /** 계산식 결과 입력 — mark-only, 승인 시 wasm.evaluateTableFormulaEx(writeResult) */
+      /** 계산식 결과 입력 — wasm.evaluateTableFormulaEx(writeResult) */
       type: 'applyFormula';
       sectionIdx: number; tableParaIdx: number; controlIdx: number;
       row: number; col: number;
       formula: string;
       format?: { decimalPlaces?: number; thousandsSeparator?: boolean; prefix?: string; suffix?: string };
-      /** 오버레이 대상 셀 (마크 시점 해석) */
+      /** 오버레이 대상 셀 (호출 시점 해석) */
       cellIdx?: number;
       dims: { rowCount: number; colCount: number };
     }
   | {
-      /** 표 캡션 글 — mark-only, 승인 시 wasm.setTableCaptionText */
+      /** 표 캡션 글 — wasm.setTableCaptionText */
       type: 'setCaption';
       sectionIdx: number; tableParaIdx: number; controlIdx: number;
       text: string;
@@ -1187,6 +1176,8 @@ export type ObjectOp =
       pageNumber?: string;
       /** false = 이 op 이 HF 를 생성했다 (reject 시 삭제) */
       existedBefore: boolean;
+      /** 기존 HF 수정: HF 컨트롤을 품은 본문 문단 (문단 보관 대상) */
+      hostParaIdx?: number;
     }
   | {
       type: 'insertNote';
@@ -1224,34 +1215,59 @@ export type ObjectOp =
       prev?: { name: string; para: number; charPos: number; ctrlIdx: number };
     };
 
-/** applied-now 인지 mark-only 인지 — 분류는 op 데이터에서 유도된다 */
-export function isObjectOpApplied(obj: ObjectOp): boolean {
+export type TableStructureOpName =
+  | 'insert_row' | 'insert_col' | 'delete_row' | 'delete_col' | 'merge_cells' | 'split_cell';
+
+/**
+ * 객체 op 의 오버레이 분류 — 편집이 실제로 한 일을 말한다:
+ * - insert: 새로 생긴 것 (표·그림·수식·주석·책갈피·새 행/열·새 머리말/꼬리말)
+ * - modify: 속성·스타일·너비·계산식·캡션·머리말/꼬리말 내용·쪽 설정 변경
+ * - remove: 지워진 것 (행·열·표·책갈피)
+ */
+export function objectOverlayKind(obj: ObjectOp): 'insert' | 'modify' | 'remove' {
   switch (obj.type) {
+    case 'deleteTable':
+      return 'remove';
+    case 'tableStructure':
+      return obj.op === 'delete_row' || obj.op === 'delete_col' ? 'remove'
+        : obj.op === 'merge_cells' || obj.op === 'split_cell' ? 'modify'
+        : 'insert';
     case 'createTable':
     case 'insertImage':
     case 'insertEquation':
-    case 'tableStructure':
-    case 'paraFormat':
-    case 'pageLayout':
     case 'insertNote':
-    case 'setNoteText':
-    case 'bookmark':
-      return true;
+      return 'insert';
     case 'headerFooter':
-      return !obj.existedBefore;
+      return obj.existedBefore ? 'modify' : 'insert';
+    case 'bookmark':
+      return obj.op === 'delete' ? 'remove' : obj.op === 'rename' ? 'modify' : 'insert';
     default:
-      return false;
+      return 'modify';
   }
 }
 
-/** 이 객체 op 이 해당 표에 대한 파괴적 마크인가 (executor 가드용) */
-export function isDestructiveTableMark(
-  obj: ObjectOp, sectionIdx: number, tableParaIdx: number, controlIdx: number,
-): boolean {
-  return (obj.type === 'tableStructureMarked' || obj.type === 'deleteTable')
-    && obj.sectionIdx === sectionIdx
-    && obj.tableParaIdx === tableParaIdx
-    && obj.controlIdx === controlIdx;
+/** 문단 보관본 — 적용 직전 본문 문단과, 적용 직후 그 문단의 내용 지문 */
+export interface ParagraphCaptureRef {
+  id: number;
+  /** 적용 직후 지문 — 되돌리기 전 사용자 수정 판별용 (null = 지문 미지원) */
+  digest: string | null;
+}
+
+/**
+ * 대기 편집이 반영되지 못한 이유. 사이드바 무효화 메시지와 에이전트 보고에 쓴다.
+ * - text-changed: 텍스트 op 자리에 기대한 글자가 없다 (사용자 수정)
+ * - field-changed / table-changed / paragraph-changed / object-changed: 대상이 바뀌거나 사라졌다
+ * - revert-failed: 되돌리기 직전 확인에 실패해 문서에 그대로 남았다
+ */
+export type PendingDropCause =
+  | 'text-changed' | 'field-changed' | 'table-changed' | 'paragraph-changed'
+  | 'object-changed' | 'revert-failed';
+
+export interface PendingDrop {
+  opId: string;
+  cause: PendingDropCause;
+  /** describeChangeSet 과 같은 한 줄 요약 */
+  summary: string;
 }
 
 /**
@@ -1283,13 +1299,14 @@ export type PendingOp =
   | {
       kind: 'insert'; id: string; agent: AgentName; range: DocRange; text: string;
       applied?: PendingAppliedAt;
+      /**
+       * 본문 문단을 나누는 삽입의 원래 문단 보관본 (digest = 삽입 직전 지문). 되돌린 뒤
+       * 내용이 같으면 이것으로 바꿔 줄 배치까지 원래대로 돌린다 — 병합은 문단을 다시 흘린다.
+       */
+      paraCapture?: ParagraphCaptureRef | null;
       /** 전역 등록 순번 — 중첩 검증·스냅샷 되돌림 안전 판별용 (pending-edits 가 부여) */
       seq?: number;
     } // applied
-  | {
-      kind: 'delete'; id: string; agent: AgentName; range: DocRange; text: string;
-      seq?: number;
-    } // marked only
   | {
       /** 원자적 교체 — 삭제+삽입을 하나의 op 로 즉시 적용 (live preview) */
       kind: 'replace';
@@ -1328,6 +1345,8 @@ export type PendingOp =
       inverse: CharFormatProps;
       /** 되돌림 전 드리프트 프로브용 등록 시점 범위 텍스트 (캡처 실패 시 생략) */
       text?: string;
+      /** 적용 시점 범위 — 나중 에이전트 교체가 범위를 덮어써도 역순 되돌림 끝에 정확히 되돌린다 */
+      applied?: PendingAppliedAt;
       seq?: number;
     } // applied
   | {
@@ -1335,8 +1354,11 @@ export type PendingOp =
       seq?: number;
     } // applied
   | { kind: 'object'; id: string; agent: AgentName; obj: ObjectOp; seq?: number;
-      snapshotId?: number | null; userEditSeqAtSnapshot?: number;
-      settledSetSeqAtSnapshot?: number }; // applied 여부는 isObjectOpApplied(obj)
+      snapshotId?: number | null;
+      /** 문단 보관본 — 있으면 문서 스냅샷보다 먼저 쓴다 */
+      paraCapture?: ParagraphCaptureRef | null;
+      userEditSeqAtSnapshot?: number;
+      settledSetSeqAtSnapshot?: number }; // 항상 적용된 상태로 등록된다
 
 export type ChangeSetStatus = 'open' | 'awaiting-review';
 
@@ -1353,4 +1375,11 @@ export type PendingEditsChangeEvent =
   | { type: 'set-finalized'; changeSetId: string }
   | { type: 'approved'; changeSetId: string }
   | { type: 'rejected'; changeSetId: string }
-  | { type: 'invalidated'; reason: string; changeSetId?: string; droppedOpIds?: string[] };
+  | {
+      type: 'invalidated'; reason: string; changeSetId?: string;
+      /** 있으면 set 의 일부만 빠졌다 — 나머지는 승인/거절대로 처리됐다 */
+      droppedOpIds?: string[];
+      drops?: PendingDrop[];
+      /** 거절/무효화로 되돌리지 못해 문서에 남은 op 인가 (승인은 false — 전부 반영됨) */
+      leftInDocument?: boolean;
+    };

@@ -417,6 +417,10 @@ pub struct DocumentCore {
         commands::picture_transform_journal::PictureTransformCapture,
     )>,
     pub(crate) next_picture_transform_id: u32,
+    /// 에이전트 대기 편집의 문단 보관본 (ID → 적용 직전 본문 문단). 자동 축출 없음 —
+    /// TS PendingEditManager 가 discard 로 수명을 끝낸다.
+    pub(crate) paragraph_capture_store: Vec<(u32, crate::model::paragraph::Paragraph)>,
+    pub(crate) next_paragraph_capture_id: u32,
     /// 머리말/꼬리말 감추기: (global_page_index, is_header) 조합
     pub(crate) hidden_header_footer: std::collections::HashSet<(u32, bool)>,
     /// 파일 이름 (머리말/꼬리말 필드 치환용)
@@ -640,6 +644,8 @@ impl DocumentCore {
             next_snapshot_id: 0,
             picture_transform_store: Vec::new(),
             next_picture_transform_id: 0,
+            paragraph_capture_store: Vec::new(),
+            next_paragraph_capture_id: 0,
             hidden_header_footer: std::collections::HashSet::new(),
             file_name: String::new(),
             active_field: None,

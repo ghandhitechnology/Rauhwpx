@@ -15,14 +15,19 @@ import { RevisionTracker } from '../src/agent/revision.ts';
 import { AgentToolError } from '../src/agent/types.ts';
 import { EditJournal } from '../src/agent/edit-journal.ts';
 
-interface FakePara { chars: string[] }
+interface FakePara { chars: string[]; tables?: number }
 const paraOf = (t: string): FakePara => ({ chars: [...t] });
 
-function makeHarness(initial: string[]) {
+/** tables: 문단 번호 → 그 문단의 표 컨트롤 수 */
+function makeHarness(initial: string[], tables: Record<number, number> = {}) {
   let body: FakePara[] = initial.map(paraOf);
+  for (const [para, count] of Object.entries(tables)) body[Number(para)].tables = count;
   let snapshotId = 0;
   const snapshots = new Map<number, FakePara[]>();
-  const clone = (b: FakePara[]): FakePara[] => b.map((p) => ({ chars: [...p.chars] }));
+  const clone = (b: FakePara[]): FakePara[] => b.map((p) => ({ chars: [...p.chars], tables: p.tables }));
+  const requireTable = (p: number, c: number): void => {
+    if (c >= (body[p]?.tables ?? 0)) throw new Error('no table');
+  };
   const okJson = (extra: Record<string, unknown> = {}) => JSON.stringify({ ok: true, ...extra });
 
   const wasm = {
@@ -56,6 +61,15 @@ function makeHarness(initial: string[]) {
     restoreSnapshot: (id: number) => { body = clone(snapshots.get(id)!); },
     discardSnapshot: (id: number) => { snapshots.delete(id); },
     getSourceFormat: () => 'hwpx',
+    getTableDimensions: (_s: number, p: number, c: number) => {
+      requireTable(p, c);
+      return { rowCount: 2, colCount: 2, cellCount: 4 };
+    },
+    deleteTableControl: (_s: number, p: number, c: number) => {
+      requireTable(p, c);
+      body[p].tables! -= 1;
+      return { ok: true };
+    },
   };
 
   const eventBus = new EventBus();
@@ -81,6 +95,7 @@ function makeHarness(initial: string[]) {
     revision: () => revision.revision,
     text: (p: number) => body[p].chars.join(''),
     paraCount: () => body.length,
+    tableCount: (p: number) => body[p].tables ?? 0,
   };
 }
 
@@ -229,5 +244,25 @@ test('rebase: 미래 revision 을 주장하면 즉시 REVISION_MISMATCH', async 
       expectedRevision: h.revision() + 7, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X',
     }),
     (e: unknown) => e instanceof AgentToolError && e.code === 'REVISION_MISMATCH',
+  );
+});
+
+test('rebase: 즉시 적용되는 표 삭제도 저널에 남아 다른 문단의 stale 쓰기가 통과한다', async () => {
+  const h = makeHarness(['제목', '표 문단', '본문', '결론'], { 1: 1 });
+  const shared = h.revision();
+
+  // 형제 에이전트 A: 표 삭제 — 호출 즉시 문서에서 사라진다
+  await exec(h, 'delete_table', { expectedRevision: shared, sectionIdx: 0, paraIdx: 1, controlIdx: 0 });
+  assert.equal(h.tableCount(1), 0);
+
+  // 에이전트 B: 다른 문단의 stale 쓰기는 저널 공백 없이 그대로 통과한다
+  await exec(h, 'insert_text', { expectedRevision: shared, sectionIdx: 0, paraIdx: 2, charOffset: 2, text: '!' });
+  assert.equal(h.text(2), '본문!');
+
+  // 표가 있던 문단을 노린 stale 쓰기는 충돌로 떨어진다
+  await assert.rejects(
+    () => exec(h, 'insert_text', { expectedRevision: shared, sectionIdx: 0, paraIdx: 1, charOffset: 0, text: 'X' }),
+    (e: unknown) => e instanceof AgentToolError && e.code === 'REVISION_MISMATCH'
+      && /concurrent edit touched/.test(e.message),
   );
 });

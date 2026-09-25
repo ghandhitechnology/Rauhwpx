@@ -214,6 +214,18 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
         "[#6806] 그림 변환 Undo 저널에서 handle만 제거. 문서 IR·구역 raw는 변경하지 않는다.",
     ),
     (
+        "commands/paragraph_capture.rs",
+        "capture_paragraph_native",
+        Exempt::SessionState,
+        "에이전트 대기 편집용 문단 보관본을 복제해 저장소와 ID만 갱신. 문서 IR·구역 raw는 읽기만 한다.",
+    ),
+    (
+        "commands/paragraph_capture.rs",
+        "discard_paragraph_capture_native",
+        Exempt::SessionState,
+        "문단 보관 저장소에서 항목만 제거. 문서 IR·구역 raw는 변경하지 않는다.",
+    ),
+    (
         "commands/formatting.rs",
         "get_cell_char_properties_at_by_path",
         Exempt::SessionState,
@@ -717,6 +729,7 @@ const INVALIDATION_LEDGER: &[(&str, usize)] = &[
     ("commands/object_ops/picture.rs", 11),
     ("commands/object_ops/shape.rs", 7),
     ("commands/object_ops/table.rs", 7),
+    ("commands/paragraph_capture.rs", 1),
     ("commands/picture_transform_journal.rs", 1),
     // Structural table edits now share one invalidating finish helper.
     ("commands/table_ops.rs", 14),

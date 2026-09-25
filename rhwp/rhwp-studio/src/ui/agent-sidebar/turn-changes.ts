@@ -1,4 +1,4 @@
-import type { PendingChangeSet, PendingEditsChangeEvent } from '../../agent/types.ts';
+import type { PendingChangeSet, PendingDropCause, PendingEditsChangeEvent } from '../../agent/types.ts';
 
 export interface CapturedTurn {
   set: PendingChangeSet;
@@ -30,10 +30,9 @@ export class TurnChanges {
       } else if (event.type === 'rejected' && turn.set.id === event.changeSetId) {
         this.turns.delete(owner);
       } else if (event.type === 'invalidated') {
-        if (event.reason.startsWith('text drift')) {
+        if (event.droppedOpIds) {
+          // set 의 일부만 빠졌다 — 나머지는 승인/거절대로 처리됐다.
           if (event.changeSetId && turn.set.id !== event.changeSetId) continue;
-          // 오래된 허브가 ID 없이 무효화하면 잘못된 적용 내역을 남기지 않는다.
-          if (!event.droppedOpIds) { this.turns.delete(owner); continue; }
           const dropped = new Set(event.droppedOpIds);
           turn.set.ops = turn.set.ops.filter((op) => !dropped.has(op.id));
           if (!turn.set.ops.length) this.turns.delete(owner);
@@ -45,4 +44,23 @@ export class TurnChanges {
   begin(threadId: string): void { this.turns.delete(threadId); }
 
   clear(): void { this.turns.clear(); }
+}
+
+const DROP_CAUSES: Record<PendingDropCause, string> = {
+  'text-changed': '텍스트 변경',
+  'field-changed': '필드 변경',
+  'table-changed': '표 변경',
+  'paragraph-changed': '문단 변경',
+  'object-changed': '개체 변경',
+  'revert-failed': '이후 수정',
+};
+
+/** 무효화 알림 문구 — 일부만 빠졌으면 실제 원인을, 통째로 해제됐으면 이유를 적는다. */
+export function invalidatedMessage(e: Extract<PendingEditsChangeEvent, { type: 'invalidated' }>): string {
+  if (!e.droppedOpIds) return `대기 중인 에이전트 편집이 해제되었습니다 (${e.reason})`;
+  const causes = [...new Set((e.drops ?? []).map((drop) => DROP_CAUSES[drop.cause]))].join(', ') || e.reason;
+  const count = e.droppedOpIds.length;
+  return e.leftInDocument
+    ? `에이전트 편집 ${count}개를 되돌리지 못해 문서에 남겼습니다 (${causes})`
+    : `에이전트 편집 ${count}개가 실행 취소 항목에서 빠졌습니다 (${causes})`;
 }

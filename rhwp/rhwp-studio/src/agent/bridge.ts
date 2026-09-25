@@ -19,7 +19,7 @@ import {
 } from '../desktop-integration.ts';
 import { RevisionTracker } from './revision.ts';
 import { AgentToolExecutor } from './tool-executor.ts';
-import { PendingEditManager } from './pending-edits.ts';
+import { PendingEditManager, editReportNote } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
 import { readProviderQuota, readRemoteBalance } from './provider-quota-protocol.ts';
 import { PendingRequestRegistry } from './pending-requests.ts';
@@ -1305,6 +1305,8 @@ export class AgentBridgeImpl implements AgentBridge {
   private workflowSwitchPending = false;
   private workflowBeforeSwitch: { workflow: AgentWorkflow; phase: AgentPhase } | null = null;
   private turnHadError = false;
+  /** 에이전트에게 알릴 대기 편집 보고 — 턴 중이면 다음 도구 결과에, 아니면 다음 턴 맥락으로 보낸다 */
+  private editReport: string[] = [];
   private pendingTurnOpen = false;
   private chatStartSent = false;
   private pendingChatStart: {
@@ -1364,6 +1366,8 @@ export class AgentBridgeImpl implements AgentBridge {
       if (e.type === 'set-finalized' || e.type === 'approved' || e.type === 'rejected' || e.type === 'invalidated') {
         this.editFollow.cancel();
       }
+      const note = editReportNote(e);
+      if (note) this.queueEditReport(note);
       this.handlePlanEditChange(e);
     });
     this.executor = new AgentToolExecutor({
@@ -2769,6 +2773,7 @@ export class AgentBridgeImpl implements AgentBridge {
             console.warn('[AgentBridge] endTurn 실패:', e);
           }
         }
+        this.flushEditReport();
         const planTurn = this.planExecutionTurn;
         this.planExecutionTurn = null;
         if (planTurn?.turnId === eventTurnId && this.latestPlan?.planId === planTurn.planId) {
@@ -2865,7 +2870,9 @@ export class AgentBridgeImpl implements AgentBridge {
       })
       .then((result) => {
         if (!requestIsActive()) return;
-        this.sendToolResponse({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: true, result });
+        this.sendToolResponse({
+          v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: true, result: this.withEditReport(result),
+        });
       })
       .catch((e: unknown) => {
         if (!requestIsActive()) return;
@@ -2881,6 +2888,28 @@ export class AgentBridgeImpl implements AgentBridge {
         }
         releaseEditingLease();
       });
+  }
+
+  /**
+   * 버려지거나 되돌리지 못한 대기 편집을 에이전트에게 알린다. 턴 중에는 다음 도구 결과에
+   * 싣고, 턴 밖(승인/거절/턴 종료)에서는 허브가 다음 사용자 메시지 맥락에 붙이도록 보낸다.
+   */
+  private queueEditReport(note: string): void {
+    (this.editReport ??= []).push(note);
+    if (!this.turnRunning) this.flushEditReport();
+  }
+
+  private flushEditReport(): void {
+    if (!this.editReport?.length) return;
+    const notes = this.editReport.splice(0);
+    if (!this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-edit-report', notes })) {
+      this.editReport.unshift(...notes.slice(-8));
+    }
+  }
+
+  private withEditReport(result: unknown): unknown {
+    if (!this.editReport?.length || result === null || typeof result !== 'object' || Array.isArray(result)) return result;
+    return { ...(result as Record<string, unknown>), editReport: this.editReport.splice(0) };
   }
 
   /** 소켓이 닫혀 있으면 결과를 버리지 않고 재연결 때까지 붙잡아 둔다. */

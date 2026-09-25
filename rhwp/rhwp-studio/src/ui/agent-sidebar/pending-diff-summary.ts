@@ -27,9 +27,6 @@ export function summarizePendingDiffs(changeSets: readonly PendingChangeSet[]): 
         case 'insert':
           summary.additions += characterCount(op.text);
           break;
-        case 'delete':
-          summary.deletions += characterCount(op.text);
-          break;
         case 'replace':
           summary.additions += characterCount(op.text);
           summary.deletions += characterCount(op.deletedText);
@@ -39,8 +36,14 @@ export function summarizePendingDiffs(changeSets: readonly PendingChangeSet[]): 
           summary.deletions += characterCount(op.oldValue);
           break;
         case 'format':
+          summary.nonTextChanges += 1;
+          break;
         case 'object':
           summary.nonTextChanges += 1;
+          // 행/열/표 삭제는 지워진 텍스트를 보관해 둔다 — 삭제 수에 센다.
+          if ('removedText' in op.obj && op.obj.removedText) {
+            summary.deletions += characterCount(op.obj.removedText);
+          }
           break;
       }
     }

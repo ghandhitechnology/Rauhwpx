@@ -316,14 +316,14 @@ function editLifecycleFor(profile) {
       lifecycle: `Document edits run autonomously during the turn: higher-level writes are staged as live preview. When the turn ends successfully they are HELD FOR THE USER'S REVIEW — the user approves or rejects them in Studio's review panel; failed, interrupted, and unknown outcomes roll them back. Raw engine writes (prepare_engine_edit_session, apply_engine_edits) are unavailable in this permission profile because they commit immediately and would bypass the review gate; exploring get_engine_edit_capabilities is still fine. Approved edits remain undoable in the editor. After every tool-using turn, always send a separate final user-facing message that states the outcome and asks the user to review and approve the staged changes. Never end a successful tool-using turn on a tool call or progress update alone.`,
       engineBullet: `- Only the staged semantic write tools are available in this profile; if a task truly needs a raw engine capability, tell the user it requires switching the chat to 전체 접근 instead of attempting apply_engine_edits.`,
       verifyBullet: `- After completing staged semantic edits, call verify_changes (includeImage:true when layout matters) to self-check and fix them before ending the turn.`,
-      tableLockBullet: `- If a cell edit fails, re-read its address; never delete or recreate a table to change its text. After a staged insert_row/insert_col/merge_cells, that table is locked until the user approves the staged changes — plan those structure changes last.`,
+      tableBullet: `- If a cell edit fails, re-read its address; never delete or recreate a table to change its text. Table structure edits (rows, columns, merge, split) apply immediately and renumber cellIdx after the change — address later cells from the counts they return or a fresh get_structure.`,
     };
   }
   return {
     lifecycle: `Document edits run autonomously: higher-level writes are staged for live verification and commit only after an explicitly successful turn; failed, interrupted, and unknown outcomes roll them back. apply_engine_edits commits its atomic batch immediately. All committed edits remain undoable in the editor. After every tool-using turn, always send a separate final user-facing message that states the outcome and asks the user to check the document. Never end a successful tool-using turn on a tool call or progress update alone.`,
     engineBullet: `- Prefer the higher-level semantic tools. If a task needs any raw engine capability, do not mix raw and staged semantic writes in that turn: use get_engine_edit_capabilities and apply_engine_edits for the whole mutation batch. Use prepare_engine_edit_session first for structured-copy or transposed-copy setup.`,
     verifyBullet: `- After completing staged semantic edits, call verify_changes (includeImage:true when layout matters) to self-check and fix them before ending the turn. For apply_engine_edits, verify with current read/render tools because it is already committed.`,
-    tableLockBullet: `- After a staged insert_row/insert_col/merge_cells, that table is locked until the successful turn auto-commits — plan those structure changes last.`,
+    tableBullet: `- Table structure edits (rows, columns, merge, split) apply immediately and renumber cellIdx after the change — address later cells from the counts they return or a fresh get_structure.`,
   };
 }
 
@@ -405,7 +405,7 @@ export function providerToolNoteFor(agentName = 'claude') {
 }
 
 export function directSystemBrief(profile = 'unrestricted', agentName = 'claude') {
-  const { lifecycle, engineBullet, verifyBullet, tableLockBullet } = editLifecycleFor(profile);
+  const { lifecycle, engineBullet, verifyBullet, tableBullet } = editLifecycleFor(profile);
   return `You may use the workspace filesystem, shell, and web tools for supporting work. ${lifecycle}
 
 EDITING WORKFLOW (revision, batching, staging, cell and offset rules are in RHWP TOOL RULES):
@@ -414,7 +414,7 @@ ${verifyBullet}
 - Use apply_list for lists — never type literal number/bullet text like '1.' or '가.'.
 - Use replace_range (not delete_range + insert_text) to replace existing text — it is atomic and preserves formatting.
 - Always preview_equation before insert_equation, and treat its warnings as errors to fix before inserting.
-${tableLockBullet}${parallelWorkSectionFor(agentName, profile)}`;
+${tableBullet}${parallelWorkSectionFor(agentName, profile)}`;
 }
 
 export const DIRECT_SYSTEM_BRIEF = directSystemBrief('unrestricted');
@@ -446,9 +446,7 @@ export function implementationSystemBrief(profile = 'unrestricted', agentName = 
   const verifyBullet = safe
     ? `- After staged semantic edits, call verify_changes (includeImage:true when layout matters) and fix problems, then send a separate final outcome asking the user to review and approve the staged changes.`
     : `- After staged semantic edits, call verify_changes (includeImage:true when layout matters) and fix problems. Verify raw engine batches with current read/render tools, then send a separate final outcome asking the user to check the document.`;
-  const tableLockBullet = safe
-    ? `- Plan staged table structure changes last because the table remains locked until the user approves the staged changes.`
-    : `- Plan staged table structure changes last because the table remains locked until the successful turn auto-commits.`;
+  const tableBullet = '- Table structure edits apply immediately and renumber cellIdx; address later cells from the counts they return or a fresh get_structure.';
   return `You are in implementation mode. Execute only the approved canonical implementation plan supplied by the hub; do not substitute or silently broaden it. Before making changes, re-read the relevant current workspace and live-document state because planning observations may be stale. Execute every canonical step thoroughly and run every validation listed in the plan. Filesystem capabilities follow the selected permission profile. Web tools, subagents, and the rhwp MCP remain available, and every subagent must follow this implementation phase and the same permission boundary. Live-document edits run autonomously and remain undoable.
 
 IMPLEMENTATION WORKFLOW:
@@ -458,7 +456,7 @@ ${commitBullet}
 ${engineBullet}
 ${verifyBullet}
 - Use apply_list for lists, replace_range for replacements, and preview_equation before insert_equation. Treat preview warnings as errors.
-${tableLockBullet}
+${tableBullet}
 - In the final report, clearly account for completed, blocked, and deferred plan items and validation results. Never call partial work complete; explain blockers and deferred work precisely.${parallelWorkSectionFor(agentName, profile)}`;
 }
 
