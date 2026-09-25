@@ -702,6 +702,8 @@ impl DocumentCore {
             next_snapshot_id: 0,
             picture_transform_store: Vec::new(),
             next_picture_transform_id: 0,
+            paragraph_capture_store: Vec::new(),
+            next_paragraph_capture_id: 0,
             hidden_header_footer: std::collections::HashSet::new(),
             file_name: String::new(),
             active_field: None,
@@ -1683,6 +1685,7 @@ impl DocumentCore {
         self.invalidate_page_tree_cache();
         self.snapshot_store.clear();
         self.next_snapshot_id = 0;
+        self.paragraph_capture_store.clear();
         self.source_format = crate::parser::FileFormat::Hwp;
         self.validation_report = ValidationReport::new();
 
