@@ -205,7 +205,10 @@ try {
     setTestCase('c. 서브에이전트 도구 호출 귀속');
     // 행 안에 해당 서브에이전트의 도구 호출이 나타난다 (루트 활동 그룹이 아니라)
     await page.waitForFunction(
-      () => (document.querySelector('.ag-fleet')?.textContent ?? '').includes('replace_range'),
+      () => {
+        const fleetText = document.querySelector('.ag-fleet')?.textContent ?? '';
+        return fleetText.includes('replace_range') && fleetText.includes('insert_text');
+      },
       { timeout: 15000 },
     );
     const routing = await page.evaluate(() => {
