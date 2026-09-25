@@ -1,6 +1,6 @@
 ---
 name: rhwp-tables
-description: Address table cells and change table structure in the live HWP/HWPX document. Use when reading or editing text inside a table cell, when calling create_table, edit_table, get_table_layout, or delete_table, when a table runs off the page, or when a cell address is rejected.
+description: Address table cells and change table structure in the live HWP/HWPX document. Use when reading or editing text inside a table cell, when calling create_table, edit_table, set_table_props, set_cell_props, set_zone_borders, get_table_layout, or delete_table, when a table runs off the page, or when a cell address is rejected.
 ---
 
 # rhwp 표 다루기
@@ -30,15 +30,22 @@ description: Address table cells and change table structure in the live HWP/HWPX
 | `insert_row` / `delete_row` | `rowIdx` |
 | `insert_col` / `delete_col` | `colIdx` |
 | `merge_cells` | `startRow`, `startCol`, `endRow`, `endCol` |
-| `set_cell_props` | `cellIdx`, `props` |
-| `set_table_props` | `props` |
+| `split_cell` | `rowIdx`, `colIdx`, `splitRows`, `splitCols` |
 | `set_column_widths` | `columnWidthsMm` |
 | `fit_to_page` | 없음 |
-| `set_zone_borders` | `startCell`, `endCell` |
 | `apply_formula` | `row`, `col`, `formula` |
 | `set_caption` | `text` |
 
 빠뜨리면 `INVALID_ARGS` 로 즉시 실패한다. 길이는 mm, 글자 크기는 pt, 색은 `"#RRGGBB"` 다.
+
+## 표·셀 속성과 테두리는 별도 도구
+
+- `set_table_props` 는 `tableProps` 객체를 받는다. 쪽 나눔(`pageBreak`), 제목 행 반복,
+  배치(`positionMode`, `textWrap`, 기준·정렬·오프셋), 여백, 캡션 설정이 여기 있다.
+  `{horizontalAlign: "center"}` 만 줘도 표가 단 기준 가운데로 옮겨진다.
+- `set_cell_props` 는 `cellIdx` 와 `cellProps` 객체를 받는다. 배경색, 세로 정렬, 크기, 안 여백,
+  글자 방향, 보호, 필드 이름을 바꾼다.
+- 모르는 키를 넣으면 올바른 키 목록과 함께 거절된다.
 
 ## 폭·테두리·계산식·캡션
 
@@ -46,7 +53,7 @@ description: Address table cells and change table structure in the live HWP/HWPX
   다르면 거절된다. 표 전체 폭은 합계로 갱신된다.
 - `fit_to_page` 는 본문 폭을 넘는 표의 열을 비례 축소해 한 쪽 안에 넣는다. 이미 들어가는
   표는 넓히지 않는다.
-- `set_zone_borders` 는 `startCell{row,col}`~`endCell{row,col}` 사각형을 한 덩어리로 보고
+- `set_zone_borders` 도구는 `startCell{row,col}`~`endCell{row,col}` 사각형을 한 덩어리로 보고
   `borderLeft`/`borderRight`/`borderTop`/`borderBottom`(각각 `{type, width, color}`),
   `fillColor`, 그리고 필요하면 `diagonalLine`/`diagonalSlash`/`diagonalBackSlash`/
   `diagonalWidth`/`diagonalColor`, `centerLine`(`NONE`|`VERTICAL`|`HORIZONTAL`|`CROSS`)
@@ -63,10 +70,10 @@ description: Address table cells and change table structure in the live HWP/HWPX
   `{pageIndex, xMm, yMm, widthMm, heightMm}` 를 주고, 항목이 둘 이상이면 이미 쪽이 나뉜 것이다.
 - `overflowsBody` 가 `true` 면 표가 본문 영역 아래로 넘쳤고, `overflowsBodyWidth` 가 `true` 면
   본문 폭보다 넓다.
-- 세로로 넘치는데 `pageBreak` 가 0(나누지 않음)이면 `edit_table set_table_props` 에
-  `{pageBreak: "row"}` 를 줘서 다음 쪽으로 이어지게 한다. 제목 행을 반복하려면
+- 세로로 넘치는데 `pageBreak` 가 0(나누지 않음)이면 `set_table_props` 에
+  `tableProps: {pageBreak: "row"}` 를 줘서 다음 쪽으로 이어지게 한다. 제목 행을 반복하려면
   `{repeatHeader: true}` 를 함께 준다.
-- 가로로 넘치면 `fit_to_page` 를 부르거나 `set_column_widths` 로 폭을 다시 잡는다.
+- 가로로 넘치면 `edit_table` 의 `fit_to_page` 를 부르거나 `set_column_widths` 로 폭을 다시 잡는다.
 
 ## delete_table
 

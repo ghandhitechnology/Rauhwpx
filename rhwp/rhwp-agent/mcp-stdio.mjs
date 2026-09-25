@@ -6,7 +6,7 @@ import {
   resolveHubIdentity,
   sessionIdFromScopedHubToken,
 } from './hub-session-registry.mjs';
-import { filterToolDefinitions, toToolContent, toolAnnotations } from './tools.mjs';
+import { RHWP_TOOL_RULES, filterToolDefinitions, toToolContent, toolAnnotations } from './tools.mjs';
 import { imageRootsFromEnv } from './image-path-policy.mjs';
 import { prepareInsertImageArgs } from './insert-image-source.mjs';
 
@@ -181,7 +181,9 @@ async function callHub(tool, args) {
   });
 }
 
-const server = new McpServer({ name: 'rhwp', version: '0.1.0' });
+// 공유 규칙(revision·스테이징·셀 주소·오프셋·단위)은 도구 설명마다 반복하지 않고
+// 서버 instructions 로 한 번만 보낸다. provider 브리프(agents/backend.mjs)도 같은 텍스트를 싣는다.
+const server = new McpServer({ name: 'rhwp', version: '0.1.0' }, { instructions: RHWP_TOOL_RULES });
 
 function registerTool(def) {
   server.registerTool(def.name, {

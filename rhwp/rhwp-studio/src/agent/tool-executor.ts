@@ -63,6 +63,9 @@ export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'create_table',
   'delete_table',
   'edit_table',
+  'set_table_props',
+  'set_cell_props',
+  'set_zone_borders',
   'apply_para_format',
   'apply_style',
   'insert_image',
@@ -110,6 +113,9 @@ const BATCHABLE_EDIT_TOOLS: ReadonlySet<string> = new Set([
   'set_page_layout',
   'create_table',
   'edit_table',
+  'set_table_props',
+  'set_cell_props',
+  'set_zone_borders',
   'delete_table',
   'insert_equation',
 ]);
@@ -488,6 +494,10 @@ export class AgentToolExecutor {
       case 'create_table': return this.createTable(args, agent);
       case 'delete_table': return this.deleteTable(args, agent);
       case 'edit_table': return this.editTable(args, agent);
+      // 표 속성·셀 속성·영역 테두리는 도구 정의 크기 때문에 별도 도구로 나뉘었다. 실행은 edit_table 과 같은 경로다.
+      case 'set_table_props':
+      case 'set_cell_props':
+      case 'set_zone_borders': return this.editTable({ ...args, op: tool }, agent);
       case 'apply_para_format': return this.applyParaFormat(args, agent);
       case 'list_styles': return this.listStyles();
       case 'apply_style': return this.applyStyle(args, agent);
@@ -2867,13 +2877,14 @@ export class AgentToolExecutor {
       }
       case 'set_cell_props': {
         const cellIdx = reqIdx('cellIdx', dims.cellCount);
-        const props = this.parseCellProps(asRecord(args['props'] ?? {}));
+        // props 는 edit_table op 시절의 옛 이름 — 한 릴리스 동안 받아 준다.
+        const props = this.parseCellProps(asRecord(args['cellProps'] ?? args['props'] ?? {}));
         const obj: ObjectOp = { type: 'setCellProps', ...base, cellIdx, props, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
         return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
       }
       case 'set_table_props': {
-        const props = this.parseTableProps(asRecord(args['props'] ?? {}));
+        const props = this.parseTableProps(asRecord(args['tableProps'] ?? args['props'] ?? {}));
         const obj: ObjectOp = { type: 'setTableProps', ...base, props, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
         return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
@@ -2962,7 +2973,7 @@ export class AgentToolExecutor {
         return { revision: this.revision, changeSetId: r.changeSetId, note: `the caption is created if missing and written at the successful turn commit. ${PENDING_NOTE}` };
       }
       default:
-        throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|split_cell|set_cell_props|set_table_props|set_column_widths|fit_to_page|set_zone_borders|apply_formula|set_caption (got ${JSON.stringify(op)})`);
+        throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|split_cell|set_column_widths|fit_to_page|apply_formula|set_caption (got ${JSON.stringify(op)}); table, cell and zone properties use set_table_props, set_cell_props and set_zone_borders`);
     }
   }
 
@@ -3096,13 +3107,15 @@ export class AgentToolExecutor {
       'applyInnerMargin', 'textDirection', 'protected', 'editableInForm', 'fieldName',
     ]);
     const unknown = Object.keys(raw).filter((key) => !allowed.has(key));
-    if (unknown.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported cell props: ${unknown.join(', ')}`);
+    if (unknown.length > 0) {
+      throw new AgentToolError('INVALID_ARGS', `Unsupported cellProps keys: ${unknown.join(', ')}. Valid keys: ${[...allowed].join(', ')}`);
+    }
 
     const out: Record<string, unknown> = {};
     const fill = raw['fillColor'];
     if (fill !== undefined && fill !== null) {
       if (typeof fill !== 'string' || !HEX_COLOR_RE.test(fill)) {
-        throw new AgentToolError('INVALID_ARGS', 'props.fillColor must be "#RRGGBB"');
+        throw new AgentToolError('INVALID_ARGS', 'cellProps.fillColor must be "#RRGGBB"');
       }
       out['fillType'] = 'solid';
       out['fillColor'] = fill;
@@ -3111,7 +3124,7 @@ export class AgentToolExecutor {
     if (va !== undefined && va !== null) {
       const map: Record<string, number> = { top: 0, center: 1, bottom: 2 };
       if (typeof va !== 'string' || !(va in map)) {
-        throw new AgentToolError('INVALID_ARGS', 'props.verticalAlign must be "top"|"center"|"bottom"');
+        throw new AgentToolError('INVALID_ARGS', 'cellProps.verticalAlign must be "top"|"center"|"bottom"');
       }
       out['verticalAlign'] = map[va];
     }
@@ -3121,21 +3134,21 @@ export class AgentToolExecutor {
     ] as const) {
       const value = raw[publicKey];
       if (value !== undefined && value !== null) {
-        if (typeof value !== 'boolean') throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be a boolean`);
+        if (typeof value !== 'boolean') throw new AgentToolError('INVALID_ARGS', `cellProps.${publicKey} must be a boolean`);
         out[internalKey] = value;
       }
     }
     const direction = raw['textDirection'];
     if (direction !== undefined && direction !== null) {
       if (direction !== 'horizontal' && direction !== 'vertical') {
-        throw new AgentToolError('INVALID_ARGS', 'props.textDirection must be "horizontal"|"vertical"');
+        throw new AgentToolError('INVALID_ARGS', 'cellProps.textDirection must be "horizontal"|"vertical"');
       }
       out['textDirection'] = direction === 'vertical' ? 1 : 0;
     }
     const fieldName = raw['fieldName'];
     if (fieldName !== undefined && fieldName !== null) {
       if (typeof fieldName !== 'string' || fieldName.length > 255) {
-        throw new AgentToolError('INVALID_ARGS', 'props.fieldName must be a string up to 255 chars (empty clears it)');
+        throw new AgentToolError('INVALID_ARGS', 'cellProps.fieldName must be a string up to 255 chars (empty clears it)');
       }
       out['fieldName'] = fieldName;
     }
@@ -3143,7 +3156,7 @@ export class AgentToolExecutor {
       const value = raw[mmKey];
       if (value !== undefined && value !== null) {
         if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 500) {
-          throw new AgentToolError('INVALID_ARGS', `props.${mmKey} must be a positive number up to 500mm`);
+          throw new AgentToolError('INVALID_ARGS', `cellProps.${mmKey} must be a positive number up to 500mm`);
         }
         out[huKey] = mmToHu(value);
       }
@@ -3151,7 +3164,7 @@ export class AgentToolExecutor {
     const padding = raw['paddingMm'];
     if (padding !== undefined && padding !== null) {
       if (typeof padding !== 'object' || Array.isArray(padding)) {
-        throw new AgentToolError('INVALID_ARGS', 'props.paddingMm must be an object with left/right/top/bottom');
+        throw new AgentToolError('INVALID_ARGS', 'cellProps.paddingMm must be an object with left/right/top/bottom');
       }
       const sides = padding as Record<string, unknown>;
       const badSides = Object.keys(sides).filter((key) => !['left', 'right', 'top', 'bottom'].includes(key));
@@ -3160,14 +3173,14 @@ export class AgentToolExecutor {
         const value = sides[side];
         if (value === undefined || value === null) continue;
         if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) {
-          throw new AgentToolError('INVALID_ARGS', `props.paddingMm.${side} must be 0..100mm`);
+          throw new AgentToolError('INVALID_ARGS', `cellProps.paddingMm.${side} must be 0..100mm`);
         }
         out[`padding${side[0].toUpperCase()}${side.slice(1)}`] = mmToHu(value);
       }
       if (out['applyInnerMargin'] === undefined) out['applyInnerMargin'] = true;
     }
     if (Object.keys(out).length === 0) {
-      throw new AgentToolError('INVALID_ARGS', `props requires at least one of: ${[...allowed].join('/')}`);
+      throw new AgentToolError('INVALID_ARGS', `cellProps needs at least one of: ${[...allowed].join(', ')}`);
     }
     return out;
   }
@@ -3182,7 +3195,9 @@ export class AgentToolExecutor {
       'captionDirection', 'captionWidthMm', 'captionSpacingMm', 'captionVerticalAlign',
     ]);
     const unknown = Object.keys(raw).filter((key) => !allowed.has(key));
-    if (unknown.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported table props: ${unknown.join(', ')}`);
+    if (unknown.length > 0) {
+      throw new AgentToolError('INVALID_ARGS', `Unsupported tableProps keys: ${unknown.join(', ')}. Valid keys: ${[...allowed].join(', ')}`);
+    }
 
     const out: Record<string, unknown> = {};
     for (const [publicKey, internalKey] of [
@@ -3192,7 +3207,7 @@ export class AgentToolExecutor {
     ] as const) {
       const value = raw[publicKey];
       if (value !== undefined && value !== null) {
-        if (typeof value !== 'boolean') throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be a boolean`);
+        if (typeof value !== 'boolean') throw new AgentToolError('INVALID_ARGS', `tableProps.${publicKey} must be a boolean`);
         out[internalKey] = value;
       }
     }
@@ -3202,7 +3217,7 @@ export class AgentToolExecutor {
       const value = raw[publicKey];
       if (value === undefined || value === null) return;
       if (typeof value !== 'string' || !(value in map)) {
-        throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be one of ${Object.keys(map).join('|')}`);
+        throw new AgentToolError('INVALID_ARGS', `tableProps.${publicKey} must be one of ${Object.keys(map).join('|')}`);
       }
       out[internalKey] = map[value];
     };
@@ -3220,7 +3235,7 @@ export class AgentToolExecutor {
     const mode = raw['positionMode'];
     if (mode !== undefined && mode !== null) {
       if (mode !== 'inline' && mode !== 'floating') {
-        throw new AgentToolError('INVALID_ARGS', 'props.positionMode must be "inline"|"floating"');
+        throw new AgentToolError('INVALID_ARGS', 'tableProps.positionMode must be "inline"|"floating"');
       }
       out['treatAsChar'] = mode === 'inline';
     }
@@ -3247,7 +3262,7 @@ export class AgentToolExecutor {
       const value = raw[publicKey];
       if (value === undefined || value === null) return;
       if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
-        throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be ${min}..${max}mm`);
+        throw new AgentToolError('INVALID_ARGS', `tableProps.${publicKey} must be ${min}..${max}mm`);
       }
       out[internalKey] = mmToHu(value);
     };
@@ -3261,7 +3276,7 @@ export class AgentToolExecutor {
       const group = raw[groupKey];
       if (group === undefined || group === null) continue;
       if (typeof group !== 'object' || Array.isArray(group)) {
-        throw new AgentToolError('INVALID_ARGS', `props.${groupKey} must be an object with left/right/top/bottom`);
+        throw new AgentToolError('INVALID_ARGS', `tableProps.${groupKey} must be an object with left/right/top/bottom`);
       }
       const sides = group as Record<string, unknown>;
       const badSides = Object.keys(sides).filter((key) => !['left', 'right', 'top', 'bottom'].includes(key));
@@ -3270,13 +3285,13 @@ export class AgentToolExecutor {
         const value = sides[side];
         if (value === undefined || value === null) continue;
         if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) {
-          throw new AgentToolError('INVALID_ARGS', `props.${groupKey}.${side} must be 0..100mm`);
+          throw new AgentToolError('INVALID_ARGS', `tableProps.${groupKey}.${side} must be 0..100mm`);
         }
         out[`${prefix}${side[0].toUpperCase()}${side.slice(1)}`] = mmToHu(value);
       }
     }
     if (Object.keys(out).length === 0) {
-      throw new AgentToolError('INVALID_ARGS', `props requires at least one of: ${[...allowed].join('/')}`);
+      throw new AgentToolError('INVALID_ARGS', `tableProps needs at least one of: ${[...allowed].join(', ')}`);
     }
     return out;
   }
