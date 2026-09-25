@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use super::clipboard::strip_structural_controls_for_text_clipboard;
 use crate::document_core::DocumentCore;
 use crate::error::HwpError;
 use crate::model::control::Control;
@@ -1306,7 +1307,7 @@ impl DocumentCore {
             return Err(transfer_error("source paragraph range is reversed"));
         }
 
-        let mut source_core = DocumentCore::from_bytes(source_bytes)?;
+        let source_core = DocumentCore::from_bytes(source_bytes)?;
         let source_section = source_core
             .document()
             .sections
@@ -1316,15 +1317,11 @@ impl DocumentCore {
                     "source section {source_section_idx} does not exist"
                 ))
             })?;
-        let end_offset = source_section
-            .paragraphs
-            .get(end_para_idx)
-            .ok_or_else(|| {
-                transfer_error(format!("source paragraph {end_para_idx} does not exist"))
-            })?
-            .text
-            .chars()
-            .count();
+        if end_para_idx >= source_section.paragraphs.len() {
+            return Err(transfer_error(format!(
+                "source paragraph {end_para_idx} does not exist"
+            )));
+        }
         let selected_source_paragraphs = source_section
             .paragraphs
             .get(start_para_idx..=end_para_idx)
@@ -1334,22 +1331,17 @@ impl DocumentCore {
         let mut source_inventory = TransferInventory::default();
         inspect_paragraphs(selected_source_paragraphs, &mut source_inventory);
         let structural_controls = source_inventory.structural_controls;
-        source_core.copy_selection_native(
-            source_section_idx,
-            start_para_idx,
-            0,
-            end_para_idx,
-            end_offset,
-        )?;
-        let mut paragraphs = source_core
-            .clipboard
-            .take()
-            .ok_or_else(|| transfer_error("source selection did not produce native paragraphs"))?
-            .paragraphs;
+        // The block is whole paragraphs, not a caret range. Routing it through the
+        // text clipboard's logical offsets drops floating objects and block tables
+        // anchored to an empty last paragraph, so clone the paragraphs directly.
+        let mut paragraphs = selected_source_paragraphs.to_vec();
+        for paragraph in &mut paragraphs {
+            strip_structural_controls_for_text_clipboard(paragraph);
+        }
 
         let mut inventory = TransferInventory::default();
         inspect_paragraphs(&paragraphs, &mut inventory);
-        // Native clipboard selection deliberately removes section/column definitions.
+        // The transfer deliberately removes section/column definitions.
         // Preserve their count from the source range so the caller is told exactly
         // which structural controls were intentionally left owned by the target.
         inventory.structural_controls = structural_controls;

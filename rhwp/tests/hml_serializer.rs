@@ -71,8 +71,9 @@ fn equation_exports_canonically_escapes_and_reparses_edited_and_untouched_script
         .export_hml_native()
         .expect("equations should export losslessly");
     let xml = std::str::from_utf8(&exported).expect("HML is UTF-8");
+    // 스크립트를 고치면 BaseLine 은 새 수식의 렌더 메트릭으로 다시 계산된다.
     assert!(xml.contains(
-        "<EQUATION BaseLine=\"65\" BaseUnit=\"1000\" TextColor=\"0\" Version=\"Equation Version 60\"><SCRIPT>a &lt; b &amp; \"c\"</SCRIPT></EQUATION>"
+        "<EQUATION BaseLine=\"80\" BaseUnit=\"1000\" TextColor=\"0\" Version=\"Equation Version 60\"><SCRIPT>a &lt; b &amp; \"c\"</SCRIPT></EQUATION>"
     ));
 
     let reparsed = DocumentCore::from_bytes(&exported).expect("exported HML should reparse");
