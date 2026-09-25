@@ -85,7 +85,8 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
   let activeTemplate: T.DocumentTemplate | null = null;
   let changes: T.PendingChangeSet[] = [];
   const changeEvents: T.PendingEditsChangeEvent['type'][] = [];
-  const fullReview = new URLSearchParams(location.search).get('review') === 'full';
+  const reviewMode = new URLSearchParams(location.search).get('review');
+  const fullReview = reviewMode === 'full';
   const references: T.ReferenceFile[] = [
     {
       id: 'reference-sample',
@@ -1256,13 +1257,14 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
         status: 'awaiting-review',
         createdAt: Date.now(),
         ops,
+        ...(reviewMode === 'stopped' ? { turnStopped: true } : {}),
       },
     ];
     changeEvents.push('set-finalized');
     pendingListeners.forEach((listener) =>
       listener({ type: 'set-finalized', changeSetId: changes[0].id }),
     );
-    if (permission === 'unrestricted') bridge.pendingEdits.approve(changes[0].id);
+    if (permission === 'unrestricted' && reviewMode !== 'stopped') bridge.pendingEdits.approve(changes[0].id);
   }
   function setServices(configured: boolean) {
     for (const provider of agents) {

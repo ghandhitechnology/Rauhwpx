@@ -8296,6 +8296,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     summary.appendChild(title);
     summary.append(renderPendingOpsDiff(set.ops, buildReviewOp));
     card.appendChild(summary);
+    if (set.turnStopped) {
+      card.appendChild(el('p', 'ag-review-note', '작업이 중단됐습니다. 남은 편집을 유지하거나 버릴 수 있습니다.'));
+    }
 
     const actions = el('div', 'ag-review-actions');
     const approve = el('button', 'ag-approve ag-change-action');
