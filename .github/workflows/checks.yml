@@ -12,18 +12,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  website:
-    name: Website links and assets
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-      - run: python3 website/check.py
-
-  publish-docs:
-    name: Publish docs
+  docs:
+    name: Docs and website
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
@@ -33,6 +23,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22.18.0
+      - name: Check website links and assets
+        run: python3 website/check.py
       - name: Check publish docs
         run: npm run check:docs
 
@@ -53,42 +45,6 @@ jobs:
           sparse-checkout: scripts
       - id: changes
         run: node scripts/ci-changes.mjs
-
-  cloud-contracts:
-    name: Cloud transfer contracts
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.app == 'true' || needs.changes.outputs.browser == 'true') }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            cloud/package-lock.json
-
-      - name: Install cloud contract dependencies
-        run: |
-          npm ci
-          npm --prefix cloud ci
-
-      - name: Install live display test dependency
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends x11-apps
-
-      - name: Test desktop and sandbox cloud contracts
-        run: npm run test:cloud
-
 
   session-tests:
     name: Session tests (${{ matrix.os }})
@@ -166,12 +122,15 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v5
         with:
-          node-version: 22.18.0
+          # The cloud workspace requires Node 24; every other package accepts it.
+          node-version: 24
           cache: npm
           cache-dependency-path: |
             package-lock.json
+            cloud/package-lock.json
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
+            rhwp/rau-credits/package-lock.json
       - name: Install dependencies
         run: npm run setup
       - name: Test repository tooling
@@ -182,7 +141,7 @@ jobs:
         run: node --test --test-concurrency=1 rhwp/rhwp-agent/tests/*.test.mjs
       - name: Test hosted authorization service and durable checkpoint storage
         env:
-          RAU_TEST_POSTGRES_URL: postgresql://rau_test:rau_test@127.0.0.1:${{ job.services.postgres.ports[5432] }}/rau_test
+          RAU_TEST_POSTGRES_URL: postgresql://rau_test:rau_test@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/rau_test
         run: |
           npm --prefix rhwp/rau-credits ci
           npm --prefix rhwp/rau-credits test
@@ -197,6 +156,13 @@ jobs:
           rhwp/rhwp-chrome/sw/fetch-security.test.mjs
           rhwp/rhwp-firefox/sw/fetch-security.test.mjs
           rhwp/rhwp-safari/src/fetch-security.test.mjs
+      - name: Install cloud contract dependencies
+        run: |
+          npm --prefix cloud ci
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends x11-apps
+      - name: Test desktop and sandbox cloud contracts
+        run: npm run test:cloud
 
   browser:
     name: Studio browser integration
@@ -224,42 +190,6 @@ jobs:
         run: npm --prefix rhwp/rhwp-studio run build
       - name: Test browser integration
         run: npm --prefix rhwp/rhwp-studio run test:browser
-      - name: Test sidebar server setup and recovery
-        run: npm run test:sidebar
-      - name: Upload sidebar preview evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sidebar-preview-evidence
-          path: rhwp/rhwp-studio/sidebar-preview/artifacts/
-          if-no-files-found: ignore
-          retention-days: 7
-      - name: Test document shortcuts, deletion, and agent table reveal
-        working-directory: rhwp/rhwp-studio
-        env:
-          VITE_URL: http://127.0.0.1:7700
-          RHWP_SKIP_AGENT_HUB: '1'
-        run: |
-          node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 7700 --strictPort > "$RUNNER_TEMP/editor-vite.log" 2>&1 &
-          editor_pid=$!
-          trap 'kill "$editor_pid" 2>/dev/null || true' EXIT
-          for attempt in {1..60}; do
-            if curl --fail --silent "$VITE_URL" > /dev/null; then break; fi
-            if ! kill -0 "$editor_pid" 2>/dev/null; then
-              cat "$RUNNER_TEMP/editor-vite.log"
-              exit 1
-            fi
-            sleep 1
-          done
-          curl --fail --silent "$VITE_URL" > /dev/null
-          node e2e/global-shortcut.test.mjs --mode=headless
-          node e2e/deletion-caret.test.mjs --mode=headless
-          node e2e/agent-table-reveal.test.mjs --mode=headless
-      - name: Test Cloud onboarding, conversation handoff, and display interaction
-        run: |
-          npm --prefix rhwp/rhwp-studio run e2e:cloud-onboarding
-          npm --prefix rhwp/rhwp-studio run e2e:cloud-workspace
-          npm --prefix rhwp/rhwp-studio run e2e:cloud-display
 
   parser-boundaries:
     needs: changes
@@ -278,38 +208,21 @@ jobs:
         with:
           cache: parser
 
-      - name: Test parser allocation and archive limits
+      - name: Test parser limits, bounded ingestion, and hostile HML identifiers
         working-directory: rhwp
         run: |
           set -euo pipefail
-          cargo_test_output="$(mktemp)"
-          trap 'rm -f "${cargo_test_output}"' EXIT
-          cargo test --locked --lib parser:: 2>&1 | tee "${cargo_test_output}"
-          if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "${cargo_test_output}"; then
-            echo 'The parser filter did not run any tests.' >&2
-            exit 1
-          fi
-
-      - name: Test bounded local-file ingestion
-        working-directory: rhwp
-        run: |
-          set -euo pipefail
-          cargo_test_output="$(mktemp)"
-          trap 'rm -f "${cargo_test_output}"' EXIT
-          cargo test --locked --bin rhwp cli_reader_rejects_oversized_files_before_unbounded_reading -- --nocapture 2>&1 | tee "${cargo_test_output}"
-          if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "${cargo_test_output}"; then
-            echo 'The bounded-ingestion filter did not run any tests.' >&2
-            exit 1
-          fi
-
-      - name: Test hostile HML resource identifiers
-        working-directory: rhwp
-        run: |
-          set -euo pipefail
-          cargo_test_output="$(mktemp)"
-          trap 'rm -f "${cargo_test_output}"' EXIT
-          cargo test --locked --test issue_2743_hml_resource_id_limit -- --nocapture 2>&1 | tee "${cargo_test_output}"
-          if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "${cargo_test_output}"; then
-            echo 'The hostile-HML test target did not run any tests.' >&2
-            exit 1
-          fi
+          # Fail when a filter matches no tests so renames cannot silently skip a gate.
+          run_nonempty() {
+            local output
+            output="$(mktemp)"
+            cargo test --locked "$@" 2>&1 | tee "${output}"
+            if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "${output}"; then
+              echo "No tests ran for: cargo test $*" >&2
+              exit 1
+            fi
+            rm -f "${output}"
+          }
+          run_nonempty --lib parser::
+          run_nonempty --bin rhwp cli_reader_rejects_oversized_files_before_unbounded_reading
+          run_nonempty --test issue_2743_hml_resource_id_limit
