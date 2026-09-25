@@ -357,9 +357,9 @@ test('executor: structural template previews block ordinary document writes', as
   assert.deepEqual(calls, []);
 });
 
-test('executor: get_structure가 revision/미리보기를 반환', async () => {
+test('executor: get_structure format:json 은 revision/미리보기를 예전 모양 그대로 반환', async () => {
   const { executor } = makeExecutor([['hello world', 'second para']]);
-  const r = (await executor.execute('get_structure', {}, 'claude')) as any;
+  const r = (await executor.execute('get_structure', { format: 'json' }, 'claude')) as any;
   assert.equal(r.revision, 1);
   assert.equal(r.sectionCount, 1);
   assert.equal(r.pageCount, 3);
@@ -367,11 +367,32 @@ test('executor: get_structure가 revision/미리보기를 반환', async () => {
   assert.equal(r.sections[0].paragraphs[0].text, 'hello world');
 });
 
+test('executor: get_structure 기본은 머리 줄 + 범례 + 문단 줄 텍스트이고 빈 문단 연속을 접는다', async () => {
+  const { executor } = makeExecutor([['hello world', '', '', '', 'tail\ttab']]);
+  const r = (await executor.execute('get_structure', { maxPreviewChars: 8 }, 'claude')) as any;
+  assert.equal(r.revision, 1);
+  assert.equal(r.pageCount, 3);
+  assert.equal(r.truncated, false);
+  assert.equal(r.sections, undefined);
+  const lines = (r.mcpContent[0].text as string).split('\n');
+  assert.equal(lines[0], 'revision 1 · 3 pages · 1 section');
+  assert.match(lines[1], /^Lines: /);
+  assert.deepEqual(lines.slice(2), [
+    's0 · 5 paragraphs',
+    's0 p0 (11) hello wo…',
+    's0 p1-p3 empty',
+    's0 p4 (8) tail⇥tab',
+  ]);
+});
+
 test('executor: get_structure maxParagraphs로 잘림', async () => {
   const { executor } = makeExecutor([['a', 'b', 'c']]);
-  const r = (await executor.execute('get_structure', { maxParagraphs: 2 }, 'claude')) as any;
+  const r = (await executor.execute('get_structure', { maxParagraphs: 2, format: 'json' }, 'claude')) as any;
   assert.equal(r.truncated, true);
   assert.equal(r.sections[0].paragraphs.length, 2);
+  const text = (await executor.execute('get_structure', { maxParagraphs: 2 }, 'claude')) as any;
+  assert.equal(text.truncated, true);
+  assert.match(text.mcpContent[0].text.split('\n')[0], /TRUNCATED/);
 });
 
 test('executor: get_text_range는 count를 clamp', async () => {
@@ -443,7 +464,8 @@ test('executor: insert_text는 pending에 위임하고 새 revision을 반환', 
   assert.deepEqual(r.insertedRange, {
     startParaIdx: 0, startCharOffset: 5, endParaIdx: 0, endCharOffset: 11,
   });
-  assert.equal(r.note, 'staged now as live preview; when the turn ends it is auto-committed (전체 접근) or held for the user’s review and approval (안전). A failed turn rolls it back');
+  // 스테이징 규칙은 공유 규칙에 한 번만 있다 — 결과마다 반복하지 않는다.
+  assert.equal(r.note, undefined);
 });
 
 test('executor: delete_range 빈 범위 → INVALID_ARGS', async () => {
@@ -498,6 +520,10 @@ test('executor: apply_edits 는 revision 검사 한 번으로 항목들을 원�
   // 항목별 revision/note 는 제거된다 — 최상위 값만 유효
   assert.equal(r.results[0].revision, undefined);
   assert.equal(r.results[0].note, undefined);
+  assert.equal(r.note, undefined);
+  // 같은 change set 이면 changeSetId 는 최상위에 한 번만 싣는다
+  assert.equal(r.changeSetId, 'cs-1');
+  assert.equal(r.results[0].changeSetId, undefined);
   assert.ok(Number.isInteger(r.revision) && r.revision > 1);
   assert.ok(r.results[0].insertedRange);
 });

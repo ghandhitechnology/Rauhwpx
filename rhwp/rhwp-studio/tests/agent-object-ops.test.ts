@@ -608,10 +608,16 @@ test('get_table_properties + set_table_props: 표 개체를 가로 가운데로 
 
   const before = (await call('get_table_properties', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
-  })) as { table: { positionMode: string; horizontal: { align: string }; sizeMm: { width: number } } };
+  })) as { table: { positionMode: string; horizontal?: { align: string }; sizeMm: { width: number } } };
   assert.equal(before.table.positionMode, 'inline');
-  assert.equal(before.table.horizontal.align, 'left');
+  // 기본 응답은 글자처럼 취급하는 표의 개체 배치 필드를 생략한다. full:true 는 전부 싣는다.
+  assert.equal(before.table.horizontal, undefined);
   assert.ok(Math.abs(before.table.sizeMm.width - 150) < 0.1);
+  const beforeFull = (await call('get_table_properties', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, full: true,
+  })) as { table: { horizontal: { align: string }; repeatHeader: boolean } };
+  assert.equal(beforeFull.table.horizontal.align, 'left');
+  assert.equal(beforeFull.table.repeatHeader, false);
 
   const edit = (await call('set_table_props', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
@@ -628,7 +634,7 @@ test('get_table_properties + set_table_props: 표 개체를 가로 가운데로 
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
   })) as { table: { positionMode: string; horizontal: { align: string; relativeTo: string; offsetMm: number } } };
   assert.equal(after.table.positionMode, 'floating');
-  assert.deepEqual(after.table.horizontal, { align: 'center', relativeTo: 'column', offsetMm: 0 });
+  assert.deepEqual(after.table.horizontal, { align: 'center', relativeTo: 'column' });
 });
 
 test('legacy edit_table set_table_props props still apply and ignore a null horizontal alignment', async () => {
@@ -1170,10 +1176,14 @@ test('rejecting a later equation keeps an earlier approved marked change', async
   assert.equal(tables[0].cellProps[0].reviewMarker, 'approved');
 });
 
-test('get_document_info 에 registeredFonts 가 실린다', async () => {
+test('get_document_info 는 등록 폰트 개수만 싣고 fontQuery 로 물은 폰트만 찾아 준다', async () => {
   const { call } = makeEnv();
-  const r = (await call('get_document_info')) as { registeredFonts: string[] };
-  assert.deepEqual(r.registeredFonts, ['바탕']);
+  const plain = (await call('get_document_info')) as Record<string, unknown>;
+  assert.equal(plain['registeredFontCount'], 1);
+  assert.equal(plain['registeredFonts'], undefined);
+  assert.equal(plain['fontMatches'], undefined);
+  const r = (await call('get_document_info', { fontQuery: ['바', '탕', '맑은 고딕'] })) as { fontMatches: Record<string, string[]> };
+  assert.deepEqual(r.fontMatches, { '바': ['바탕'], '탕': ['바탕'], '맑은 고딕': [] });
 });
 
 // ─── 리뷰 확정 결함 회귀 테스트 ─────────────────────────────

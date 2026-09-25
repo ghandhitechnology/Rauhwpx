@@ -7,10 +7,11 @@ description: Address table cells and change table structure in the live HWP/HWPX
 
 ## 셀 주소 조립
 
-- `get_structure` 의 `tables[]` 항목이 표 컨트롤의 `paraIdx` 와 `controlIdx` 를 준다.
+- `get_structure` 의 표 줄 `table s0 p5 c0 3x4` 가 표 컨트롤의 `paraIdx`(5) 와 `controlIdx`(0) 를 준다.
+  그 아래 `r<행>` 줄의 `[cellIdx]` 가 셀 번호다. `rs2`/`cs2` 는 1 이 아닌 행·열 병합 폭이다.
 - 셀 주소는 `cell = { paraIdx, controlIdx, cellIdx }` 세 값이 모두 있어야 한다.
   `cellIdx` 는 행 우선 평면 인덱스이고 병합된 셀은 한 번만 센다.
-- `get_structure` 의 셀별 항목에는 `paraIdx`/`controlIdx` 가 없다. 표 항목에서 가져와 직접 붙인다.
+- 셀 안의 `⏎` 는 셀 문단 경계다 (앞에서부터 셀 문단 0, 1, …). `⊞` 는 중첩 표를 품은 셀 문단이다.
 - `find_text` 결과에 들어 있는 `cell` 객체는 완전하다. 그대로 복사해 쓰는 쪽이 안전하다.
 - `cell` 을 넘기면 `paraIdx`/`startParaIdx`/`endParaIdx` 와 모든 오프셋이 그 셀 내부 기준이 된다.
 - 중첩 표 텍스트를 `find_text` 로 찾거나, 그 셀에 커서를 둔 뒤 `get_selection` 을 부르면
@@ -77,7 +78,7 @@ description: Address table cells and change table structure in the live HWP/HWPX
 
 ## delete_table
 
-- 표 전체를 지운다. 주소는 `get_structure` 의 `tables[]` 에서 온 `sectionIdx`/`paraIdx`/`controlIdx` 다.
+- 표 전체를 지운다. 주소는 `get_structure` 표 줄의 `sectionIdx`/`paraIdx`/`controlIdx` 다.
 - mark-only: 승인 전까지 표는 그대로 있고 하이라이트만 된다. 거절하면 아무 것도 지우지 않는다.
 - 같은 표에 대한 후속 편집은 승인/거절 전까지 `PENDING_DESTRUCTIVE_OP` 로 거절된다.
 - 셀 텍스트를 고치려는 작업에는 `delete_table` 을 사용하지 않는다. 셀 주소가 거절되면

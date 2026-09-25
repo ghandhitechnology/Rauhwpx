@@ -175,10 +175,25 @@ export function getEngineEditCapabilities(query = '') {
     .filter((capability) => !normalized
       || capability.method.toLowerCase().includes(normalized)
       || capability.signature.toLowerCase().includes(normalized))
-    .map((capability) => ({
-      ...capability,
-      argumentGuide: argumentGuide(capability.method, capability.signature),
-    }));
+    .map((capability) => {
+      const guide = argumentGuide(capability.method, capability.signature);
+      // parameters 는 signature 와 중복이라 싣지 않는다. 빈 argumentGuide 도 생략한다.
+      return {
+        method: capability.method,
+        kind: capability.kind,
+        signature: capability.signature,
+        ...(Object.keys(guide).length > 0 ? { argumentGuide: guide } : {}),
+      };
+    });
+}
+
+/** 쿼리 없는 기본 응답 — kind 별 메서드 이름만. 시그니처는 query 나 detail:true 로 받는다. */
+export function getEngineEditMethodNamesByKind(): Record<string, string[]> {
+  const byKind: Record<string, string[]> = {};
+  for (const capability of ENGINE_EDIT_CAPABILITIES) {
+    (byKind[capability.kind] ??= []).push(capability.method);
+  }
+  return byKind;
 }
 
 export function getEngineEditCapabilityCount() {
@@ -187,6 +202,29 @@ export function getEngineEditCapabilityCount() {
 
 export function getEngineEditTypeDefinitions() {
   return ENGINE_EDIT_TYPE_DEFINITIONS;
+}
+
+/**
+ * 주어진 capability 들이 시그니처·argumentGuide 에서 참조하는 타입 정의만 모은다.
+ * 정의 본문이 다른 타입을 참조하면(CellPathLike → CellPathEntry 등) 그것도 따라간다.
+ */
+export function getReferencedTypeDefinitions(
+  capabilities: ReadonlyArray<{ signature: string; argumentGuide?: Record<string, string> }>,
+): Record<string, string> {
+  const definitions = ENGINE_EDIT_TYPE_DEFINITIONS as Readonly<Record<string, string>>;
+  const names = Object.keys(definitions);
+  const referencedIn = (text: string): string[] =>
+    names.filter((name) => new RegExp(`\\b${name}\\b`).test(text));
+  const out: Record<string, string> = {};
+  const queue = capabilities.flatMap((capability) =>
+    referencedIn(`${capability.signature} ${Object.values(capability.argumentGuide ?? {}).join(' ')}`));
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    if (name in out) continue;
+    out[name] = definitions[name];
+    queue.push(...referencedIn(definitions[name]).filter((ref) => ref !== name));
+  }
+  return out;
 }
 
 export function applyEngineEdits(

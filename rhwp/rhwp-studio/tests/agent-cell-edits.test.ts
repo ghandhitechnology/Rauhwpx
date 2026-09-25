@@ -202,9 +202,39 @@ async function expectToolError(p: Promise<unknown>, code: string): Promise<void>
   assert.fail(`${code} 오류를 기대했지만 성공함`);
 }
 
-test('get_structure: 섹션에 tables[] 로 셀 주소와 셀 텍스트가 실린다', async () => {
+test('get_structure: 표는 앵커 문단 뒤에 cellIdx 그리드로 실리고 스팬·셀 문단·중첩 표를 표시한다', async () => {
+  const { executor, wasm } = makeExecutor();
+  // 셀 1 이 두 행에 걸친(rowSpan 2) 표로 바꾸고, 셀 2 의 빈 둘째 문단에 중첩 표를 둔다.
+  Object.assign(wasm, {
+    getTableDimensions: () => ({ rowCount: 2, colCount: 2, cellCount: 3 }),
+    getCellInfo: (_s: number, _p: number, _c: number, idx: number) => (
+      [{ row: 0, col: 0, rowSpan: 1, colSpan: 1 }, { row: 0, col: 1, rowSpan: 2, colSpan: 1 }, { row: 1, col: 0, rowSpan: 1, colSpan: 1 }][idx]
+    ),
+  });
+  const cells = [['Name'], ['Value'], ['foo', '']];
+  Object.assign(wasm, {
+    getCellParagraphCount: (_s: number, _p: number, _c: number, cell: number) => cells[cell].length,
+    getCellParagraphLength: (_s: number, _p: number, _c: number, cell: number, cp: number) => cells[cell][cp].length,
+    getTextInCell: (_s: number, _p: number, _c: number, cell: number, cp: number, off: number, cnt: number) =>
+      cells[cell][cp].slice(off, off + cnt),
+  });
+  wasm.nestedTableParas.add('2:1');
+  const r = (await executor.execute('get_structure', {}, 'claude')) as { mcpContent: Array<{ text: string }> };
+  const lines = r.mcpContent[0].text.split('\n').slice(2);
+  assert.deepEqual(lines, [
+    's0 · 3 paragraphs',
+    's0 p0 (5) Intro',
+    's0 p1 (0)',
+    '  table s0 p1 c0 2x2',
+    '  r0 [0] Name | [1 rs2] Value',
+    '  r1 [2] foo⏎⊞',
+    's0 p2 (5) Outro',
+  ]);
+});
+
+test('get_structure format:json: 섹션에 tables[] 로 셀 주소와 셀 텍스트가 실린다', async () => {
   const { executor } = makeExecutor();
-  const r = (await executor.execute('get_structure', {}, 'claude')) as {
+  const r = (await executor.execute('get_structure', { format: 'json' }, 'claude')) as {
     sections: Array<{ tables?: Array<Record<string, unknown>> }>;
   };
   const tables = r.sections[0].tables;

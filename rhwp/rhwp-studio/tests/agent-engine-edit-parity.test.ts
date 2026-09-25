@@ -12,6 +12,8 @@ import {
   applyEngineEdits,
   applyEngineEditSession,
   getEngineEditCapabilities,
+  getEngineEditMethodNamesByKind,
+  getReferencedTypeDefinitions,
 } from '../src/agent/engine-edit.ts';
 import type { InputHandler } from '../src/engine/input-handler.ts';
 import { AgentToolError } from '../src/agent/types.ts';
@@ -39,14 +41,30 @@ test('opaque engine arguments carry actionable field guides', () => {
   const byMethod = new Map(capabilities.map((capability) => [capability.method, capability]));
   for (const capability of capabilities.filter(({ signature }) => signature.includes('Record<string, unknown>'))) {
     assert.ok(
-      Object.keys(capability.argumentGuide).length > 0,
+      Object.keys(capability.argumentGuide ?? {}).length > 0,
       `${capability.method} lacks a property argument guide`,
     );
   }
-  assert.match(byMethod.get('createShapeControl')?.argumentGuide.params ?? '', /shapeType/);
-  assert.match(byMethod.get('createNumbering')?.argumentGuide.json ?? '', /levelFormats/);
-  assert.match(byMethod.get('createStyle')?.argumentGuide.json ?? '', /baseCharShapeId/);
-  assert.match(byMethod.get('updateStyleShapes')?.argumentGuide.charModsJson ?? '', /CharProperties/);
+  assert.match(byMethod.get('createShapeControl')?.argumentGuide?.params ?? '', /shapeType/);
+  assert.match(byMethod.get('createNumbering')?.argumentGuide?.json ?? '', /levelFormats/);
+  assert.match(byMethod.get('createStyle')?.argumentGuide?.json ?? '', /baseCharShapeId/);
+  assert.match(byMethod.get('updateStyleShapes')?.argumentGuide?.charModsJson ?? '', /CharProperties/);
+});
+
+test('capability results carry only the type definitions their signatures and guides reference', () => {
+  const picture = getEngineEditCapabilities('setPictureProperties');
+  assert.deepEqual(Object.keys(getReferencedTypeDefinitions(picture)).sort(), ['PictureProperties']);
+  const byPath = getEngineEditCapabilities('applyCharFormatInCellByPath');
+  assert.deepEqual(
+    Object.keys(getReferencedTypeDefinitions(byPath)).sort(),
+    ['CellPathEntry', 'CharProperties'],
+  );
+  const names = getEngineEditMethodNamesByKind();
+  assert.equal(
+    Object.values(names).reduce((total, list) => total + list.length, 0),
+    ENGINE_EDIT_CAPABILITIES.length,
+  );
+  assert.ok(names['document']?.includes('setPictureProperties'));
 });
 
 test('engine-edit batch uses the atomic editor snapshot path and preserves order', () => {

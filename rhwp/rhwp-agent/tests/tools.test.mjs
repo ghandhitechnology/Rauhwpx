@@ -335,7 +335,7 @@ test('copy-layout runner schema exposes actions and data, never commands or path
 
 test('공유 규칙은 한 번만: 셀 주소·오프셋·리비전·스테이징·단위가 RHWP_TOOL_RULES 에 있다', () => {
   // get_structure 의 셀 항목에는 paraIdx/controlIdx 가 없으므로 표 항목 것과 조립해야 한다는 안내
-  assert.match(RHWP_TOOL_RULES, /paraIdx\/controlIdx come from the table entry in get_structure tables\[\]/);
+  assert.match(RHWP_TOOL_RULES, /paraIdx\/controlIdx come from the get_structure table line/);
   assert.match(RHWP_TOOL_RULES, /cellIdx is the row-major index/);
   assert.match(RHWP_TOOL_RULES, /find_text match carries a complete cell/);
   assert.match(RHWP_TOOL_RULES, /cellPath/);
@@ -479,7 +479,7 @@ test('delete_table: 스키마는 주소 네 값이 필수이고 document-write �
   const def = byName.get('delete_table');
   assert.ok(def, 'missing tool: delete_table');
   assert.equal(def.category, 'document-write');
-  assert.match(def.description, /get_structure tables\[\]/);
+  assert.match(def.description, /get_structure table line/);
   assert.match(def.description, /PENDING_DESTRUCTIVE_OP/);
   assert.match(def.description, /mark-only/i);
   for (const key of ['expectedRevision', 'sectionIdx', 'paraIdx', 'controlIdx']) {
