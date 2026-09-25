@@ -84,6 +84,18 @@ export class EditJournal {
     return { ok: true, shift };
   }
 
+  /**
+   * (expected, current] 구간의 모든 bump 가 정밀 기록됐는지만 본다. 앵커 쓰기는
+   * 좌표를 실행 시점 매치에서 얻으므로 리베이스 대신 이 검사만 거치면 된다 —
+   * 사이에 낀 변경이 전부 이 실행기의 쓰기라면(=gap 없음) stale revision 도 안전하다.
+   */
+  covers(expectedRevision: number, currentRevision: number): boolean {
+    for (let rev = expectedRevision + 1; rev <= currentRevision; rev++) {
+      if (!this.entries.has(rev)) return false;
+    }
+    return true;
+  }
+
   clear(): void {
     this.entries.clear();
   }
