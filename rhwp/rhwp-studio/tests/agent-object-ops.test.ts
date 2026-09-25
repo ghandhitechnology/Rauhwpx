@@ -577,6 +577,25 @@ test('delete_table 앞에서 채운 셀 편집도 reject 하면 함께 되돌아
   assert.equal(tables[0].cells[0][0], 'a', '표 삭제를 되돌린 뒤 셀 삽입도 되돌린다');
 });
 
+test('행 삽입 앞뒤로 같은 셀 번호에 쓴 텍스트도 reject 가 모두 되돌린다 (되돌린 op 은 기대값에서 뺀다)', async () => {
+  const { call, pending, tables } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
+  })) as { changeSetId: string };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  const cell = { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 };
+  const events: string[] = [];
+  pending.onChange((e) => { if (e.type === 'invalidated') events.push(e.reason); });
+  const first = (await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'q', cell })) as { changeSetId: string };
+  await call('edit_table', { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 0, below: false });
+  await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'm', cell });
+  assert.deepEqual(tables[0].cells.map((p) => p[0]), ['m', '', 'qa', 'b', 'c', 'd']);
+  pending.reject(first.changeSetId);
+  assert.deepEqual(tables[0].cells.map((p) => p[0]), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(events, [], '아무 편집도 문서에 남지 않는다');
+});
+
 test('delete_table → approve: 삭제를 그대로 확정한다', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const c = (await call('create_table', {

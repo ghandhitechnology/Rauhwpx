@@ -1060,3 +1060,17 @@ test('a user edit after an overwritten op keeps the old drift fallback', () => {
   // 사용자 편집 이후에는 적용 직후 좌표를 믿지 않는다 — 사용자 글자를 지우지 않는다.
   assert.ok(fake.text(0).endsWith('hello!'));
 });
+
+test('a format whose range a later replace overwrote reverts on its original range', () => {
+  const { mgr, fake, calls, events } = makeManager([paraOf('hello world')]);
+  mgr.beginTurn('claude');
+  const range: DocRange = { sectionIdx: 0, startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 5 };
+  mgr.applyCharFormat('claude', range, { bold: true });
+  mgr.replaceText({ ...range }, 'HELLO!', 'claude');
+  calls.length = 0;
+  mgr.reject(mgr.getChangeSets()[0].id);
+  assert.equal(fake.text(0), 'hello world');
+  // 교체가 먼저 되돌아간 뒤, 서식 역연산은 무너진 live 범위가 아니라 적용 시점 범위에 걸린다
+  assert.deepEqual(calls.filter((c) => c.m === 'applyCharFormat').map((c) => c.args.slice(0, 3)), [[0, 0, 5]]);
+  assert.ok(!events.includes('invalidated'), 'the format is not dropped as drift');
+});

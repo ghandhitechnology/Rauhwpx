@@ -531,6 +531,7 @@ export class PendingEditManager {
     const op: PendingOp = {
       kind: 'format', id: this.nextId('op'), agent: set.agent, range: { ...range }, format: { ...format }, inverse,
       text: rangeText,
+      ...(rangeText !== undefined ? { applied: this.appliedAt(range) } : {}),
     };
     this.pushOp(set, op);
     this.reconcilePreviewLayout();
@@ -2464,18 +2465,19 @@ export class PendingEditManager {
    * 이 op 이후 적용된 텍스트 op(insert/replace)이 이 범위 안에 중첩된 경우 그
    * 기여분을 반영한 기대 텍스트를 만든다 — 에이전트 자신의 나중 편집으로 범위가
    * 커진 것을 드리프트로 오판하지 않기 위함이다. 사용자 편집은 여기에 기록되지
-   * 않으므로 여전히 불일치(=드리프트)로 잡힌다.
+   * 않으므로 여전히 불일치(=드리프트)로 잡힌다. reverted 는 이미 되돌린 op 이라 기여하지 않는다.
    */
   private expectedOpText(
     op: Extract<PendingOp, { kind: 'insert' | 'replace' | 'format' }>,
     base: string,
+    reverted?: ReadonlySet<PendingOp>,
   ): string {
     interface Contrib { paraIdx: number; charOffset: number; ins: string; delLen: number; seq: number }
     const r = op.range;
     const contribs: Contrib[] = [];
     for (const set of this.sets) {
       for (const cand of set.ops) {
-        if (cand === op || (cand.seq ?? 0) <= (op.seq ?? 0)) continue;
+        if (cand === op || (cand.seq ?? 0) <= (op.seq ?? 0) || reverted?.has(cand)) continue;
         if (cand.kind !== 'insert' && cand.kind !== 'replace') continue;
         const cr = cand.range;
         if (cr.sectionIdx !== r.sectionIdx || !sameCell(cr.cell, r.cell)) continue;
@@ -2513,13 +2515,15 @@ export class PendingEditManager {
    * approve/reject 검증: 기대 텍스트가 아직 그 자리에 있는가.
    * 멀티 문단 op 는 첫 줄이 아니라 전체 텍스트를 비교한다.
    */
-  private verifyOpText(op: Extract<PendingOp, { kind: 'insert' | 'replace' | 'format' }>): boolean {
+  private verifyOpText(
+    op: Extract<PendingOp, { kind: 'insert' | 'replace' | 'format' }>, reverted?: ReadonlySet<PendingOp>,
+  ): boolean {
     // format 은 등록 시점 텍스트 지문이 없으면(캡처 실패) 검증을 건너뛴다 (기존 동작)
     if (op.kind === 'format' && op.text === undefined) return true;
     const base = op.kind === 'format' ? op.text! : op.text;
     const current = this.readRangeText(op.range);
     if (current === null) return false;
-    return current === this.expectedOpText(op, base);
+    return current === this.expectedOpText(op, base, reverted);
   }
 
   /** 필드 되돌림 전 드리프트 프로브: 현재 값이 여전히 newValue 인가 (사용자 수정 시 되돌리지 않음) */
@@ -2535,10 +2539,10 @@ export class PendingEditManager {
   }
 
   /** op 이 아직 기록한 자리에 그대로 있는가 — 어긋났으면 그 원인 (없으면 null) */
-  private driftCause(op: PendingOp): PendingDropCause | null {
+  private driftCause(op: PendingOp, reverted?: ReadonlySet<PendingOp>): PendingDropCause | null {
     switch (op.kind) {
       case 'insert': case 'replace': case 'format':
-        return this.verifyOpText(op) ? null : 'text-changed';
+        return this.verifyOpText(op, reverted) ? null : 'text-changed';
       case 'field':
         return this.verifyFieldOp(op) ? null : 'field-changed';
       case 'object':
@@ -2587,7 +2591,7 @@ export class PendingEditManager {
         kept.push(op);
         continue;
       }
-      if ((op.kind === 'insert' || op.kind === 'replace')
+      if ((op.kind === 'insert' || op.kind === 'replace' || op.kind === 'format')
         && op.applied?.overwritten === true && this.appliedAtIsCurrent(op, this.userEditSeq)) {
         overwritten.add(op);
         kept.push(op);
@@ -2618,7 +2622,7 @@ export class PendingEditManager {
 
   /** 적용 이후 사용자 편집도, 다른 set 의 확정도 없었는가. */
   private appliedAtIsCurrent(
-    op: Extract<PendingOp, { kind: 'insert' | 'replace' }>, userEditSeqNow: number,
+    op: Extract<PendingOp, { kind: 'insert' | 'replace' | 'format' }>, userEditSeqNow: number,
   ): boolean {
     return op.applied !== undefined
       && op.applied.userEditSeq === userEditSeqNow
@@ -2631,11 +2635,11 @@ export class PendingEditManager {
    * live range 가 무너졌어도 정확히 되돌린다. 텍스트가 다르면 live range 를 유지한다.
    */
   private restoreAppliedRange(
-    op: Extract<PendingOp, { kind: 'insert' | 'replace' }>,
+    op: Extract<PendingOp, { kind: 'insert' | 'replace' | 'format' }>,
     revertSet: PendingOp[], keepPreviewsOf: PendingOp[], userEditSeqNow: number,
   ): void {
     const applied = op.applied;
-    if (!applied || !this.appliedAtIsCurrent(op, userEditSeqNow)) return;
+    if (!applied || op.text === undefined || !this.appliedAtIsCurrent(op, userEditSeqNow)) return;
     if (this.hasLaterAppliedOpsOutside(op, revertSet, keepPreviewsOf)) return;
     if (this.readRangeText(applied.range) !== op.text) return;
     const range = op.range;
@@ -2663,10 +2667,16 @@ export class PendingEditManager {
   ): Map<string, PendingDropCause> {
     const wasm = this.deps.wasm;
     const failed = new Map<string, PendingDropCause>();
+    // 이미 되돌린 나중 op — 미룬 검증에서 그 텍스트 기여를 기대값에 넣지 않는다
+    const reverted = new Set<PendingOp>();
     for (let i = ops.length - 1; i >= 0; i--) {
       const op = ops[i];
       if (deferred?.has(op)) {
-        const cause = this.driftCause(op);
+        // 나중 op 이 덮어쓴 범위는 그 op 들이 모두 되돌아간 지금 적용 시점 범위로 돌려 놓고 잰다
+        if (op.kind === 'insert' || op.kind === 'replace' || op.kind === 'format') {
+          this.restoreAppliedRange(op, ops, keepPreviewsOf, userEditSeqNow);
+        }
+        const cause = this.driftCause(op, reverted);
         if (cause !== null) {
           failed.set(op.id, cause);
           continue;
@@ -2691,6 +2701,7 @@ export class PendingEditManager {
         } else if (op.kind === 'replace') {
           this.revertReplaceOp(op, ops, keepPreviewsOf, userEditSeqNow);
         } else if (op.kind === 'format') {
+          this.restoreAppliedRange(op, ops, keepPreviewsOf, userEditSeqNow);
           this.applyFormatRaw(op.range, op.inverse);
         } else if (op.kind === 'field') {
           wasm.setFieldValueByName(op.name, op.oldValue);
@@ -2699,7 +2710,9 @@ export class PendingEditManager {
           wasm.restoreSnapshot(op.snapshotId);
         } else if (!this.revertObject(op, ops, keepPreviewsOf, userEditSeqNow)) {
           failed.set(op.id, 'revert-failed');
+          continue;
         }
+        reverted.add(op);
       } catch (err) {
         console.warn('[pending-edits] revert failed for op', op.id, err);
         failed.set(op.id, 'revert-failed');
@@ -3122,7 +3135,8 @@ export class PendingEditManager {
         }
         if (op.range.sectionIdx !== del.sectionIdx) continue;
         if (sameCell(op.range.cell, del.cell)) {
-          if ((op.kind === 'insert' || op.kind === 'replace') && op.applied && rangesOverlap(op.range, del)) {
+          if ((op.kind === 'insert' || op.kind === 'replace' || op.kind === 'format')
+            && op.applied && rangesOverlap(op.range, del)) {
             op.applied.overwritten = true;
           }
           this.shiftRange(op.range, (p) => shiftPointAfterDelete(p, del));

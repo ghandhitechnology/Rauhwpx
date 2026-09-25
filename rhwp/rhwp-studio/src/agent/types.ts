@@ -1311,6 +1311,8 @@ export type PendingOp =
       inverse: CharFormatProps;
       /** 되돌림 전 드리프트 프로브용 등록 시점 범위 텍스트 (캡처 실패 시 생략) */
       text?: string;
+      /** 적용 시점 범위 — 나중 에이전트 교체가 범위를 덮어써도 역순 되돌림 끝에 정확히 되돌린다 */
+      applied?: PendingAppliedAt;
       seq?: number;
     } // applied
   | {

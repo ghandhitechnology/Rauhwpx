@@ -227,6 +227,33 @@ try {
       }],
       ['insert_text', { sectionIdx: 0, paraIdx: c.p('Closing'), charOffset: 1, text: 'X\nY' }],
     ]],
+    // 한 턴에 섞인 편집 — 되돌림은 역순으로 각자의 적용 직후 상태를 거쳐야 한다
+    ['style, character format and replace in one paragraph', (c) => [
+      ['apply_style', { sectionIdx: 0, paraIdx: c.p('Parity'), styleId: c.styleId }],
+      ['apply_char_format', { sectionIdx: 0, paraIdx: c.p('Parity'), startOffset: 0, endOffset: 6, italic: true }],
+      ['replace_range', { sectionIdx: 0, startParaIdx: c.p('Parity'), startCharOffset: 0, endParaIdx: c.p('Parity'), endCharOffset: 6, text: 'Parity!' }],
+    ]],
+    ['cell text around table structure ops', (c) => [
+      ['insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'q', cell: cellOf(c.table, 0) }],
+      ['edit_table', { ...at(c.table), op: 'insert_row', rowIdx: 0, below: false }],
+      ['edit_table', { ...at(c.table), op: 'merge_cells', startRow: 0, startCol: 0, endRow: 0, endCol: 1 }],
+      ['insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'm', cell: cellOf(c.table, 0) }],
+      ['edit_table', { ...at(c.table), op: 'set_column_widths', columnWidthsMm: Array.from({ length: c.table.colCount }, () => 25) }],
+    ]],
+    ['a new table built up in one turn', (c) => {
+      const table = { sectionIdx: 0, paraIdx: c.p('body'), controlIdx: 0 };
+      return [
+        ['create_table', { sectionIdx: 0, paraIdx: c.p('body'), charOffset: 4, cells: [['h1', 'h2'], ['v1', 'v2']] }],
+        ['edit_table', { ...table, op: 'insert_row', rowIdx: 1 }],
+        ['insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'new', cell: { paraIdx: table.paraIdx, controlIdx: 0, cellIdx: 4 } }],
+        ['edit_table', { ...table, op: 'merge_cells', startRow: 2, startCol: 0, endRow: 2, endCol: 1 }],
+        ['edit_table', { ...table, op: 'set_cell_props', cellIdx: 0, props: { fillColor: '#FFE0E0' } }],
+      ];
+    }],
+    ['a footnote and a line break before it', (c) => [
+      ['insert_footnote', { sectionIdx: 0, paraIdx: c.p('Opening'), charOffset: 10, text: 'Split note.' }],
+      ['insert_text', { sectionIdx: 0, paraIdx: c.p('Opening'), charOffset: 2, text: 'X\nY' }],
+    ]],
     ['delete_table', (c) => [['delete_table', at(c.table)]]],
   ];
 
