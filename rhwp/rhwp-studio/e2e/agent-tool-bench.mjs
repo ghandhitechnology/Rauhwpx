@@ -8,6 +8,8 @@
  *      도구 텔레메트리 행(RHWP_WORK_DIR/tool-telemetry.jsonl)에서 호출 수, 결과 글자 수,
  *      이미지 수, 도구 ms 를 읽는다. 작업마다 "today"(현재 도구) 스크립트가 있고, 이후
  *      슬라이스가 같은 작업의 "target" 스크립트를 더해 비교한다.
+ *   3. 도구 정의 크기: 모델이 매 요청 읽는 direct 프로필 설명 + 입력 스키마 글자 수와
+ *      MCP 서버 instructions(공유 규칙) 글자 수.
  *
  * 실행: node e2e/agent-tool-bench.mjs --mode=headless [--tasks-only] [--task=<이름>]
  * 결과: 마지막에 JSON 한 줄 (BENCH_RESULT: {...}) — 전후 비교용.
@@ -25,7 +27,8 @@ import { PNG } from 'pngjs';
 import { registerHubSession } from '../../../desktop/agent-hub.mjs';
 import { writeFakeCliBin } from '../../rhwp-agent/tests/fake-cli-bin.mjs';
 import { prepareInsertImageArgs } from '../../rhwp-agent/insert-image-source.mjs';
-import { readToolTelemetryRows } from '../../rhwp-agent/tool-telemetry.mjs';
+import { measureToolDefinitions, readToolTelemetryRows } from '../../rhwp-agent/tool-telemetry.mjs';
+import { RHWP_TOOL_RULES, filterToolDefinitions } from '../../rhwp-agent/tools.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const studioRoot = path.resolve(__dirname, '..');
@@ -451,7 +454,9 @@ function printSummary() {
       console.log(`    ${`${name} ${variant}`.padEnd(34)} turns=${row.turns}  calls=${String(row.calls).padStart(3)}  chars=${String(row.resultChars).padStart(7)}  images=${row.images}  toolMs=${row.toolMs}`);
     }
   }
-  console.log(`\nBENCH_RESULT: ${JSON.stringify({ latency: latencySummary, tasks })}`);
+  const definitions = { ...measureToolDefinitions(filterToolDefinitions('direct')), instructionsChars: RHWP_TOOL_RULES.length };
+  console.log(`\n  [bench] direct 도구 정의: ${definitions.tools}개 ${definitions.totalChars}자 + 공유 규칙 ${definitions.instructionsChars}자`);
+  console.log(`\nBENCH_RESULT: ${JSON.stringify({ latency: latencySummary, tasks, definitions })}`);
 }
 
 try {

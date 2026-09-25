@@ -18,6 +18,7 @@ import {
   toToolContent,
   toolAnnotations,
 } from '../tools.mjs';
+import { toolDefinitionChars } from '../tool-telemetry.mjs';
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
@@ -590,87 +591,10 @@ test('표·셀 속성은 타입이 있는 객체이고 모르는 키는 올바�
 // ─── 도구 정의 크기 한도 ─────────────────────────────────────
 // 모델은 매 요청마다 direct 프로필의 설명 + JSON 스키마 전체를 읽는다. SDK 와 같은 변환
 // (zod-to-json-schema, strictUnions, input)으로 글자 수를 재서 한도를 넘지 못하게 한다.
-// 한도는 현재 값 +2% — 정의를 줄이는 작업(T1)이 낮춘다. 새 도구는 3K 안에 들어와야 한다.
-const DIRECT_DEFINITION_BASELINE = {
-  read_agent_instructions: 422,
-  update_agent_instructions: 1122,
-  read_product_skill: 669,
-  commit_product_skill: 960,
-  list_harness_skills: 270,
-  list_reference_files: 358,
-  search_reference_files: 500,
-  read_reference_chunk: 523,
-  read_reference_image: 448,
-  get_active_template: 342,
-  template_get_structure: 574,
-  template_get_text_range: 1343,
-  template_get_para_format: 1215,
-  template_get_char_format: 1260,
-  template_list_styles: 364,
-  template_get_page_layout: 358,
-  template_render_page: 518,
-  get_structure: 1131,
-  get_text_range: 2282,
-  get_selection: 431,
-  get_fields: 335,
-  get_document_info: 870,
-  materialize_document_snapshot: 751,
-  publish_cloud_document: 518,
-  find_text: 838,
-  render_page: 969,
-  get_para_format: 2361,
-  get_char_format: 2781,
-  get_table_properties: 1135,
-  get_table_layout: 1344,
-  get_engine_edit_capabilities: 893,
-  apply_engine_edits: 2133,
-  prepare_engine_edit_session: 871,
-  apply_edits: 2533,
-  insert_text: 3337,
-  template_apply_section_layout: 1651,
-  template_apply_paragraph_format: 1608,
-  template_insert_block: 1719,
-  delete_range: 3448,
-  replace_range: 3412,
-  apply_char_format: 3614,
-  create_table: 3032,
-  edit_table: 10174,
-  delete_table: 1444,
-  apply_para_format: 3666,
-  apply_list: 2228,
-  list_styles: 344,
-  list_numberings: 495,
-  apply_style: 2313,
-  insert_image: 2681,
-  environment_screenshot: 539,
-  insert_equation: 4072,
-  preview_equation: 1243,
-  insert_chart: 2735,
-  set_page_layout: 2307,
-  edit_header_footer: 1649,
-  insert_page_break: 1295,
-  replace_all: 1737,
-  get_outline: 695,
-  list_footnotes: 512,
-  insert_footnote: 1822,
-  edit_footnote: 1420,
-  list_bookmarks: 379,
-  set_bookmark: 1888,
-  set_field_value: 1070,
-  verify_changes: 1203,
-  ask_user_question: 1256,
-  publish_artifact: 874,
-  delegate_copy_layout: 1166,
-  register_copy_layout_template: 486,
-};
-const DIRECT_DEFINITION_TOTAL_BASELINE = 106936;
-const NEW_TOOL_DEFINITION_LIMIT = 3_000;
-const DEFINITION_SLACK = 1.02;
-
-function toolDefinitionChars(definition) {
-  const schema = zodToJsonSchema(z.object(definition.shape), { strictUnions: true, pipeStrategy: 'input' });
-  return definition.description.length + JSON.stringify(schema).length;
-}
+// 공유 규칙은 RHWP_TOOL_RULES 에 한 번만 두고, 새 도구도 이 한도 안에 들어와야 한다.
+// P0 기준선: 70개 106,936자 (edit_table 10,174자).
+const DIRECT_DEFINITION_TOTAL_LIMIT = 60_000;
+const TOOL_DEFINITION_LIMIT = 3_000;
 
 test('direct 프로필 도구 정의 크기가 한도를 넘지 않는다', () => {
   let total = 0;
@@ -678,13 +602,10 @@ test('direct 프로필 도구 정의 크기가 한도를 넘지 않는다', () =
   for (const definition of filterToolDefinitions('direct')) {
     const chars = toolDefinitionChars(definition);
     total += chars;
-    const baseline = DIRECT_DEFINITION_BASELINE[definition.name];
-    const limit = baseline === undefined ? NEW_TOOL_DEFINITION_LIMIT : Math.ceil(baseline * DEFINITION_SLACK);
-    if (chars > limit) over.push(`${definition.name} ${chars} > ${limit}`);
+    if (chars > TOOL_DEFINITION_LIMIT) over.push(`${definition.name} ${chars} > ${TOOL_DEFINITION_LIMIT}`);
   }
   assert.deepEqual(over, [], 'tool definitions over their size limit');
-  const totalLimit = Math.ceil(DIRECT_DEFINITION_TOTAL_BASELINE * DEFINITION_SLACK);
-  assert.ok(total <= totalLimit, `direct tool definitions total ${total} > ${totalLimit}`);
+  assert.ok(total <= DIRECT_DEFINITION_TOTAL_LIMIT, `direct tool definitions total ${total} > ${DIRECT_DEFINITION_TOTAL_LIMIT}`);
 });
 
 test('도구 스키마는 $ref 없이 펼쳐진다 (Codex/Pi 가 $ref 를 못 읽는다)', () => {

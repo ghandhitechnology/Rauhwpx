@@ -6,6 +6,8 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { z } from 'zod/v3';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 
 import { imageDetails } from './insert-image-source.mjs';
 
@@ -14,6 +16,26 @@ export const TOOL_TELEMETRY_FILE = 'tool-telemetry.jsonl';
 export const MAX_TOOL_TELEMETRY_BYTES = 8 * 1024 * 1024;
 /** 한 턴 행에 싣는 호출 상세의 상한 — 합계는 상한과 무관하게 전부 센다. */
 export const MAX_TURN_CALL_DETAILS = 256;
+
+/**
+ * 도구 정의 한 건이 모델에게 보이는 글자 수 — 설명 + MCP SDK 와 같은 옵션으로 만든 입력 스키마.
+ * tools.test 의 크기 한도와 agent-tool-bench 의 정의 크기 보고가 같은 잣대를 쓴다.
+ */
+export function toolDefinitionChars(definition) {
+  const schema = zodToJsonSchema(z.object(definition.shape), { strictUnions: true, pipeStrategy: 'input' });
+  return definition.description.length + JSON.stringify(schema).length;
+}
+
+/** 정의 목록의 합계와 큰 순서 상위 항목. */
+export function measureToolDefinitions(definitions, { top = 5 } = {}) {
+  const sizes = definitions.map((definition) => ({ name: definition.name, chars: toolDefinitionChars(definition) }));
+  sizes.sort((a, b) => b.chars - a.chars);
+  return {
+    tools: sizes.length,
+    totalChars: sizes.reduce((sum, entry) => sum + entry.chars, 0),
+    largest: sizes.slice(0, top),
+  };
+}
 
 /** base64 이미지의 픽셀 수. 모르는 형식이면 0. */
 export function imagePixels(base64) {
