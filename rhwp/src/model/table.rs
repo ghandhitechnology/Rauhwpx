@@ -555,6 +555,170 @@ impl Table {
         self.inferred_width_row_roles().1.into_iter().collect()
     }
 
+    /// Widths owned by cell paragraph frames before padding and paragraph margins.
+    ///
+    /// Native tables may repeat a row with raw cell widths whose sum is a few
+    /// HWPUNIT short of the table's resolved column grid. Those raw values are
+    /// serialization auxiliaries, not independent row boundaries. Use genuine
+    /// base-track evidence and place any positive table-width residual on the
+    /// last column without inferring a prior editing gesture.
+    ///
+    /// This is deliberately batch-shaped. Row-role inference examines the table
+    /// as a whole, so repeating it once per cell makes large native tables
+    /// quadratic and can prevent on-demand reflow from completing.
+    ///
+    /// `treat_as_char` tables keep the stored `cell.width`. TAC screenshots in
+    /// #7333 must not reflow from this auxiliary-width rewrite.
+    pub(crate) fn paragraph_frame_owner_widths(&self) -> Vec<i32> {
+        let to_i32 = |width: u64| width.min(i32::MAX as u64) as i32;
+        let mut owners = self
+            .cells
+            .iter()
+            .map(|cell| to_i32(u64::from(cell.width)))
+            .collect::<Vec<_>>();
+        let col_count = usize::from(self.col_count);
+        if owners.is_empty()
+            || col_count == 0
+            || self.common.treat_as_char
+            || self.common.width == 0
+        {
+            return owners;
+        }
+
+        let nonclosing_rows = self.declared_width_rows_exceeding(0);
+
+        // Extract only real single-column evidence. `base_grid_column_widths`
+        // intentionally fills holes from the display grid; that fallback would
+        // make excluded local/outlier data look like a paragraph-frame base.
+        let local_resize_rows = self
+            .local_resize_rows
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let base_grid_outlier_rows = self
+            .base_grid_outlier_rows()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut base_tracks = vec![0u32; col_count];
+        for cell in &self.cells {
+            let col = usize::from(cell.col);
+            if cell.row >= self.row_count
+                || cell.col_span != 1
+                || cell.width == 0
+                || col >= col_count
+                || nonclosing_rows.contains(&cell.row)
+                || local_resize_rows.contains(&cell.row)
+                || base_grid_outlier_rows.contains(&cell.row)
+            {
+                continue;
+            }
+            base_tracks[col] = base_tracks[col].max(cell.width);
+        }
+        if base_tracks.contains(&0) {
+            return owners;
+        }
+        let base_total = base_tracks.iter().copied().map(u64::from).sum::<u64>();
+        let table_width = u64::from(self.common.width);
+        if table_width > base_total {
+            let residual = (table_width - base_total).min(u64::from(u32::MAX)) as u32;
+            if let Some(last) = base_tracks.last_mut() {
+                *last = last.saturating_add(residual);
+            }
+        }
+
+        let mut rows = vec![Vec::<usize>::new(); usize::from(self.row_count)];
+        for (cell_index, cell) in self.cells.iter().enumerate() {
+            if let Some(row) = rows.get_mut(usize::from(cell.row)) {
+                row.push(cell_index);
+            }
+        }
+        for (row_index, cell_indices) in rows.iter_mut().enumerate() {
+            let row = row_index as u16;
+            if nonclosing_rows.contains(&row)
+                || local_resize_rows.contains(&row)
+                || base_grid_outlier_rows.contains(&row)
+            {
+                continue;
+            }
+            cell_indices.sort_by_key(|index| self.cells[*index].col);
+            let mut next_col = 0usize;
+            let mut row_total = 0u64;
+            let mut complete = !cell_indices.is_empty();
+            for &cell_index in cell_indices.iter() {
+                let cell = &self.cells[cell_index];
+                let start = usize::from(cell.col);
+                let Some(end) = start.checked_add(usize::from(cell.col_span)) else {
+                    complete = false;
+                    break;
+                };
+                if cell.row_span != 1
+                    || cell.col_span == 0
+                    || cell.width == 0
+                    || start != next_col
+                    || end > col_count
+                {
+                    complete = false;
+                    break;
+                }
+                row_total = row_total.saturating_add(u64::from(cell.width));
+                next_col = end;
+            }
+            if !complete || next_col != col_count || row_total == table_width {
+                continue;
+            }
+            for &cell_index in cell_indices.iter() {
+                let cell = &self.cells[cell_index];
+                let start = usize::from(cell.col);
+                let end = start + usize::from(cell.col_span);
+                let resolved = base_tracks[start..end]
+                    .iter()
+                    .copied()
+                    .map(u64::from)
+                    .sum::<u64>();
+                owners[cell_index] = to_i32(resolved);
+            }
+        }
+        owners
+    }
+
+    fn declared_width_rows_exceeding(&self, tolerance: u64) -> std::collections::BTreeSet<u16> {
+        let mut invalid = std::collections::BTreeSet::new();
+        let col_count = usize::from(self.col_count);
+        if col_count == 0 || self.common.width == 0 {
+            return invalid;
+        }
+        for row in 0..self.row_count {
+            let mut cells = self
+                .cells
+                .iter()
+                .filter(|cell| cell.row == row && cell.row_span == 1)
+                .collect::<Vec<_>>();
+            cells.sort_by_key(|cell| cell.col);
+            let mut next_col = 0usize;
+            let mut total = 0u64;
+            let mut complete = !cells.is_empty();
+            for cell in cells {
+                let start = usize::from(cell.col);
+                let end = start.saturating_add(usize::from(cell.col_span));
+                if cell.col_span == 0 || start != next_col || end > col_count {
+                    complete = false;
+                    break;
+                }
+                total = total.saturating_add(u64::from(cell.width));
+                next_col = end;
+            }
+            // A short row can be closed by the table-width residual. A row
+            // wider than its persisted table cannot be a valid shared grid.
+            if complete
+                && next_col == col_count
+                && total.saturating_sub(u64::from(self.common.width)) > tolerance
+            {
+                invalid.insert(row);
+            }
+        }
+        invalid
+    }
+
     /// 2D 그리드 인덱스를 재구축한다.
     /// 구조 변경(파싱, 행/열 추가/삭제, 병합/분할) 후 호출해야 한다.
     ///

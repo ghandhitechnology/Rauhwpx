@@ -182,7 +182,7 @@ use super::{CellContext, CellPathEntry, LayoutEngine};
 
 // 표 수평 정렬: model::shape 타입 사용
 use crate::model::shape::{
-    Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertRelTo,
+    Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertAlign, VertRelTo,
 };
 
 fn caption_has_topbottom_picture(caption: &Caption) -> bool {
@@ -3460,9 +3460,17 @@ impl LayoutEngine {
 
             // 줄별 TAC 컨트롤 너비 합산: 각 TAC가 속한 줄을 판별하여 줄별 최대 너비 계산
             let tac_line_widths: Vec<f64> = {
-                // 줄별 너비 합산 벡터
-                let mut line_widths = vec![0.0f64; composed.lines.len().max(1)];
-                for ctrl in &para.controls {
+                let use_stored_line_buckets =
+                    para.text.trim().is_empty() && para.line_segs.len() > 1;
+                let mut line_widths = vec![
+                    0.0f64;
+                    if use_stored_line_buckets {
+                        para.line_segs.len()
+                    } else {
+                        composed.lines.len().max(1)
+                    }
+                ];
+                for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
                     let (is_tac, w) = match ctrl {
                         Control::Picture(pic) if pic.common.treat_as_char => (
                             true,
@@ -3490,6 +3498,12 @@ impl LayoutEngine {
                         _ => (false, 0.0),
                     };
                     if !is_tac {
+                        continue;
+                    }
+                    if use_stored_line_buckets {
+                        let target = super::control_line_seg_index(para, ctrl_idx).unwrap_or(0);
+                        let idx = target.min(line_widths.len().saturating_sub(1));
+                        line_widths[idx] += w;
                         continue;
                     }
                     // 줄이 1개이면 무조건 0번 줄
@@ -3708,10 +3722,14 @@ impl LayoutEngine {
                             if !will_render_inline {
                                 // LINE_SEG 기반 줄 판별
                                 let target_line = if all_runs_empty && para.line_segs.len() > 1 {
-                                    // 빈 문단: TAC 순번으로 LINE_SEG에 1:1 매핑
-                                    let li = tac_seq_index.min(para.line_segs.len() - 1);
+                                    // 빈 문단이라도 앞선 글앞/글뒤 도형은 TAC 순번에 포함되지
+                                    // 않는다. 그림은 빈-control stream의 실제 위치가 가리키는
+                                    // 저장 LINE_SEG를 우선 사용한다. 없거나 깨진 stream만 기존
+                                    // TAC 순번 폴백을 쓴다 (#7333 p40~47).
+                                    let fallback = tac_seq_index.min(para.line_segs.len() - 1);
                                     tac_seq_index += 1;
-                                    li
+                                    super::control_line_seg_index(para, ctrl_idx)
+                                        .unwrap_or(fallback)
                                 } else {
                                     // 텍스트 있는 문단: char position으로 줄 판별
                                     composed
@@ -3741,8 +3759,11 @@ impl LayoutEngine {
                                 if target_line > current_tac_line {
                                     // 줄이 바뀜: inline_x 리셋, y를 LINE_SEG vpos 기준으로 이동
                                     current_tac_line = target_line;
-                                    let line_w =
-                                        tac_line_widths.get(target_line).copied().unwrap_or(0.0);
+                                    let line_w = tac_line_widths
+                                        .get(target_line)
+                                        .copied()
+                                        .or_else(|| tac_line_widths.first().copied())
+                                        .unwrap_or(0.0);
                                     // [Task #548] target_line 의 effective_margin_left 적용
                                     let line_margin = effective_margin_left_line(
                                         para_margin_left_px,
@@ -4030,9 +4051,9 @@ impl LayoutEngine {
                             // inline_x/tac_img_y 리셋. multi-line paragraph 에서 사각형이
                             // ls[1]+ 에 있을 때 paragraph 첫 줄 좌표가 잘못 사용되던 결함 정정.
                             let target_line = if all_runs_empty && para.line_segs.len() > 1 {
-                                let li = tac_seq_index.min(para.line_segs.len() - 1);
+                                let fallback = tac_seq_index.min(para.line_segs.len() - 1);
                                 tac_seq_index += 1;
-                                li
+                                super::control_line_seg_index(para, ctrl_idx).unwrap_or(fallback)
                             } else {
                                 composed
                                     .tac_controls
@@ -4052,8 +4073,11 @@ impl LayoutEngine {
                             };
                             if target_line > current_tac_line {
                                 current_tac_line = target_line;
-                                let line_w =
-                                    tac_line_widths.get(target_line).copied().unwrap_or(0.0);
+                                let line_w = tac_line_widths
+                                    .get(target_line)
+                                    .copied()
+                                    .or_else(|| tac_line_widths.first().copied())
+                                    .unwrap_or(0.0);
                                 // [Task #548] target_line 의 effective_margin_left 적용
                                 let line_margin = effective_margin_left_line(
                                     para_margin_left_px,
@@ -4271,10 +4295,34 @@ impl LayoutEngine {
                             let table_cell_ctx = table_meta.map(|(opi, otci)| {
                                 (section_index, opi, otci, cell_idx, cp_idx, ctrl_idx)
                             });
+                            // HWP5가 셀 안의 번호 주석 앞에 남긴 음수 y offset은
+                            // 다음 inline TopAndBottom 그림의 저장 줄을 거슬러 올라가는
+                            // paint offset이 아니다. 한컴은 그 주석을 그림의 첫 줄에
+                            // 붙인다. 일반적인 음수 paragraph offset은 보존하고, 같은
+                            // 셀 문단의 뒤쪽 그림이 이 정확한 형식일 때만 정규화한다.
+                            let follows_inline_picture = para.controls.iter().skip(ctrl_idx + 1).any(
+                                |candidate| {
+                                    matches!(candidate, Control::Picture(picture)
+                                        if picture.common.treat_as_char
+                                            && matches!(picture.common.text_wrap, TextWrap::TopAndBottom))
+                                },
+                            );
+                            let mut shape_for_layout = shape.clone();
+                            if follows_inline_picture
+                                && matches!(shape.common().text_wrap, TextWrap::InFrontOfText)
+                                && matches!(shape.common().vert_rel_to, VertRelTo::Para)
+                                && matches!(
+                                    shape.common().vert_align,
+                                    VertAlign::Top | VertAlign::Inside
+                                )
+                                && (shape.common().vertical_offset as i32) < 0
+                            {
+                                shape_for_layout.common_mut().vertical_offset = 0;
+                            }
                             self.layout_cell_shape(
                                 tree,
                                 cell_node,
-                                shape,
+                                &shape_for_layout,
                                 &inner_area,
                                 shape_anchor_y,
                                 para_alignment,

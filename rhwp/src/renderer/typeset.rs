@@ -4311,12 +4311,17 @@ impl TypesetEngine {
                         // #1750 split-precheck 상한(2500)과 정합. sb 일치 ±150 조건이
                         // 유지되어 오발동 억제.
                         && cv <= 2500
-                        && para_sb_hu_for_reset > 0
-                        && (cv - para_sb_hu_for_reset).abs() <= 150
                         && !shape_only_para
                         && !has_table_control
                         && para_has_visible_text(para)
-                        && prev_vpos_end > 60_000;
+                        // #7333 p41→p42: 직전 빈 줄 끝 57483HU, 다음 본문 vpos=1200.
+                        // 고정 60_000 하단 게이트는 body(~60150HU) 바로 위만 인정해서
+                        // 이 저장 쪽 경계를 놓친다. 55_000HU(733px)면 쪽 하단 꼬리를
+                        // 유지하면서 해당 리셋을 살린다.
+                        && prev_vpos_end > 55_000
+                        && ((para_sb_hu_for_reset > 0
+                            && (cv - para_sb_hu_for_reset).abs() <= 150)
+                            || (para_sb_hu_for_reset == 0 && cv <= 1500));
                     let next_heading_after_top_content_reset =
                         paragraphs.get(para_idx + 1).is_some_and(|next_para| {
                             let next_sb_hu = styles
