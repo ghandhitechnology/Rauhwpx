@@ -367,7 +367,6 @@ hwp5rb	task1705/wrap_empty_para_anchor_page.hwp	sections[].paragraphs[].controls
 hwp5rb	task1706/empty_para_between_tac_tables.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	32
 hwp5rb	task1718/table_giant_cell_overfill.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	1
 hwp5rb	task1718/table_giant_cell_overfill.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	5
-hwp5rb	task1725/text_footnote_tail_overpagination.hwp	sections[].paragraphs[].control_mask	1
 hwp5rb	task1725/text_footnote_tail_overpagination.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	1083
 hwp5rb	task1745/table_text_anchor_wrap.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	153
 hwp5rb	task1749/saved_bounds_cumulative_page_break.hwp	sections[].paragraphs[].char_count	1
