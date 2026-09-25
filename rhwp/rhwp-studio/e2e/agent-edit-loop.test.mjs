@@ -776,6 +776,8 @@ try {
         (elements) => elements.length,
       );
       assert(replayedAnimations === 0, 'viewport rerender 가 liquid reveal 을 재생하지 않음');
+      // 호스트 CLI 버전에 따라 뜨는 업데이트 토스트가 모바일 폭에서 접기 탭을 가린다
+      await page.evaluate(() => document.getElementById('rhwp-toast-container')?.remove());
       await page.click('.ag-collapse-tab');
       await page.waitForFunction(
         () => document.querySelector('#agent-sidebar')?.classList.contains('ag-collapsed') === true,
