@@ -32,11 +32,11 @@ interface InsertShift {
  * 삽입 이후 좌표 이동. 경계 규칙은 그 점이 범위의 어느 끝인지에 따라 다르다:
  *
  * - 끝(end) 경계 — strictly-after: 삽입 지점과 정확히 같은 끝은 움직이지 않는다
- *   (범위 끝에 덧붙인 텍스트가 기존 마크/범위에 삼켜지지 않도록).
+ *   (범위 끝에 덧붙인 텍스트가 기존 범위에 삼켜지지 않도록).
  * - 시작(start) 경계 — at-or-after (`isStartBoundary`): 삽입 지점과 정확히 같은
  *   시작은 삽입 길이만큼 밀린다. 그 자리에 삽입된 텍스트는 물리적으로 범위의
  *   기존 텍스트를 뒤로 밀므로, 시작이 제자리에 남으면 범위가 새 텍스트를 삼킨다
- *   (삭제 마크 시작점에 재작성 텍스트를 삽입하면 승인 시 새 텍스트까지 지워지는 버그).
+ *   (삭제/교체 범위의 시작점에 새 텍스트를 넣으면 되돌림이 새 텍스트까지 지우는 문제).
  */
 export function shiftPointAfterInsert(
   p: DocPoint, ins: InsertShift, isStartBoundary = false,

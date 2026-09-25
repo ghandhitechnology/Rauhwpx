@@ -871,7 +871,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'delete_table',
-    description: `Delete a whole table (address from its get_structure table line). The table is removed immediately; later tables in the same paragraph move down one controlIdx. Rejecting or rolling back the turn restores it. ${WRITE_POINTER}`,
+    description: `Delete a whole table (address from its get_structure table line). The table is removed immediately; later tables in the same paragraph move down one controlIdx. Rejecting the staged change restores it. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),

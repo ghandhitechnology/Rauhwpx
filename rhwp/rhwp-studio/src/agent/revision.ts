@@ -12,9 +12,7 @@
  *
  * 내용이 변하지 않는 이벤트는 bump 하지 않는다 — 과잉 bump 하나가
  * REVISION_MISMATCH → 재조회 → LLM 왕복 하나를 통째로 낭비시키기 때문이다:
- *  - 저장 계열의 dirty false 전이는 직렬화만 했을 뿐 내용이 같다.
- *  - holdDuring() 은 스냅샷 복원으로 문서가 그대로 돌아오는 검증 창
- *    (verify_changes 미리보기)의 이벤트를 흡수한다.
+ * 저장 계열의 dirty false 전이는 직렬화만 했을 뿐 내용이 같다.
  */
 import type { EventBus } from '../core/event-bus.ts';
 
@@ -32,12 +30,10 @@ const CLEAN_REASONS_WITHOUT_BUMP = new Set(['save', 'save-as', 'host-save']);
 export class RevisionTracker {
   private rev = 1;
   private inWindow = false;
-  private held = 0;
   private unsubscribes: Array<() => void> = [];
 
   constructor(eventBus: EventBus) {
     const bump = () => {
-      if (this.held > 0) return;
       if (this.inWindow) return;
       this.rev++;
       this.inWindow = true;
@@ -60,20 +56,6 @@ export class RevisionTracker {
 
   get revision(): number {
     return this.rev;
-  }
-
-  /**
-   * fn 실행 동안 bump 를 멈춘다. 문서를 변이 없이 복원하는 것이 보장되는 창
-   * (스냅샷 restore 로 끝나는 검증/미리보기)에만 사용할 것 — 실제 변이 창에
-   * 쓰면 오래된 expectedRevision 이 통과해 좌표가 어긋난다.
-   */
-  holdDuring<T>(fn: () => T): T {
-    this.held++;
-    try {
-      return fn();
-    } finally {
-      this.held--;
-    }
   }
 
   dispose(): void {
