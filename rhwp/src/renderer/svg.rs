@@ -299,6 +299,19 @@ impl SvgRenderer {
                             codepoints.insert(ch);
                         }
                     }
+                    // 문서 선언 대체 글꼴도 같은 글자로 임베드 — 원본 미설치 뷰어에서
+                    // font-family 체인이 subst face 를 선택할 수 있게 한다.
+                    if !run.style.font_subst.is_empty() {
+                        let subst_codepoints = self
+                            .font_codepoints
+                            .entry(run.style.font_subst.clone())
+                            .or_default();
+                        for ch in run.display_or_text().chars() {
+                            if !ch.is_control() {
+                                subst_codepoints.insert(ch);
+                            }
+                        }
+                    }
                 }
                 if let Some(ref overlap) = run.char_overlap {
                     // 글자겹침(CharOverlap) 렌더링: 각 문자에 테두리 도형 + 텍스트
@@ -324,8 +337,11 @@ impl SvgRenderer {
                     let font_family = if run.style.font_family.is_empty() {
                         "sans-serif".to_string()
                     } else {
-                        // [#3314] 요청 face → base family → generic 체인.
-                        super::render_font_family_chain(&run.style.font_family)
+                        // [#3314] 요청 face → base family → 문서 선언 대체 → generic 체인.
+                        super::render_font_family_chain(
+                            &run.style.font_family,
+                            &run.style.font_subst,
+                        )
                     };
                     let mut attrs = format!("font-family=\"{}\" font-size=\"{}\" fill=\"{}\" text-anchor=\"middle\" dominant-baseline=\"central\"",
                         escape_xml(&font_family), font_size, color);
@@ -423,14 +439,16 @@ impl SvgRenderer {
                 }
             }
             RenderNodeType::FootnoteMarker(marker) => {
-                let sup_size = (marker.base_font_size * 0.55).max(7.0);
+                // 각주 번호 위첨자: 본문 글꼴의 0.75 배율 (한컴 PDF 정합)
+                let sup_size = (marker.base_font_size * 0.75).max(7.0);
                 let color = color_to_svg(marker.color);
                 let font_family = if marker.font_family.is_empty() {
                     "sans-serif"
                 } else {
                     &marker.font_family
                 };
-                let y = node.bbox.y + node.bbox.height * 0.4;
+                // 본문 baseline 에서 (본문-위첨자) 크기 차만큼만 올려 top 정렬
+                let y = node.bbox.y + marker.baseline - (marker.base_font_size - sup_size) * 0.85;
                 self.output.push_str(&format!(
                     "<text x=\"{}\" y=\"{}\" font-family=\"{}\" font-size=\"{}\" fill=\"{}\">{}</text>\n",
                     node.bbox.x, y, escape_xml(font_family), sup_size, color, escape_xml(&marker.text),
@@ -1979,7 +1997,7 @@ impl SvgRenderer {
             "sans-serif".to_string()
         } else {
             // [#3314] 요청 face → base family → generic 체인.
-            super::render_font_family_chain(&style.font_family)
+            super::render_font_family_chain(&style.font_family, &style.font_subst)
         };
         let mut font_attrs = format!(
             "font-family=\"{}\" font-size=\"{:.2}\"",
@@ -2125,7 +2143,7 @@ impl SvgRenderer {
             "sans-serif".to_string()
         } else {
             // [#3314] 요청 face → base family → generic 체인.
-            super::render_font_family_chain(&style.font_family)
+            super::render_font_family_chain(&style.font_family, &style.font_subst)
         };
         let mut font_attrs = format!(
             "font-family=\"{}\" font-size=\"{:.2}\"",
@@ -2697,7 +2715,7 @@ impl Renderer for SvgRenderer {
             "sans-serif".to_string()
         } else {
             // [#3314] 요청 face → base family → generic 체인.
-            super::render_font_family_chain(&style.font_family)
+            super::render_font_family_chain(&style.font_family, &style.font_subst)
         };
         let old_hangul_font_family = format!("'Source Han Serif K Old Hangul',{}", font_family);
 

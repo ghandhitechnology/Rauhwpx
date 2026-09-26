@@ -531,8 +531,11 @@ pub struct FootnoteMarkerNode {
     pub number: u16,
     /// 위첨자 텍스트 ("1)" 등)
     pub text: String,
-    /// 기본 폰트 크기 (본문 크기, 위첨자는 이것의 55%)
+    /// 기본 폰트 크기 (본문 크기, 위첨자는 이것의 75%)
     pub base_font_size: f64,
+    /// 본문 baseline 거리 (bbox 상단 기준 px). 마커 bbox.height 는 경로에 따라
+    /// 줄 높이이거나 baseline 거리이므로 위첨자 상승량 계산은 이 필드를 쓴다.
+    pub baseline: f64,
     /// 폰트 패밀리
     pub font_family: String,
     /// 글자 색

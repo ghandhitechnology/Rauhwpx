@@ -20,11 +20,10 @@ fn issue_598_body_footnote_marker_has_hit_and_cursor_unit() {
 
     assert_eq!(doc.get_control_text_positions(0, 3), "[7]");
 
-    // 마커 bbox 중앙. 둘째 TAC 표(문단 1)가 앞 문단 TAC 표 뒤에서도 자기 줄 상단 +
-    // 바깥 여백에 놓여 본문이 10.4px 내려갔다 (footnote-01-2022.pdf: 두 표 상단 간격
-    // 132.8px, rhwp 132.9px).
+    // 마커 bbox 중앙. 본문 줄 상단은 공식 PDF의 319.5pt(=426.1px)와 일치한다
+    // (footnote-01-2022.pdf: '1)' 상단 319.5pt).
     let hit = doc
-        .hit_test_body_footnote_marker_native(0, 267.0, 402.0)
+        .hit_test_body_footnote_marker_native(0, 267.0, 436.0)
         .expect("hit body footnote marker");
     assert!(hit.contains("\"hit\":true"), "hit json: {hit}");
     assert!(hit.contains("\"sectionIndex\":0"), "hit json: {hit}");
@@ -59,8 +58,9 @@ fn issue_598_second_body_footnote_marker_has_same_cursor_unit() {
 
     assert_eq!(doc.get_control_text_positions(0, 7), "[6]");
 
+    // '2)' 마커 줄 상단 538.1pt(=717.6px, footnote-01-2022.pdf 정합).
     let hit = doc
-        .hit_test_body_footnote_marker_native(0, 216.0, 694.0)
+        .hit_test_body_footnote_marker_native(0, 216.0, 728.0)
         .expect("hit second body footnote marker");
     assert!(hit.contains("\"hit\":true"), "hit json: {hit}");
     assert!(hit.contains("\"paragraphIndex\":7"), "hit json: {hit}");

@@ -343,6 +343,17 @@ fn numbering_marker_text_style(
     }
 }
 
+/// 개요 번호/글머리표 마커의 점유 폭.
+///
+/// 마커 문자로 U+00AD(soft hyphen) 같이 본문에서는 폭 0 으로 처리되는 문자가
+/// 쓰이면 한컴도 그 글리프를 그리며 반각(font_size/2)의 폭을 차지한다.
+/// 폭 0 규칙은 본문 텍스트용이므로 마커 폭에서는 반각으로 보정한다.
+fn numbering_marker_width(num_text: &str, num_style: &TextStyle) -> f64 {
+    let base = estimate_text_width(num_text, num_style);
+    let zero_w = num_text.chars().filter(|&c| c == '\u{00AD}').count() as f64;
+    base + zero_w * num_style.font_size * 0.5
+}
+
 fn tac_picture_or_shape_height_for_line(
     para: Option<&Paragraph>,
     raw_line_height: f64,
@@ -2561,7 +2572,8 @@ impl LayoutEngine {
                                 fn_num,
                             );
                             let base_ts = resolved_to_text_style(styles, current_cs_id, 0);
-                            let sup_font_size = (base_ts.font_size * 0.55).max(7.0);
+                            // 각주 번호 위첨자: 본문 글꼴의 0.75 배율 (한컴 PDF 정합)
+                            let sup_font_size = (base_ts.font_size * 0.75).max(7.0);
                             let sup_ts = TextStyle {
                                 font_size: sup_font_size,
                                 font_family: base_ts.font_family.clone(),
@@ -2581,6 +2593,7 @@ impl LayoutEngine {
                                     number: fn_num,
                                     text: fn_text,
                                     base_font_size: base_ts.font_size,
+                                    baseline: run_bbox_h,
                                     font_family: base_ts.font_family.clone(),
                                     color: base_ts.color,
                                     section_index,
@@ -3740,18 +3753,17 @@ impl LayoutEngine {
             .get(start_line..end)
             .map_or(true, |slice| slice.iter().all(|l| l.runs.is_empty()));
 
-        // 개요 번호/글머리표 마커 폭 사전 계산 (첫 줄 가용폭 차감용)
-        let numbering_width = if start_line == 0 {
-            if let Some(ref num_text) = composed.numbering_text {
-                let num_style = numbering_marker_text_style(
-                    styles,
-                    para,
-                    composed.lines.first().and_then(|l| l.runs.first()),
-                );
-                estimate_text_width(num_text, &num_style)
-            } else {
-                0.0
-            }
+        // 개요 번호/글머리표 마커 폭 사전 계산 (행잉 인덴트용)
+        // 마커 자체는 문단 첫 줄에만 그리지만, 문단이 페이지/단 경계에서 나뉘어
+        // start_line > 0 인 청크로 이월돼도 후속 줄의 행잉 인덴트(마커 폭만큼의
+        // 들여쓰기)는 유지돼야 하므로 start_line 과 무관하게 계산한다.
+        let numbering_width = if let Some(ref num_text) = composed.numbering_text {
+            let num_style = numbering_marker_text_style(
+                styles,
+                para,
+                composed.lines.first().and_then(|l| l.runs.first()),
+            );
+            numbering_marker_width(num_text, &num_style)
         } else {
             0.0
         };
@@ -4768,7 +4780,7 @@ impl LayoutEngine {
                 if let Some(ref num_text) = composed.numbering_text {
                     let num_style =
                         numbering_marker_text_style(styles, para, comp_line.runs.first());
-                    let num_width = estimate_text_width(num_text, &num_style);
+                    let num_width = numbering_marker_width(num_text, &num_style);
                     line_numbering_marker_width = num_width;
                     let num_id = tree.next_id();
                     let num_node = RenderNode::new(
@@ -5956,7 +5968,8 @@ impl LayoutEngine {
                                 fnum,
                             );
                             let base_ts = &text_style;
-                            let sup_size = (base_ts.font_size * 0.55).max(7.0);
+                            // 각주 번호 위첨자: 본문 글꼴의 0.75 배율 (한컴 PDF 정합)
+                            let sup_size = (base_ts.font_size * 0.75).max(7.0);
                             let sup_ts = TextStyle {
                                 font_size: sup_size,
                                 font_family: base_ts.font_family.clone(),
@@ -5971,6 +5984,7 @@ impl LayoutEngine {
                                     number: fnum,
                                     text: fn_text,
                                     base_font_size: base_ts.font_size,
+                                    baseline,
                                     font_family: base_ts.font_family.clone(),
                                     color: base_ts.color,
                                     section_index,
@@ -7230,7 +7244,7 @@ impl LayoutEngine {
                         para.and_then(|p| p.controls.get(ctrl_idx)),
                         fnum,
                     );
-                    let sup_size = (ts.font_size * 0.55).max(7.0);
+                    let sup_size = (ts.font_size * 0.75).max(7.0);
                     let sup_ts = TextStyle {
                         font_size: sup_size,
                         font_family: ts.font_family.clone(),

@@ -190,6 +190,64 @@ pub fn bundled_font_dirs() -> Vec<PathBuf> {
     vec![PathBuf::from(BUNDLED_OPENSOURCE_DIR)]
 }
 
+/// 폰트 패밀리명이 현재 렌더 폰트 집합에 실재하는지 판별한다.
+///
+/// substFont(문서 선언 대체 글꼴) 적용 판정용 — 파일명 휴리스틱이 아니라 각
+/// 파일의 name 테이블에 기록된 실제 패밀리명으로 판별한다. 기본 집합은
+/// 시스템 + `RHWP_FONT_PATH` + 번들이며 프로세스 최초 한 번만 구축하고,
+/// `extra` 경로(`--font-path` 인자)는 호출 시마다 스캔한다.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn font_family_available(family: &str, extra: &[PathBuf]) -> bool {
+    fn normalize(name: &str) -> String {
+        name.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    }
+    let want = normalize(family);
+    static BASE: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    let base = BASE.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        load_into_fontdb(&mut db, &[]);
+        db.faces()
+            .flat_map(|face| {
+                face.families
+                    .iter()
+                    .map(|(name, _)| normalize(name))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    });
+    if base.contains(&want) {
+        return true;
+    }
+    for file in font_files(extra) {
+        let Ok(data) = std::fs::read(&file) else {
+            continue;
+        };
+        let face_count = ttf_parser::fonts_in_collection(&data).unwrap_or(1).min(256);
+        for face_index in 0..face_count {
+            let Ok(face) = ttf_parser::Face::parse(&data, face_index) else {
+                continue;
+            };
+            let hit = face.names().into_iter().any(|name| {
+                matches!(
+                    name.name_id,
+                    ttf_parser::name_id::FAMILY | ttf_parser::name_id::TYPOGRAPHIC_FAMILY
+                ) && name
+                    .to_string()
+                    .is_some_and(|value| normalize(&value) == want)
+            });
+            if hit {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// `fontdb` 에 조달 순서대로 폰트를 적재한다.
 ///
 /// 시스템 폰트는 `load_system_fonts()` 가 담당하므로 여기서는 호출자 지정 →

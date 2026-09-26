@@ -2041,6 +2041,45 @@ pub(crate) fn vpos_corrected_end_y(
     (end_y, applied)
 }
 
+/// [Task #1811 정합] 컬럼 첫 항목(문단) 첫 줄이 쪽 상단에서 저장 vpos 복원으로
+/// 실제 아래에 놓이는 양(HU) — `paragraph_layout` 의 column-top vpos 복원
+/// 규칙(#853 para0 min(sb,vpos0), #1811 paraN: 0 < vpos0 ≤ sb+0.5px 이면 vpos0)과
+/// 동일 판정이다. `vpos_page_base` 초기값은 "쪽 상단에 대응하는 저장 vpos"이므로
+/// base = 첫 줄 vpos − 이 복원량 이어야 한다. 복원이 없으면 0 을 반환해 종전
+/// 기준(첫 줄 vpos 자체)을 유지한다. sb=0 폴백(#1012)은 TopAndBottom float
+/// 가드가 필요해 여기서는 적용하지 않는다.
+pub(crate) fn column_top_vpos_restore_hu(
+    para: &Paragraph,
+    para_index: usize,
+    styles: &ResolvedStyleSet,
+    dpi: f64,
+) -> i32 {
+    let Some(seg) = para
+        .line_segs
+        .first()
+        .filter(|ls| ls.tag & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0)
+    else {
+        return 0;
+    };
+    let vpos0_px = hwpunit_to_px(seg.vertical_pos, dpi);
+    let spacing_before = styles
+        .para_styles
+        .get(para.para_shape_id as usize)
+        .map(|ps| ps.spacing_before)
+        .unwrap_or(0.0);
+    if spacing_before <= 0.0 {
+        return 0;
+    }
+    let restore_px = if para_index == 0 {
+        spacing_before.min(vpos0_px.max(0.0))
+    } else if vpos0_px > 0.0 && vpos0_px <= spacing_before + 0.5 {
+        vpos0_px
+    } else {
+        0.0
+    };
+    px_to_hwpunit(restore_px, dpi)
+}
+
 /// [Task #1027 Stage B] 문단이 vpos 보정을 무효화하는 overlay 개체를 포함하는지.
 /// 글앞으로/글뒤로(InFrontOfText/BehindText) 또는 위아래(TopAndBottom)+vert=Para 인
 /// 비-TAC Shape/Picture 는 vpos 에 개체 높이가 포함되어 과대하므로, 다음 항목의 vpos
@@ -2280,6 +2319,8 @@ pub(crate) use text_measurement::{
     registered_glyph_advance, resolved_to_text_style, split_into_clusters,
     with_resolved_shaping_fonts, ResolvedShapingFont, ResolvedShapingFontScope,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use text_measurement::{enter_measure_font_paths, MeasureFontPathsScope};
 // [Task #826] map_pua_bullet_char 는 통합 테스트 (tests/issue_826.rs) 에서 직접 검증
 // (PUA substitution 매핑 정합) — pub 노출.
 pub(crate) use border_rendering::{
@@ -5631,12 +5672,27 @@ impl LayoutEngine {
 
         // vpos 보정을 위한 페이지 기준 vpos 계산
         // 페이지 첫 항목의 vpos를 기준점으로 삼아 모든 페이지에서 vpos 보정 적용
+        //
+        // [Task #1811 정합] base 는 "쪽 상단에 대응하는 저장 vpos"여야 한다.
+        // 첫 문단 첫 줄이 컬럼 상단에서 저장 vpos 복원(#853/#1811 evidence)으로
+        // 아래에 놓이면 그 복원량만큼 빼야 후속 항목의 (vpos - base)가 쪽-상대
+        // 오프셋으로 정확해진다. 복원 없이 첫 줄 vpos 를 그대로 쓰면 한컴이
+        // 쪽 상단에서 앞 간격을 유지한 문서(vpos0 ≈ spacing_before)에서 후속 문단이
+        // vpos0 만큼 위로 되감겨 앞 간격이 소실된다 (footnote-01 p4: pi36 vpos=500
+        // 복원 후 pi37 이 -500HU 스냅).
         let vpos_page_base_init: Option<i32> = col_content.items.first().and_then(|item| {
             match item {
-                PageItem::FullParagraph { para_index } => paragraphs
-                    .get(*para_index)
-                    .and_then(|p| p.line_segs.first())
-                    .map(|seg| seg.vertical_pos),
+                PageItem::FullParagraph { para_index }
+                | PageItem::PartialParagraph {
+                    para_index,
+                    start_line: 0,
+                    ..
+                } => paragraphs.get(*para_index).and_then(|p| {
+                    p.line_segs.first().map(|seg| {
+                        seg.vertical_pos
+                            - column_top_vpos_restore_hu(p, *para_index, styles, self.dpi)
+                    })
+                }),
                 PageItem::PartialParagraph {
                     para_index,
                     start_line,
@@ -7148,7 +7204,19 @@ impl LayoutEngine {
                         // layout_partial_paragraph에 직접 전달
                         numbered.or_else(|| composed.get(*para_index).cloned())
                     } else {
-                        composed.get(*para_index).cloned()
+                        // 이월 청크(start_line > 0)에도 마커 텍스트가 필요하다 —
+                        // 후속 줄의 행잉 인덴트(마커 폭 들여쓰기)가 유지돼야 한다.
+                        // 카운터 이중 진행을 막으려고 numbering_state 를 저장·복원한
+                        // 채 head 텍스트만 회수한다.
+                        let saved = self.numbering_state.borrow().clone();
+                        let numbered = self.apply_paragraph_numbering(
+                            composed.get(*para_index),
+                            para,
+                            styles,
+                            outline_numbering_id,
+                        );
+                        *self.numbering_state.borrow_mut() = saved;
+                        numbered.or_else(|| composed.get(*para_index).cloned())
                     };
                     // [Issue #677] 같은 paragraph 의 TAC 표를 선행한 PP 는 y_offset 이
                     // 이미 표 바닥까지 누적된 상태로 진입한다. 그러나 HWP IR 는 line 1 의
@@ -8347,6 +8415,90 @@ impl LayoutEngine {
                                 .unwrap_or(0.0);
                             if spacing_before > 0.0 {
                                 y_offset += spacing_before;
+                            }
+                        } else {
+                            // [Task #1811 규칙] 쪽 상단 TAC 표: 한컴이 앞 간격을 유지한
+                            // 문서는 저장 첫 줄 vpos 가 쪽-상대 값(≤ spacing_before)이므로
+                            // 이를 증거로 표가 실린 줄의 vpos(선행 빈 줄의 줄 진행분 포함)를
+                            // 복원한다. 누적축 인코딩(vpos ≫ spacing_before)은 쪽-상대 증거가
+                            // 아니므로 종전 트림 유지. 본문 텍스트가 있는 문단은 문단
+                            // 레이아웃이 앞 간격을 이미 반영하므로 제외한다.
+                            let spacing_before = styles
+                                .para_styles
+                                .get(ps_id)
+                                .map(|ps| ps.spacing_before)
+                                .unwrap_or(0.0);
+                            let host_has_text =
+                                para.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}');
+                            let vpos0_px = para
+                                .line_segs
+                                .first()
+                                .filter(|ls| ls.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0)
+                                .map(|ls| hwpunit_to_px(ls.vertical_pos, self.dpi))
+                                .unwrap_or(0.0);
+                            if spacing_before > 0.0
+                                && vpos0_px > 0.0
+                                && vpos0_px <= spacing_before + 0.5
+                                && !host_has_text
+                            {
+                                // 표가 실린 저장 줄: ① TAC 문자 위치를 포함하는 seg,
+                                // ② 빈 호스트 문단은 tac 위치가 없으므로 저장 th
+                                //   (= 표 높이 + om 상하)가 일치하는 줄을 TAC 순번으로 선택,
+                                // ③ 둘 다 실패하면 control_index 번째 seg.
+                                let tac_pos = comp.and_then(|c| {
+                                    c.tac_controls
+                                        .iter()
+                                        .find(|(.., ci)| *ci == control_index)
+                                        .map(|(pos, ..)| *pos)
+                                });
+                                let stored_segs: Vec<&LineSeg> = para
+                                    .line_segs
+                                    .iter()
+                                    .filter(|ls| ls.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0)
+                                    .collect();
+                                let table_line_vpos_px = tac_pos
+                                    .and_then(|pos| {
+                                        stored_segs
+                                            .iter()
+                                            .take_while(|ls| ls.text_start as usize <= pos)
+                                            .last()
+                                            .copied()
+                                    })
+                                    .or_else(|| {
+                                        if let Some(Control::Table(t)) =
+                                            para.controls.get(control_index)
+                                        {
+                                            let expected_th = t.common.height as i32
+                                                + t.outer_margin_top as i32
+                                                + t.outer_margin_bottom as i32;
+                                            let tac_ordinal = para
+                                                .controls
+                                                .iter()
+                                                .take(control_index)
+                                                .filter(|c| {
+                                                    matches!(c, Control::Table(t)
+                                                        if t.common.treat_as_char)
+                                                })
+                                                .count();
+                                            stored_segs
+                                                .iter()
+                                                .filter(|ls| {
+                                                    (ls.text_height - expected_th).abs() <= 100
+                                                })
+                                                .nth(tac_ordinal)
+                                                .copied()
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .or_else(|| para.line_segs.get(control_index))
+                                    .map(|ls| hwpunit_to_px(ls.vertical_pos, self.dpi))
+                                    .unwrap_or(0.0);
+                                if table_line_vpos_px >= vpos0_px
+                                    && table_line_vpos_px <= col_area.height
+                                {
+                                    y_offset += table_line_vpos_px;
+                                }
                             }
                         }
                         if outer_margin_top_px > 0.0 {

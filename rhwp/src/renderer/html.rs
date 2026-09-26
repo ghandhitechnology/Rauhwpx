@@ -292,15 +292,27 @@ impl Renderer for HtmlRenderer {
             "sans-serif".to_string()
         } else {
             let fallback = super::generic_fallback(&style.font_family);
+            // 문서 선언 대체 글꼴(substFont)은 generic 폴백보다 먼저 시도.
+            let subst = if style.font_subst.is_empty() {
+                String::new()
+            } else {
+                format!(" '{}',", escape_html(&style.font_subst))
+            };
             // [#3314] 접미사 face 미설치 시 base family 가 generic 보다 먼저 구제.
             match super::base_family_without_weight_suffix(&style.font_family) {
                 Some(base) => format!(
-                    "'{}', '{}', {}",
+                    "'{}', '{}',{} {}",
                     escape_html(&style.font_family),
                     escape_html(&base),
+                    subst,
                     fallback
                 ),
-                None => format!("'{}', {}", escape_html(&style.font_family), fallback),
+                None => format!(
+                    "'{}',{} {}",
+                    escape_html(&style.font_family),
+                    subst,
+                    fallback
+                ),
             }
         };
 

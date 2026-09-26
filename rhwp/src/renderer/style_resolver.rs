@@ -23,6 +23,10 @@ pub struct ResolvedCharStyle {
     pub font_family: String,
     /// 7개 언어 카테고리별 글꼴 이름
     pub font_families: Vec<String>,
+    /// 7개 언어 카테고리별 문서 선언 대체 글꼴 face (HWPX `<hh:substFont>` /
+    /// HWP5 alt_name). 원본 글꼴 미설치 시 generic 폴백보다 먼저 시도할 이름.
+    /// 빈 문자열 = 선언된 대체 글꼴 없음.
+    pub subst_families: Vec<String>,
     /// 글꼴 크기 (px)
     pub font_size: f64,
     /// 진하게
@@ -85,6 +89,7 @@ impl Default for ResolvedCharStyle {
             font_metrics_policy: Default::default(),
             font_family: String::new(),
             font_families: Vec::new(),
+            subst_families: Vec::new(),
             font_size: 12.0,
             bold: false,
             italic: false,
@@ -127,6 +132,21 @@ impl ResolvedCharStyle {
             }
         }
         &self.font_family
+    }
+
+    /// 지정 언어 카테고리 글꼴의 문서 선언 대체 글꼴 face 를 반환한다.
+    /// 해당 언어에 없으면 한국어(0번) 폴백. 없으면 빈 문자열.
+    pub fn font_subst_for_lang(&self, lang_index: usize) -> &str {
+        if lang_index < self.subst_families.len() {
+            let name = &self.subst_families[lang_index];
+            if !name.is_empty() {
+                return name;
+            }
+        }
+        self.subst_families
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("")
     }
 
     /// 지정 언어 카테고리의 자간(px)을 반환한다.
@@ -358,12 +378,14 @@ fn resolve_single_char_style(cs: &CharShape, doc_info: &DocInfo, dpi: f64) -> Re
 
     // 7개 언어 카테고리별 폰트 이름, 자간, 장평 해소
     let mut font_families = Vec::with_capacity(LANG_COUNT);
+    let mut subst_families = Vec::with_capacity(LANG_COUNT);
     let mut letter_spacings = Vec::with_capacity(LANG_COUNT);
     let mut ratios = Vec::with_capacity(LANG_COUNT);
 
     for lang in 0..LANG_COUNT {
         let font_id = cs.font_ids[lang];
         font_families.push(lookup_font_name(doc_info, lang, font_id));
+        subst_families.push(lookup_subst_font_name(doc_info, lang, font_id));
 
         let spacing_percent = cs.spacings[lang] as f64;
         letter_spacings.push(font_size * spacing_percent / 100.0);
@@ -380,6 +402,7 @@ fn resolve_single_char_style(cs: &CharShape, doc_info: &DocInfo, dpi: f64) -> Re
         font_metrics_policy: doc_info.font_metrics_policy,
         font_family,
         font_families,
+        subst_families,
         font_size,
         bold: cs.bold,
         italic: cs.italic,
@@ -502,6 +525,33 @@ fn lookup_font_name(doc_info: &DocInfo, lang_index: usize, font_id: u16) -> Stri
                 return resolved.to_string();
             }
             return name.clone();
+        }
+    }
+    String::new()
+}
+
+/// FontFace 테이블에서 문서가 선언한 대체 글꼴 face 조회.
+///
+/// HWPX 는 `<hh:substFont face="...">`, HWP5 는 FACE_NAME 의 alt_name 으로
+/// "원본 글꼴이 없을 때 쓸 글꼴"을 문서가 직접 지정한다. 한컴은 원본 미설치 시
+/// 이 face 로 대체해 그리므로, 렌더러의 폰트 체인에서 원본 뒤·generic 폴백 앞에
+/// 넣을 수 있도록 이름을 그대로 전달한다 (설치 여부 판정은 렌더 시점의 체인이
+/// 처리 — 원본이 있으면 subst 는 자연스럽게 도달하지 않는다).
+fn lookup_subst_font_name(doc_info: &DocInfo, lang_index: usize, font_id: u16) -> String {
+    if lang_index < doc_info.font_faces.len() {
+        let lang_fonts = &doc_info.font_faces[lang_index];
+        if (font_id as usize) < lang_fonts.len() {
+            let font = &lang_fonts[font_id as usize];
+            if let Some(subst) = &font.subst_font {
+                if !subst.face.is_empty() {
+                    return subst.face.clone();
+                }
+            }
+            if let Some(alt) = &font.alt_name {
+                if !alt.is_empty() {
+                    return alt.clone();
+                }
+            }
         }
     }
     String::new()

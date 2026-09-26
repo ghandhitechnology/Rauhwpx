@@ -898,6 +898,8 @@ impl DocumentCore {
         options: &crate::renderer::pdf::PdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
         let _font_scope = self.resolved_shaping_font_scope();
+        let _measure_font_scope =
+            crate::renderer::layout::enter_measure_font_paths(options.font_paths.clone());
         if page_nums.is_empty() {
             return Err(HwpError::RenderError(
                 "PDF export requires at least one page".to_string(),
@@ -927,6 +929,8 @@ impl DocumentCore {
         profile: RenderProfile,
         options: &crate::renderer::pdf::PdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
+        let _measure_font_scope =
+            crate::renderer::layout::enter_measure_font_paths(options.font_paths.clone());
         if page_nums.is_empty() {
             return Err(HwpError::RenderError(
                 "PDF export requires at least one page".to_string(),
@@ -1007,6 +1011,8 @@ impl DocumentCore {
         options: &crate::renderer::pdf::DirectPdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
         let _font_scope = self.resolved_shaping_font_scope();
+        let _measure_font_scope =
+            crate::renderer::layout::enter_measure_font_paths(options.font_paths.clone());
         if page_nums.is_empty() {
             return Err(HwpError::RenderError(
                 "PDF export requires at least one page".to_string(),
@@ -1178,6 +1184,9 @@ impl DocumentCore {
         font_paths: &[std::path::PathBuf],
     ) -> Result<String, HwpError> {
         let _font_scope = self.resolved_shaping_font_scope();
+        // substFont 측정 판정이 --font-path 목록까지 보게 경로를 노출한다.
+        let _measure_font_scope =
+            crate::renderer::layout::enter_measure_font_paths(font_paths.to_vec());
         let tree = self.build_page_tree(page_num)?;
         let _overflows = self.layout_engine.take_overflows();
         let mut renderer = SvgRenderer::new();
@@ -1334,6 +1343,8 @@ impl DocumentCore {
         use crate::renderer::skia::SkiaLayerRenderer;
 
         let _font_scope = self.resolved_shaping_font_scope();
+        let _measure_font_scope =
+            crate::renderer::layout::enter_measure_font_paths(font_paths.to_vec());
         let layer_tree = self.build_page_layer_tree(page_num)?;
         SkiaLayerRenderer::new()
             .with_font_paths(font_paths)
@@ -1366,6 +1377,8 @@ impl DocumentCore {
         use crate::renderer::skia::SkiaLayerRenderer;
 
         let _font_scope = self.resolved_shaping_font_scope();
+        let _measure_font_scope =
+            crate::renderer::layout::enter_measure_font_paths(options.font_paths.clone());
         let layer_tree = self.build_page_layer_tree_with_profile(page_num, profile)?;
 
         // 페이지 크기에서 effective scale + max_dimension 결정

@@ -52,6 +52,87 @@ pub(crate) fn with_resolved_shaping_fonts<T>(
     action()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    /// 네이티브 렌더 진입(`--font-path` 인자)이 노출한 추가 폰트 경로.
+    /// substFont 대체 판정의 탐색 범위다.
+    static MEASURE_FONT_PATHS: std::cell::RefCell<Vec<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// 패밀리명 → 설치 여부 캐시 (경로 스코프 진입/해제 시 비운다).
+    static MEASURE_FONT_AVAIL: std::cell::RefCell<std::collections::HashMap<String, bool>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct MeasureFontPathsScope(Vec<std::path::PathBuf>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for MeasureFontPathsScope {
+    fn drop(&mut self) {
+        MEASURE_FONT_PATHS.with(|paths| {
+            paths.replace(std::mem::take(&mut self.0));
+        });
+        MEASURE_FONT_AVAIL.with(|cache| cache.borrow_mut().clear());
+    }
+}
+
+/// 렌더 진입점이 `--font-path` 목록을 측정 판정에도 노출한다.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn enter_measure_font_paths(paths: Vec<std::path::PathBuf>) -> MeasureFontPathsScope {
+    let previous = MEASURE_FONT_PATHS.with(|slot| slot.replace(paths));
+    MEASURE_FONT_AVAIL.with(|cache| cache.borrow_mut().clear());
+    MeasureFontPathsScope(previous)
+}
+
+/// 문서 선언 글꼴이 현재 렌더 환경에 실재하는지 — substFont 대체 규칙의 근거.
+///
+/// 임베디드(BinData) face 는 shaping scope 에 등록돼 있으면 설치와 동일하게 본다.
+/// wasm 은 파일시스템 판정이 불가하므로 설치된 것으로 간주해 기존 동작을 유지한다.
+fn declared_family_available(font_family: &str) -> bool {
+    let primary = super::super::style_resolver::primary_font_name(font_family);
+    if primary.is_empty() {
+        return true;
+    }
+    if ACTIVE_SHAPING_FONTS.with(|active| {
+        active
+            .borrow()
+            .iter()
+            .any(|font| font.family.eq_ignore_ascii_case(primary))
+    }) {
+        return true;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let key = primary.to_string();
+        if let Some(hit) = MEASURE_FONT_AVAIL.with(|cache| cache.borrow().get(&key).copied()) {
+            return hit;
+        }
+        let hit = MEASURE_FONT_PATHS.with(|paths| {
+            crate::renderer::font_paths::font_family_available(primary, &paths.borrow())
+        });
+        MEASURE_FONT_AVAIL.with(|cache| cache.borrow_mut().insert(key, hit));
+        hit
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        true
+    }
+}
+
+/// substFont(문서 선언 대체 글꼴)의 측정 규칙.
+///
+/// 원본 글꼴이 렌더 환경에 없으면 한컴은 대체 글꼴로 조판한다 — 폭 산출도 같은
+/// face 기준이어야 그려지는 위치와 일치한다. 반환은 측정 전용 복사본이라 노드에
+/// 저장된 `font_family`/`font_subst`(emit 체인)는 바뀌지 않는다.
+fn measure_style(style: &TextStyle) -> std::borrow::Cow<'_, TextStyle> {
+    if style.font_subst.is_empty() || declared_family_available(&style.font_family) {
+        return std::borrow::Cow::Borrowed(style);
+    }
+    let mut patched = style.clone();
+    patched.font_family = style.font_subst.clone();
+    std::borrow::Cow::Owned(patched)
+}
+
 fn shaped_char_positions(text: &str, style: &TextStyle) -> Option<Vec<f64>> {
     // 문서 내장 글꼴의 실제 advance 는 플랫폼 정책과 무관하게 같다.
     if text.is_empty()
@@ -373,6 +454,8 @@ pub fn extract_tab_leaders_with_extended(
     style: &TextStyle,
     tab_extended: &[[u16; 7]],
 ) -> Vec<TabLeaderInfo> {
+    let patched = measure_style(style);
+    let style = patched.as_ref();
     let chars: Vec<char> = text.chars().collect();
     let tab_w = if style.default_tab_width > 0.0 {
         style.default_tab_width
@@ -1603,6 +1686,7 @@ pub(crate) fn resolved_to_text_style(
         TextStyle {
             font_metrics_policy: cs.font_metrics_policy,
             font_family: cs.font_family_for_lang(lang_index).to_string(),
+            font_subst: cs.font_subst_for_lang(lang_index).to_string(),
             font_size: cs.font_size,
             color: cs.text_color,
             bold: cs.bold,
@@ -1681,6 +1765,8 @@ pub(crate) fn apply_covered_hancom_fallback(style: &mut TextStyle, text: &str) {
     }
     if visible {
         style.font_family = FALLBACK.to_string();
+        // 선언 대체 글꼴은 원본 face 소유 — font_family 교체 시 함께 지운다.
+        style.font_subst.clear();
     }
 }
 
@@ -2152,6 +2238,8 @@ fn script_measure_style(style: &TextStyle) -> Option<TextStyle> {
 /// WASM: WasmTextMeasurer (JS Canvas + HWP 양자화)
 /// 네이티브: EmbeddedTextMeasurer (내장 메트릭 + 휴리스틱)
 pub(crate) fn estimate_text_width(text: &str, style: &TextStyle) -> f64 {
+    let patched = measure_style(style);
+    let style = patched.as_ref();
     if let Some(script) = script_measure_style(style) {
         return estimate_text_width(text, &script);
     }
@@ -2167,6 +2255,8 @@ pub(crate) fn estimate_text_width(text: &str, style: &TextStyle) -> f64 {
 /// 한컴은 HWPUNIT 정수로 폭을 누적하므로, round 없이 px를 합산한 뒤
 /// 줄바꿈 비교 시점에서 available_width와 비교하는 것이 더 정확하다.
 pub(crate) fn estimate_text_width_unrounded(text: &str, style: &TextStyle) -> f64 {
+    let patched = measure_style(style);
+    let style = patched.as_ref();
     if let Some(script) = script_measure_style(style) {
         return estimate_text_width_unrounded(text, &script);
     }
@@ -2257,6 +2347,8 @@ pub(crate) fn estimate_text_width_unrounded(text: &str, style: &TextStyle) -> f6
 /// N글자 → N+1개 경계값을 반환한다 (0번째는 0.0, N번째는 전체 폭).
 /// run 내부 상대 좌표이며, 절대 좌표는 run.bbox.x + charX[i]로 계산한다.
 pub(crate) fn compute_char_positions(text: &str, style: &TextStyle) -> Vec<f64> {
+    let patched = measure_style(style);
+    let style = patched.as_ref();
     if let Some(script) = script_measure_style(style) {
         return compute_char_positions(text, &script);
     }
@@ -2271,6 +2363,8 @@ pub(crate) fn compute_char_positions(text: &str, style: &TextStyle) -> Vec<f64> 
 /// Tracking and justification move the next glyph; they must not widen the
 /// current glyph when Canvas/SVG fit browser text to the calibrated advance.
 pub(crate) fn compute_glyph_positions(text: &str, style: &TextStyle) -> Vec<f64> {
+    let patched = measure_style(style);
+    let style = patched.as_ref();
     let mut glyph_style = style.clone();
     glyph_style.letter_spacing = 0.0;
     glyph_style.extra_char_spacing = 0.0;
@@ -2309,6 +2403,11 @@ fn is_narrow_punctuation(c: char) -> bool {
         '\u{00B7}' |  // · MIDDLE DOT
         '\u{2018}' |  // ' LEFT SINGLE QUOTATION MARK
         '\u{2019}' |  // ' RIGHT SINGLE QUOTATION MARK
+        // ․ ONE DOT LEADER — 휴먼명조 등 폰트 미보유 글리프. 한컴은 좁은 점
+        // 대체 폰트로 ~0.29em 으로 렌더하므로 0.5em 기본 폴백은 과대
+        // (footnote-01 p3 '불법․무단제조': +3.1pt 누적 오차가 양쪽정렬
+        // space 신축폭을 좁힘).
+        '\u{2024}' |  // ․ ONE DOT LEADER
         '\u{2027}' |  // ‧ HYPHENATION POINT
         // [Task #1735] 한글 방점. 렌더 경로에서 좁은 가운데 점(·)으로 치환되므로
         // 측정 폭도 narrow 로 맞춰 측정-렌더 폭 정합 유지(0.5em 기본 폴백 방지).
@@ -2352,6 +2451,8 @@ pub(crate) fn is_halfwidth_forced_punct(c: char) -> bool {
 /// 레이아웃이 반각으로 줄인 전각 구두점을 렌더러가 찌그러뜨리지 않고 배치할 때 쓴다
 /// (`renderer::halfwidth_punct_glyph_offset`). 글꼴이 DB 에 없으면 `None`.
 pub(crate) fn registered_glyph_advance(c: char, style: &TextStyle) -> Option<f64> {
+    let patched = measure_style(style);
+    let style = patched.as_ref();
     if let Some(script) = script_measure_style(style) {
         return registered_glyph_advance(c, &script);
     }

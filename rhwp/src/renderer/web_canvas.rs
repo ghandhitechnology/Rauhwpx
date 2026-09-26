@@ -991,7 +991,8 @@ impl WebCanvasRenderer {
             } else {
                 ""
             };
-            let font_family = super::canvas_font_family_chain(&run.style.font_family);
+            let font_family =
+                super::canvas_font_family_chain(&run.style.font_family, &run.style.font_subst);
             let font = format!(
                 "{}{}{:.3}px {}",
                 font_style_str, font_weight, font_size, font_family
@@ -1355,11 +1356,13 @@ impl WebCanvasRenderer {
     }
 
     fn render_footnote_marker(&mut self, bbox: &BoundingBox, marker: &FootnoteMarkerNode) {
-        let sup_size = (marker.base_font_size * 0.55).max(7.0);
+        // 각주 번호 위첨자: 본문 글꼴의 0.75 배율 (한컴 PDF 정합)
+        let sup_size = (marker.base_font_size * 0.75).max(7.0);
         let font = format!("{:.1}px {}", sup_size, marker.font_family);
         self.ctx.set_font(&font);
         self.ctx.set_fill_style_str(&color_to_css(marker.color));
-        let y = bbox.y + bbox.height * 0.4;
+        // 본문 baseline 에서 (본문-위첨자) 크기 차만큼만 올려 top 정렬
+        let y = bbox.y + marker.baseline - (marker.base_font_size - sup_size) * 0.85;
         let _ = self.ctx.fill_text(&marker.text, bbox.x, y);
     }
 
@@ -2473,7 +2476,7 @@ impl Renderer for WebCanvasRenderer {
             ""
         };
 
-        let font_family = super::canvas_font_family_chain(&style.font_family);
+        let font_family = super::canvas_font_family_chain(&style.font_family, &style.font_subst);
 
         let font = format!(
             "{}{}{:.3}px {}",
@@ -3337,7 +3340,7 @@ impl WebCanvasRenderer {
             glyph_color.clone()
         };
 
-        let font_family = super::canvas_font_family_chain(&style.font_family);
+        let font_family = super::canvas_font_family_chain(&style.font_family, &style.font_subst);
         let font_weight = if style.bold { "bold " } else { "" };
         let font_style_str = if style.italic { "italic " } else { "" };
         let font = format!(
@@ -3498,7 +3501,7 @@ impl WebCanvasRenderer {
             glyph_color.clone()
         };
 
-        let font_family = super::canvas_font_family_chain(&style.font_family);
+        let font_family = super::canvas_font_family_chain(&style.font_family, &style.font_subst);
 
         let cx = bbox_x + box_size / 2.0;
         let cy = bbox_y + bbox_h - box_size / 2.0;

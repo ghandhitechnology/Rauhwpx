@@ -836,7 +836,17 @@ impl LayoutEngine {
                             outline_numbering_id,
                         )
                     } else {
-                        None
+                        // 이월 청크도 마커 텍스트가 필요 (행잉 인덴트 유지).
+                        // 카운터 이중 진행 방지를 위해 상태를 저장·복원한다.
+                        let saved = self.numbering_state.borrow().clone();
+                        let numbered = self.apply_paragraph_numbering(
+                            Some(composed),
+                            para,
+                            styles,
+                            outline_numbering_id,
+                        );
+                        *self.numbering_state.borrow_mut() = saved;
+                        numbered
                     };
                     let composed_for_layout = numbered_comp.as_ref().unwrap_or(composed);
                     // [Task #1728 v2] 셀-내 continuation 조각(cut su>0)의 첫 가시 문단

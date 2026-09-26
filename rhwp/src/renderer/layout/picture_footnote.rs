@@ -1082,6 +1082,12 @@ impl LayoutEngine {
                 let is_last_para_of_fn = p_idx + 1 == fn_paras.len();
 
                 if p_idx == 0 {
+                    // autoNum 컨트롤이 있으면 본문 텍스트의 placeholder 공백을
+                    // 번호가 대체한다 (strip 대상).
+                    let has_autonum = para
+                        .controls
+                        .iter()
+                        .any(|c| matches!(c, Control::AutoNumber(_)));
                     // 첫 문단: 각주 번호를 텍스트 앞에 삽입
                     y = self.layout_footnote_paragraph_with_number(
                         tree,
@@ -1095,6 +1101,7 @@ impl LayoutEngine {
                         marker_para,
                         base_cs_id,
                         is_last_para_of_fn,
+                        has_autonum,
                     );
                 } else {
                     let returned_y = self.layout_composed_paragraph(
@@ -1158,6 +1165,9 @@ impl LayoutEngine {
         // [Issue #483] true 면 각주의 마지막 paragraph — 마지막 line 의 trailing
         // line_spacing 을 누적하지 않는다 (between-notes 와 이중 합산 방지).
         is_last_para_of_fn: bool,
+        // true 면 첫 줄 본문 텍스트 선두의 autoNum placeholder 공백 한 글자를
+        // 번호가 대체한 것으로 보아 본문 폭에서 제외한다.
+        strip_autonum_placeholder: bool,
     ) -> f64 {
         let mut y = y_start;
 
@@ -1177,20 +1187,21 @@ impl LayoutEngine {
 
             // 첫 줄에 각주 번호 삽입
             if line_idx == 0 {
-                // 각주 번호 스타일: 문단의 기본 char_shape로 고정 (크기 약간 축소)
+                // 각주 번호 스타일: 문단의 기본 char_shape 그대로 사용.
+                // 한컴은 각주 번호를 본문과 같은 크기로 그린다 (축소 없음).
                 // 빈/비빈 문단 모두 동일한 base_cs_id 사용 → 리렌더링 시 폰트·폭 변동 방지
-                let base_style = {
-                    let mut ts = resolved_to_text_style(styles, base_cs_id, 0);
-                    ts.font_size = (ts.font_size * 0.9).max(8.0);
-                    ts
-                };
+                let base_style = resolved_to_text_style(styles, base_cs_id, 0);
 
-                let num_width = estimate_text_width(number_text, &base_style);
+                // 번호 자리는 본문 텍스트의 autoNum placeholder(\u{0012})를 대체한다.
+                // format_footnote_number 의 뒤쪽 공백은 run 선행 공백과 중복되므로
+                // 마커 폭에서는 제외한다.
+                let marker_text = number_text.trim_end();
+                let num_width = estimate_text_width(marker_text, &base_style);
                 let num_id = tree.next_id();
                 let num_node = RenderNode::new(
                     num_id,
                     RenderNodeType::TextRun(TextRunNode {
-                        text: number_text.to_string(),
+                        text: marker_text.to_string(),
                         style: base_style,
                         char_shape_id: None,
                         para_shape_id: None,
@@ -1216,15 +1227,28 @@ impl LayoutEngine {
 
             // 원본 TextRun들
             let mut char_offset = comp_line.char_start;
+            let mut placeholder_pending = strip_autonum_placeholder;
             for run in &comp_line.runs {
                 let text_style = resolved_to_text_style(styles, run.char_style_id, run.lang_index);
-                let width = estimate_text_width(&run.text, &text_style);
+                // 첫 줄 run 선두의 autoNum placeholder(공백 한 글자)는 각주 번호가
+                // 차지한 자리 — 그대로 두면 번호 뒤에 유령 공백이 생긴다.
+                let run_text = if line_idx == 0 && placeholder_pending {
+                    let stripped = run
+                        .text
+                        .strip_prefix(|c: char| Self::is_auto_number_placeholder_char(c))
+                        .unwrap_or(&run.text);
+                    placeholder_pending = stripped.len() == run.text.len();
+                    stripped
+                } else {
+                    run.text.as_str()
+                };
+                let width = estimate_text_width(run_text, &text_style);
 
                 let run_id = tree.next_id();
                 let run_node = RenderNode::new(
                     run_id,
                     RenderNodeType::TextRun(TextRunNode {
-                        text: run.text.clone(),
+                        text: run_text.to_string(),
                         style: text_style,
                         char_shape_id: None,
                         para_shape_id: None,
@@ -1411,8 +1435,10 @@ impl LayoutEngine {
             }
 
             if let Some(line_idx) = target_line_idx {
-                let sup_font_size = (base_font_size * 0.6).max(7.0);
-                let sup_y_offset = line_height * 0.35;
+                // 각주 번호 위첨자: 본문 글꼴의 0.75 배율 (한컴 PDF 정합)
+                let sup_font_size = (base_font_size * 0.75).max(7.0);
+                // 본문 baseline 에서 (본문-위첨자) 크기 차만큼만 올려 top 정렬
+                let sup_y_offset = (base_font_size - sup_font_size) * 0.85;
                 let style = TextStyle {
                     font_size: sup_font_size,
                     font_family: base_font_family,

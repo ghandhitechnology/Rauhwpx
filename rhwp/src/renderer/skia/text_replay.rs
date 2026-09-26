@@ -353,6 +353,11 @@ impl SkiaTextReplay<'_> {
                 if let Some(base) = base_family.as_deref() {
                     families.push(base);
                 }
+                // 문서 선언 대체 글꼴(<hh:substFont>/HWP5 alt_name): 원본 face 가
+                // 없을 때 한컴이 쓰는 지정 대체 — generic CJK 폴백보다 먼저 시도.
+                if !style.font_subst.is_empty() {
+                    families.push(style.font_subst.as_str());
+                }
                 // 한글 fallback (CJK glyph 미보유 폰트로 fallback 시 사각형 방지).
                 // 명조/바탕/궁서 계열을 sans로 바꾸면 글리프 폭·획·줄바꿈이 모두
                 // 달라지므로 원본 family 분류에 맞는 계열을 먼저 시도한다.

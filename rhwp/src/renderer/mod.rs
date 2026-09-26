@@ -125,6 +125,9 @@ pub struct TextStyle {
     pub font_metrics_policy: crate::model::provenance::FontMetricsPolicy,
     /// 글꼴 이름
     pub font_family: String,
+    /// 문서가 선언한 대체 글꼴 face (HWPX `<hh:substFont>` / HWP5 alt_name).
+    /// 원본 글꼴 미설치 시 generic 폴백보다 먼저 시도할 이름. 비어 있으면 없음.
+    pub font_subst: String,
     /// 글꼴 크기 (px)
     pub font_size: f64,
     /// 글자 색상
@@ -246,6 +249,7 @@ impl Default for TextStyle {
         Self {
             font_metrics_policy: Default::default(),
             font_family: String::new(),
+            font_subst: String::new(),
             font_size: 0.0,
             color: 0,
             bold: false,
@@ -1237,11 +1241,16 @@ pub fn base_family_without_weight_suffix(font_family: &str) -> Option<String> {
 }
 
 /// [#3314] 렌더용 폴백 체인 문자열: `요청 face → (base family) → generic 체인`.
-pub fn render_font_family_chain(font_family: &str) -> String {
+pub fn render_font_family_chain(font_family: &str, font_subst: &str) -> String {
     let fb = generic_fallback(font_family);
+    let subst = if font_subst.is_empty() {
+        String::new()
+    } else {
+        format!("'{}',", font_subst)
+    };
     match base_family_without_weight_suffix(font_family) {
-        Some(base) => format!("{},'{}',{}", font_family, base, fb),
-        None => format!("{},{}", font_family, fb),
+        Some(base) => format!("{},'{}',{}{}", font_family, base, subst, fb),
+        None => format!("{},{}{}", font_family, subst, fb),
     }
 }
 
@@ -1250,15 +1259,20 @@ pub fn render_font_family_chain(font_family: &str) -> String {
 /// [#3314] Canvas API가 요구하는 인용 형식을 유지하면서, 굵기 접미사 face
 /// 바로 뒤에 base family를 넣어 generic 폴백보다 먼저 선택되게 한다.
 /// 측정 경로에는 사용하지 않는다.
-pub fn canvas_font_family_chain(font_family: &str) -> String {
+pub fn canvas_font_family_chain(font_family: &str, font_subst: &str) -> String {
     if font_family.is_empty() {
         return "sans-serif".to_string();
     }
 
     let fallback = generic_fallback(font_family);
+    let subst = if font_subst.is_empty() {
+        String::new()
+    } else {
+        format!(" \"{}\",", font_subst)
+    };
     match base_family_without_weight_suffix(font_family) {
-        Some(base) => format!("\"{}\", \"{}\", {}", font_family, base, fallback),
-        None => format!("\"{}\", {}", font_family, fallback),
+        Some(base) => format!("\"{}\", \"{}\",{} {}", font_family, base, subst, fallback),
+        None => format!("\"{}\",{} {}", font_family, subst, fallback),
     }
 }
 
@@ -2005,21 +2019,31 @@ mod tests {
         // 전체가 접미사 토큰뿐이면 벗기지 않는다
         assert_eq!(base_family_without_weight_suffix("Light"), None);
         // 렌더 체인: 요청 face → base → generic
-        let chain = render_font_family_chain("Noto Serif KR Black");
+        let chain = render_font_family_chain("Noto Serif KR Black", "");
         assert!(chain.starts_with("Noto Serif KR Black,'Noto Serif KR',"));
-        let plain = render_font_family_chain("맑은 고딕");
+        let plain = render_font_family_chain("맑은 고딕", "");
         assert!(plain.starts_with("맑은 고딕,'Malgun Gothic'"));
+        // 문서 선언 대체 글꼴은 base 뒤·generic 앞에 삽입
+        let sub = render_font_family_chain("나눔고딕", "한컴바탕");
+        assert!(sub.starts_with("나눔고딕,'한컴바탕',"));
 
         assert_eq!(
-            canvas_font_family_chain("Noto Serif KR Black"),
+            canvas_font_family_chain("Noto Serif KR Black", ""),
             format!(
                 "\"Noto Serif KR Black\", \"Noto Serif KR\", {}",
                 generic_fallback("Noto Serif KR Black")
             )
         );
         assert_eq!(
-            canvas_font_family_chain("맑은 고딕"),
+            canvas_font_family_chain("맑은 고딕", ""),
             format!("\"맑은 고딕\", {}", generic_fallback("맑은 고딕"))
+        );
+        assert_eq!(
+            canvas_font_family_chain("나눔고딕", "한컴바탕"),
+            format!(
+                "\"나눔고딕\", \"한컴바탕\", {}",
+                generic_fallback("나눔고딕")
+            )
         );
     }
 
