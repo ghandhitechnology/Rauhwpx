@@ -1682,10 +1682,15 @@ export class PendingEditManager {
           res = wasm.deleteCellPictureControlByPath(
             obj.sectionIdx, obj.cell.paraIdx, this.objectCellPath(obj.cell, obj.paraIdx), obj.controlIdx,
           );
+        } else if (obj.kind === 'picture') {
+          try {
+            res = wasm.deletePictureControl(obj.sectionIdx, obj.paraIdx, obj.controlIdx);
+          } catch {
+            // 도형 컨트롤로 감싼 그림은 그림 삭제 API 가 거부한다 — 도형으로 지운다
+            res = wasm.deleteShapeControl(obj.sectionIdx, obj.paraIdx, obj.controlIdx);
+          }
         } else {
-          res = obj.kind === 'picture'
-            ? wasm.deletePictureControl(obj.sectionIdx, obj.paraIdx, obj.controlIdx)
-            : wasm.deleteShapeControl(obj.sectionIdx, obj.paraIdx, obj.controlIdx);
+          res = wasm.deleteShapeControl(obj.sectionIdx, obj.paraIdx, obj.controlIdx);
         }
         if (res?.ok !== true) throw new AgentToolError('RPC_ERROR', `delete ${obj.kind} failed`);
         if (obj.cell) this.shiftCellObjectRefsAt(obj.cell, obj.paraIdx, obj.controlIdx, -1, obj);
