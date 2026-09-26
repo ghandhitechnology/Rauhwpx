@@ -318,6 +318,22 @@ try {
     }],
     ['edit_object deletes a shape', (c) => [['edit_object', { ...c.object('shape'), delete: true }]]],
     ['edit_object deletes a picture', (c) => [['edit_object', { ...c.object('image'), delete: true }]]],
+    // raw 엔진 배치 — 배치 전 문서 스냅샷으로 되돌리는 staged op 하나
+    ['apply_engine_edits', (c) => [['apply_engine_edits', { operations: [
+      { method: 'insertText', args: [0, c.p('Parity'), 0, 'Raw '] },
+      { method: 'applyParaFormat', args: [0, c.p('Parity'), JSON.stringify({ alignment: 'right' })] },
+      { method: 'splitParagraph', args: [0, c.p('Parity'), 4] },
+    ] }]]],
+    // 한 턴에 섞인 semantic + raw — 배치가 나눈 문단 뒤의 앞 op 은 밀린 좌표로 되돌아간다
+    ['semantic and raw engine writes mixed in one turn', (c) => [
+      ['insert_text', { sectionIdx: 0, paraIdx: c.p('Parity') + 1, charOffset: 0, text: 'before ' }],
+      ['apply_engine_edits', { operations: [
+        { method: 'splitParagraph', args: [0, c.p('Parity'), 3] },
+        { method: 'applyCharFormat', args: [0, c.p('Parity'), 0, 3, JSON.stringify({ bold: true })] },
+      ] }],
+      ['insert_text', { sectionIdx: 0, paraIdx: c.p('Parity') + 2, charOffset: 0, text: 'after ' }],
+      ['apply_para_format', { sectionIdx: 0, paraIdx: c.p('Parity') + 1, alignment: 'center' }],
+    ]],
   ];
 
   const report = [];
