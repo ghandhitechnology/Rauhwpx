@@ -109,3 +109,15 @@ test('rejectAll reverts a later engine batch set even after an earlier set was s
   assert.deepEqual(env.body, ORIGINAL);
   assert.equal(env.pending.hasPending(), false);
 });
+
+test('undo/redo invalidation reverts every staged engine batch set, newest first', async () => {
+  const env = makeEnv(ORIGINAL);
+  for (const [para, text] of [[0, 'A'], [2, 'B']] as const) {
+    env.pending.beginTurn('claude');
+    await env.call('apply_engine_edits', { operations: [{ method: 'insertText', args: [0, para, 0, text] }] });
+    env.pending.endTurn('review');
+  }
+  env.bus.emit('history-jumped');
+  assert.deepEqual(env.body, ORIGINAL);
+  assert.equal(env.pending.hasPending(), false);
+});

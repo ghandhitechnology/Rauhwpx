@@ -1251,6 +1251,9 @@ export class PendingEditManager {
         if (cause) drops.push({ opId: op.id, cause, summary: this.summarizeOp(op) });
       }
       this.discardOpSnapshots([...kept, ...dropped]);
+      // 되돌린 op 은 앞 set 의 복원 판정에서 "나중 op" 으로 보이면 안 되고, 문서에 남은
+      // op(드리프트·되돌림 실패)은 계속 보여야 한다.
+      set.ops = [...dropped, ...kept.filter((op) => failed.has(op.id))];
     }
     if (reverted) this.reconcilePreviewLayout();
     this.sets = [];
