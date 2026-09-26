@@ -2633,6 +2633,7 @@ impl LayoutEngine {
                                 cell_index: 0,
                                 cell_para_index: tb_para_idx,
                                 text_direction: 0,
+                                line_wrap_squeeze: false,
                             });
                             p
                         },
@@ -2852,6 +2853,7 @@ impl LayoutEngine {
                         cell_index: 0,
                         cell_para_index: tb_para_idx,
                         text_direction: 0,
+                        line_wrap_squeeze: false,
                     });
                     p
                 },
@@ -3111,6 +3113,7 @@ impl LayoutEngine {
                             cell_index: 0,
                             cell_para_index: pi,
                             text_direction: 0,
+                            line_wrap_squeeze: false,
                         });
                         let empty_map = std::collections::HashMap::new();
                         self.layout_shape_object(
@@ -3146,6 +3149,7 @@ impl LayoutEngine {
                                     cell_index: 0,
                                     cell_para_index: pi,
                                     text_direction: 0,
+                                    line_wrap_squeeze: false,
                                 });
                                 p
                             },
@@ -3240,6 +3244,7 @@ impl LayoutEngine {
                                     cell_index: 0,
                                     cell_para_index: pi,
                                     text_direction: 0,
+                                    line_wrap_squeeze: false,
                                 });
                                 p
                             },
@@ -3321,6 +3326,7 @@ impl LayoutEngine {
                             cell_index: 0,
                             cell_para_index: pi,
                             text_direction: 0,
+                            line_wrap_squeeze: false,
                         });
                         // 호스트 문단의 정렬 속성
                         let host_align = styles
@@ -3611,6 +3617,7 @@ impl LayoutEngine {
                             cell_index: 0,
                             cell_para_index: ci.cell_para_index,
                             text_direction,
+                            line_wrap_squeeze: false,
                         });
                         p
                     },

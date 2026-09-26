@@ -1987,6 +1987,44 @@ fn measure_char_width_with_policy(
     }
     // CSS font-family 체인에서 첫 번째 폰트명으로 메트릭 조회
     let primary_name = font_family.split(',').next().unwrap_or(font_family).trim();
+    // HcrDeclared(macOS): 표준 Windows 폰트(바탕·궁서·돋움·굴림 계열)는 macOS
+    // 한컴에 없으면 번들 서체(한컴바탕=Haansoft Batang / 한컴돋움=Haansoft
+    // Dotum)로 치환해 그린다 — 조판 폭도 치환 서체의 hmtx 를 쓴다 (괄호 0.50em,
+    // 숫자 0.583em 등 PDF 실측과 일치; Windows Batang 은 괄호 0.377em).
+    // 단 치환은 한컴 FontMap 규칙과 동일하게 "요청 face가 없을 때만" 발동한다 —
+    // --font-path 로 실제 TTF(예: 돋움체)가 주어지면 페인트 경로는 실폰트를 쓰고
+    // (text_replay) 측정도 실폰트 메트릭(돋움체=고정폭)이어야 양쪽이 일치한다.
+    let face_available = crate::renderer::font_paths::custom_font_face_available(primary_name);
+    // 치환 메트릭은 치환 서체가 실제로 설치돼 있을 때만(그 서체로 그려질 때) 쓴다.
+    // 치환 서체도 없으면 페인트는 제네릭 폴백으로 내려가므로 요청 face의 베이크드
+    // 정본 폭(돋움체 전각 구두점 등)이 더 가깝다.
+    let metric_name = if policy == FontMetricsPolicy::HcrDeclared && !face_available {
+        crate::renderer::hancom_substitute_faces(primary_name)
+            .iter()
+            .copied()
+            .find(|s| crate::renderer::font_paths::custom_font_face_available(s))
+            .unwrap_or(primary_name)
+    } else {
+        primary_name
+    };
+    // face 파일이 주어지면 한컴도 실제 hmtx 로 조판한다 — 베이크드 테이블은
+    // 구버전 TTF 기준이라 실폰트와 엇갈린다 (HY헤드라인M '.' 0.208→0.242em 등).
+    // 공백은 HWP em/2 문서 규약이 우선이고, cmap 에 없는 글자는 베이크드
+    // 경로로 폴백한다.
+    if policy == FontMetricsPolicy::HcrDeclared && face_available && c != ' ' {
+        if let Some(mut em_advance) =
+            crate::renderer::font_paths::custom_face_char_em_advance(primary_name, c)
+        {
+            // 한컴 반각 강제는 문서 규약이라 실폰트에도 동일하게 적용한다 —
+            // 실 hmtx 가 전각이면 구두점/인용부호를 em/2 로 줄인다.
+            if (matches!(c, '\u{2018}'..='\u{2027}') || is_halfwidth_cjk_quote(c))
+                && em_advance >= 1.0
+            {
+                em_advance = 0.5;
+            }
+            return Some(quantize_hwp_px(em_advance * font_size));
+        }
+    }
     // [#2156] 함초롬바탕 비한글 문자 — Haansoft Batang 메트릭 대체 (한글 동작).
     if policy == FontMetricsPolicy::HancomWindows {
         if let Some(r) = haansoft_latin_override(primary_name, c) {
@@ -1999,8 +2037,8 @@ fn measure_char_width_with_policy(
     // macOS 한컴이 Bold face 를 제공하지 않는 서체(맑은 고딕 등)는 참조 환경에서
     // 굵게를 Regular face + 합성 획으로 그리므로 Regular 메트릭으로 조판한다.
     let metric_bold =
-        bold && crate::renderer::macos_synthetic_bold_em(primary_name, policy).is_none();
-    let requested = font_metrics_data::find_metric(primary_name, metric_bold, italic);
+        bold && crate::renderer::macos_synthetic_bold_em(metric_name, policy).is_none();
+    let requested = font_metrics_data::find_metric(metric_name, metric_bold, italic);
     let requested_covers = requested
         .as_ref()
         .is_some_and(|metric| c == ' ' || metric.metric.get_width(c).is_some());

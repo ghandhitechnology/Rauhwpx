@@ -1997,8 +1997,34 @@ fn compute_line_extra_spacing(
             (0.0, 0.0, 0.0)
         }
     } else if needs_distribute && total_char_count > 1 {
-        // 배분/나눔 정렬: 모든 글자에 균등 분배
-        let raw = (available_width - total_text_width) / total_char_count as f64;
+        // 배분 정렬: 여유 폭은 보이는 글자 사이 틈(n_visible-1 개)에만 균등 분배한다.
+        // 줄 끝 후행 공백은 한컴처럼 폭과 글자 수에서 모두 빼고 마지막 글자 뒤 자연
+        // 위치에 둔다 — 공백까지 글자로 세면 마지막 글자가 줄 오른쪽 끝에 닿지 않는다.
+        let all_chars: Vec<char> = comp_line
+            .runs
+            .iter()
+            .flat_map(|r| effective_text_for_metrics(r).chars())
+            .collect();
+        let trailing_spaces = all_chars.iter().rev().take_while(|c| **c == ' ').count();
+        let visible_count = total_char_count - trailing_spaces;
+        // 후행 공백 폭은 run 별 스타일로 각각 잰다 (선택 영역이 여러 run 에 걸칠 수 있음).
+        let mut trailing_width = 0.0;
+        for run in comp_line.runs.iter().rev() {
+            let text = effective_text_for_metrics(run);
+            let count = text.chars().rev().take_while(|ch| *ch == ' ').count();
+            if count > 0 {
+                let ts = resolved_to_text_style(styles, run.char_style_id, run.lang_index);
+                trailing_width += estimate_text_width(&" ".repeat(count), &ts);
+            }
+            if count < text.chars().count() {
+                break;
+            }
+        }
+        let raw = if visible_count > 1 {
+            (available_width - (total_text_width - trailing_width)) / (visible_count - 1) as f64
+        } else {
+            0.0
+        };
         if suppress_cell_overflow_spacing && raw < 0.0 {
             (0.0, 0.0, 0.0)
         } else {
@@ -2387,6 +2413,19 @@ impl LayoutEngine {
                 12.0
             }
         };
+        // paraPr vertical=CENTER: 저장 baseline=50%는 마커 — 기준선 =
+        // line_height/2 + 0.35×font (layout_composed_paragraph 와 동일 규칙).
+        let para_vertical_center = para_style.map(|s| s.vertical_align).unwrap_or(0) == 2;
+        let stored_or_centered_baseline = |ls: &crate::model::paragraph::LineSeg| -> f64 {
+            if para_vertical_center {
+                hwpunit_to_px(ls.line_height, self.dpi) / 2.0 + para_max_font_size * 0.35
+            } else {
+                ensure_min_baseline(
+                    hwpunit_to_px(ls.baseline_distance, self.dpi),
+                    para_max_font_size,
+                )
+            }
+        };
         let stored_line_baseline_at = |char_idx: usize| -> Option<f64> {
             if para.line_segs.len() < 2 {
                 return None;
@@ -2397,26 +2436,16 @@ impl LayoutEngine {
                     .get(i)
                     .is_some_and(|seg| seg.text_start <= pos)
             })?;
-            let seg = para.line_segs.get(idx)?;
-            Some(ensure_min_baseline(
-                hwpunit_to_px(seg.baseline_distance, self.dpi),
-                para_max_font_size,
-            ))
+            Some(stored_or_centered_baseline(para.line_segs.get(idx)?))
         };
         let baseline_dist = if let Some(ls) = para.line_segs.first() {
-            ensure_min_baseline(
-                hwpunit_to_px(ls.baseline_distance, self.dpi),
-                para_max_font_size,
-            )
+            stored_or_centered_baseline(ls)
         } else {
             line_height * 0.8
         };
         // 텍스트 줄(표 아래) 전용 메트릭: line_seg[1]이 있으면 사용
         let text_line_baseline = if let Some(ls) = para.line_segs.get(1) {
-            ensure_min_baseline(
-                hwpunit_to_px(ls.baseline_distance, self.dpi),
-                para_max_font_size,
-            )
+            stored_or_centered_baseline(ls)
         } else {
             baseline_dist
         };
@@ -4161,8 +4190,14 @@ impl LayoutEngine {
                 let font_bl = max_fs * 0.85;
                 (font_lh, ensure_min_baseline(font_bl, max_fs))
             } else {
-                (
-                    line_height,
+                // paraPr vertical=CENTER (attr1 bit20-21=2): 한컴이 저장하는
+                // baseline=50%는 실측값이 아니라 "줄 상자 세로 가운데 정렬" 마커다.
+                // 그릴 때 기준선 = line_height/2 + (asc−desc)/2
+                //            = line_height/2 + 0.35×font  (asc 85%/desc 15% 관례)
+                // (표 셀 vertsize1200/baseline600 저장 → PDF 실측 10.2pt 정합).
+                let baseline = if para_style.map(|s| s.vertical_align).unwrap_or(0) == 2 {
+                    line_height / 2.0 + max_fs * 0.35
+                } else {
                     ensure_min_baseline(
                         crate::renderer::corrected_line_baseline_for_source(
                             hwpunit_to_px(comp_line.baseline_distance, self.dpi),
@@ -4170,8 +4205,9 @@ impl LayoutEngine {
                             source_metrics_reflowed,
                         ),
                         max_fs,
-                    ),
-                )
+                    )
+                };
+                (line_height, baseline)
             };
             let has_stored_equation_line_metrics = para
                 .and_then(|p| p.line_segs.get(line_idx))
@@ -4626,8 +4662,11 @@ impl LayoutEngine {
                         .count()
                 })
                 .sum();
-            let suppress_cell_overflow_spacing =
-                cell_ctx.is_some() && total_text_width > available_width * 1.15;
+            // SQUEEZE 셀은 넘침을 자간 압축으로 흡수하는 게 본래 동작이므로
+            // 셀 오버플로우 간격 억제 대상에서 제외한다.
+            let suppress_cell_overflow_spacing = cell_ctx.is_some()
+                && !cell_ctx.as_ref().is_some_and(|c| c.line_wrap_squeeze())
+                && total_text_width > available_width * 1.15;
             // 양쪽 정렬 줄 머리 공백은 한컴처럼 자연 폭으로 두고 줄 안 공백에만 여유를
             // 나눈다 (hy-001 ` ㅇ ` 줄 실측). 렌더에서 그 공백만 여유를 빼도록 run 을 나눈다.
             let leading_space_split = if alignment == Alignment::Justify
@@ -6438,6 +6477,7 @@ impl LayoutEngine {
                                         cell_index: 0,
                                         cell_para_index: 0,
                                         text_direction: 0,
+                                        line_wrap_squeeze: false,
                                     });
                                     c
                                 });
@@ -8265,6 +8305,7 @@ mod saved_native_cell_vpos_tests {
                 cell_index: 0,
                 cell_para_index: 0,
                 text_direction: 0,
+                line_wrap_squeeze: false,
             }],
         };
         let area = LayoutRect {

@@ -218,6 +218,8 @@ pub struct ResolvedParaStyle {
     pub keep_lines: bool,
     /// 문단 앞에서 항상 쪽 나눔 — attr1 bit 19
     pub page_break_before: bool,
+    /// 문단 세로 정렬 — attr1 bit 20-21 (0=BASELINE, 1=TOP, 2=CENTER, 3=BOTTOM)
+    pub vertical_align: u8,
 }
 
 impl Default for ResolvedParaStyle {
@@ -246,6 +248,7 @@ impl Default for ResolvedParaStyle {
             keep_with_next: false,
             keep_lines: false,
             page_break_before: false,
+            vertical_align: 0,
         }
     }
 }
@@ -981,6 +984,7 @@ fn resolve_single_para_style(
         keep_with_next: (ps.attr1 >> 17) & 1 != 0 || (ps.attr2 >> 6) & 1 != 0,
         keep_lines: (ps.attr1 >> 18) & 1 != 0 || (ps.attr2 >> 7) & 1 != 0,
         page_break_before: (ps.attr1 >> 19) & 1 != 0 || (ps.attr2 >> 8) & 1 != 0,
+        vertical_align: ((ps.attr1 >> 20) & 0x03) as u8,
     }
 }
 

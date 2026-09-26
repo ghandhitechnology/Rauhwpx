@@ -607,11 +607,20 @@ impl SkiaLayerRenderer {
         let clip_enabled = output_options.clip_enabled;
         let apply_dash = |paint: &mut Paint, dash: StrokeDash| {
             let base_width = paint.stroke_width().max(1.0);
+            // 점선은 선 굵기 비례 간격(한컴 규칙)이라 이미 실제 선폭이 곱해져 나온다.
+            let interval_scale = if matches!(dash, StrokeDash::Dot) {
+                1.0
+            } else {
+                base_width
+            };
             let intervals: Option<[f32; 6]> = match dash {
                 StrokeDash::Solid => None,
                 StrokeDash::Dash => Some([6.0, 3.0, 0.0, 0.0, 0.0, 0.0]),
                 StrokeDash::LongDash => Some([10.0, 3.0, 0.0, 0.0, 0.0, 0.0]),
-                StrokeDash::Dot => Some([2.0, 2.0, 0.0, 0.0, 0.0, 0.0]),
+                StrokeDash::Dot => {
+                    let (on, off) = crate::renderer::dot_dash_segments(paint.stroke_width() as f64);
+                    Some([on as f32, off as f32, 0.0, 0.0, 0.0, 0.0])
+                }
                 StrokeDash::Circle => {
                     paint.set_stroke_cap(paint::Cap::Round);
                     Some([0.1, 3.0, 0.0, 0.0, 0.0, 0.0])
@@ -623,7 +632,7 @@ impl SkiaLayerRenderer {
                 let intervals = intervals
                     .into_iter()
                     .filter(|value| *value > 0.0)
-                    .map(|value| value * base_width)
+                    .map(|value| value * interval_scale)
                     .collect::<Vec<_>>();
                 if let Some(effect) = PathEffect::dash(&intervals, 0.0) {
                     paint.set_path_effect(effect);

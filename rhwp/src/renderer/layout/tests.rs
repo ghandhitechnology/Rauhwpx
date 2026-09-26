@@ -534,6 +534,7 @@ fn cell_picture_caption_attaches_to_matching_image_frame() {
             cell_index: 1,
             cell_para_index: 0,
             text_direction: 0,
+            line_wrap_squeeze: false,
         }],
     };
     let caption = Caption {

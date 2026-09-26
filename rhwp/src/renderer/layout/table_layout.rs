@@ -1682,7 +1682,24 @@ impl LayoutEngine {
         // inline_x_override가 있으면 외부에서 inline 위치를 계산했으므로 x/y 기준은 유지한다.
         // 단, Top 캡션은 표 본문 위의 별도 영역이므로 표 본문 y 에 캡션 높이만큼 반영한다.
         let table_y = if inline_x_override.is_some() {
-            y_start + inline_top_caption_offset
+            // 저장-배치 Square+본문기준 표의 외곽여백 상자 규칙(아래 compute_table_y_position
+            // 분기와 동일) — tbl_inline_x 를 쓰는 이 경로는 compute_table_y_position 을
+            // 거치지 않으므로 페인트 상단의 outer_margin_top 만큼 안쪽 이동이 여기서 필요.
+            let om_top_px = if !table.common.treat_as_char
+                && matches!(table.common.text_wrap, crate::model::shape::TextWrap::Square)
+                && matches!(table.common.vert_rel_to, crate::model::shape::VertRelTo::Para)
+                && (self.profile.get().hwpx_stored_layout()
+                    || self.profile.get().hwp5_origin_hwpx())
+                && crate::renderer::float_placement::para_square_rowbreak_first_fragment_top_offset_px(
+                    table,
+                    self.dpi,
+                ) <= 0.0
+            {
+                hwpunit_to_px(table.outer_margin_top as i32, self.dpi)
+            } else {
+                0.0
+            };
+            y_start + inline_top_caption_offset + om_top_px
         } else {
             let computed_y = self.compute_table_y_position(
                 table,
@@ -2022,6 +2039,7 @@ impl LayoutEngine {
                             cell_index: 65534, // 캡션 식별 센티널
                             cell_para_index: 0,
                             text_direction: 0,
+                            line_wrap_squeeze: false,
                         }],
                     })
                     .or_else(|| {
@@ -2930,6 +2948,7 @@ impl LayoutEngine {
         paragraphs: &[Paragraph],
         styles: &ResolvedStyleSet,
         preserve_cell_padding: bool,
+        min_pad: f64,
     ) -> (f64, f64) {
         // [#2279 axis B] 규칙 본체는 composer::shrunk_cell_horizontal_padding 로 이동 —
         // cut(cell_units)/mt(HeightMeasurer) 측정과 단일 출처 공유 (규칙이 갈리면
@@ -2942,6 +2961,7 @@ impl LayoutEngine {
             paragraphs,
             styles,
             preserve_cell_padding,
+            min_pad,
         )
     }
 
@@ -3095,7 +3115,7 @@ impl LayoutEngine {
                 ),
                 _ => (col_area.x, col_area.width),
             };
-            match horz_align {
+            let x = match horz_align {
                 HorzAlign::Left | HorzAlign::Inside => ref_x + h_offset + outer_left,
                 HorzAlign::Center => {
                     ref_x
@@ -3107,7 +3127,21 @@ impl LayoutEngine {
                 HorzAlign::Right | HorzAlign::Outside => {
                     ref_x + (ref_w - table_width).max(0.0) - h_offset - outer_right
                 }
+            };
+            if std::env::var("RHWP_DIAG_TX").is_ok() {
+                eprintln!(
+                    "TX wrap={:?} href={:?} halign={:?} hoff={:.2} ol={:.2} ref_x={:.2} tblw={:.2} -> x={:.2}",
+                    table.common.text_wrap,
+                    horz_rel_to,
+                    horz_align,
+                    h_offset,
+                    outer_left,
+                    ref_x,
+                    table_width,
+                    x
+                );
             }
+            x
         } else {
             // Center/right alignment uses the occupied outer-margin box, while
             // the returned coordinate is the painted table border. Omitting the
@@ -3283,15 +3317,34 @@ impl LayoutEngine {
             } else {
                 0.0
             };
+            // 저장-배치(HWPX 직파스/hwp5-origin) 문서의 Square+본문기준 표도
+            // TopAndBottom 과 동일하게 외곽여백 상자가 배치 기준 — 그리는 표
+            // 상단은 outer_margin_top 만큼 안쪽. RowBreak 첫 단편은
+            // para_square_rowbreak_first_fragment_top_offset_px 가 이미
+            // outer_margin_top 을 포함하므로 이중 가산을 막는다.
+            let om_top_px = if !table_treat_as_char
+                && matches!(table_text_wrap, crate::model::shape::TextWrap::Square)
+                && matches!(table.common.vert_rel_to, VertRelTo::Para)
+                && (self.profile.get().hwpx_stored_layout()
+                    || self.profile.get().hwp5_origin_hwpx())
+                && crate::renderer::float_placement::para_square_rowbreak_first_fragment_top_offset_px(
+                    table,
+                    self.dpi,
+                ) <= 0.0
+            {
+                hwpunit_to_px(table.outer_margin_top as i32, self.dpi)
+            } else {
+                0.0
+            };
             if let Some(ref caption) = table.caption {
                 use crate::model::shape::CaptionDirection;
                 if matches!(caption.direction, CaptionDirection::Top) {
-                    y_start + caption_height + caption_spacing + v_offset
+                    y_start + caption_height + caption_spacing + v_offset + om_top_px
                 } else {
-                    y_start + v_offset
+                    y_start + v_offset + om_top_px
                 }
             } else {
-                y_start + v_offset
+                y_start + v_offset + om_top_px
             }
         } else {
             // 중첩 표: outer_margin_top 적용
@@ -3370,6 +3423,8 @@ impl LayoutEngine {
                     last.cell_index = cell_idx;
                     last.cell_para_index = cp_idx;
                     last.text_direction = cell.text_direction;
+                    last.line_wrap_squeeze =
+                        cell.line_wrap == crate::model::table::CellLineWrap::Squeeze;
                 }
                 Some(new_ctx)
             } else {
@@ -3380,6 +3435,8 @@ impl LayoutEngine {
                         cell_index: cell_idx,
                         cell_para_index: cp_idx,
                         text_direction: cell.text_direction,
+                        line_wrap_squeeze: cell.line_wrap
+                            == crate::model::table::CellLineWrap::Squeeze,
                     }],
                 })
             };
@@ -4396,6 +4453,7 @@ impl LayoutEngine {
                                 cell_index: 0,
                                 cell_para_index: 0,
                                 text_direction: 0,
+                                line_wrap_squeeze: false,
                             });
                             new_ctx
                         });
@@ -4983,6 +5041,14 @@ impl LayoutEngine {
             // 기존 문서의 1~4mm급 일반 셀 여백은 종전 오버플로우 방어를 유지한다.
             let preserve_explicit_horizontal_padding =
                 cell.apply_inner_margin && cell.padding.left.max(cell.padding.right) >= 1700;
+            // SQUEEZE 셀은 오버플로우 때 좌우 여백을 1mm(284hu)까지만 줄여 넓은
+            // 압축 존(cell−2×284hu)을 만들고, 넘치는 텍스트는 자간 압축으로 그 존에
+            // 맞춘다. 오버플로우가 없으면 원래 여백 유지 → 배분 정렬 폭도 그대로.
+            let min_pad = if cell.line_wrap == crate::model::table::CellLineWrap::Squeeze {
+                hwpunit_to_px(284, self.dpi)
+            } else {
+                1.0
+            };
             let (new_pl, new_pr) = self.shrink_cell_padding_for_overflow(
                 pad_left,
                 pad_right,
@@ -4991,6 +5057,7 @@ impl LayoutEngine {
                 &cell.paragraphs,
                 styles,
                 preserve_explicit_horizontal_padding,
+                min_pad,
             );
             pad_left = new_pl;
             pad_right = new_pr;
@@ -11363,6 +11430,7 @@ mod row_cut_tests {
             &paragraphs,
             &styles,
             false,
+            1.0,
         );
         assert!(
             shrunk.0 < 20.0 || shrunk.1 < 20.0,
@@ -11377,6 +11445,7 @@ mod row_cut_tests {
             &paragraphs,
             &styles,
             true,
+            1.0,
         );
         assert_eq!(
             preserved,

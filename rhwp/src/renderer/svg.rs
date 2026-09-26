@@ -1188,7 +1188,11 @@ impl SvgRenderer {
             match style.stroke_dash {
                 StrokeDash::Dash => attrs.push_str(" stroke-dasharray=\"6 3\""),
                 StrokeDash::LongDash => attrs.push_str(" stroke-dasharray=\"10 3\""),
-                StrokeDash::Dot => attrs.push_str(" stroke-dasharray=\"2 2\""),
+                StrokeDash::Dot => {
+                    // 점선은 선 굵기 비례 (한컴 규칙)
+                    let (on, off) = super::dot_dash_segments(style.stroke_width);
+                    attrs.push_str(&format!(" stroke-dasharray=\"{:.2} {:.2}\"", on, off));
+                }
                 StrokeDash::Circle => {
                     attrs.push_str(" stroke-dasharray=\"0.1 3\" stroke-linecap=\"round\"")
                 }
@@ -1278,7 +1282,10 @@ impl SvgRenderer {
             match style.stroke_dash {
                 StrokeDash::Dash => attrs.push_str(" stroke-dasharray=\"6 3\""),
                 StrokeDash::LongDash => attrs.push_str(" stroke-dasharray=\"10 3\""),
-                StrokeDash::Dot => attrs.push_str(" stroke-dasharray=\"2 2\""),
+                StrokeDash::Dot => {
+                    let (on, off) = super::dot_dash_segments(style.stroke_width);
+                    attrs.push_str(&format!(" stroke-dasharray=\"{:.2} {:.2}\"", on, off));
+                }
                 StrokeDash::Circle => {
                     attrs.push_str(" stroke-dasharray=\"0.1 3\" stroke-linecap=\"round\"")
                 }
@@ -3185,7 +3192,10 @@ impl Renderer for SvgRenderer {
         match style.dash {
             super::StrokeDash::Dash => attrs.push_str(" stroke-dasharray=\"6 3\""),
             super::StrokeDash::LongDash => attrs.push_str(" stroke-dasharray=\"10 3\""),
-            super::StrokeDash::Dot => attrs.push_str(" stroke-dasharray=\"2 2\""),
+            super::StrokeDash::Dot => {
+                let (on, off) = super::dot_dash_segments(width);
+                attrs.push_str(&format!(" stroke-dasharray=\"{:.2} {:.2}\"", on, off));
+            }
             super::StrokeDash::Circle => {
                 attrs.push_str(" stroke-dasharray=\"0.1 3\" stroke-linecap=\"round\"")
             }
@@ -3402,8 +3412,8 @@ fn font_local_aliases(font_family: &str) -> Vec<&'static str> {
         "함초롬돋움" => vec!["함초롬돋움", "HCR Dotum"],
         "함초롱바탕" => vec!["함초롱바탕", "HCR Batang"],
         "함초롱돋움" => vec!["함초롱돋움", "HCR Dotum"],
-        "한컴바탕" => vec!["한컴바탕", "함초롬바탕", "HCR Batang"],
-        "한컴돋움" => vec!["한컴돋움", "함초롬돋움", "HCR Dotum"],
+        "한컴바탕" => vec!["한컴바탕", "Haansoft Batang", "함초롬바탕", "HCR Batang"],
+        "한컴돋움" => vec!["한컴돋움", "Haansoft Dotum", "함초롬돋움", "HCR Dotum"],
         "맑은 고딕" => vec!["맑은 고딕", "Malgun Gothic"],
         "바탕" => vec!["바탕", "Batang"],
         "돋움" => vec!["돋움", "Dotum"],
@@ -3438,12 +3448,52 @@ fn known_font_filenames(font_name: &str) -> Vec<&'static str> {
             "lmmath-regular.otf",
         ],
         "맑은 고딕" | "Malgun Gothic" => vec!["malgun.ttf", "MalgunGothic.ttf"],
-        "바탕" | "Batang" => vec!["batang.ttc", "BATANG.TTC", "hamchob-r.ttf"],
-        "돋움" | "Dotum" => vec!["dotum.ttc", "DOTUM.TTC", "hamchod-r.ttf"],
-        "굴림" | "Gulim" => vec!["gulim.ttc", "GULIM.TTC", "hamchod-r.ttf"],
-        "궁서" | "Gungsuh" => vec!["gungsuh.ttc", "GUNGSUH.TTC", "hamchob-r.ttf"],
-        "굴림체" | "GulimChe" => vec!["gulim.ttc", "hamchod-r.ttf"],
-        "바탕체" | "BatangChe" => vec!["batang.ttc", "hamchob-r.ttf"],
+        // 표준 Windows 폰트 부재 시 한컴 번들 서체(한컴바탕/한컴돋움 = Haansoft)
+        // 를 함초롬 계열보다 먼저 시도한다 — 한컴(macOS) FontMap 치환과 정합.
+        "바탕" | "Batang" => vec![
+            "batang.ttc",
+            "BATANG.TTC",
+            "HBATANG.TTF",
+            "HBatang.TTF",
+            "hamchob-r.ttf",
+        ],
+        "돋움" | "Dotum" => vec![
+            "dotum.ttc",
+            "DOTUM.TTC",
+            "HDOTUM.TTF",
+            "HDotum.TTF",
+            "hamchod-r.ttf",
+        ],
+        "돋움체" | "DotumChe" => vec![
+            "DotumChe.TTF",
+            "dotum.ttc",
+            "HDOTUM.TTF",
+            "HDotum.TTF",
+            "hamchod-r.ttf",
+        ],
+        "굴림" | "Gulim" => vec![
+            "gulim.ttc",
+            "GULIM.TTC",
+            "HDOTUM.TTF",
+            "HDotum.TTF",
+            "hamchod-r.ttf",
+        ],
+        "궁서" | "Gungsuh" => vec![
+            "gungsuh.ttc",
+            "GUNGSUH.TTC",
+            "HBATANG.TTF",
+            "HBatang.TTF",
+            "hamchob-r.ttf",
+        ],
+        "굴림체" | "GulimChe" => {
+            vec!["gulim.ttc", "HDOTUM.TTF", "HDotum.TTF", "hamchod-r.ttf"]
+        }
+        "바탕체" | "BatangChe" => {
+            vec!["batang.ttc", "HBATANG.TTF", "HBatang.TTF", "hamchob-r.ttf"]
+        }
+        "궁서체" | "GungsuhChe" => {
+            vec!["gungsuh.ttc", "HBATANG.TTF", "HBatang.TTF", "hamchob-r.ttf"]
+        }
         "휴먼명조" => vec!["HYMJRE.TTF", "hamchob-r.ttf"],
         "새바탕" | "새돋움" | "새굴림" | "새궁서" => {
             vec!["hamchob-r.ttf", "hamchod-r.ttf"]

@@ -193,6 +193,81 @@ pub(crate) fn native_empty_host_rowbreak_line_advance_hu(
     Some(advance)
 }
 
+/// 저장 vpos 사다리가 빈 호스트 TopAndBottom 표의 배타 영역을 계상하는지 검증한다.
+///
+/// 한컴은 빈(공백만 있는 것도 포함) 호스트 문단 + 문단 기준 TopAndBottom 표를 두
+/// 가지 방식으로 기록한다:
+///
+/// 1. 배타-인코딩: host 줄이 배타 상자보다 위에 남고, 다음 문단 vpos =
+///    host vpos + 배타 span(vertical_offset + outer margin + 표 높이). 흐름
+///    재개점은 margin box 하단(페인트 하단 + outer_margin_bottom).
+/// 2. 밀림-인코딩: host 줄 자체가 배타 하단에 저장된다(host 줄 상자가 배타
+///    상자와 겹치면 아래로 밀림). 다음 문단은 배타 하단 + host 줄 advance 뒤.
+///
+/// 기계 생성 양식(#2439 계열)은 사다리가 host 줄 advance 만 담아 배타 영역을
+/// 접는다 — 둘 다 아니면 None 을 돌려줘 기존 `global + reserved` 계약을 유지한다.
+pub(crate) fn empty_host_topbottom_exclusion_flow_bottom(
+    para: &Paragraph,
+    table: &Table,
+    next_para: Option<&Paragraph>,
+    next_spacing_before_px: f64,
+    col_top_px: f64,
+    lane_top_px: f64,
+    painted_height_px: f64,
+    dpi: f64,
+) -> Option<f64> {
+    // 비문자 TopAndBottom 표가 둘 이상이면 사다리 델타를 이 표 하나에 귀속할 수 없다.
+    let para_topbottom_tables = para
+        .controls
+        .iter()
+        .filter(
+            |control| matches!(control, Control::Table(t) if is_para_topbottom_float(&t.common)),
+        )
+        .count();
+    if para_topbottom_tables != 1 {
+        return None;
+    }
+    let host_seg = para
+        .line_segs
+        .iter()
+        .find(|seg| seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0 && seg.line_height > 0)?;
+    let exclusion_bottom_px =
+        lane_top_px + painted_height_px + hwpunit_to_px(i32::from(table.outer_margin_bottom), dpi);
+    // px↔HU 왕복과 표 높이 측정 오차용 허용치. 접힘 인코딩과 배타 인코딩의 델타
+    // 차이는 통상 수천 HWPUNIT 이므로 판별에는 충분히 좁다.
+    const LADDER_TOL_HU: i64 = 400;
+    let tol_px = hwpunit_to_px(LADDER_TOL_HU as i32, dpi);
+    // 밀림 인코딩: 호스트 줄 저장 vpos 가 배타 하단과 일치하면 호스트 줄이
+    // 배타 상자 아래로 밀린 것이다.
+    let host_abs_px = col_top_px + hwpunit_to_px(host_seg.vertical_pos, dpi);
+    if (host_abs_px - exclusion_bottom_px).abs() <= tol_px {
+        let host_advance = host_seg.line_height + host_seg.line_spacing.max(0);
+        return Some(exclusion_bottom_px + hwpunit_to_px(host_advance, dpi));
+    }
+    let next_vpos = next_para
+        .and_then(|next| {
+            next.line_segs.iter().find(|seg| {
+                seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0 && seg.line_height > 0
+            })
+        })?
+        .vertical_pos;
+    let exclusion_hu = i64::from(signed_hwpunit(table.common.vertical_offset).max(0))
+        + i64::from(table.outer_margin_top)
+        + i64::from(super::px_to_hwpunit_round(painted_height_px, dpi))
+        + i64::from(table.outer_margin_bottom);
+    let ladder_delta = i64::from(next_vpos) - i64::from(host_seg.vertical_pos);
+    let over = ladder_delta - exclusion_hu;
+    let next_spacing_before_hu = i64::from(super::px_to_hwpunit_round(
+        next_spacing_before_px.max(0.0),
+        dpi,
+    ));
+    // 다음 문단 spacing_before 를 사다리 안에 접는 저장본과 밖에 두는 저장본을 모두
+    // 인정한다.
+    let encodes_exclusion =
+        over.abs() <= LADDER_TOL_HU || (over - next_spacing_before_hu).abs() <= LADDER_TOL_HU;
+    encodes_exclusion.then_some(exclusion_bottom_px)
+}
+
 /// Stored page-reset evidence for the native-HWP single-cell RowBreak blank-band contract.
 ///
 /// Some Hancom documents serialize a one-row table with a cell taller than the table object's

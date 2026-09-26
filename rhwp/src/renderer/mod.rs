@@ -570,6 +570,16 @@ pub enum StrokeDash {
     DashDotDot,
 }
 
+/// 점선(Dot) 대시 간격 (선 그리기 단위, on/off 순).
+/// 한컴은 선 굵기 w 에 비례해 [4w/3 선분, 2w 공백]로 그린다 — 한컴 PDF 출력에서
+/// 0.36pt 선이 [0.48 on, 0.72 off] 로, 0.24pt 선이 [0.36, 0.48] 로 나오는 것으로 확인.
+/// (OWPML 명명 뒤바뀜으로 HWPX XML "DASH" 가 이 변형이다)
+/// 고정 px 패턴을 쓰면 가는 표 안선에서 점이 지나치게 성기게 나온다.
+pub fn dot_dash_segments(width: f64) -> (f64, f64) {
+    let w = width.max(0.2); // 0 에 가까운 선폭에서 대시가 사라지지 않게 하한만 둔다
+    (w * 4.0 / 3.0, w * 2.0)
+}
+
 /// 선 렌더링 종류 (이중선/삼중선)
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub enum LineRenderType {
@@ -1297,6 +1307,25 @@ pub(crate) fn hft_substitute_faces(font_family: &str) -> &'static [&'static str]
     }
 }
 
+/// 설치되지 않은 표준 Windows 한글 폰트를 대신할 한컴 번들 서체 (선호 순서).
+///
+/// 한컴(macOS)은 문서가 요청한 표준 폰트가 없으면 자체 번들 서체로 치환해 그린다:
+/// 바탕·궁서(세리프) 계열 → 한컴바탕(Haansoft Batang), 돋움·굴림(산세리프)
+/// 계열 → 한컴돋움(Haansoft Dotum). 함초롬 계열은 둘째 후보다. 정답지 근거:
+/// hwpx-h-01 의 바탕 본문이 한컴 출력에서 Haansoft-Batang 으로 임베드된다.
+/// `hft_substitute_faces` 와 달리 generic fallback 체인과 무관하며, 요청
+/// family 가 어느 경로로도 해석되지 않을 때만 호출자가 적용한다.
+pub(crate) fn hancom_substitute_faces(font_family: &str) -> &'static [&'static str] {
+    match font_family.trim() {
+        "바탕" | "Batang" | "바탕체" | "BatangChe" | "궁서" | "Gungsuh" | "궁서체"
+        | "GungsuhChe" => &["한컴바탕", "Haansoft Batang", "함초롬바탕", "HCR Batang"],
+        "돋움" | "Dotum" | "돋움체" | "DotumChe" | "굴림" | "Gulim" | "굴림체" | "GulimChe" => {
+            &["한컴돋움", "Haansoft Dotum", "함초롬돋움", "HCR Dotum"]
+        }
+        _ => &[],
+    }
+}
+
 /// HFT 폭 테이블에 없는 글자(0x7F 이후)를 잴 글꼴.
 ///
 /// 한컴 FontMap.dat `mapFont=HCI Poppy,Palatino Linotype`: HFT 에 없는 글자는
@@ -1308,7 +1337,7 @@ pub(crate) fn hft_metric_fallback(font_family: &str) -> Option<&'static str> {
     }
 }
 
-const HCI_POPPY_FALLBACK: &str = "'Palatino','Palatino Linotype','Book Antiqua','Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+const HCI_POPPY_FALLBACK: &str = "'Palatino','Palatino Linotype','Book Antiqua','Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Haansoft Batang','한컴바탕','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
 
 /// CSS generic fallback 반환 (serif 또는 sans-serif)
 ///
@@ -1329,19 +1358,19 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
         // 굵게 렌더됨. 한컴 돋움 획 두께(페이지 밀도 0.265)에 근접한
         // 'Noto Sans KR ExtraLight'(rsvg 페이지 밀도 0.277)를 무거운 Noto 직전에 삽입 —
         // 시스템 고딕 렌더는 무영향, Noto 폴백만 가볍게 교체.
-        return "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
+        return "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','Haansoft Dotum','한컴돋움','HCR Dotum','함초롬돋움','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
     }
     // 고정폭 키워드
     let lower = font_family.to_ascii_lowercase();
     if (font_family.contains("KoPub돋움체") || lower.contains("kopub dotum"))
         && (font_family.contains("Light") || lower.contains("light"))
     {
-        return "'Noto Sans KR ExtraLight','Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
+        return "'Noto Sans KR ExtraLight','Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','Haansoft Dotum','한컴돋움','HCR Dotum','함초롬돋움','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
     }
     // KoPub Batang uses "바탕체" in the family name, but it is a proportional
     // serif publication face, not the Windows fixed-width BatangChe face.
     if font_family.contains("KoPub바탕체") || lower.contains("kopub batang") {
-        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Haansoft Batang','한컴바탕','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
     }
     if font_family.contains("굴림체")
         || font_family.contains("바탕체")
@@ -1373,7 +1402,7 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
         // AppleMyungjo 보다 앞에 두어야 macOS Chrome 에서 CJK 글리프 bold 매칭 성공.
         // 'Source Han Serif K Old Hangul' (Task #528): @font-face unicode-range 가 옛한글
         // 영역 (U+1100-11FF, U+A960-A97F, U+D7B0-D7FF) 만 매칭하므로 일반 한글에 영향 없음.
-        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Haansoft Batang','한컴바탕','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
     }
     // 세리프 키워드 (영문) — "serif" 포함하되 "sans" 부분 문자열을 가진 폰트명 전체 제외
     if lower.contains("times")
@@ -1384,13 +1413,13 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
         || lower.contains("gungsuh")
         || (lower.contains("serif") && !lower.contains("sans"))
     {
-        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Haansoft Batang','한컴바탕','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
     }
     // Sans-serif: Windows → macOS/iOS → Android → 오픈소스 → 한컴 → generic
     // 'Source Han Serif K Old Hangul' (Task #528): unicode-range 옛한글 자모 영역 한정
     // 'Noto Sans KR ExtraLight' (Task #1224): 무거운 Noto CJK Regular 폴백 직전에 삽입해
     // 한컴 돋움 획 두께에 근접시킴. 시스템 고딕 우선 → 부재 시에만 ExtraLight 매칭.
-    "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif"
+    "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','Haansoft Dotum','한컴돋움','HCR Dotum','함초롬돋움','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif"
 }
 
 pub(crate) fn contains_old_hangul_jamo(text: &str) -> bool {
@@ -2049,8 +2078,8 @@ mod tests {
 
     #[test]
     fn test_generic_fallback() {
-        let serif = "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
-        let sans = "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
+        let serif = "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Haansoft Batang','한컴바탕','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+        let sans = "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','Haansoft Dotum','한컴돋움','HCR Dotum','함초롬돋움','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
         // Task #1224: ExtraLight 가 무거운 Noto 직전에 위치하는지 명시 검증
         assert!(sans.contains("'Noto Sans KR ExtraLight','Noto Sans KR'"));
         let mono = "'GulimChe','굴림체','D2Coding','Noto Sans Mono',monospace";

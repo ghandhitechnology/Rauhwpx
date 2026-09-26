@@ -391,11 +391,19 @@ impl SkiaTextReplay<'_> {
                                 typeface_for_style(self.bundled_typefaces, family, font_style)
                             })
                     };
-                    // 설치되지 않은 한컴 HFT 영문 글꼴은 대체 서체를 선호 순서대로 하나씩
-                    // 해석한다 (SVG/Canvas 의 generic_fallback 체인 순서와 같다).
+                    // 설치되지 않은 한컴 HFT 영문 글꼴·표준 Windows 한글 폰트는
+                    // 대체 서체를 선호 순서대로 하나씩 해석한다 (한컴 FontMap 치환과
+                    // 같다 — 바탕 계열은 한컴바탕, 돋움 계열은 한컴돋움).
                     // custom 우선 루프에 섞으면 --font-path 의 Palatino Linotype
                     // Regular 가 시스템 Palatino(Bold 보유)를 앞질러 굵은 글자가 가늘어진다.
-                    let substitutes = crate::renderer::hft_substitute_faces(&style.font_family);
+                    // 이 대체가 없으면 세리프 요청(바탕)이 generic 산세리프
+                    // (맑은 고딕 등)에 떨어져 본문 전체가 굵은 고딕으로 렌더된다.
+                    let substitutes: Vec<&str> =
+                        crate::renderer::hft_substitute_faces(&style.font_family)
+                            .iter()
+                            .chain(crate::renderer::hancom_substitute_faces(&style.font_family))
+                            .copied()
+                            .collect();
                     if !substitutes.is_empty() && resolve_family(&style.font_family).is_none() {
                         for family in substitutes {
                             if let Some(tf) = resolve_family(family) {

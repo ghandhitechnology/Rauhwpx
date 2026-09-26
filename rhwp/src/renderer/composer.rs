@@ -2323,6 +2323,7 @@ pub(crate) fn shrunk_cell_horizontal_padding(
     paragraphs: &[Paragraph],
     styles: &ResolvedStyleSet,
     preserve_cell_padding: bool,
+    min_pad: f64,
 ) -> (f64, f64) {
     if preserve_cell_padding {
         return (pad_left, pad_right);
@@ -2374,7 +2375,6 @@ pub(crate) fn shrunk_cell_horizontal_padding(
     if max_line_w <= overflow_threshold || cell_w <= 2.0 {
         return (pad_left, pad_right);
     }
-    let min_pad = 1.0;
     let total_pad = pad_left + pad_right;
     let max_reducible = (total_pad - 2.0 * min_pad).max(0.0);
     if max_reducible <= 0.0 {

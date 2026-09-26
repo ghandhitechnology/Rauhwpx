@@ -151,6 +151,7 @@ impl LayoutEngine {
                 cell_index: 0,
                 cell_para_index: 0,
                 text_direction: 0,
+                line_wrap_squeeze: false,
             });
             self.layout_caption(
                 tree,
@@ -735,6 +736,7 @@ impl LayoutEngine {
                     cell_index: 0,
                     cell_para_index: 0,
                     text_direction: 0,
+                    line_wrap_squeeze: false,
                 }],
             };
             self.layout_caption(

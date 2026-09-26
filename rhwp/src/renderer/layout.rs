@@ -5,8 +5,8 @@
 
 use super::composer::{compose_paragraph, effective_text_for_metrics, ComposedParagraph};
 use super::float_placement::{
-    float_exclusion, flow_cursor_after_float, horizontal_range, is_para_topbottom_float,
-    native_empty_host_rowbreak_line_advance_hu,
+    empty_host_topbottom_exclusion_flow_bottom, float_exclusion, flow_cursor_after_float,
+    horizontal_range, is_para_topbottom_float, native_empty_host_rowbreak_line_advance_hu,
     native_single_cell_rowbreak_saved_residual_split_hu,
     native_uniform_cellbreak_fragment_spacing_hu, signed_hwpunit, FloatLaneSet,
     FloatPlacementContext,
@@ -873,6 +873,9 @@ pub struct CellPathEntry {
     pub cell_para_index: usize,
     /// 텍스트 방향 (0=가로, 1=세로/영문눕힘, 2=세로/영문세움)
     pub text_direction: u8,
+    /// 셀 lineWrap=SQUEEZE — 텍스트가 좌우 여백 안쪽(1mm 인셋 존)까지 넘칠 때
+    /// 자간 압축으로 맞추는 한컴 셀 모드
+    pub line_wrap_squeeze: bool,
 }
 
 /// 표 셀 내부 문단 편집용 컨텍스트 (중첩 표 경로 지원)
@@ -926,6 +929,10 @@ impl CellContext {
     /// 텍스트 방향 (최내곽 기준)
     pub fn text_direction(&self) -> u8 {
         self.innermost().text_direction
+    }
+    /// lineWrap=SQUEEZE 여부 (최내곽 기준)
+    pub fn line_wrap_squeeze(&self) -> bool {
+        self.innermost().line_wrap_squeeze
     }
 
     /// (cell_index, cell_para_index, outer_table_control_index) — 최내곽 entry 의 3 필드.
@@ -1471,8 +1478,19 @@ fn para_has_visible_inline_control(para: &Paragraph) -> bool {
     })
 }
 
-fn para_is_empty_topbottom_table_anchor(para: &Paragraph) -> bool {
-    !para_has_visible_text(para)
+/// HWPX 저장본에서 공백만 담긴 호스트(한컴이 표 앵커용으로 쓰는 '    ' 문단)도
+/// 보이는 내용이 없으므로 빈 호스트로 본다 — 저장 사다리도 동일하게 인코딩된다.
+/// 네이티브 HWP 는 다른 호스트 인코딩을 쓰므로 공백 호스트를 종전처럼 내용으로 본다.
+fn para_host_is_empty(stored_layout: bool, para: &Paragraph) -> bool {
+    if stored_layout {
+        !para_has_non_whitespace_text(para)
+    } else {
+        !para_has_visible_text(para)
+    }
+}
+
+fn para_is_empty_topbottom_table_anchor(stored_layout: bool, para: &Paragraph) -> bool {
+    para_host_is_empty(stored_layout, para)
         && para
             .controls
             .iter()
@@ -6933,7 +6951,9 @@ impl LayoutEngine {
                             || (t.common.treat_as_char
                                 && !crate::renderer::height_measurer::is_tac_table_inline_in_para(t, seg_width, para))));
                     if has_block_table {
-                        if para_is_empty_topbottom_table_anchor(para) {
+                        let stored_layout = self.profile.get().hwpx_stored_layout()
+                            || self.profile.get().hwp5_origin_hwpx();
+                        if para_is_empty_topbottom_table_anchor(stored_layout, para) {
                             // 빈 기본 표 host 문단은 별도 빈 줄로 소비하지 않는다.
                             // 표 PageItem 렌더 시 같은 y에 문단부호를 얹어 한컴처럼
                             // 첫 조판부호가 표와 겹쳐 보이게 한다.
@@ -7534,13 +7554,27 @@ impl LayoutEngine {
                 let tbl_w = hwpunit_to_px(t.common.width as i32, self.dpi);
                 let area_x = col_area.x + effective_margin;
                 let area_w = (col_area.width - effective_margin - margin_right).max(0.0);
+                // HWPX 저장-배치는 외곽여백 상자(outMargin) 기준 정렬 — 그리는 표
+                // 테두리는 TopAndBottom 과 동일하게 좌/우 outer margin 만큼 안쪽.
+                let square_om_x = self.profile.get().hwpx_stored_layout()
+                    || self.profile.get().hwp5_origin_hwpx();
+                let (om_l_px, om_r_px) = if square_om_x {
+                    (
+                        hwpunit_to_px(t.outer_margin_left as i32, self.dpi),
+                        hwpunit_to_px(t.outer_margin_right as i32, self.dpi),
+                    )
+                } else {
+                    (0.0, 0.0)
+                };
                 let x = match t.common.horz_align {
                     crate::model::shape::HorzAlign::Right
-                    | crate::model::shape::HorzAlign::Outside => area_x + (area_w - tbl_w).max(0.0),
-                    crate::model::shape::HorzAlign::Center => {
-                        area_x + (area_w - tbl_w).max(0.0) / 2.0
+                    | crate::model::shape::HorzAlign::Outside => {
+                        area_x + (area_w - tbl_w).max(0.0) - om_r_px
                     }
-                    _ => area_x,
+                    crate::model::shape::HorzAlign::Center => {
+                        area_x + (area_w - tbl_w).max(0.0) / 2.0 + (om_l_px - om_r_px) / 2.0
+                    }
+                    _ => area_x + om_l_px,
                 };
                 Some(x)
             } else if is_tac {
@@ -7778,9 +7812,14 @@ impl LayoutEngine {
                     // boundary already places the following table, so shifting only the painted
                     // first table consumes its outer-top from the visible inter-table gap. The
                     // HWP/HWPX #1133 pair exposes this exactly: 283 HU became a 3.77 px gap loss.
-                    let followed_by_empty_topbottom_table = paragraphs
-                        .get(para_index + 1)
-                        .is_some_and(para_is_empty_topbottom_table_anchor);
+                    let followed_by_empty_topbottom_table =
+                        paragraphs.get(para_index + 1).is_some_and(|p| {
+                            para_is_empty_topbottom_table_anchor(
+                                self.profile.get().hwpx_stored_layout()
+                                    || self.profile.get().hwp5_origin_hwpx(),
+                                p,
+                            )
+                        });
                     let hwpx_margin_box_outer_top_px = if followed_by_empty_topbottom_table {
                         0.0
                     } else {
@@ -8000,6 +8039,16 @@ impl LayoutEngine {
                 );
                 let allow_para_top_bleed =
                     is_current_visible_para_float && signed_hwpunit(t.common.vertical_offset) < 0;
+                // 저장-배치(HWPX 직파스/hwp5-origin) 문서는 compute_table_y_position 의
+                // uses_outer_margin_box 분기가 outer_margin_top 을 raw_y 에 직접 더한다.
+                // 앵커 para_y 에도 얹으면 표가 외곽 상단 여백만큼 아래로 이중 이동하므로
+                // 그 경우에는 순수 문단 상단을 넘긴다.
+                let para_anchor_outer_top_px =
+                    if profile.hwpx_stored_layout() || profile.hwp5_origin_hwpx() {
+                        0.0
+                    } else {
+                        visible_outer_top_px
+                    };
                 let table_visual_end = if tac_already_rendered_inline {
                     table_y_start + table_visual_height
                 } else {
@@ -8022,7 +8071,7 @@ impl LayoutEngine {
                         margin_right,
                         tbl_inline_x,
                         None,
-                        Some(para_y_for_table + visible_outer_top_px),
+                        Some(para_y_for_table + para_anchor_outer_top_px),
                         allow_para_top_bleed,
                         false,
                         native_saved_text_frame_outer_box,
@@ -8357,6 +8406,8 @@ impl LayoutEngine {
                 .get(control_index)
                 .map(|c| matches!(c, Control::Table(t) if t.common.treat_as_char))
                 .unwrap_or(false);
+            let stored_layout =
+                self.profile.get().hwpx_stored_layout() || self.profile.get().hwp5_origin_hwpx();
             let is_current_empty_para_float = para
                 .controls
                 .get(control_index)
@@ -8364,7 +8415,8 @@ impl LayoutEngine {
                     matches!(
                         c,
                         Control::Table(t)
-                            if is_para_topbottom_float(&t.common) && !para_has_visible_text(para)
+                            if is_para_topbottom_float(&t.common)
+                                && para_host_is_empty(stored_layout, para)
                     )
                 })
                 .unwrap_or(false);
@@ -8386,7 +8438,7 @@ impl LayoutEngine {
                         c,
                         Control::Table(t)
                             if is_para_topbottom_float(&t.common)
-                                && !para_has_visible_text(para)
+                                && para_host_is_empty(stored_layout, para)
                     )
                 }) == Some(control_index);
             // ── 표 위 간격 ──
@@ -8654,7 +8706,13 @@ impl LayoutEngine {
                 // 표-표 사이 간격이므로 HWP처럼 보존한다.
                 let next_is_empty_topbottom_table_anchor = paragraphs
                     .get(para_index + 1)
-                    .map(para_is_empty_topbottom_table_anchor)
+                    .map(|p| {
+                        para_is_empty_topbottom_table_anchor(
+                            self.profile.get().hwpx_stored_layout()
+                                || self.profile.get().hwp5_origin_hwpx(),
+                            p,
+                        )
+                    })
                     .unwrap_or(false);
                 let suppress_empty_anchor_spacing =
                     is_current_empty_para_float && !next_is_empty_topbottom_table_anchor;
@@ -8712,7 +8770,43 @@ impl LayoutEngine {
                     // vertical offset separately from the flow height measured
                     // by pagination. Keep the table painted at lane_top, but
                     // advance following items by the reserved table height only.
-                    global_y_before + reserved_height
+                    let exclusion_bottom = para
+                        .controls
+                        .get(control_index)
+                        .and_then(|control| match control {
+                            Control::Table(table) => Some(table.as_ref()),
+                            _ => None,
+                        })
+                        .and_then(|table| {
+                            let next_para = paragraphs.get(para_index + 1);
+                            let next_spacing_before_px = next_para
+                                .map(|next| {
+                                    let style_id = composed
+                                        .get(para_index + 1)
+                                        .map(|c| c.para_style_id as usize)
+                                        .unwrap_or(next.para_shape_id as usize);
+                                    styles
+                                        .para_styles
+                                        .get(style_id)
+                                        .map(|ps| ps.spacing_before)
+                                        .unwrap_or(0.0)
+                                })
+                                .unwrap_or(0.0);
+                            empty_host_topbottom_exclusion_flow_bottom(
+                                para,
+                                table,
+                                next_para,
+                                next_spacing_before_px,
+                                col_area.y,
+                                lane_top,
+                                reserved_height,
+                                self.dpi,
+                            )
+                        });
+                    // 저장 사다리가 개체의 배타 영역(offset+바깥여백+높이)을
+                    // 계상한 문서는 margin box 하단에서 흐름을 재개한다.
+                    // 판별 불가·접힘 인코딩은 기존 계약을 유지한다.
+                    exclusion_bottom.unwrap_or(global_y_before + reserved_height)
                 } else {
                     lanes.max_bottom()
                 };
@@ -9836,6 +9930,7 @@ impl LayoutEngine {
                                     cell_index: 0,
                                     cell_para_index: 0,
                                     text_direction: 0,
+                                    line_wrap_squeeze: false,
                                 }],
                             };
                             self.layout_caption(

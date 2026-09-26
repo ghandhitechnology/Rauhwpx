@@ -897,6 +897,7 @@ impl DocumentCore {
         page_nums: &[u32],
         options: &crate::renderer::pdf::PdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
+        crate::renderer::font_paths::register_font_face_availability(&options.font_paths);
         let _font_scope = self.resolved_shaping_font_scope();
         let _measure_font_scope =
             crate::renderer::layout::enter_measure_font_paths(options.font_paths.clone());
@@ -929,6 +930,7 @@ impl DocumentCore {
         profile: RenderProfile,
         options: &crate::renderer::pdf::PdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
+        crate::renderer::font_paths::register_font_face_availability(&options.font_paths);
         let _measure_font_scope =
             crate::renderer::layout::enter_measure_font_paths(options.font_paths.clone());
         if page_nums.is_empty() {
@@ -1010,6 +1012,7 @@ impl DocumentCore {
         profile: RenderProfile,
         options: &crate::renderer::pdf::DirectPdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
+        crate::renderer::font_paths::register_font_face_availability(&options.font_paths);
         let _font_scope = self.resolved_shaping_font_scope();
         let _measure_font_scope =
             crate::renderer::layout::enter_measure_font_paths(options.font_paths.clone());
@@ -1170,6 +1173,11 @@ impl DocumentCore {
     pub(crate) fn resolved_shaping_font_scope(
         &self,
     ) -> crate::renderer::layout::ResolvedShapingFontScope {
+        // 레이아웃 진입 전에 `RHWP_FONT_PATH` 의 face 이름을 등록한다 —
+        // HcrDeclared 폭 측정의 한컴 FontMap 치환은 "요청 face 가 없을 때만"
+        // 발동하므로 측정 경로가 custom font 실재 여부를 알아야 한다.
+        // (파일별 파싱은 최초 1회, 미설정이면 no-op)
+        crate::renderer::font_paths::register_font_face_availability(&[]);
         crate::renderer::layout::enter_resolved_shaping_fonts(
             self.layout_engine.resolved_shaping_fonts(),
         )
@@ -1183,6 +1191,7 @@ impl DocumentCore {
         font_embed_mode: crate::renderer::svg::FontEmbedMode,
         font_paths: &[std::path::PathBuf],
     ) -> Result<String, HwpError> {
+        crate::renderer::font_paths::register_font_face_availability(font_paths);
         let _font_scope = self.resolved_shaping_font_scope();
         // substFont 측정 판정이 --font-path 목록까지 보게 경로를 노출한다.
         let _measure_font_scope =
@@ -1342,6 +1351,7 @@ impl DocumentCore {
         use crate::renderer::layer_renderer::LayerRasterRenderer;
         use crate::renderer::skia::SkiaLayerRenderer;
 
+        crate::renderer::font_paths::register_font_face_availability(font_paths);
         let _font_scope = self.resolved_shaping_font_scope();
         let _measure_font_scope =
             crate::renderer::layout::enter_measure_font_paths(font_paths.to_vec());
@@ -1376,6 +1386,7 @@ impl DocumentCore {
         use crate::renderer::layer_renderer::{LayerRasterRenderer, RasterRenderOptions};
         use crate::renderer::skia::SkiaLayerRenderer;
 
+        crate::renderer::font_paths::register_font_face_availability(&options.font_paths);
         let _font_scope = self.resolved_shaping_font_scope();
         let _measure_font_scope =
             crate::renderer::layout::enter_measure_font_paths(options.font_paths.clone());
