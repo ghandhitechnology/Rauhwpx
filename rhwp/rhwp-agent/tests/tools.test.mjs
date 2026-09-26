@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod/v3';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
+  BATCHABLE_EDIT_TOOL_NAMES,
   TOOL_CATEGORIES,
   TOOL_CLASSIFICATIONS,
   TOOL_DEFINITIONS,
@@ -794,6 +795,18 @@ test('도구 스키마는 $ref 없이 펼쳐진다 (Codex/Pi 가 $ref 를 못 �
     const schema = JSON.stringify(zodToJsonSchema(z.object(definition.shape), { strictUnions: true, pipeStrategy: 'input' }));
     assert.doesNotMatch(schema, /"\$ref"/, `${definition.name} has a $ref`);
   }
+});
+
+test('edit_object 편집 인자는 스튜디오 계획 함수가 읽는 키와 같다', () => {
+  // 허브 스키마에만 있는 키는 스튜디오가 조용히 무시한다 — 두 목록을 함께 고친다.
+  const src = readFileSync(fileURLToPath(new URL('../../rhwp-studio/src/agent/object-edit-args.ts', import.meta.url)), 'utf8');
+  const list = /export const EDIT_OBJECT_ARG_KEYS = \[([^\]]*)\]/.exec(src)?.[1] ?? '';
+  const studio = [...list.matchAll(/'([A-Za-z]+)'/g)].map((m) => m[1]).sort();
+  const address = ['expectedRevision', 'sectionIdx', 'paraIdx', 'controlIdx', 'cell', 'cellPath', 'delete'];
+  const hub = Object.keys(byName.get('edit_object').shape).filter((key) => !address.includes(key)).sort();
+  assert.deepEqual(hub, studio);
+  assert.deepEqual(byName.get('insert_shape').shape.shape._def.values, ['line', 'rectangle', 'ellipse', 'textBox']);
+  assert.ok(BATCHABLE_EDIT_TOOL_NAMES.includes('edit_object') && BATCHABLE_EDIT_TOOL_NAMES.includes('insert_shape'));
 });
 
 test('insert_image takes one source and floating fields only with positionMode floating', () => {

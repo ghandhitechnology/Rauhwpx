@@ -41,6 +41,8 @@ description: Pending-edit and revision workflow for changing the live HWP/HWPX d
   스크립트는 LaTeX 가 아니라 한컴 수식 문법이다.
 - 표 구조 변경(`insert_row`/`delete_row`/`merge_cells` 등)은 즉시 적용되고 `cellIdx` 를 다시 매긴다.
   이후 셀은 돌려받은 개수나 새 `get_structure` 로 주소를 잡는다. 표 작업은 `rhwp-tables` 스킬을 참고한다.
+- 그림·도형의 위치·크기·배치·자르기·앞뒤 순서·삭제는 `edit_object` 로 바꾼다(주소는 `get_page_geometry` 의 objects).
+  선·사각형·타원·글상자는 `insert_shape` 로 넣고, 글상자 글은 돌려받은 `cell`/`cellPath` 로 텍스트 도구에 쓴다.
 - 도구 결과에 `editReport` 가 있거나 턴이 `staged_edit_report` 블록으로 시작하면, 대기 편집 일부가 버려졌거나
   거절 뒤에도 문서에 남은 것이다. 그 부분을 다시 읽은 뒤 편집한다.
 
