@@ -1910,7 +1910,11 @@ fn measure_char_width_with_policy(
     if let Some(w) = kopub_char_width(primary_name, c, font_size) {
         return Some(w);
     }
-    let requested = font_metrics_data::find_metric(primary_name, bold, italic);
+    // macOS 한컴이 Bold face 를 제공하지 않는 서체(맑은 고딕 등)는 참조 환경에서
+    // 굵게를 Regular face + 합성 획으로 그리므로 Regular 메트릭으로 조판한다.
+    let metric_bold =
+        bold && crate::renderer::macos_synthetic_bold_em(primary_name, policy).is_none();
+    let requested = font_metrics_data::find_metric(primary_name, metric_bold, italic);
     let requested_covers = requested
         .as_ref()
         .is_some_and(|metric| c == ' ' || metric.metric.get_width(c).is_some());
@@ -2353,7 +2357,9 @@ pub(crate) fn registered_glyph_advance(c: char, style: &TextStyle) -> Option<f64
     }
     let (font_size, _, _) = style_params(style);
     let primary = super::super::style_resolver::primary_font_name(&style.font_family);
-    let metric = font_metrics_data::find_metric(primary, style.bold, style.italic)?.metric;
+    let bold = style.bold
+        && crate::renderer::macos_synthetic_bold_em(primary, style.font_metrics_policy).is_none();
+    let metric = font_metrics_data::find_metric(primary, bold, style.italic)?.metric;
     let width = metric.get_width(c)?;
     Some(f64::from(width) * font_size / f64::from(metric.em_size))
 }

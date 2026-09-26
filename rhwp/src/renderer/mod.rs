@@ -299,9 +299,39 @@ pub(crate) fn faux_bold_stroke_width(style: &TextStyle, font_size: f64) -> Optio
         return None;
     }
     let primary = style_resolver::primary_font_name(&style.font_family);
+    // macOS 한컴이 Bold face 를 제공하지 않는 서체는 DB 의 Windows Bold 메트릭이
+    // 있어도 합성하며, 획 비율도 서체별로 다르다.
+    if let Some(em) = macos_synthetic_bold_em(primary, style.font_metrics_policy) {
+        return Some(font_size * em);
+    }
     font_metrics_data::find_metric(primary, true, style.italic)?
         .bold_fallback
         .then_some(font_size * FAUX_BOLD_STROKE_EM)
+}
+
+/// macOS 한컴이 Bold face 를 제공하지 않아 굵게를 Regular + 합성 획(`2 Tr`)으로
+/// 그리는 서체의 획 비율(글자 크기 대비). 이 서체들의 DB Bold 메트릭은 Windows
+/// 글꼴 파일에서 추출한 것으로 참조 환경에는 없으므로 `HcrDeclared`(macOS)
+/// 규칙에서는 Bold 메트릭을 무시하고 Regular 폭으로 조판한다. `HancomWindows`
+/// 문서는 Windows 한/글이 실제 Bold 글꼴을 쓰므로 대상에서 제외한다.
+///
+/// 획 비율은 서체마다 다르다 — 한컴 macOS PDF 실측 `w`/Tm 단위:
+/// 맑은 고딕 ≈1/30 (2.75/83, 3.325/100, 3.6/108 — landscape-001·hwpx-h-01),
+/// 나머지(Haansoft Batang·돋움체·HY견고딕·HMKMM 등) ≈1/40 = FAUX_BOLD_STROKE_EM.
+/// 함초롬돋움 처럼 한컴 번들에 Bold face(HCR Dotum Bold)가 있는 서체는
+/// 실제 Bold 를 유지하므로 None 반환.
+pub(crate) fn macos_synthetic_bold_em(
+    font_name: &str,
+    policy: crate::model::provenance::FontMetricsPolicy,
+) -> Option<f64> {
+    if policy == crate::model::provenance::FontMetricsPolicy::HancomWindows {
+        return None;
+    }
+    let n: String = font_name.split_whitespace().collect();
+    if n.eq_ignore_ascii_case("malgungothic") || n == "맑은고딕" {
+        return Some(1.0 / 30.0);
+    }
+    None
 }
 
 /// 위/아래 첨자 glyph 크기 비율. 한컴(macOS) PDF 실측: 15pt 본문 → 9.6pt (80/125 장치 단위).

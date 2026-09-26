@@ -112,17 +112,48 @@ fn test_svg_draw_text_malgun_gothic_bold_keeps_font_weight() {
             font_size: 16.0,
             font_family: "맑은 고딕".to_string(),
             bold: true,
+            // Windows 한/글은 malgunbd 실제 Bold 글꼴을 쓴다.
+            font_metrics_policy: crate::model::provenance::FontMetricsPolicy::HancomWindows,
             ..Default::default()
         },
     );
     let output = renderer.output();
     assert!(
         output.contains("font-weight=\"bold\""),
-        "맑은 고딕은 Bold 메트릭이 있어 font-weight=\"bold\" 를 유지해야 함: {output}"
+        "Windows 환경의 맑은 고딕은 실제 Bold 를 쓰므로 font-weight=\"bold\" 를 유지해야 함: {output}"
     );
     assert!(
         !output.contains("stroke-width="),
         "실제 Bold face 에 합성 획을 겹치면 안 됨: {output}"
+    );
+}
+
+#[test]
+fn test_svg_draw_text_malgun_gothic_bold_synthesized_on_macos() {
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 600.0);
+    renderer.draw_text(
+        "굵게",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_size: 16.0,
+            font_family: "맑은 고딕".to_string(),
+            bold: true,
+            ..Default::default()
+        },
+    );
+    let output = renderer.output();
+    // macOS 한컴은 맑은 고딕 Bold face 가 없어 Regular + 합성 획(1/30em 실측)으로
+    // 그린다 — landscape-001/hwpx-h-01 참조 PDF 의 MalgunGothic-Regular + `2 Tr`.
+    let want = format!("stroke-width=\"{:.3}\"", 16.0 / 30.0);
+    assert!(
+        output.contains(&want),
+        "맑은 고딕 볼드는 macOS 에서 1/30em 합성 획이어야 함 — {want} 없음: {output}"
+    );
+    assert!(
+        !output.contains("font-weight=\"bold\""),
+        "합성 획과 font-weight=\"bold\" 를 겹치면 안 됨: {output}"
     );
 }
 

@@ -326,6 +326,22 @@ impl SkiaTextReplay<'_> {
                     (false, true) => FontStyle::italic(),
                     (false, false) => FontStyle::normal(),
                 };
+                // 합성 진하게 대상(macOS 한컴이 Bold face 를 제공하지 않거나 DB 에
+                // Bold 메트릭이 없는 서체)은 Regular face 를 해석해 획으로 굵게를
+                // 만든다 — SVG/Canvas 와 같은 규칙. Bold face 파일이 해석돼도
+                // 한컴 출력과 모양·폭이 다르므로 내려준다.
+                let font_style = if style.bold
+                    && crate::renderer::faux_bold_stroke_width(style, f64::from(font_size))
+                        .is_some()
+                {
+                    if style.italic {
+                        FontStyle::italic()
+                    } else {
+                        FontStyle::normal()
+                    }
+                } else {
+                    font_style
+                };
                 let mut families = Vec::new();
                 // [#3314] 접미사 face("Noto Serif KR Black") 미설치 시 base
                 // family 가 아래 generic 폴백보다 먼저 구제 — SVG 체인과 정합.
@@ -818,9 +834,15 @@ impl SkiaTextReplay<'_> {
                 let is_middle_dot = |cluster: &str| cluster == "\u{00B7}";
                 // 합성 진하게: 해석된 서체에 Bold face 가 없으면 한컴처럼 fill+stroke 로
                 // 획을 더한다. 두께는 svg/web_canvas 의 faux_bold_stroke_width 와 같은 비율.
-                let faux_bold_width = style
-                    .bold
-                    .then(|| font_size * crate::renderer::FAUX_BOLD_STROKE_EM as f32);
+                // 서체별 실측 비율(맑은 고딕 1/30 등)을 우선 쓰고 아니면 기본 1/40.
+                let faux_bold_width =
+                    crate::renderer::faux_bold_stroke_width(style, f64::from(font_size))
+                        .map(|w| w as f32)
+                        .or_else(|| {
+                            style
+                                .bold
+                                .then(|| font_size * crate::renderer::FAUX_BOLD_STROKE_EM as f32)
+                        });
                 let draw_text_pass = |color: Color, stroke_width: f32, dx: f32, dy: f32| {
                     let mut text_paint = Paint::default();
                     text_paint.set_anti_alias(true);
