@@ -483,12 +483,7 @@ impl DocumentCore {
 
             // 채우기 (단색)
             if let Some(v) = json_str(props_json, "fillType") {
-                d.fill.fill_type = match v.as_str() {
-                    "solid" => crate::model::style::FillType::Solid,
-                    "gradient" => crate::model::style::FillType::Gradient,
-                    "image" => crate::model::style::FillType::Image,
-                    _ => crate::model::style::FillType::None,
-                };
+                Self::apply_shape_fill_type(&mut d.fill, &v);
             }
             if let Some(v) = json_i32(props_json, "fillBgColor") {
                 let solid = d.fill.solid.get_or_insert_with(|| {
@@ -755,6 +750,22 @@ impl DocumentCore {
             common_json, tb_json, extra_json, round_json, connector_json, caption_json
         ))
     }
+    /// 도형 fillType 적용. "none" 은 남은 단색·그러데이션 값까지 지운다 — 렌더러는 solid 가
+    /// 있으면 fill_type 과 무관하게 배경을 칠하고, HWPX 저장도 그 solid 를 winBrush 로
+    /// 내보내므로 종류만 바꾸면 채우기 없음이 흰 면으로 남는다.
+    fn apply_shape_fill_type(fill: &mut crate::model::style::Fill, value: &str) {
+        use crate::model::style::FillType;
+        fill.fill_type = match value {
+            "solid" => FillType::Solid,
+            "gradient" => FillType::Gradient,
+            "image" => FillType::Image,
+            _ => FillType::None,
+        };
+        if fill.fill_type == FillType::None {
+            fill.solid = None;
+            fill.gradient = None;
+        }
+    }
     /// [Task #1138] Shape 속성 JSON 적용 (mutation only). 후처리 (recompose /
     /// paginate / cache invalidate / event log) 는 호출자 책임.
     /// set_shape_properties_native + set_cell_shape_properties_by_path_native 공유.
@@ -837,12 +848,7 @@ impl DocumentCore {
                 d.border_line.attr = attr;
             }
             if let Some(v) = json_str(props_json, "fillType") {
-                d.fill.fill_type = match v.as_str() {
-                    "solid" => crate::model::style::FillType::Solid,
-                    "gradient" => crate::model::style::FillType::Gradient,
-                    "image" => crate::model::style::FillType::Image,
-                    _ => crate::model::style::FillType::None,
-                };
+                Self::apply_shape_fill_type(&mut d.fill, &v);
             }
             if let Some(v) = json_i32(props_json, "fillBgColor") {
                 let solid = d
