@@ -89,7 +89,7 @@ test('결과 줄은 실행기 결과에서 숫자·쪽·경고·그림을 고른
   assert.deepEqual(failed.items, [{ ok: true, text: '되돌림' }, { ok: false, text: '인자 오류' }]);
 
   assert.equal(presentToolResult({
-    tool: 'edit_object', argsJson: '{"xMm":10}', ok: true, preview: '', result: { kind: 'picture' },
+    tool: 'edit_object', argsJson: '{"xMm":10}', ok: true, preview: '', result: { object: { kind: 'picture' } },
   }).label, '그림 이동');
 });
 

@@ -950,7 +950,9 @@ function failedItemIndex(message: string): number | null {
 
 function refinedLabel(name: string, args: Args, result: Args | null): string | undefined {
   if (name !== 'edit_object' || !result) return undefined;
-  const kind = str(result['kind'] ?? result['objectKind'] ?? result['objectType']).toLowerCase();
+  // 실행기는 { object: {kind…} } 또는 삭제 시 { deleted: {kind…} } 를 돌려준다
+  const target = rec(result['object'] ?? result['deleted']);
+  const kind = str(target['kind'] ?? result['kind'] ?? result['objectKind']).toLowerCase();
   const noun = kind.includes('picture') || kind.includes('image') ? '그림'
     : kind.includes('textbox') ? '글상자'
       : kind.includes('shape') || kind.includes('line') || kind.includes('rect') || kind.includes('ellipse') ? '도형'
