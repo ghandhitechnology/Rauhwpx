@@ -382,20 +382,24 @@ impl SkiaTextReplay<'_> {
                             }
                         }
                     }
+                    // family 우선(CSS 순서)으로 custom→system을 잇는다.
+                    // 소스 우선(custom 전체 → system 전체)으로 두면 --font-path 의
+                    // 깊은 폴백이 시스템의 더 앞선 후보를 제친다 — exam_kor 의
+                    // '제 1 교시'(한양견명조, 세리프)가 serif 계열 AppleMyungjo
+                    // (후보 5) 대신 custom Malgun Gothic(후보 9)으로 그려졌다.
                     for family in &families {
                         if let Some(tf) =
-                            typeface_for_style(self.custom_typefaces, family, font_style)
+                            typeface_for_style(self.custom_typefaces, family, font_style).or_else(
+                                || {
+                                    match_system_family_style(
+                                        self.font_mgr,
+                                        self.system_families,
+                                        family,
+                                        font_style,
+                                    )
+                                },
+                            )
                         {
-                            push(&mut chain, &mut seen, tf);
-                        }
-                    }
-                    for family in &families {
-                        if let Some(tf) = match_system_family_style(
-                            self.font_mgr,
-                            self.system_families,
-                            family,
-                            font_style,
-                        ) {
                             push(&mut chain, &mut seen, tf);
                         }
                     }
@@ -436,6 +440,17 @@ impl SkiaTextReplay<'_> {
                     }
                     chain
                 };
+                if std::env::var_os("RHWP_DEBUG_FONTS").is_some() {
+                    eprintln!(
+                        "[FONT] text={:?} family={:?} chain={:?}",
+                        text,
+                        style.font_family,
+                        typeface_chain
+                            .iter()
+                            .map(|tf| tf.family_name())
+                            .collect::<Vec<_>>()
+                    );
+                }
                 let primary_typeface = typeface_chain.first().cloned();
                 let has_explicit_glyph = |ch: char| {
                     typeface_chain

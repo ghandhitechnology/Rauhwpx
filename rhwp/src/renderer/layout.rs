@@ -3117,7 +3117,10 @@ impl LayoutEngine {
                         .iter()
                         .all(|seg| seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0)
                     && !para.controls.iter().any(|c| match c {
-                        Control::Table(_) => true,
+                        // TAC 표는 호스트 줄의 line_height 에 자기 높이(바깥여백
+                        // 포함)가 이미 들어가 있다 — 합이 정확하므로 제외하지 않는다.
+                        // 비-TAC 표만 줄 합을 과소평가한다.
+                        Control::Table(t) => !t.common.treat_as_char,
                         Control::Picture(pic) => !pic.common.treat_as_char,
                         Control::Shape(shape) => {
                             shape.common().affect_line_spacing && !shape.common().treat_as_char
@@ -3179,6 +3182,7 @@ impl LayoutEngine {
                         // [Issue #924] 머릿말에서는 적용하지 않음 — 표가 header_area 안에 정확히 위치해야 함.
                         // 꼬리말은 Task #445에서 필요하므로 유지.
                         let line_anchor_offset = if !is_header
+                            && !t.common.treat_as_char
                             && matches!(
                                 t.common.text_wrap,
                                 crate::model::shape::TextWrap::TopAndBottom
@@ -3195,7 +3199,33 @@ impl LayoutEngine {
                         } else {
                             0.0
                         };
-                        let table_y = y_offset + line_anchor_offset;
+                        // TAC 표는 줄 안의 인라인 개체 — 본문 paragraph_layout 의
+                        // #7150 규칙과 같이 줄 상단 + 바깥 위 여백에 앉힌다.
+                        // lh/2 는 비-TAC(부유) 표 전용 보정이다.
+                        let table_y = if t.common.treat_as_char {
+                            let table_h = hwpunit_to_px(t.common.height as i32, self.dpi);
+                            let om_top = hwpunit_to_px(i32::from(t.outer_margin_top), self.dpi);
+                            let om_bottom =
+                                hwpunit_to_px(i32::from(t.outer_margin_bottom), self.dpi);
+                            let first_seg = para.line_segs.first();
+                            let raw_lh = first_seg
+                                .map(|ls| hwpunit_to_px(ls.line_height as i32, self.dpi))
+                                .unwrap_or(0.0);
+                            let stored_lh_covers_om = (om_top > 0.0 || om_bottom > 0.0)
+                                && (table_h + om_top + om_bottom - 0.2
+                                    ..=table_h + om_top + om_bottom + 0.2)
+                                    .contains(&raw_lh);
+                            if stored_lh_covers_om {
+                                y_offset + om_top
+                            } else {
+                                let baseline = first_seg
+                                    .map(|ls| hwpunit_to_px(ls.baseline_distance as i32, self.dpi))
+                                    .unwrap_or(0.0);
+                                (y_offset + baseline + om_bottom - table_h).max(y_offset)
+                            }
+                        } else {
+                            y_offset + line_anchor_offset
+                        };
                         let table_area = table_area.unwrap_or(area);
                         y_offset = self.layout_table(
                             tree,

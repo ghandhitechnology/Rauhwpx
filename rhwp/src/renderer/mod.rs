@@ -1243,6 +1243,12 @@ pub fn canvas_font_family_chain(font_family: &str) -> String {
 pub(crate) fn hft_substitute_faces(font_family: &str) -> &'static [&'static str] {
     match font_family.trim() {
         "HCI Poppy" => &["Palatino", "Palatino Linotype", "Book Antiqua"],
+        // 한양 견명조/견고딕 HFT 에는 한컴 배포 TTF 쌍이 있다
+        // (known_font_filenames: 한양견명조→HYMJRE.TTF, 한양견고딕→HYGTRE.TTF).
+        // 원명은 font_metrics_data 의 HanyangKyun* 메트릭이 재므로 레이아웃은
+        // 그대로 두고, 미설치 시 글리프 소스만 같은 face 의 TTF 로 대체한다.
+        "한양견명조" => &["HY견명조", "HYmjrE"],
+        "한양견고딕" => &["HY견고딕", "HYgtrE"],
         _ => &[],
     }
 }
@@ -1304,8 +1310,16 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
         // Monospace: Windows → 오픈소스 → generic
         return "'GulimChe','굴림체','D2Coding','Noto Sans Mono',monospace";
     }
-    if !hft_substitute_faces(font_family).is_empty() {
+    if font_family.trim() == "HCI Poppy" {
         return HCI_POPPY_FALLBACK;
+    }
+    // 한양 HFT → 한컴 TTF 쌍(hft_substitute_faces 와 같은 매핑)을 generic 체인
+    // 앞에 둔다. 미설치 환경에선 자연스럽게 다음 후보로 넘어간다.
+    if font_family.trim() == "한양견고딕" {
+        return "'HY견고딕','HYgtrE','Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
+    }
+    if font_family.trim() == "한양견명조" {
+        return "'HY견명조','HYmjrE','Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
     }
     // 세리프 키워드 (한글)
     if font_family.contains("바탕") || font_family.contains("명조") || font_family.contains("궁서")
