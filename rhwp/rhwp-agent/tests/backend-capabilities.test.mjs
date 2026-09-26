@@ -500,10 +500,10 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(implementing, /run every validation listed/);
   assert.match(implementing, /completed, blocked, and deferred plan items/);
   assert.match(implementing, /Never call partial work complete/);
-  assert.match(implementing, /Higher-level document writes commit only after an explicitly successful turn/);
   assert.match(implementing, /unsuccessful turn leaves them in review/);
   assert.doesNotMatch(implementing, /roll back staged changes|roll them back/);
-  assert.match(implementing, /apply_engine_edits commits one atomic undoable batch/);
+  assert.match(implementing, /Document writes, including apply_engine_edits batches, commit only after an explicitly successful turn/);
+  assert.match(implementing, /can mix with semantic writes in the same turn/);
   assert.doesNotMatch(implementing, /present_implementation_plan/);
 });
 
@@ -515,7 +515,8 @@ test('permission profiles split approval-gated staging from free editing', () =>
     systemBriefFor({ workflow: 'plan', phase: 'implementing', permissionProfile: 'safe' }),
   ]) {
     assert.match(safeBrief, /review and approve the staged changes/);
-    assert.match(safeBrief, /unavailable in this perm/);
+    assert.match(safeBrief, /apply_engine_edits batches/);
+    assert.doesNotMatch(safeBrief, /unavailable in this perm/);
     assert.doesNotMatch(safeBrief, /commit only after an explicitly successful turn/);
   }
   for (const freeBrief of [
@@ -523,7 +524,7 @@ test('permission profiles split approval-gated staging from free editing', () =>
     systemBriefFor({ workflow: 'plan', phase: 'implementing', permissionProfile: 'unrestricted' }),
   ]) {
     assert.doesNotMatch(freeBrief, /review and approve the staged changes/);
-    assert.match(freeBrief, /apply_engine_edits commits/);
+    assert.match(freeBrief, /including apply_engine_edits batches, (is staged|commit)/);
   }
 });
 

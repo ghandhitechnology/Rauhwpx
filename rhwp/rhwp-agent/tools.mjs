@@ -756,7 +756,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'apply_engine_edits',
-    description: `Apply 1-32 engine mutations in order as one atomic, immediately committed transaction (one undo entry): the escape hatch for every other method returned by get_engine_edit_capabilities. op = {method, args} (positional; Uint8Array as {$base64}). Any failure restores the pre-batch state. Needs expectedRevision (rhwp tool rules).`,
+    description: `Apply 1-32 engine mutations in order as one atomic staged edit (rhwp tool rules): the escape hatch for every other method returned by get_engine_edit_capabilities. op = {method, args} (positional; Uint8Array as {$base64}). Any failure restores the pre-batch state; mixes with semantic writes. Needs expectedRevision.`,
     shape: {
       expectedRevision: z.number().int(),
       operations: z.array(z.object({

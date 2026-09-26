@@ -3,7 +3,6 @@ import {
   AGENT_EDIT_SESSION_METHODS,
   MUTATING_METHODS,
 } from '../core/mutation-method-registry.ts';
-import type { InputHandler } from '../engine/input-handler.ts';
 import {
   ENGINE_EDIT_CAPABILITIES,
   ENGINE_EDIT_TYPE_DEFINITIONS,
@@ -223,10 +222,8 @@ export function getReferencedTypeDefinitions(
   return out;
 }
 
-export function applyEngineEdits(
-  inputHandler: InputHandler,
-  operations: EngineEditOperation[],
-): unknown[] {
+/** 배치 크기·형태 검증 — 문서를 건드리기 전에 끝낸다. */
+export function validateEngineEdits(operations: EngineEditOperation[]): void {
   if (operations.length === 0 || operations.length > MAX_ENGINE_EDIT_OPERATIONS) {
     throw new AgentToolError(
       'INVALID_ARGS',
@@ -245,9 +242,14 @@ export function applyEngineEdits(
       `serialized operations exceed ${MAX_ENGINE_EDIT_ARGUMENT_BYTES} bytes; split the batch`,
     );
   }
+}
 
-  return inputHandler.executeAppliedSnapshot('agent:apply_engine_edits', (wasm) =>
-    operations.map((operation) => invokeEngineMethod(wasm, operation, DOCUMENT_EDIT_METHODS)));
+/**
+ * 검증된 배치를 순서대로 엔진에 직접 적용한다. 원자성(실패 시 배치 전 상태 복원)과
+ * 되돌림은 호출자(PendingEditManager.addEngineBatch)의 스냅샷이 맡는다.
+ */
+export function runEngineEdits(wasm: WasmBridge, operations: EngineEditOperation[]): unknown[] {
+  return operations.map((operation) => invokeEngineMethod(wasm, operation, DOCUMENT_EDIT_METHODS));
 }
 
 export function applyEngineEditSession(wasm: WasmBridge, operation: EngineEditOperation) {

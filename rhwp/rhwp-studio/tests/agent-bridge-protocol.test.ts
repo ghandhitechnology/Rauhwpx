@@ -281,32 +281,23 @@ test('executor: a settled provider turn is rejected before a document write', as
   );
 });
 
-test('executor: raw and semantic write modes cannot mix in either order within one turn', async () => {
-  const first = makeExecutor();
-  first.executor.beginTurn();
-  await first.executor.execute('prepare_engine_edit_session', {
+test('executor: engine session setup and semantic writes share one turn in either profile', async () => {
+  const { executor } = makeExecutor();
+  executor.beginTurn();
+  const safe = { workflow: 'direct' as const, permissionProfile: 'safe' as const };
+  await executor.execute('prepare_engine_edit_session', {
     expectedRevision: 1,
     method: 'copySelection',
     args: [0, 0, 0, 0, 1],
-  });
-  await expectToolError(first.executor.execute('insert_text', {
+  }, 'claude', safe);
+  await executor.execute('insert_text', {
     expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-  }), 'MIXED_ENGINE_WRITE_MODE');
-  first.executor.endTurn();
-  await first.executor.execute('insert_text', {
-    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-  });
-
-  const second = makeExecutor();
-  second.executor.beginTurn();
-  await second.executor.execute('insert_text', {
-    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-  });
-  await expectToolError(second.executor.execute('prepare_engine_edit_session', {
+  }, 'claude', safe);
+  await executor.execute('prepare_engine_edit_session', {
     expectedRevision: 2,
     method: 'copySelection',
     args: [0, 0, 0, 0, 1],
-  }), 'MIXED_ENGINE_WRITE_MODE');
+  }, 'claude', safe);
 });
 
 test('executor: planning reads and authorized implementation writes remain available', async () => {

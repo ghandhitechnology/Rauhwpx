@@ -9,13 +9,13 @@ import {
   ENGINE_EDIT_TYPE_DEFINITIONS,
 } from '../src/agent/engine-edit-capabilities.generated.ts';
 import {
-  applyEngineEdits,
   applyEngineEditSession,
   getEngineEditCapabilities,
   getEngineEditMethodNamesByKind,
   getReferencedTypeDefinitions,
+  runEngineEdits,
+  validateEngineEdits,
 } from '../src/agent/engine-edit.ts';
-import type { InputHandler } from '../src/engine/input-handler.ts';
 import { AgentToolError } from '../src/agent/types.ts';
 
 test('agent engine-edit catalog covers every mutator and required editor-session operation', () => {
@@ -67,59 +67,44 @@ test('capability results carry only the type definitions their signatures and gu
   assert.ok(names['document']?.includes('setPictureProperties'));
 });
 
-test('engine-edit batch uses the atomic editor snapshot path and preserves order', () => {
+test('engine-edit batch runs in order and validates its size first', () => {
   const calls: unknown[][] = [];
   const wasm = {
     setPageDef: (...args: unknown[]) => {
       calls.push(args);
       return { ok: true, pageCount: 2 };
     },
-  };
-  const inputHandler = {
-    executeAppliedSnapshot(operationType: string, apply: (target: unknown) => unknown) {
-      assert.equal(operationType, 'agent:apply_engine_edits');
-      return apply(wasm);
-    },
-  } as unknown as InputHandler;
+  } as unknown as Parameters<typeof runEngineEdits>[0];
 
-  const result = applyEngineEdits(inputHandler, [
+  const result = runEngineEdits(wasm, [
     { method: 'setPageDef', args: [0, { width: 100 }] },
     { method: 'setPageDef', args: [1, { width: 200 }] },
   ]);
 
   assert.deepEqual(calls, [[0, { width: 100 }], [1, { width: 200 }]]);
   assert.deepEqual(result, [{ ok: true, pageCount: 2 }, { ok: true, pageCount: 2 }]);
+  assert.throws(
+    () => validateEngineEdits([]),
+    (error) => error instanceof AgentToolError && error.code === 'INVALID_ARGS',
+  );
 });
 
-test('session setup methods remain separate from atomic document batches', () => {
-  const wasm = { copySelection: () => '{"ok":true}' };
+test('session setup methods remain separate from document batches', () => {
+  const wasm = { copySelection: () => '{"ok":true}' } as unknown as Parameters<typeof runEngineEdits>[0];
   assert.deepEqual(
-    applyEngineEditSession(
-      wasm as unknown as Parameters<typeof applyEngineEditSession>[0],
-      { method: 'copySelection', args: [0, 0, 0, 0, 1] },
-    ),
+    applyEngineEditSession(wasm, { method: 'copySelection', args: [0, 0, 0, 0, 1] }),
     { value: '{"ok":true}', parsedJson: { ok: true } },
   );
-  const inputHandler = {
-    executeAppliedSnapshot(_operationType: string, apply: (target: unknown) => unknown) {
-      return apply(wasm);
-    },
-  } as unknown as InputHandler;
   assert.throws(
-    () => applyEngineEdits(inputHandler, [{ method: 'copySelection', args: [0, 0, 0, 0, 1] }]),
+    () => runEngineEdits(wasm, [{ method: 'copySelection', args: [0, 0, 0, 0, 1] }]),
     (error) => error instanceof AgentToolError && error.code === 'ENGINE_EDIT_NOT_ALLOWED',
   );
 });
 
 test('engine-edit batch rejects methods outside the authoritative mutator registry', () => {
-  const inputHandler = {
-    executeAppliedSnapshot(_operationType: string, apply: (target: unknown) => unknown) {
-      return apply({ getDocumentInfo: () => ({}) });
-    },
-  } as unknown as InputHandler;
-
+  const wasm = { getDocumentInfo: () => ({}) } as unknown as Parameters<typeof runEngineEdits>[0];
   assert.throws(
-    () => applyEngineEdits(inputHandler, [{ method: 'getDocumentInfo', args: [] }]),
+    () => runEngineEdits(wasm, [{ method: 'getDocumentInfo', args: [] }]),
     (error) => error instanceof AgentToolError && error.code === 'ENGINE_EDIT_NOT_ALLOWED',
   );
 });

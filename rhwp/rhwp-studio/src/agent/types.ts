@@ -1272,7 +1272,29 @@ export type ObjectOp =
       name?: string;
       /** delete/rename 역연산용 이전 상태 (적용 시 캡처) */
       prev?: { name: string; para: number; charPos: number; ctrlIdx: number };
+    }
+  | {
+      /**
+       * apply_engine_edits 한 배치 — 역연산이 없어 배치 직전 문서 스냅샷으로만 되돌린다.
+       * sectionIdx 는 요약·쪽 표시용 대표 구역이다.
+       */
+      type: 'engineBatch';
+      sectionIdx: number;
+      methods: string[];
+      /** 배치가 바꾼 본문 문단 구간 (적용 후 좌표, 포함) — 비면 구역 전체 쪽을 표시한다 */
+      touched: EngineBatchSpan[];
+      /**
+       * 바뀐 구간 뒤 문단의 이동 — 등록 시 다른 op 좌표를 from(적용 전 좌표) 이상부터
+       * delta 만큼 밀었고, 스냅샷 복원 뒤 거꾸로 되민다.
+       */
+      shifts: Array<{ sectionIdx: number; from: number; delta: number }>;
     };
+
+export interface EngineBatchSpan {
+  sectionIdx: number;
+  paraStart: number;
+  paraEnd: number;
+}
 
 export type TableStructureOpName =
   | 'insert_row' | 'insert_col' | 'delete_row' | 'delete_col' | 'merge_cells' | 'split_cell';

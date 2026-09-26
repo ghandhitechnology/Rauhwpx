@@ -47,7 +47,7 @@ export type ObjectOverlayRef =
     }
   | { sort: 'hf'; sectionIdx: number; isHeader: boolean; applyTo: number }
   | { sort: 'page'; sectionIdx: number }
-  | { sort: 'para'; sectionIdx: number; paraIdx: number; cell?: CellAddr };
+  | { sort: 'para'; sectionIdx: number; paraIdx: number; cell?: CellAddr; /** 본문 문단 구간 끝 (포함) */ endParaIdx?: number };
 
 interface LegacyOverlayOp {
   kind: 'insert' | 'modify' | 'remove' | 'format';
@@ -1035,8 +1035,9 @@ export class PendingOverlayRenderer {
             ref.paraIdx, 0, ref.paraIdx, len,
           );
         }
-        const len = wasm.getLogicalLength(ref.sectionIdx, ref.paraIdx);
-        return wasm.getSelectionRects(ref.sectionIdx, ref.paraIdx, 0, ref.paraIdx, len);
+        const end = Math.max(ref.paraIdx, ref.endParaIdx ?? ref.paraIdx);
+        const len = wasm.getLogicalLength(ref.sectionIdx, end);
+        return wasm.getSelectionRects(ref.sectionIdx, ref.paraIdx, 0, end, len);
       }
     }
   }

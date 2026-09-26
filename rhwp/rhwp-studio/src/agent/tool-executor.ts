@@ -20,7 +20,8 @@ import { cropImageOnCanvas, REFERENCE_READ_MAX_PIXELS, type ImageCropper, type P
 import { describeObject, EDIT_OBJECT_ARG_KEYS, planInsertShape, planObjectEdit, type ObjectKind } from './object-edit-args.ts';
 import type { ChartSpec } from './chart-render.ts';
 import {
-  applyEngineEdits,
+  runEngineEdits,
+  validateEngineEdits,
   applyEngineEditSession,
   getEngineEditCapabilities,
   getEngineEditCapabilityCount,
@@ -172,8 +173,6 @@ export function isDocumentWriteTool(tool: string) {
   return DOCUMENT_WRITE_TOOLS.has(tool);
 }
 
-const RAW_ENGINE_WRITE_TOOLS = new Set(['apply_engine_edits', 'prepare_engine_edit_session']);
-
 /**
  * apply_edits 배치에 넣을 수 있는 staged semantic write — 전부 동기 dispatch 여야
  * 한다 (runAtomicBatch 의 fn 은 동기). insert_image/insert_chart 는 비동기이거나
@@ -233,7 +232,6 @@ const BATCHABLE_READ_TOOLS: ReadonlySet<string> = new Set([
   'preview_equation',
   'verify_changes',
 ]);
-type TurnWriteMode = 'none' | 'semantic' | 'raw';
 
 export interface ToolCapabilityContext {
   workflow: AgentWorkflow;
@@ -243,7 +241,7 @@ export interface ToolCapabilityContext {
   /** Server state last synchronized by the Studio bridge. */
   activePhase?: AgentPhase;
   activeCapabilityEpoch?: number | null;
-  /** 현재 채팅의 권한 프로필 — 안전 모드에서는 즉시 커밋되는 raw 엔진 쓰기를 막는다. */
+  /** 현재 채팅의 권한 프로필 — 안전 모드에서는 클라우드 게시를 막는다. */
   permissionProfile?: PermissionProfile;
   template?: DocumentTemplate;
   /** Exact hub turn/cancellation fence captured for this request. */
@@ -261,13 +259,6 @@ export function assertToolRequestActive(capability?: ToolCapabilityContext): voi
 
 /** Enforce plan-mode write authority before dispatch can touch document state. */
 export function assertToolCapability(tool: string, capability?: ToolCapabilityContext) {
-  // 안전 프로필: raw 엔진 쓰기는 승인 게이트를 우회해 즉시 커밋되므로 차단한다.
-  if (capability?.permissionProfile === 'safe' && RAW_ENGINE_WRITE_TOOLS.has(tool)) {
-    throw new AgentToolError(
-      'SAFE_MODE_RAW_ENGINE',
-      'Raw engine edits commit immediately and bypass the user’s review gate, so they are unavailable in the 안전 permission profile. Use the staged semantic write tools instead, or ask the user to switch the chat to 전체 접근.',
-    );
-  }
   if (!isDocumentWriteTool(tool)) return;
   if (capability?.workflow === 'question') {
     throw new AgentToolError(
@@ -716,7 +707,6 @@ function borderSpecOut(b: ParaBorderSpec | undefined): { type: number; widthMm: 
 
 export class AgentToolExecutor {
   private deps: AgentToolExecutorDeps;
-  private turnWriteMode: TurnWriteMode = 'none';
   private templateWasm: WasmBridge | null = null;
   private templateBytes: Uint8Array | null = null;
   private templateKey: string | null = null;
@@ -737,12 +727,10 @@ export class AgentToolExecutor {
   }
 
   beginTurn(): void {
-    this.turnWriteMode = 'none';
     this.verifiedOpIds.clear();
   }
 
   endTurn(): void {
-    this.turnWriteMode = 'none';
     this.verifiedOpIds.clear();
   }
 
@@ -752,7 +740,6 @@ export class AgentToolExecutor {
     agent: AgentName = 'claude',
     capability?: ToolCapabilityContext,
   ): Promise<unknown> {
-    let claimedMode = false;
     try {
       assertToolRequestActive(capability);
       assertToolCapability(tool, capability);
@@ -761,21 +748,6 @@ export class AgentToolExecutor {
           'READ_ONLY_TEMPLATE_PREVIEW',
           'This published template preview is read-only and cannot accept document-write tools.',
         );
-      }
-      const requestedMode: TurnWriteMode = !isDocumentWriteTool(tool) || tool === 'publish_cloud_document'
-        ? 'none'
-        : RAW_ENGINE_WRITE_TOOLS.has(tool) ? 'raw' : 'semantic';
-      if (requestedMode !== 'none'
-        && this.turnWriteMode !== 'none'
-        && this.turnWriteMode !== requestedMode) {
-        throw new AgentToolError(
-          'MIXED_ENGINE_WRITE_MODE',
-          'Raw engine batches and staged semantic writes cannot run in the same turn. Use one mode for the whole mutation batch.',
-        );
-      }
-      if (requestedMode !== 'none' && this.turnWriteMode === 'none') {
-        this.turnWriteMode = requestedMode;
-        claimedMode = true;
       }
       if (isDocumentWriteTool(tool)
         && !tool.startsWith('template_')
@@ -790,7 +762,6 @@ export class AgentToolExecutor {
       assertToolRequestActive(capability);
       return result;
     } catch (e) {
-      if (claimedMode) this.turnWriteMode = 'none';
       if (e instanceof AgentToolError) throw e;
       const message = e instanceof Error ? e.message : String(e);
       if (message.includes(DOC_NOT_LOADED_MESSAGE)) {
@@ -874,7 +845,7 @@ export class AgentToolExecutor {
       case 'edit_footnote': return this.editFootnote(args, agent);
       case 'list_bookmarks': return this.listBookmarks();
       case 'set_bookmark': return this.setBookmark(args, agent);
-      case 'apply_engine_edits': return this.applyEngineEdits(args);
+      case 'apply_engine_edits': return this.applyEngineEdits(args, agent);
       case 'prepare_engine_edit_session': return this.prepareEngineEditSession(args);
       default:
         throw new AgentToolError('UNKNOWN_TOOL', `Unknown tool: ${tool}`);
@@ -915,7 +886,11 @@ export class AgentToolExecutor {
     };
   }
 
-  private applyEngineEdits(args: Record<string, unknown>) {
+  /**
+   * 엔진 배치는 하나의 스테이징 op 으로 들어간다 — 호출 시점에 적용되고(미리보기 = 승인
+   * 결과), 같은 턴의 semantic 쓰기와 섞여 한 change set 으로 검토·확정·거절된다.
+   */
+  private applyEngineEdits(args: Record<string, unknown>, agent: AgentName) {
     this.requireDocLoaded();
     this.requireRevision(args);
     const rawOperations = args['operations'];
@@ -931,22 +906,19 @@ export class AgentToolExecutor {
       }
       return { method, args: methodArgs };
     });
-
-    if (this.deps.pending.hasPending()) {
-      throw new AgentToolError(
-        'PENDING_SEMANTIC_EDITS',
-        'apply_engine_edits cannot mix with staged semantic writes in one turn. Use apply_engine_edits for the whole task, or finish the current turn first.',
-      );
-    }
+    validateEngineEdits(operations);
     const previousRevision = this.revision;
-    const results = applyEngineEdits(this.deps.inputHandler, operations);
+    const staged = this.deps.pending.addEngineBatch(
+      agent, operations.map((operation) => operation.method),
+      () => runEngineEdits(this.deps.wasm, operations),
+    );
     return {
       previousRevision,
       revision: this.revision,
+      changeSetId: staged.changeSetId,
       applied: operations.length,
-      results,
-      undo: 'one editor undo entry',
-      status: 'committed',
+      results: staged.result,
+      ...(staged.touched.length > 0 ? { changedParagraphs: staged.touched } : {}),
     };
   }
 
@@ -3119,6 +3091,11 @@ export class AgentToolExecutor {
           case 'applyFormula':
           case 'setCaption':
             pushPara(o.sectionIdx, o.tableParaIdx);
+            break;
+          case 'engineBatch':
+            for (const span of o.touched) {
+              for (let p = span.paraStart; p <= Math.min(span.paraEnd, span.paraStart + 2); p++) pushPara(span.sectionIdx, p);
+            }
             break;
           default:
             break; // pageLayout/headerFooter — 문단 좌표 없음

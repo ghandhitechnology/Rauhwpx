@@ -6,7 +6,7 @@ import type { DocumentPosition, CharProperties, CharShapeRun } from '../core/typ
 import { replacementCharShapes } from './replacement-format.ts';
 import { PreparedSnapshotCommand } from '../engine/prepared-snapshot-command.ts';
 import type {
-  AgentName, CellAddr, CharFormatProps, DocPoint, DocRange,
+  AgentName, CellAddr, CharFormatProps, DocPoint, DocRange, EngineBatchSpan,
   ObjectAnchor, ObjectOp, ParagraphCaptureRef, PendingAppliedAt, PendingChangeSet,
   PendingDrop, PendingDropCause, PendingEditsChangeEvent, PendingOp,
 } from './types.ts';
@@ -20,6 +20,31 @@ export interface PendingEditDeps {
   inputHandler: InputHandler;
   canvasView: CanvasView;
   overlay: PendingOverlayRenderer;
+}
+
+/**
+ * 엔진 배치 전후 한 구역의 문단 지문 목록을 비교해 바뀐 구간을 찾는다. 앞뒤로 같은
+ * 문단을 걷어 내고 남은 가운데를 바뀐 구간으로 본다 — 적용 후 좌표 span, 그리고 그
+ * 뒤 문단이 움직인 양(from 은 적용 전 좌표). 바뀐 문단이 없으면 둘 다 null.
+ */
+export function diffParagraphDigests(
+  before: ReadonlyArray<string | null>, after: ReadonlyArray<string | null>,
+): { span: { paraStart: number; paraEnd: number } | null; shift: { from: number; delta: number } | null } {
+  let head = 0;
+  while (head < before.length && head < after.length && before[head] === after[head]) head++;
+  let tail = 0;
+  while (tail < before.length - head && tail < after.length - head
+    && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
+  const beforeEnd = before.length - tail - 1;
+  const afterEnd = after.length - tail - 1;
+  if (beforeEnd < head && afterEnd < head) return { span: null, shift: null };
+  const delta = after.length - before.length;
+  // 문단만 지운 배치는 바뀐 구간이 비므로 지워진 자리의 문단 하나를 표시한다
+  const last = Math.max(after.length - 1, 0);
+  const span = afterEnd >= head
+    ? { paraStart: head, paraEnd: afterEnd }
+    : { paraStart: Math.min(head, last), paraEnd: Math.min(head, last) };
+  return { span, shift: delta === 0 ? null : { from: beforeEnd + 1, delta } };
 }
 
 /** shiftPointAfterInsert 의 삽입 서술자 */
@@ -702,6 +727,71 @@ export class PendingEditManager {
   }
 
   /**
+   * apply_engine_edits 배치를 하나의 스냅샷 기반 객체 op 으로 등록한다. 배치 직전에 문서
+   * 스냅샷을 잡고 run 으로 엔진 메서드를 바로 적용한다 (미리보기 = 승인 결과). 실패하면
+   * 문서를 배치 전으로 되돌리고 던진다. 되돌림(reject)은 이 스냅샷 복원뿐이라, 그 뒤에
+   * 사용자 편집이나 다른 set 의 확정이 있으면 되돌리지 않고 문서에 남겨 보고한다.
+   * 배치 전후 문단 지문을 비교해 바뀐 구간을 표시하고, 그 뒤 문단을 가리키는 다른
+   * pending op 좌표를 민다.
+   */
+  addEngineBatch<T>(agent: AgentName, methods: string[], run: () => T): { changeSetId: string; result: T; touched: EngineBatchSpan[] } {
+    const wasm = this.deps.wasm;
+    const digestsBefore = this.bodyDigests();
+    this.deps.inputHandler.prepareSnapshotCapacity?.(1);
+    const snapshotId = wasm.saveSnapshot();
+    this.deps.inputHandler.retainExternalSnapshot?.();
+    let result: T;
+    try {
+      result = run();
+      if (wasm.getSectionCount() === 0) throw new AgentToolError('ENGINE_EDIT_FAILED', 'The batch removed every document section');
+    } catch (error) {
+      try { wasm.restoreSnapshot(snapshotId); } catch { /* best effort */ }
+      wasm.discardSnapshot(snapshotId);
+      this.deps.inputHandler.releaseExternalSnapshot?.();
+      this.reconcilePreviewLayout();
+      throw error;
+    }
+    const digestsAfter = this.bodyDigests();
+    const touched: EngineBatchSpan[] = [];
+    const shifts: Array<{ sectionIdx: number; from: number; delta: number }> = [];
+    if (digestsBefore && digestsAfter) {
+      for (let sectionIdx = 0; sectionIdx < digestsAfter.length; sectionIdx++) {
+        const diff = diffParagraphDigests(digestsBefore[sectionIdx] ?? [], digestsAfter[sectionIdx]);
+        if (diff.span) touched.push({ sectionIdx, ...diff.span });
+        if (diff.shift) shifts.push({ sectionIdx, ...diff.shift });
+      }
+    }
+    const obj: ObjectOp = {
+      type: 'engineBatch', sectionIdx: touched[0]?.sectionIdx ?? 0, methods, touched, shifts,
+    };
+    const set = this.ensureOpenSet(agent);
+    const op: PendingOp = { kind: 'object', id: this.nextId('op'), agent: set.agent, obj,
+      snapshotId, paraCapture: null, userEditSeqAtSnapshot: this.userEditSeq,
+      settledSetSeqAtSnapshot: this.settledSetSeq };
+    for (const shift of shifts) this.shiftAllParagraphs(shift.sectionIdx, shift.from, shift.delta, op);
+    this.pushOp(set, op);
+    this.reconcilePreviewLayout();
+    this.emitDocEvents('agent-pending-edit');
+    this.syncOverlay();
+    this.emitChange({ type: 'ops-changed' });
+    return { changeSetId: set.id, result, touched: structuredClone(touched) };
+  }
+
+  /** 구역별 본문 문단 지문 — 지문을 지원하지 않는 WASM 이면 null */
+  private bodyDigests(): Array<Array<string | null>> | null {
+    const wasm = this.deps.wasm;
+    if (typeof wasm.getParagraphContentDigest !== 'function') return null;
+    const sections: Array<Array<string | null>> = [];
+    for (let sectionIdx = 0; sectionIdx < wasm.getSectionCount(); sectionIdx++) {
+      const digests: Array<string | null> = [];
+      const count = wasm.getParagraphCount(sectionIdx);
+      for (let paraIdx = 0; paraIdx < count; paraIdx++) digests.push(this.paragraphDigest(sectionIdx, paraIdx));
+      sections.push(digests);
+    }
+    return sections;
+  }
+
+  /**
    * 원자적 벌크 교체 — 모든 항목이 성공해야 등록된다. 중간 실패 시 문서(스냅샷)와
    * pending 상태(op 좌표·추가 op·새 set)를 배치 이전으로 통째로 되돌리고 던진다 —
    * 부분 적용된 찾아-바꾸기 배치가 리뷰에 남는 것을 막는다 (replace_all 전용).
@@ -1201,6 +1291,16 @@ export class PendingEditManager {
     for (const set of this.sets) {
       for (const op of set.ops) {
         if (op.kind === 'field' || op.kind === 'template') continue;
+        if (op.kind === 'object' && op.obj.type === 'engineBatch') {
+          // 바뀐 문단 구간마다 수정 표시 — 문단 밖만 바꾼 배치는 대표 구역의 쪽 전체
+          const refs: import('./pending-overlay.ts').ObjectOverlayRef[] = op.obj.touched.length > 0
+            ? op.obj.touched.map((span) => ({
+              sort: 'para' as const, sectionIdx: span.sectionIdx, paraIdx: span.paraStart, endParaIdx: span.paraEnd,
+            }))
+            : [{ sort: 'page', sectionIdx: op.obj.sectionIdx }];
+          for (const objRef of refs) ops.push({ kind: 'modify', agent: op.agent, objRef });
+          continue;
+        }
         if (op.kind === 'object') {
           const ref = this.objectOverlayRef(op.obj);
           if (ref) {
@@ -1367,6 +1467,7 @@ export class PendingEditManager {
         const detail = o.type === 'tableStructure' ? `(${o.op})`
           : o.type === 'headerFooter' ? `(${o.isHeader ? 'header' : 'footer'})`
           : o.type === 'bookmark' ? `(${o.op})`
+          : o.type === 'engineBatch' ? `(${digest(o.methods.join(','))})`
           : '';
         return `${o.type}${detail} @${at}`;
       }
@@ -1942,6 +2043,8 @@ export class PendingEditManager {
         }
         return;
       }
+      case 'engineBatch':
+        throw new AgentToolError('INVALID_ARGS', 'engine batches are staged through addEngineBatch');
     }
   }
 
@@ -2182,6 +2285,11 @@ export class PendingEditManager {
       case 'object': {
         const o = op.obj;
         if (o.type === 'pageLayout') return o.sectionIdx === sectionIdx; // 구역 전체를 다시 흘린다
+        if (o.type === 'engineBatch') {
+          // 문단 밖(스타일·쪽 설정 등)만 바꾼 배치는 위치를 모른다 — 보수적으로 겹친다고 본다
+          return o.touched.length === 0 || o.touched.some((span) =>
+            span.sectionIdx === sectionIdx && span.paraStart <= paraIdx && paraIdx <= span.paraEnd);
+        }
         if (o.sectionIdx !== sectionIdx) return false;
         const host = this.captureHost(o) ?? this.objectBodyParaIdx(o);
         return host === paraIdx;
@@ -2475,6 +2583,9 @@ export class PendingEditManager {
           if (info?.ok !== true || info.paraCount !== 1) return 'object-changed';
           return (info.texts[0] ?? '') === obj.text ? null : 'text-changed';
         }
+        case 'engineBatch':
+          // 스냅샷 되돌림의 사용자 편집·확정 가드가 대신 판정한다
+          return null;
         case 'bookmark': {
           if (obj.op === 'add' || obj.op === 'rename') {
             return wasm.getBookmarks().some(
@@ -2922,8 +3033,13 @@ export class PendingEditManager {
     // 겹쳐 덮어쓴 것이다. 나중 op 이 모두 함께 되돌려지면 적용 직후 범위로 정확히
     // 되돌릴 수 있으므로 드리프트로 남기지 않는다.
     const overwritten = new Set<PendingOp>();
+    // 같은 set 의 나중 엔진 배치는 문서 스냅샷으로 되돌아간다 — 그 앞 op 은 배치가
+    // 바꿨을 수 있으므로 배치가 되돌아간 뒤에 판정한다.
+    const lastBatchSeq = Math.max(0, ...set.ops.flatMap((op) =>
+      op.kind === 'object' && op.obj.type === 'engineBatch' ? [op.seq ?? 0] : []));
     for (const op of set.ops) {
-      if (captures.some((c) => c.seq > (op.seq ?? 0) && this.opTouchesBodyPara(op, c.sectionIdx, c.host))) {
+      if ((op.seq ?? 0) < lastBatchSeq
+        || captures.some((c) => c.seq > (op.seq ?? 0) && this.opTouchesBodyPara(op, c.sectionIdx, c.host))) {
         deferred.add(op);
         kept.push(op);
         continue;
@@ -3142,6 +3258,10 @@ export class PendingEditManager {
         else this.shiftControlIdxRefs(obj.sectionIdx, obj.paraIdx, obj.controlIdx, 1, obj, op.seq ?? 0);
         return;
       case 'editObject':
+        return;
+      case 'engineBatch':
+        // 스냅샷이 배치 전 문서로 돌아갔다 — 등록 때 민 다른 op 좌표를 거꾸로 되민다
+        for (const s of [...obj.shifts].reverse()) this.shiftAllParagraphs(s.sectionIdx, s.from + s.delta, -s.delta, op);
         return;
       case 'insertImage':
       case 'insertEquation':
@@ -3368,6 +3488,8 @@ export class PendingEditManager {
         return obj.paraIdx;
       case 'headerFooter':
         return obj.hostParaIdx ?? null;
+      case 'engineBatch':
+        return obj.touched[0]?.paraStart ?? null;
       default:
         return null;
     }
@@ -3379,6 +3501,16 @@ export class PendingEditManager {
    * trackControls 가 엔진 기준으로 다시 잡는다.
    */
   private shiftObjectOp(obj: ObjectOp, sectionIdx: number, shift: (p: DocPoint) => DocPoint, insCell?: CellAddr): void {
+    if (obj.type === 'engineBatch') {
+      // 표시용 구간만 민다 — 되돌림은 스냅샷이라 좌표가 필요 없다
+      if (insCell) return;
+      for (const span of obj.touched) {
+        if (span.sectionIdx !== sectionIdx) continue;
+        span.paraStart = shift({ paraIdx: span.paraStart, charOffset: 0 }).paraIdx;
+        span.paraEnd = Math.max(span.paraStart, shift({ paraIdx: span.paraEnd, charOffset: 0 }).paraIdx);
+      }
+      return;
+    }
     if (obj.sectionIdx !== sectionIdx) return;
     const shiftBody = (paraIdx: number, charOffset: number): DocPoint => shift({ paraIdx, charOffset });
     switch (obj.type) {
@@ -3487,6 +3619,30 @@ export class PendingEditManager {
         } else if (!cell && op.range.cell && ins.addedParas > 0 && ins.paraIdx < op.range.cell.paraIdx) {
           // 본문 문단 추가가 표 앞에서 일어나면 셀 op 의 부모 문단 인덱스만 이동한다.
           op.range.cell = { ...op.range.cell, paraIdx: op.range.cell.paraIdx + ins.addedParas };
+        }
+      }
+    }
+  }
+
+  /**
+   * 엔진 배치가 바꾼 구간 뒤의 본문 문단(from 이상)을 가리키는 좌표를 delta 만큼 민다.
+   * 적용 시점 범위(applied)는 배치 전 좌표 그대로 둔다 — 역순 되돌림에서 배치가 먼저
+   * 스냅샷으로 되돌아간 뒤에 쓰인다.
+   */
+  private shiftAllParagraphs(sectionIdx: number, from: number, delta: number, exclude?: PendingOp): void {
+    const shift = (p: DocPoint): DocPoint => (p.paraIdx >= from ? { paraIdx: p.paraIdx + delta, charOffset: p.charOffset } : p);
+    for (const set of this.sets) {
+      for (const op of set.ops) {
+        if (op === exclude || op.kind === 'field' || op.kind === 'template') continue;
+        if (op.kind === 'object') {
+          this.shiftObjectOp(op.obj, sectionIdx, shift);
+          continue;
+        }
+        if (op.range.sectionIdx !== sectionIdx) continue;
+        if (op.range.cell) {
+          if (op.range.cell.paraIdx >= from) op.range.cell = { ...op.range.cell, paraIdx: op.range.cell.paraIdx + delta };
+        } else {
+          this.shiftRange(op.range, shift);
         }
       }
     }
@@ -3631,7 +3787,7 @@ export class PendingEditManager {
               });
             }
             break;
-          case 'pageLayout': case 'headerFooter':
+          case 'pageLayout': case 'headerFooter': case 'engineBatch':
             break;
           default:
             if (inRange(o.tableParaIdx)) {

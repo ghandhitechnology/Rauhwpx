@@ -351,8 +351,7 @@ const TASKS = [
         });
         inserted.push(result.image);
       }
-      // 스테이징된 의미 쓰기와 raw 엔진 배치는 한 턴에 섞을 수 없다 — 커밋 뒤 새 턴에서 배치한다.
-      await t.nextTurn();
+      // raw 엔진 배치도 스테이징되므로 같은 턴에서 그림 삽입과 섞는다.
       await t.read('get_engine_edit_capabilities', { query: 'setPictureProperties' });
       await t.write('apply_engine_edits', { operations: inserted.map((image, i) => ({
         method: 'setPictureProperties',
@@ -542,7 +541,7 @@ try {
     };
 
     // 문서를 바꾸면 사이드바가 그 문서의 스레드로 옮겨 기본 프로바이더를 띄울 수 있다 —
-    // 매번 가짜 pi 채팅을 다시 확인한다. apply_engine_edits 는 전체 접근에서만 열린다.
+    // 매번 가짜 pi 채팅을 다시 확인한다. 성공 턴이 자동 커밋되도록 전체 접근으로 연다.
     const ensurePiChat = async () => {
       await delay(300);
       const agent = await page.evaluate(() => window.__agentBridge.getActiveAgent());

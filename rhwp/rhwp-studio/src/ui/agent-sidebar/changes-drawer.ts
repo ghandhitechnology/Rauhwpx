@@ -167,7 +167,8 @@ function pendingAddress(op: PendingOp): string {
   if (op.kind === 'template') return op.label;
   if (op.kind === 'object') {
     const obj = op.obj;
-    const para = 'tableParaIdx' in obj ? obj.tableParaIdx : 'paraIdx' in obj ? obj.paraIdx : null;
+    const para = 'tableParaIdx' in obj ? obj.tableParaIdx : 'paraIdx' in obj ? obj.paraIdx
+      : obj.type === 'engineBatch' ? obj.touched[0]?.paraStart ?? null : null;
     const cell = 'cellIdx' in obj && typeof obj.cellIdx === 'number' ? ` · ${obj.cellIdx + 1}셀` : '';
     return `${para === null ? '문서' : `${para + 1}문단`}${cell}`;
   }
@@ -228,6 +229,7 @@ function pendingObjectDetail(op: PendingOp): string {
     case 'paraFormat': return '문단 서식 변경';
     case 'applyStyle': return '문단 스타일 적용';
     case 'pageLayout': return '쪽 설정 변경';
+    case 'engineBatch': return `엔진 편집 ${obj.methods.length}개 · ${[...new Set(obj.methods)].slice(0, 3).join(', ')}`;
     case 'headerFooter': {
       const kind = obj.isHeader ? '머리말' : '꼬리말';
       const preview = obj.lines.filter((line) => line.length > 0).join(' / ');
