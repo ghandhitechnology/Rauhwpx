@@ -36,7 +36,7 @@
   font: inherit;
   font-size: 12px;
   line-height: 1;
-  cursor: pointer;
+  cursor: default;
 }
 
 /* 펼침: 위쪽(접기), 접힘: 아래쪽(펼치기) — aria-expanded 로 회전 */
@@ -188,7 +188,7 @@
   padding: 0 8px;
   background: transparent;
   color: var(--color-text-secondary);
-  cursor: pointer;
+  cursor: default;
   font: inherit;
   text-align: left;
 }
@@ -252,7 +252,7 @@
   padding: 2px 9px;
   background: transparent;
   color: var(--color-text);
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-base);
   text-align: left;
   text-overflow: ellipsis;
@@ -321,7 +321,7 @@
   box-sizing: border-box;
   border: 1px solid var(--ui-border-light);
   background: var(--ui-surface-muted);
-  cursor: pointer;
+  cursor: default;
   font-size: 6px;
   padding: 0;
   display: flex;
@@ -349,7 +349,7 @@
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
-  cursor: pointer;
+  cursor: default;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -471,7 +471,7 @@
   padding: 3px 8px;
   border: none;
   background: transparent;
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-base);
   color: var(--color-text);
   white-space: nowrap;
@@ -580,14 +580,14 @@
   padding: 2px 4px;
   background: var(--color-surface);
   border: 1px solid var(--ui-border-strong);
-  cursor: pointer;
+  cursor: default;
 }
 .sb-hl-palette-actions button:hover { background: var(--color-hover-bg); }
 .sb-hl-swatch {
   width: 14px;
   height: 14px;
   border: 1px solid var(--ui-border-strong);
-  cursor: pointer;
+  cursor: default;
 }
 .sb-hl-swatch:hover { border-color: var(--color-text); }
 .sb-hl-swatch.selected { border: 2px solid var(--color-text); }
@@ -638,7 +638,7 @@
   padding: 0 2px;
   background: var(--color-surface);
   color: var(--color-text);
-  cursor: pointer;
+  cursor: default;
   text-align: center;
 }
 

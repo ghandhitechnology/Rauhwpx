@@ -198,7 +198,18 @@ export interface RhwpDesktopApi {
   }) => void) => (() => void) | void;
   onEditCommand?: (callback: (command: string) => void) => void;
   onPastePlainText?: (callback: (text: string) => void) => void;
+  /** macOS 프록시 아이콘과 미저장 점. 경로는 메인이 핸들로 찾는다. */
+  setDocumentState?: (state: { edited: boolean }) => void;
+  notifyAgentTurnFinished?: (payload: { title: string; body: string }) => void;
+  setPendingReviewCount?: (count: number) => void;
+  showContextMenu?: (items: NativeContextMenuItem[]) => Promise<string | null>;
+  /** 저장 확인을 창에 붙은 네이티브 시트로 묻는다. */
+  showUnsavedChangesSheet?: (payload: { fileName: string }) => Promise<'save' | 'discard' | 'cancel'>;
 }
+
+export type NativeContextMenuItem =
+  | { id: string; label: string; enabled?: boolean; checked?: boolean; danger?: boolean }
+  | { type: 'separator' };
 
 export interface CloudEditDraftIdentity {
   sessionId: string;
@@ -1061,6 +1072,93 @@ export function installDesktopWindowChrome(win?: DesktopHost): void {
   void api?.isFullScreen?.().then(setFullscreen).catch(() => {
     /* IPC 미지원 셸에서는 기본(비전체화면) 상태 유지 */
   });
+}
+
+/**
+ * macOS 닫기 버튼의 미저장 점을 문서 상태에 맞춘다.
+ * 이벤트가 몰려도 마이크로태스크 하나로 합치고, 같은 값은 다시 보내지 않는다.
+ */
+export function installDesktopDocumentState(
+  source: {
+    subscribe: (update: () => void) => void;
+    hasDocument: () => boolean;
+    isDirty: () => boolean;
+  },
+  win?: DesktopHost,
+): void {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (api?.platform !== 'darwin' || !api.setDocumentState) return;
+  const setDocumentState = api.setDocumentState;
+  let lastSent: boolean | null = null;
+  let queued = false;
+
+  const flush = () => {
+    queued = false;
+    const edited = source.hasDocument() && source.isDirty();
+    if (edited === lastSent) return;
+    lastSent = edited;
+    setDocumentState({ edited });
+  };
+
+  source.subscribe(() => {
+    if (queued) return;
+    queued = true;
+    queueMicrotask(flush);
+  });
+  flush();
+}
+
+/**
+ * macOS 에이전트 턴 완료 알림과 Dock 배지.
+ * 창이 포커스 중인지는 메인 프로세스가 판단하고, 여기서는 성공한 턴만 알린다.
+ */
+export function installDesktopAgentAttention(
+  source: {
+    onEvent: (cb: (event: { type: string; event?: unknown }) => void) => () => void;
+    onPendingChange: (cb: () => void) => () => void;
+    pendingReviewCount: () => number;
+    documentTitle: () => string;
+  },
+  win?: DesktopHost,
+): () => void {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (api?.platform !== 'darwin') return () => {};
+  if (!api.notifyAgentTurnFinished && !api.setPendingReviewCount) return () => {};
+  let turnFailed = false;
+  let lastCount = -1;
+  const syncCount = () => {
+    const count = Math.max(0, Math.floor(source.pendingReviewCount()));
+    if (count === lastCount) return;
+    lastCount = count;
+    api.setPendingReviewCount?.(count);
+  };
+  const offEvent = source.onEvent((sidebarEvent) => {
+    if (sidebarEvent.type !== 'agent') return;
+    const event = sidebarEvent.event as { type?: string; stopReason?: string; errorMessage?: string };
+    if (event?.type === 'turn-start') turnFailed = false;
+    else if (event?.type === 'error') turnFailed = true;
+    else if (event?.type === 'turn-end') {
+      const succeeded = !turnFailed && !event.errorMessage
+        && (event.stopReason === 'end_turn'
+          || event.stopReason === 'completed'
+          || event.stopReason === 'success');
+      turnFailed = false;
+      syncCount();
+      if (succeeded) {
+        api.notifyAgentTurnFinished?.({
+          title: source.documentTitle() || 'Rauhwpx',
+          body: lastCount > 0 ? '검토할 변경이 있습니다' : '작업 완료',
+        });
+      }
+    }
+  });
+  const offPending = source.onPendingChange(syncCount);
+  syncCount();
+  return () => {
+    offEvent();
+    offPending();
+    if (lastCount > 0) api.setPendingReviewCount?.(0);
+  };
 }
 
 type ServiceWorkerLike = NonNullable<NonNullable<DesktopHost['navigator']>['serviceWorker']>;

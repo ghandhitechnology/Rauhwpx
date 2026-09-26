@@ -5,6 +5,7 @@
  * 이 대화상자는 앱 내부 문서 교체 동작에서만 사용한다.
  */
 import { ModalDialog } from './dialog';
+import type { RhwpDesktopApi } from '../desktop-integration';
 
 export type UnsavedChangesChoice = 'save' | 'discard' | 'cancel';
 
@@ -15,6 +16,7 @@ interface UnsavedChangesDialogOptions {
 
 class UnsavedChangesDialog extends ModalDialog {
   private resolve!: (value: UnsavedChangesChoice) => void;
+  protected override sheet = true;
 
   constructor(private readonly options: UnsavedChangesDialogOptions) {
     super('저장 확인', 420);
@@ -22,9 +24,7 @@ class UnsavedChangesDialog extends ModalDialog {
 
   protected createBody(): HTMLElement {
     const body = document.createElement('div');
-    body.style.padding = '16px 20px';
-    body.style.lineHeight = '1.6';
-    body.style.whiteSpace = 'pre-line';
+    body.className = 'dialog-sheet-message';
 
     const fileName = this.options.fileName || '현재 문서';
     body.textContent = this.options.canSave
@@ -82,5 +82,12 @@ class UnsavedChangesDialog extends ModalDialog {
 }
 
 export function showUnsavedChangesDialog(options: UnsavedChangesDialogOptions): Promise<UnsavedChangesChoice> {
+  // macOS 데스크톱은 창에 붙는 네이티브 시트로 묻는다.
+  const desktop = (window as { rhwpDesktop?: RhwpDesktopApi }).rhwpDesktop;
+  if (options.canSave && desktop?.platform === 'darwin' && desktop.showUnsavedChangesSheet) {
+    return desktop.showUnsavedChangesSheet({ fileName: options.fileName || '현재 문서' })
+      .then((choice) => (choice === 'save' || choice === 'discard' ? choice : 'cancel'))
+      .catch(() => new UnsavedChangesDialog(options).showAsync());
+  }
   return new UnsavedChangesDialog(options).showAsync();
 }

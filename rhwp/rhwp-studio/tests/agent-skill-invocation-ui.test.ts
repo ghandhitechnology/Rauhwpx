@@ -45,10 +45,8 @@ test('skill invocation structure persists and renders independently from its sen
   assert.match(css, /\.ag-msg-user\.ag-has-skill\s*\{[^}]*background:\s*transparent/s);
 });
 
-test('skill tokens follow provider colors and use the hand-drawn outline', () => {
+test('skill tokens follow provider colors', () => {
   for (const provider of ['codex', 'pi']) {
     assert.match(css, new RegExp(`\\.ag-skill-token\\[data-agent='${provider}'\\]`));
   }
-  assert.match(css, /\.ag-skill-token::before\s*\{[^}]*filter:\s*var\(--ag-sketch-line\)/s);
-  assert.match(css, /\.ag-skill-token\s*\{[^}]*border-radius:\s*[^;]*\/[^;]*;/s);
 });

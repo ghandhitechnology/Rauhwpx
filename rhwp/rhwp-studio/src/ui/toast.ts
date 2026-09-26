@@ -1,7 +1,9 @@
 /**
  * 우상단 슬라이드 토스트 알림 (#196).
  *
- * - 슬라이드 인 + 자동 페이드 (기본 8초)
+ * - 크롬(제목 막대 + 도구 모음) 바로 아래 오른쪽에 쌓인다
+ * - 200ms 슬라이드·페이드, 동작 줄이기 설정에서는 페이드만
+ * - 자동 페이드 (기본 8초)
  * - 사용자 닫기 버튼 (×)
  * - 선택적 액션 버튼 (텍스트 링크 스타일)
  * - 일반 재사용 가능 — 다른 안내에도 활용 가능
@@ -9,8 +11,10 @@
 
 const CONTAINER_ID = 'rhwp-toast-container';
 const DEFAULT_DURATION_MS = 8000;
-const SLIDE_DURATION_MS = 200;
-const FADE_DURATION_MS = 350;
+/** 등장·퇴장 시간. base.css 의 .rhwp-toast transition 과 같다. */
+const EXIT_DURATION_MS = 200;
+/** 크롬(제목 막대 + 도구 모음) 아래로 띄우는 간격 */
+const CHROME_GAP_PX = 8;
 
 export interface ToastAction {
   label: string;
@@ -31,22 +35,34 @@ export interface ToastOptions {
   confirmLabel?: string;
 }
 
+/** 제목 막대와 도구 모음을 가리지 않도록 크롬 판 바로 아래에 둔다. */
+function chromeBottom(): number {
+  const header = document.getElementById('studio-header');
+  const bottom = header?.getBoundingClientRect().bottom ?? 0;
+  return Math.max(0, Math.round(bottom));
+}
+
 function ensureContainer(): HTMLElement {
   let container = document.getElementById(CONTAINER_ID);
-  if (container) return container;
-
-  container = document.createElement('div');
-  container.id = CONTAINER_ID;
-  container.style.position = 'fixed';
-  container.style.top = '16px';
-  container.style.right = '16px';
-  container.style.zIndex = '21000';  // 모달 (10000~20000) 보다 위
-  container.style.display = 'flex';
-  container.style.flexDirection = 'column';
-  container.style.gap = '8px';
-  container.style.pointerEvents = 'none';  // 토스트 외 영역은 통과
-  document.body.appendChild(container);
+  if (!container) {
+    container = document.createElement('div');
+    container.id = CONTAINER_ID;
+    container.className = 'rhwp-toast-stack';
+    document.body.appendChild(container);
+  }
+  container.style.top = `${chromeBottom() + CHROME_GAP_PX}px`;
   return container;
+}
+
+function createCloseIcon(): SVGSVGElement {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 12 12');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS(NS, 'path');
+  path.setAttribute('d', 'M3 3l6 6M9 3L3 9');
+  svg.appendChild(path);
+  return svg;
 }
 
 /**
@@ -59,28 +75,13 @@ export function showToast(options: ToastOptions): void {
   const duration = options.durationMs ?? DEFAULT_DURATION_MS;
 
   const toast = document.createElement('div');
-  toast.style.background = '#1e293b';
-  toast.style.color = '#f1f5f9';
-  toast.style.padding = '12px 14px';
-  toast.style.borderRadius = '6px';
-  toast.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.2)';
-  toast.style.font = '13px/1.5 sans-serif';
-  toast.style.maxWidth = '400px';
-  toast.style.minWidth = '280px';
-  toast.style.display = 'flex';
-  toast.style.alignItems = 'flex-start';
-  toast.style.gap = '12px';
-  toast.style.transform = 'translateX(120%)';
-  toast.style.transition = `transform ${SLIDE_DURATION_MS}ms ease-out, opacity ${FADE_DURATION_MS}ms ease-out`;
-  toast.style.opacity = '1';
-  toast.style.pointerEvents = 'auto';
+  toast.className = 'rhwp-toast';
   toast.setAttribute('role', 'status');
   toast.setAttribute('aria-live', 'polite');
 
   // 본문
   const body = document.createElement('div');
-  body.style.flex = '1';
-  body.style.whiteSpace = 'pre-line';
+  body.className = 'rhwp-toast-message';
   body.textContent = options.message;
   toast.appendChild(body);
 
@@ -88,15 +89,8 @@ export function showToast(options: ToastOptions): void {
   if (options.action) {
     const actionBtn = document.createElement('button');
     actionBtn.type = 'button';
+    actionBtn.className = 'rhwp-toast-action';
     actionBtn.textContent = options.action.label;
-    actionBtn.style.background = 'transparent';
-    actionBtn.style.color = '#60a5fa';
-    actionBtn.style.border = 'none';
-    actionBtn.style.cursor = 'pointer';
-    actionBtn.style.padding = '0';
-    actionBtn.style.font = 'inherit';
-    actionBtn.style.textDecoration = 'underline';
-    actionBtn.style.flexShrink = '0';
     actionBtn.addEventListener('click', () => {
       options.action!.onClick();
       // 액션 클릭 시 토스트 자동 닫지 않음 — confirmLabel 가 있으면 사용자가 명시적으로 닫음
@@ -105,43 +99,29 @@ export function showToast(options: ToastOptions): void {
     toast.appendChild(actionBtn);
   }
 
-  // 확인 버튼 (선택, 강조 스타일) 또는 닫기 버튼 (×)
+  // 확인 버튼 (선택, 강조 스타일) 또는 닫기 버튼
   if (options.confirmLabel) {
     const confirmBtn = document.createElement('button');
     confirmBtn.type = 'button';
+    confirmBtn.className = 'rhwp-toast-confirm';
     confirmBtn.textContent = options.confirmLabel;
-    confirmBtn.style.background = '#2563eb';
-    confirmBtn.style.color = '#ffffff';
-    confirmBtn.style.border = 'none';
-    confirmBtn.style.borderRadius = '4px';
-    confirmBtn.style.cursor = 'pointer';
-    confirmBtn.style.padding = '4px 12px';
-    confirmBtn.style.font = 'inherit';
-    confirmBtn.style.flexShrink = '0';
     confirmBtn.addEventListener('click', () => removeToast());
     toast.appendChild(confirmBtn);
   } else {
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
+    closeBtn.className = 'rhwp-toast-close';
     closeBtn.setAttribute('aria-label', '닫기');
-    closeBtn.textContent = '×';
-    closeBtn.style.background = 'transparent';
-    closeBtn.style.color = '#94a3b8';
-    closeBtn.style.border = 'none';
-    closeBtn.style.cursor = 'pointer';
-    closeBtn.style.padding = '0';
-    closeBtn.style.font = '20px/1 sans-serif';
-    closeBtn.style.flexShrink = '0';
-    closeBtn.style.lineHeight = '1';
+    closeBtn.appendChild(createCloseIcon());
     closeBtn.addEventListener('click', () => removeToast());
     toast.appendChild(closeBtn);
   }
 
   container.appendChild(toast);
 
-  // 슬라이드 인 (다음 프레임에서 transform 변경)
+  // 다음 프레임에서 들어온다 — 첫 프레임은 퇴장 위치에서 칠해져야 전환이 걸린다.
   requestAnimationFrame(() => {
-    toast.style.transform = 'translateX(0)';
+    requestAnimationFrame(() => toast.classList.add('rhwp-toast-in'));
   });
 
   let removed = false;
@@ -151,11 +131,10 @@ export function showToast(options: ToastOptions): void {
     if (removed) return;
     removed = true;
     if (timer) clearTimeout(timer);
-    toast.style.opacity = '0';
-    toast.style.transform = 'translateX(120%)';
+    toast.classList.remove('rhwp-toast-in');
     setTimeout(() => {
       toast.remove();
-    }, FADE_DURATION_MS);
+    }, EXIT_DURATION_MS);
   }
 
   // 자동 페이드

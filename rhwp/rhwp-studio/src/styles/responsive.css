@@ -105,7 +105,7 @@
     height: var(--touch-target-min);
     border: none;
     background: transparent;
-    cursor: pointer;
+    cursor: default;
     font-size: 20px;
   }
   /* 메뉴 펼쳐진 상태 */

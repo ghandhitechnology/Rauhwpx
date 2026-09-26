@@ -91,8 +91,10 @@ import {
   type ChatRunStatus,
 } from '../../agent/chat-status.ts';
 import { createChevron, createColumnIcon } from '../chevron.ts';
-import { showActionMenu } from '../action-menu.ts';
+import { showContextMenu } from '../native-context-menu.ts';
+import { setMiddleTruncatedText } from '../middle-truncate.ts';
 import { createHieumGlyph, createIcon, createStopIcon } from './icons.ts';
+import { detectPlatformKind } from '../../engine/navigation-keymap.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
 import { createEffortSlider } from './effort-slider.ts';
 import { createComposerRestingMotion } from './composer-resting.ts';
@@ -270,12 +272,10 @@ const COMPOSER_REST_GESTURE_MS = 120;
 /** 한 줄 입력의 textarea 높이 상한. 넘으면 접지 않는다. */
 const COMPOSER_REST_MAX_INPUT_PX = 40;
 const SIDEBAR_MOTION_DURATION_MS = 320;
-/* 전체 화면 전환도 사이드바·용지와 같은 320ms 축을 쓴다(모션 계약).
-   타이머는 전이가 끝날 때까지의 여유분을 포함한다. */
-const FS_MOTION_SETTLE_MS = SIDEBAR_MOTION_DURATION_MS + 60;
-/* The sidebar handoff briefly staggers its chrome after the fullscreen shell
-   has folded away. Keep the class alive through the last control's entrance. */
-const FS_RETURN_SETTLE_MS = 300;
+/* 전체 화면 전환은 한 번의 교차 페이드다(agent-sidebar.css
+   --ag-fs-crossfade-duration 과 같은 값). 타이머는 끝날 때까지의 여유분을 포함한다. */
+const FS_CROSSFADE_MS = 220;
+const FS_MOTION_SETTLE_MS = FS_CROSSFADE_MS + 60;
 const COMPACT_RAIL_HOVER_OPEN_DELAY_MS = 260;
 
 const CLIPBOARD_IMAGE_EXTENSION: Readonly<Record<string, string>> = {
@@ -524,34 +524,6 @@ function prettyJson(s: string): string {
   } catch {
     return s;
   }
-}
-
-/**
- * 손그림 버튼용 displacement 필터 정의. CSS 의 filter: url(#ag-sketch-line)
- * 참조는 문서 안의 실제 정의를 필요로 하므로 사이드바 루트에 한 번 심는다.
- * display:none 으로 숨기면 Safari 가 참조를 무시하므로 0 크기로만 둔다
- * (.ag-sketch-defs).
- */
-function createSketchFilterDefs(): SVGSVGElement {
-  const NS = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(NS, 'svg');
-  svg.classList.add('ag-sketch-defs');
-  svg.setAttribute('aria-hidden', 'true');
-  const filter = document.createElementNS(NS, 'filter');
-  filter.setAttribute('id', 'ag-sketch-line');
-  const turbulence = document.createElementNS(NS, 'feTurbulence');
-  turbulence.setAttribute('type', 'fractalNoise');
-  turbulence.setAttribute('baseFrequency', '0.04');
-  turbulence.setAttribute('numOctaves', '2');
-  turbulence.setAttribute('seed', '7');
-  turbulence.setAttribute('result', 'noise');
-  const displacement = document.createElementNS(NS, 'feDisplacementMap');
-  displacement.setAttribute('in', 'SourceGraphic');
-  displacement.setAttribute('in2', 'noise');
-  displacement.setAttribute('scale', '3');
-  filter.append(turbulence, displacement);
-  svg.appendChild(filter);
-  return svg;
 }
 
 export function initAgentSidebar(deps: AgentSidebarDeps): {
@@ -829,7 +801,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   root.id = 'agent-sidebar';
   root.className = 'ag-root';
   root.dataset.agent = selectedAgent;
-  root.appendChild(createSketchFilterDefs());
 
   const collapseTab = el('button', 'ag-collapse-tab');
   collapseTab.type = 'button';
@@ -915,10 +886,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   applySidebarWidth(sidebarWidth, { persist: false, recenter: false });
 
   const RESIZE_DRAG_THRESHOLD_PX = 4;
+  /* Mail 의 분할선처럼 최솟값을 이만큼 넘겨 끌면 사이드바를 접는다. */
+  const RESIZE_COLLAPSE_OVERSHOOT_PX = 72;
   let resizing = false;
   let resizeArmed = false;
   let resizeStartX = 0;
   let resizeStartWidth = sidebarWidth;
+  /** 드래그 도중 접힌 상태 — 놓기 전에 돌아오면 다시 펼친다. */
+  let resizeDragCollapsed = false;
+  let resizeResumeTimer: number | null = null;
+
+  function clearResizeResumeTimer(): void {
+    if (resizeResumeTimer === null) return;
+    window.clearTimeout(resizeResumeTimer);
+    resizeResumeTimer = null;
+  }
 
   function detachResizeWindowListeners(): void {
     window.removeEventListener('pointermove', onResizePointerMove, true);
@@ -931,6 +913,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     resizeArmed = false;
     resizeStartX = startX;
     resizeStartWidth = sidebarWidth;
+    resizeDragCollapsed = false;
     setConfigPanelOpen(false);
     document.body.classList.add('ag-sidebar-resizing', 'ag-sidebar-animating');
     window.addEventListener('pointermove', onResizePointerMove, true);
@@ -941,10 +924,26 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function applyResizeMove(): void {
     resizeMoveRaf = null;
     if (!resizing || !resizeArmed) return;
-    applySidebarWidth(resizeStartWidth + (resizeStartX - resizeMoveX), {
-      persist: false,
-      recenter: false,
-    });
+    const target = resizeStartWidth + (resizeStartX - resizeMoveX);
+    const overshoot = !fullscreen && target < sidebarWidthMin - RESIZE_COLLAPSE_OVERSHOOT_PX;
+    if (overshoot !== resizeDragCollapsed) {
+      resizeDragCollapsed = overshoot;
+      clearResizeResumeTimer();
+      // 접고 펴는 동안은 편집 영역 여백도 전이로 따라가야 한다 — 리사이즈 클래스를
+      // 잠시 내리고, 다시 펼친 뒤 전이가 끝나면 즉시 추종으로 돌아간다.
+      document.body.classList.remove('ag-sidebar-resizing');
+      setCollapsed(overshoot);
+      if (!overshoot) {
+        resizeResumeTimer = window.setTimeout(() => {
+          resizeResumeTimer = null;
+          if (resizing && !resizeDragCollapsed) {
+            document.body.classList.add('ag-sidebar-resizing', 'ag-sidebar-animating');
+          }
+        }, SIDEBAR_MOTION_DURATION_MS);
+      }
+    }
+    if (resizeDragCollapsed) return;
+    applySidebarWidth(target, { persist: false, recenter: false });
   }
 
   function onResizePointerMove(e: PointerEvent): void {
@@ -968,8 +967,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     resizing = false;
     resizeArmed = false;
-    document.body.classList.remove('ag-sidebar-resizing', 'ag-sidebar-animating');
+    clearResizeResumeTimer();
+    document.body.classList.remove('ag-sidebar-resizing');
+    // 접힘 전이가 도는 중이면 ag-sidebar-animating 은 그 루프가 거둔다.
+    if (insetRecenterRaf === null) document.body.classList.remove('ag-sidebar-animating');
     detachResizeWindowListeners();
+    if (resizeDragCollapsed) {
+      // 다시 펼칠 때는 끌기 전 폭으로 돌아온다.
+      resizeDragCollapsed = false;
+      applySidebarWidth(resizeStartWidth, { persist: true, recenter: false });
+      return;
+    }
     applySidebarWidth(sidebarWidth, { persist: true, recenter: true });
   }
 
@@ -990,6 +998,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   });
 
   resizeHandle.addEventListener('pointerdown', onResizeHandlePointerDown);
+  // 두 번 누르면 기본 폭으로 돌아간다.
+  resizeHandle.addEventListener('dblclick', (e) => {
+    if (root.classList.contains('ag-collapsed')) return;
+    e.preventDefault();
+    if (sidebarWidth === clampSidebarWidth(SIDEBAR_WIDTH_DEFAULT, sidebarWidthMin)) return;
+    applySidebarWidth(SIDEBAR_WIDTH_DEFAULT, { persist: true, recenter: false });
+    startInsetRecenterLoop();
+  });
   resizeHandle.addEventListener('keydown', (e) => {
     if (root.classList.contains('ag-collapsed')) return;
     const step = e.shiftKey ? 32 : 16;
@@ -1103,6 +1119,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       (visibleProviderItems().find(item => item.dataset.agent === selectedAgent)
         ?? visibleProviderItems()[0] ?? providerTrigger).focus();
     } else if (e.key === 'Escape') {
+      if (configPanelOpen) e.preventDefault();
       setConfigPanelOpen(false);
     }
   });
@@ -1205,6 +1222,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       setConfigPanelOpen(true);
       llmItems.get(selectedModel)?.focus();
     } else if (e.key === 'Escape') {
+      if (configPanelOpen) e.preventDefault();
       setConfigPanelOpen(false);
     }
   });
@@ -1296,6 +1314,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       setConfigPanelOpen(true);
       effortSlider.root.focus();
     } else if (e.key === 'Escape') {
+      if (configPanelOpen) e.preventDefault();
       setConfigPanelOpen(false);
     }
   });
@@ -1425,8 +1444,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function updateDocumentContext(): void {
     const context = getDocumentContext?.();
     const currentDocumentName = context?.documentName || '문서 없음';
-    documentName.textContent = currentDocumentName;
-    documentName.title = context?.documentName || '';
+    setMiddleTruncatedText(documentName, currentDocumentName, context?.documentName || '');
     selectionContext.textContent = context?.selectionLabel || '선택 없음';
     workspaceDocumentName.textContent = currentDocumentName;
     workspaceDocumentName.title = context?.documentName || '';
@@ -1524,7 +1542,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
      닫히고, 입력 중 IME 조합은 가로채지 않는다. */
   const onDocKeyDown = (e: KeyboardEvent) => {
     if (e.key !== 'Escape' || !fullscreen) return;
-    if (e.isComposing) return;
+    // 슬래시 메뉴·팝오버처럼 먼저 Esc 를 받은 쪽이 있으면 모드는 그대로 둔다.
+    if (e.isComposing || e.defaultPrevented) return;
     if (configPanelOpen) {
       setConfigPanelOpen(false);
       e.preventDefault();
@@ -1553,6 +1572,72 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     e.preventDefault();
   };
   document.addEventListener('keydown', onDocKeyDown);
+
+  /* 에이전트 명령 — 네이티브 메뉴(rhwp:agent-command)와 같은 동작을
+     macOS 에서는 ⌃⌘S(사이드바 보이기/숨기기)·⌃⌘J(집중 모드)로도 연다.
+     Windows 의 Ctrl+Alt 는 AltGr 문자 입력과 겹쳐 키는 두지 않는다. */
+  function toggleAgentSidebarVisibility(): void {
+    if (fullscreen) {
+      setFullscreen(false, { then: () => setCollapsed(true) });
+      return;
+    }
+    setCollapsed(!root.classList.contains('ag-collapsed'));
+  }
+
+  function toggleFocusChat(): void {
+    if (fullscreen) {
+      setFullscreen(false);
+      return;
+    }
+    setFullscreen(true, { then: () => input.focus({ preventScroll: true }) });
+  }
+
+  const onAgentCommand = (event: Event) => {
+    const command = (event as CustomEvent<{ command?: unknown }>).detail?.command;
+    if (command === 'toggle-sidebar') toggleAgentSidebarVisibility();
+    else if (command === 'toggle-focus-chat') toggleFocusChat();
+  };
+  window.addEventListener('rhwp:agent-command', onAgentCommand);
+
+  const isMacPlatform = detectPlatformKind() === 'mac';
+  /** 텍스트를 입력하는 자리. 집중 모드에서는 가려진 문서 입력기는 치지 않는다. */
+  function focusOwnsText(target: Element | null): boolean {
+    if (!target) return false;
+    if (fullscreen && target.closest('[data-rhwp-editor-input]')) return false;
+    return Boolean(target.closest(
+      'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]',
+    ));
+  }
+
+  // 캡처 단계에서 받아 문서 단축키·입력기 처리보다 먼저 가져간다.
+  const onAgentShortcutKeyDown = (e: KeyboardEvent) => {
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+    if (isMacPlatform && e.ctrlKey && e.metaKey && !e.altKey && !e.shiftKey
+      && (e.code === 'KeyS' || e.code === 'KeyJ')) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.repeat) return;
+      if (e.code === 'KeyS') toggleAgentSidebarVisibility();
+      else toggleFocusChat();
+      return;
+    }
+    // ⌘↑ / ⌘↓ — 대화의 처음·최신으로. 입력 칸 안에서는 캐럿 이동을 그대로 둔다.
+    const jump = isMacPlatform
+      ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+      : false;
+    if (!jump || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    if (root.classList.contains('ag-collapsed') || !chatPage.isConnected) return;
+    const target = document.activeElement;
+    const inConversation = fullscreen || (target instanceof Element && root.contains(target));
+    if (!inConversation || focusOwnsText(target)) return;
+    if (['ag-threads-open', 'ag-skills-open', 'ag-settings-open', 'ag-versions-open']
+      .some((name) => root.classList.contains(name))) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === 'ArrowUp') scrollConversationToTop();
+    else scrollConversationToLatest();
+  };
+  window.addEventListener('keydown', onAgentShortcutKeyDown, true);
 
   const stage = el('div', 'ag-stage');
 
@@ -2688,19 +2773,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
   }
 
-  function refreshEnvironmentFilenameMarquee(): void {
-    if (!fullscreen || !environmentPanelOpen) return;
-    const distance = Math.max(0, environmentFilenameTrack.scrollWidth - environmentFilenameViewport.clientWidth);
-    environmentFileRow.classList.toggle('ag-filename-overflow', distance > 1);
-    environmentFileRow.style.setProperty('--ag-filename-distance', `${Math.ceil(distance)}px`);
-    environmentFileRow.style.setProperty('--ag-filename-duration', `${Math.max(4.8, distance / 26 + 2.4).toFixed(1)}s`);
-  }
-
   function updateEnvironmentFilename(name: string): void {
-    environmentFilenameTrack.textContent = name;
+    // 긴 이름은 가운데를 줄여 확장자·버전 표기를 남긴다. 전체 이름은 행 title 이 맡는다.
+    setMiddleTruncatedText(environmentFilenameTrack, name, null);
     environmentFileRow.title = name === '문서 없음' ? '' : name;
     environmentFileRow.setAttribute('aria-label', `현재 문서: ${name}`);
-    window.requestAnimationFrame(refreshEnvironmentFilenameMarquee);
   }
 
   function applyEnvironmentPanelState(): void {
@@ -2712,7 +2789,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     environmentToggle.setAttribute('aria-expanded', environmentPanelOpen ? 'true' : 'false');
     environmentToggle.setAttribute('aria-label', environmentPanelOpen ? '환경 패널 닫기' : '환경 패널 열기');
     environmentToggle.title = environmentPanelOpen ? '환경 패널 닫기' : '환경 패널 열기';
-    if (environmentPanelOpen) window.requestAnimationFrame(refreshEnvironmentFilenameMarquee);
   }
 
   function setEnvironmentPanelOpen(open: boolean, opts?: { persist?: boolean }): void {
@@ -2749,8 +2825,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       window.requestAnimationFrame(() => environmentFileRow.focus({ preventScroll: true }));
     }
   });
-  environmentFileRow.addEventListener('pointerenter', refreshEnvironmentFilenameMarquee);
-  environmentFileRow.addEventListener('focus', refreshEnvironmentFilenameMarquee);
   environmentChanges.addEventListener('click', () => {
     setReviewColCollapsed(false);
     setEnvironmentPanelOpen(false, { persist: !isCompactWorkspace() });
@@ -2929,6 +3003,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const messagesMutationObserver = typeof MutationObserver === 'function'
     ? new MutationObserver(() => {
         if (followConversation) scrollConversationToEnd();
+        scheduleLatestPillUpdate();
       })
     : null;
   messagesMutationObserver?.observe(messages, {
@@ -2949,6 +3024,61 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       })
     : null;
   messagesResizeObserver?.observe(messages);
+
+  /* 위로 읽는 중에 보이는 "최신" 알약. 최신 턴 자리보다 위에 있을 때만
+     뜨고, 누르면 그 자리로 부드럽게 내려가 다시 새 출력을 따라간다. */
+  const latestDock = el('div', 'ag-latest-dock');
+  const latestPill = el('button', 'ag-latest-pill');
+  latestPill.type = 'button';
+  latestPill.hidden = true;
+  latestPill.title = '최신 대화로 (⌘↓)';
+  latestPill.append(createIcon('arrowDown'), el('span', 'ag-latest-pill-label', '최신'));
+  latestDock.appendChild(latestPill);
+  let latestPillFrame: number | null = null;
+
+  function isAboveLatestTurn(): boolean {
+    if (followConversation) return false;
+    const anchor = latestTurnAnchor();
+    if (!anchor) return messages.scrollHeight - messages.scrollTop - messages.clientHeight > 56;
+    return messages.scrollTop < conversationScrollTarget(anchor) - 64;
+  }
+
+  function scheduleLatestPillUpdate(): void {
+    if (latestPillFrame !== null) return;
+    latestPillFrame = window.requestAnimationFrame(() => {
+      latestPillFrame = null;
+      const show = messages.isConnected && isAboveLatestTurn();
+      if (latestPill.hidden === !show) return;
+      latestPill.hidden = !show;
+    });
+  }
+
+  function scrollConversationToLatest(): void {
+    const anchor = latestTurnAnchor();
+    if (anchor) {
+      scrollConversationToMessage(anchor, { smooth: true });
+    } else {
+      followConversation = true;
+      conversationScrollPaused = false;
+      messages.scrollTo({
+        top: messages.scrollHeight,
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      });
+    }
+    latestPill.hidden = true;
+  }
+
+  function scrollConversationToTop(): void {
+    stopFollowingConversation();
+    messages.scrollTo({
+      top: 0,
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+    });
+    scheduleLatestPillUpdate();
+  }
+
+  latestPill.addEventListener('click', () => scrollConversationToLatest());
+  messages.addEventListener('scroll', scheduleLatestPillUpdate, { passive: true });
   const review = el('div', 'ag-review');
   review.tabIndex = 0;
   review.setAttribute('aria-label', '변경 사항 검토');
@@ -2975,7 +3105,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   planRestore.title = '계획 펼치기';
   planRestore.setAttribute('aria-hidden', 'true');
   planRestore.inert = true;
-  const planOrbit = el('span', 'ag-plan-orbit');
+  const planOrbit = el('span', 'ag-plan-orbit ui-spinner');
   planOrbit.setAttribute('aria-hidden', 'true');
   const planHistoryIcon = createIcon('changes', 'ag-plan-history-icon');
   planHistoryIcon.setAttribute('aria-hidden', 'true');
@@ -3218,6 +3348,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
   // 질문 카드와 입력기는 인접 형제여야 하나의 입력 면으로 이어진다.
   chatPage.append(header, messages, review, compactChanges, planSurface, calibrationChip, questionController.root, composer);
+  messages.after(latestDock);
 
   /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다.
    *  펼쳐진 사이드바의 현재 폭이 아니라 max-content(말줄임 바닥)로 잰다.
@@ -3478,8 +3609,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function navigateToChange(position: DocumentPosition, anchor?: DiffItem['rightAnchor']): void {
     if (!deps.navigateToChange) return;
-    if (fullscreen) setFullscreen(false);
-    window.requestAnimationFrame(() => deps.navigateToChange?.(position, anchor));
+    const navigate = () => {
+      window.requestAnimationFrame(() => deps.navigateToChange?.(position, anchor));
+    };
+    if (fullscreen) setFullscreen(false, { then: navigate });
+    else navigate();
   }
 
   const planColumn = el('aside', 'ag-plan-column');
@@ -3539,8 +3673,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   settingsPage.addEventListener('ag-settings-expand-request', () => {
     void (async () => {
       if (!await settingsPanel.requestClose()) return;
-      setFullscreen(true);
-      setSettingsPanelOpen(true, 'cloud');
+      setFullscreen(true, { then: () => setSettingsPanelOpen(true, 'cloud') });
     })();
   });
   initialSetup = maybeStartInitialSetup({
@@ -4003,38 +4136,22 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
      스레드·대화는 안정적인 shell로 남고 검토는 오른쪽 drawer로 옮긴다.
      DOM을 재생성하지 않으므로 스레드·모델·승인 상태가 모두 이어진다.
 
-     전환은 clip-path 로 연다: 콘솔이 사이드바 자리에서 자라나고,
-     돌아갈 때는 그 자리로 접힌다. 내용물은 한 번만 배치하고 보이는
-     영역만 옮기므로 레이아웃 비용은 한 번뿐이다. 용지(#editor-area)는
-     같은 320ms 축으로 함께 움직인다 — 패널과 용지가 따로 놀지 않는다. */
-  let fsMotionTimer: number | null = null;
-  let fsReturnTimer: number | null = null;
+     전환은 한 번의 교차 페이드다. View Transition 이 바뀌기 전·후 화면을
+     잡고, 작업 공간 쪽만 0.985 ↔ 1 로 살짝 커지거나 줄어든다. 지원하지
+     않는 엔진이나 동작 줄이기 설정에서는 즉시 바뀐다. */
+  type FsViewTransition = { finished: Promise<void>; skipTransition(): void };
+  let fsTransition: FsViewTransition | null = null;
+
+  function clearFsTransitionClasses(): void {
+    document.documentElement.classList.remove('ag-fs-vt', 'ag-fs-vt-enter', 'ag-fs-vt-exit');
+    root.classList.remove('ag-fs-motion');
+  }
 
   function cancelFsMotionTimers(): void {
-    if (fsMotionTimer !== null) {
-      window.clearTimeout(fsMotionTimer);
-      fsMotionTimer = null;
-    }
-    if (fsReturnTimer !== null) {
-      window.clearTimeout(fsReturnTimer);
-      fsReturnTimer = null;
-    }
-  }
-
-  function setFsClipVars(top: number, bottom: number, left: number): void {
-    root.style.setProperty('--ag-fs-clip-top', `${Math.max(0, top)}px`);
-    root.style.setProperty('--ag-fs-clip-bottom', `${Math.max(0, bottom)}px`);
-    root.style.setProperty('--ag-fs-clip-left', `${Math.max(0, left)}px`);
-  }
-
-  /** 돌아갈 사이드바 자리. measure() 와 같은 기준이라 접힘 끝에서
-      clip 영역과 사이드바 상자가 정확히 포개져 교체가 보이지 않는다. */
-  function setFsClipVarsToSidebar(): void {
-    const top = document.getElementById('editor-area')?.getBoundingClientRect().top ?? 96;
-    const statusTop =
-      document.getElementById('status-bar')?.getBoundingClientRect().top ?? window.innerHeight;
-    const width = Math.min(sidebarWidth, window.innerWidth);
-    setFsClipVars(top, window.innerHeight - statusTop, window.innerWidth - width);
+    const transition = fsTransition;
+    fsTransition = null;
+    transition?.skipTransition();
+    clearFsTransitionClasses();
   }
 
   /** 전체 화면 무대를 걷고 사이드바 배치로 되돌린다. */
@@ -4056,30 +4173,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     applyPlanMinimizedState();
   }
 
-  function setFullscreen(on: boolean): void {
-    if (fullscreen === on) return;
-    if (on && settingsPanelOpen && settingsPanel.isDirty()) {
-      void requestSettingsClose(undefined, () => setFullscreen(true));
-      return;
-    }
-    fullscreen = on;
-    syncWorkspaceSwitchMount();
-    hideThreadPopover();
-    cancelFsMotionTimers();
-    // 두 모드의 쉬는 모양이 달라서, 화면 전환은 펼친 입력기로 시작한다.
-    composerRest.setResting(false);
-
-    const animate = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    // clip 이 자라나는 출발점 — 배치가 바뀌기 전에 잰다. 접히던
-    // 도중 되돌아가는 경우에는 현재 clip 값에서 이어가므로 잴 필요가 없다.
-    const enterRect =
-      on && animate && !root.classList.contains('ag-fs-to')
-        ? root.getBoundingClientRect()
-        : null;
-
-    // 돌아갈 때는 접힘이 끝난 뒤에 클래스를 걷는다 — 접히는 동안
-    // 전체 화면 배치(기하·workspace·숨겨진 손잡이)가 유지되어야 한다.
-    if (on || !animate) root.classList.toggle('ag-fullscreen', on);
+  function applyFullscreenLayout(on: boolean): void {
+    root.classList.toggle('ag-fullscreen', on);
     document.body.classList.toggle('ag-fullscreen-open', on);
     applyEnvironmentPanelState();
     fullscreenBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
@@ -4089,98 +4184,103 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     fullscreenIcon.replaceWith(nextIcon);
     fullscreenIcon = nextIcon;
 
-    if (on) {
-      root.classList.remove('ag-fs-return', 'ag-fs-exiting');
-      if (animate) {
-        // 전환 자세는 배치 변경보다 먼저 세운다 — 첫 스타일 확정이
-        // 접힌 자세(ag-fs-from)여야 clip 이 펼침 방향으로만 보간된다.
-        if (enterRect) {
-          setFsClipVars(enterRect.top, window.innerHeight - enterRect.bottom, enterRect.left);
-        }
-        root.classList.add('ag-fs-motion', 'ag-fs-entering');
-        if (enterRect) root.classList.add('ag-fs-from');
-        // 접히던 도중 되돌아가기 — clip 이 현재 값에서 그대로 펼쳐진다.
-        else root.classList.remove('ag-fs-to');
-      } else {
-        root.classList.remove('ag-fs-motion', 'ag-fs-from', 'ag-fs-to');
-      }
-
-      // 접힌 상태에서 바로 펼칠 수 있어야 한다.
-      setCollapsed(false, { recenter: false });
-      // 페이지 전환 상태를 걷어내고 레일 + 대화 무대를 세운다.
-      threadsPanelOpen = false;
-      skillsPanelOpen = false;
-      closeSettingsPage();
-      closeVersionsPage();
-      root.classList.remove('ag-threads-open', 'ag-skills-open');
-      threadsBtn.setAttribute('aria-expanded', 'false');
-      skillsBtn.setAttribute('aria-expanded', 'false');
-      chatPage.setAttribute('aria-hidden', 'false');
-      skillsPage.setAttribute('aria-hidden', 'true');
-      threadsPage.setAttribute('aria-hidden', 'false');
-      rebuildThreadsList();
-      // 칸 폭은 클래스 규칙이 아니라 인라인 변수로 산다.
-      applyRailWidth(railWidth, { persist: false });
-      applyReviewWidth(reviewWidth, { persist: false });
-      // 변경 사항과 계획은 각각의 환경 drawer에 둔다.
-      setCompactChangesOpen(false);
-      changesDrawer.setCompactHost(null);
-      updateCompactChangesVisibility();
-      changesDrawer.reviewSlot.appendChild(review);
-      planColumn.appendChild(planSurface);
-      reviewColCollapsed = true;
-      planColCollapsed = true;
-      applyThreadsRailState();
-      applyReviewColState();
-
-      setConfigPanelOpen(false);
-      // 인라인 top/bottom 을 모드에 맞게 다시 잰다.
-      measure();
-      window.requestAnimationFrame(refreshEnvironmentFilenameMarquee);
-      // 문서가 가려지거나 다시 드러나므로 용지 정렬을 다시 잡는다.
-      startInsetRecenterLoop();
-      scrollConversationToEnd();
-
-      if (!animate) return;
-      // 접힌 자세를 확정한 뒤 펼침으로 넘긴다.
-      void root.offsetHeight;
-      if (enterRect) root.classList.remove('ag-fs-from');
-      fsMotionTimer = window.setTimeout(() => {
-        root.classList.remove('ag-fs-motion', 'ag-fs-entering', 'ag-fs-to');
-        fsMotionTimer = null;
-      }, FS_MOTION_SETTLE_MS);
-      return;
-    }
-
-    if (!animate) {
-      root.classList.remove('ag-fs-motion', 'ag-fs-from', 'ag-fs-to', 'ag-fs-entering', 'ag-fs-return');
+    if (!on) {
       restoreSidebarLayout();
       setConfigPanelOpen(false);
       measure();
+      // 용지가 사이드바 폭만큼 제자리를 찾는다 — 새 화면은 살아 있는
+      // 스냅샷이라 교차 페이드와 같은 시간축에 보인다.
       startInsetRecenterLoop();
       scrollConversationToEnd();
       return;
     }
 
-    // 접히는 동안 용지가 같은 시간축으로 제자리를 찾는다.
+    // 접힌 상태에서 바로 펼칠 수 있어야 한다.
+    setCollapsed(false, { recenter: false });
+    // 페이지 전환 상태를 걷어내고 레일 + 대화 무대를 세운다.
+    threadsPanelOpen = false;
+    skillsPanelOpen = false;
+    closeSettingsPage();
+    closeVersionsPage();
+    root.classList.remove('ag-threads-open', 'ag-skills-open');
+    threadsBtn.setAttribute('aria-expanded', 'false');
+    skillsBtn.setAttribute('aria-expanded', 'false');
+    chatPage.setAttribute('aria-hidden', 'false');
+    skillsPage.setAttribute('aria-hidden', 'true');
+    threadsPage.setAttribute('aria-hidden', 'false');
+    rebuildThreadsList();
+    // 칸 폭은 클래스 규칙이 아니라 인라인 변수로 산다.
+    applyRailWidth(railWidth, { persist: false });
+    applyReviewWidth(reviewWidth, { persist: false });
+    // 변경 사항과 계획은 각각의 환경 drawer에 둔다.
+    setCompactChangesOpen(false);
+    changesDrawer.setCompactHost(null);
+    updateCompactChangesVisibility();
+    changesDrawer.reviewSlot.appendChild(review);
+    planColumn.appendChild(planSurface);
+    reviewColCollapsed = true;
+    planColCollapsed = true;
+    applyThreadsRailState();
+    applyReviewColState();
+
+    setConfigPanelOpen(false);
+    // 인라인 top/bottom 을 모드에 맞게 다시 잰다.
+    measure();
+    // 문서가 가려지거나 다시 드러나므로 용지 정렬을 다시 잡는다.
     startInsetRecenterLoop();
-    setFsClipVarsToSidebar();
-    root.classList.remove('ag-fs-entering', 'ag-fs-from', 'ag-fs-return');
-    root.classList.add('ag-fs-motion', 'ag-fs-exiting', 'ag-fs-to');
-    fsMotionTimer = window.setTimeout(() => {
-      fsMotionTimer = null;
-      root.classList.remove('ag-fullscreen', 'ag-fs-to', 'ag-fs-exiting');
-      restoreSidebarLayout();
-      setConfigPanelOpen(false);
-      measure();
-      scrollConversationToEnd();
-      // 돌아온 사이드바는 스며들며 마무리.
-      root.classList.add('ag-fs-return');
-      fsReturnTimer = window.setTimeout(() => {
-        root.classList.remove('ag-fs-motion', 'ag-fs-return');
-        fsReturnTimer = null;
-      }, FS_RETURN_SETTLE_MS);
-    }, FS_MOTION_SETTLE_MS);
+    scrollConversationToEnd();
+  }
+
+  /** `then` 은 새 배치가 DOM 에 반영된 뒤에 부른다 — 교차 페이드는
+      다음 프레임에 배치를 바꾸므로, 바뀐 배치에 기대는 후속 동작은 여기로 넘긴다. */
+  function setFullscreen(on: boolean, opts?: { then?: () => void }): void {
+    if (fullscreen === on) {
+      opts?.then?.();
+      return;
+    }
+    if (on && settingsPanelOpen && settingsPanel.isDirty()) {
+      void requestSettingsClose(undefined, () => setFullscreen(true, opts));
+      return;
+    }
+    fullscreen = on;
+    syncWorkspaceSwitchMount();
+    hideThreadPopover();
+    // 두 모드의 쉬는 모양이 달라서, 화면 전환은 펼친 입력기로 시작한다.
+    composerRest.setResting(false);
+
+    const startViewTransition = (document as unknown as {
+      startViewTransition?: (update: () => void) => FsViewTransition;
+    }).startViewTransition;
+    const animate = typeof startViewTransition === 'function'
+      && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!animate) {
+      cancelFsMotionTimers();
+      // 즉시 바꿀 때도 패널 슬라이드·칸 전환이 새 배치 위에서 돌지 않게 한다.
+      root.classList.add('ag-fs-motion');
+      applyFullscreenLayout(on);
+      opts?.then?.();
+      void root.offsetHeight;
+      root.classList.remove('ag-fs-motion');
+      return;
+    }
+
+    const html = document.documentElement;
+    html.classList.remove('ag-fs-vt-enter', 'ag-fs-vt-exit');
+    html.classList.add('ag-fs-vt', on ? 'ag-fs-vt-enter' : 'ag-fs-vt-exit');
+    root.classList.add('ag-fs-motion');
+    // 새 전환이 앞선 전환을 건너뛰게 한다. 앞선 update 는 그래도 불리지만
+    // 모드가 이미 다시 바뀌었으면 마지막 요청만 배치에 반영한다.
+    const transition = startViewTransition.call(document, () => {
+      if (fullscreen !== on) return;
+      applyFullscreenLayout(on);
+      opts?.then?.();
+    });
+    fsTransition = transition;
+    void transition.finished.catch(() => {}).then(() => {
+      if (fsTransition !== transition) return;
+      fsTransition = null;
+      clearFsTransitionClasses();
+    });
   }
 
   function updatePermissionButton(): void {
@@ -4459,9 +4559,44 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       .join(' ');
   }
 
+  /* 입력칸 높이. 상한은 CSS(.ag-input max-height) 한 곳에서 정하고 여기서는
+     그 값을 읽는다. 줄 수가 바뀌면 짧게 이어 붙이고, IME 조합 중·쉬는 모양·
+     동작 줄이기에서는 바로 맞춘다. 전환은 인라인으로만 걸어, 쉬는 모양이
+     풀릴 때 입력기 전환의 측정과 겹치지 않게 한다. */
+  let composerInputComposing = false;
+  let composerInputTransitionTimer: number | null = null;
+  input.addEventListener('compositionstart', () => { composerInputComposing = true; });
+  input.addEventListener('compositionend', () => { composerInputComposing = false; });
+
   function resizeComposerInput(): void {
+    const from = Number.parseFloat(input.style.height);
+    if (composerInputTransitionTimer !== null) {
+      window.clearTimeout(composerInputTransitionTimer);
+      composerInputTransitionTimer = null;
+    }
+    input.style.transition = 'none';
     input.style.height = 'auto';
-    input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
+    const cap = Number.parseFloat(getComputedStyle(input).maxHeight);
+    const to = Number.isFinite(cap) ? Math.min(input.scrollHeight, cap) : input.scrollHeight;
+    const animate = Number.isFinite(from) && Math.abs(to - from) >= 1
+      && !composerInputComposing
+      && !composer.classList.contains('ag-resting')
+      && input.getClientRects().length > 0
+      && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (animate) input.style.height = `${from}px`;
+    else input.style.height = `${to}px`;
+    // 전환을 되돌리기 전에 지금 높이를 확정해 auto → px 가 보간되지 않게 한다.
+    void input.offsetHeight;
+    if (!animate) {
+      input.style.transition = '';
+      return;
+    }
+    input.style.transition = 'height var(--ag-dur-fast) var(--ag-ease-out)';
+    input.style.height = `${to}px`;
+    composerInputTransitionTimer = window.setTimeout(() => {
+      composerInputTransitionTimer = null;
+      input.style.transition = '';
+    }, 180);
   }
 
   function invocableSkill(name: string): CatalogRow | undefined {
@@ -4930,7 +5065,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       scrollConversationToMessage(userBubble, { smooth: true });
       revisionPlanId = null;
       input.value = '';
-      input.style.height = 'auto';
+      resizeComposerInput();
       persistComposerDraft();
       updateComposer();
       rebuildReview();
@@ -5063,7 +5198,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     revisionPlanId = null;
     setComposerSkill(null);
     setSlashMenuOpen(false);
-    input.style.height = 'auto';
+    resizeComposerInput();
     persistComposerDraft();
   });
 
@@ -5114,8 +5249,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     applyThreadsRailState();
     // 전체 화면은 도구 모음·상태바까지 덮는다 — 인라인 배치를 걷어낸다.
-    // 접혀 돌아가는 동안(ag-fs-to)에도 전체 화면 기준을 유지한다.
-    if (fullscreen || root.classList.contains('ag-fs-to')) {
+    if (fullscreen) {
       root.style.top = '0px';
       root.style.bottom = '0px';
       // 창이 줄면 두 칸의 비율 상한이 내려간다 — 다시 클램프한다.
@@ -5300,9 +5434,58 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     return bubble;
   }
 
+  /* 답변마다 호버 때 뜨는 복사 버튼. 마크다운 원문을 복사하고, 결과는
+     토스트 없이 버튼 자체가 잠깐 체크 표시로 알린다. 스트리밍 중 다시
+     그려도 같은 버튼을 다시 붙이므로 상태가 끊기지 않는다. */
+  const assistantCopyButtons = new WeakMap<HTMLElement, HTMLButtonElement>();
+
+  function assistantCopyButton(bubble: HTMLElement): HTMLButtonElement {
+    const existing = assistantCopyButtons.get(bubble);
+    if (existing) return existing;
+    const button = el('button', 'ag-msg-copy');
+    button.type = 'button';
+    button.title = '복사';
+    button.setAttribute('aria-label', '답변 복사');
+    button.appendChild(createIcon('copy'));
+    let resetTimer: number | null = null;
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const source = assistantBubbleSources.get(bubble) ?? '';
+      void navigator.clipboard?.writeText(source.trim()).then(() => {
+        button.classList.add('ag-copied');
+        button.title = '복사됨';
+        button.setAttribute('aria-label', '복사됨');
+        button.replaceChildren(createIcon('check'));
+        if (resetTimer !== null) window.clearTimeout(resetTimer);
+        resetTimer = window.setTimeout(() => {
+          resetTimer = null;
+          button.classList.remove('ag-copied');
+          button.title = '복사';
+          button.setAttribute('aria-label', '답변 복사');
+          button.replaceChildren(createIcon('copy'));
+        }, 1400);
+      }).catch(() => {});
+    });
+    assistantCopyButtons.set(bubble, button);
+    return button;
+  }
+
+  // 수식 모듈이 늦게 도착하면 chat-markdown 이 답변을 다시 그린다 — 호버 때 버튼을 되붙인다.
+  messages.addEventListener('pointerover', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const bubble = target?.closest<HTMLElement>('.ag-msg-assistant');
+    if (!bubble || !messages.contains(bubble)) return;
+    if (!(assistantBubbleSources.get(bubble) ?? '').trim()) return;
+    const button = assistantCopyButton(bubble);
+    if (button.parentElement !== bubble) bubble.appendChild(button);
+  });
+
   function renderAssistantMessage(bubble: HTMLElement, text: string): void {
     assistantBubbleSources.set(bubble, text);
     renderChatMarkdown(bubble, text);
+    if (bubble.classList.contains('ag-msg-assistant') && text.trim()) {
+      bubble.appendChild(assistantCopyButton(bubble));
+    }
     const links = Array.from(bubble.querySelectorAll<HTMLAnchorElement>('a.ag-md-link'));
     for (const link of links) {
       const artifact = parsePublishedDocumentLink(link.href);
@@ -5644,8 +5827,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let threadPopover: HTMLElement | null = null;
   let threadPopoverTimer: number | null = null;
   let threadPopoverHideTimer: number | null = null;
-  /** 방금 펼친 그룹 — 이 그룹의 행만 한 번 계단식으로 들어온다. */
-  let threadsCascadeKey: string | null = null;
 
   function clearThreadPopoverTimers(): void {
     if (threadPopoverTimer !== null) {
@@ -5811,6 +5992,58 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     return dot;
   }
 
+  /** 행 버튼 → 채팅. 키보드 삭제가 버튼에서 채팅을 되찾는다. */
+  const threadRowTargets = new WeakMap<HTMLElement, { thread: ChatThread; row: HTMLElement }>();
+  const threadsPlatformKind = detectPlatformKind();
+
+  function findThreadRow(id: string): HTMLElement | null {
+    for (const item of threadsList.querySelectorAll<HTMLElement>('.ag-threads-item')) {
+      if (item.dataset.threadId === id) return item.closest<HTMLElement>('.ag-threads-row');
+    }
+    return null;
+  }
+
+  /** 키보드로 연 우클릭 메뉴는 좌표가 0 이다 — 요소 아래에 띄운다. */
+  function contextMenuAnchor(event: MouseEvent, target: HTMLElement): { x: number; y: number } {
+    if (event.clientX || event.clientY) return { x: event.clientX, y: event.clientY };
+    const rect = target.getBoundingClientRect();
+    return { x: rect.left + 12, y: rect.bottom };
+  }
+
+  /** 채팅 하나를 지운다 — 문서 보관과 같은 정리를 한 채팅에만 한다. */
+  async function deleteThreadWithConfirm(thread: ChatThread): Promise<boolean> {
+    if (getChatStatus(thread.id) === 'working') return false;
+    const confirmed = await confirmSheet(root, '채팅 삭제', `"${thread.title || '새 채팅'}" 채팅을 지웁니다.`, { confirmLabel: '삭제', destructive: true });
+    if (!confirmed) return false;
+    // startNewChat 이 현재 채팅을 저장하므로, 삭제는 빠져나온 뒤에 한다.
+    if (thread.id === currentThread.id) startNewChat({ silent: true });
+    removeThread(thread.id);
+    planArchives.delete(thread.id);
+    threadWorkflows.delete(thread.id);
+    clearChatStatus(thread.id);
+    rebuildThreadsList();
+    return true;
+  }
+
+  async function openThreadMenu(thread: ChatThread, anchor: { x: number; y: number }): Promise<void> {
+    hideThreadPopover();
+    const choice = await showContextMenu([
+      { id: 'open', label: '열기', enabled: thread.id !== currentThread.id },
+      { id: 'rename', label: '이름 바꾸기' },
+      { type: 'separator' },
+      { id: 'delete', label: '삭제', danger: true, enabled: getChatStatus(thread.id) !== 'working' },
+    ], anchor);
+    if (choice === 'open') {
+      openThread(thread.id);
+    } else if (choice === 'rename') {
+      // 메뉴가 떠 있는 동안 목록이 다시 그려졌을 수 있다.
+      const row = findThreadRow(thread.id);
+      if (row) beginThreadRename(thread, row);
+    } else if (choice === 'delete') {
+      void deleteThreadWithConfirm(thread);
+    }
+  }
+
   function buildThreadRow(thread: ChatThread): HTMLElement {
     const li = el('li', 'ag-threads-row');
     if (thread.id === currentThread.id) li.classList.add('ag-current');
@@ -5818,6 +6051,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const btn = el('button', 'ag-threads-item');
     btn.type = 'button';
     btn.dataset.threadId = thread.id;
+    btn.tabIndex = -1;
     if (thread.id === currentThread.id) btn.classList.add('ag-active');
     // 상태 점은 제목 들여쓰기 여백에 겹쳐 앉는다 — 행 배치는 그대로다.
     const status = getChatStatus(thread.id);
@@ -5828,71 +6062,125 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     mode.setAttribute('role', 'img');
     mode.setAttribute('aria-label', modeLabel);
     mode.append(createIcon(thread.executionMode === 'cloud' ? 'cloud' : 'local'));
-    const title = el('span', 'ag-threads-item-title');
-    const titleText = el('span', 'ag-threads-item-title-text', thread.title || '새 채팅');
-    title.append(titleText);
+    const title = el('span', 'ag-threads-item-title', thread.title || '새 채팅');
     btn.append(title, mode);
     btn.setAttribute('aria-label', `${thread.title || '새 채팅'}, ${modeLabel}`);
-    let titleScroll: Animation | null = null;
-    const stopTitleScroll = () => {
-      titleScroll?.cancel();
-      titleScroll = null;
-      title.classList.remove('ag-scrolling');
-    };
-    const startTitleScroll = () => {
-      if (titleScroll || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-      title.classList.add('ag-scrolling');
-      const overflow = titleText.scrollWidth - title.clientWidth;
-      if (overflow <= 0) { stopTitleScroll(); return; }
-      titleScroll = titleText.animate([
-        { transform: 'translateX(0)', offset: 0 },
-        { transform: 'translateX(0)', offset: .15 },
-        { transform: `translateX(-${overflow}px)`, offset: .85 },
-        { transform: `translateX(-${overflow}px)`, offset: 1 },
-      ], { duration: Math.max(2400, overflow / 30 * 1000 / .7), iterations: Infinity, direction: 'alternate', easing: 'linear' });
-    };
-    li.addEventListener('mouseenter', startTitleScroll);
-    li.addEventListener('mouseleave', () => { if (!li.contains(document.activeElement)) stopTitleScroll(); });
-    li.addEventListener('focusin', startTitleScroll);
-    li.addEventListener('focusout', (event) => {
-      if (!li.contains(event.relatedTarget as Node | null) && !li.matches(':hover')) stopTitleScroll();
-    });
     // 두 번 누르기로는 열지 않는다 — 첫 클릭이 이미 대화를 열어버리므로
-    // 이름 바꾸기는 연필 버튼 하나로만 들어간다.
+    // 이름 바꾸기는 연필 버튼과 우클릭 메뉴로 들어간다.
     btn.addEventListener('click', () => openThread(thread.id));
     btn.addEventListener('mouseenter', () => scheduleThreadPopover(thread, li));
     btn.addEventListener('mouseleave', scheduleHideThreadPopover);
+    threadRowTargets.set(btn, { thread, row: li });
 
     const rename = el('button', 'ag-thread-rename');
     rename.type = 'button';
+    // 키보드는 행 사이를 화살표로 오가고, 이름 바꾸기는 우클릭 메뉴로 닿는다.
+    rename.tabIndex = -1;
     rename.setAttribute('aria-label', `${thread.title || '새 채팅'} 이름 바꾸기`);
+    rename.title = '이름 바꾸기';
     rename.appendChild(createIcon('format'));
-    const renameTooltip = el('span', 'ag-thread-rename-tooltip', '이름 바꾸기');
-    renameTooltip.setAttribute('role', 'tooltip');
-    const positionRenameTooltip = () => {
-      const rect = rename.getBoundingClientRect();
-      renameTooltip.style.left = `${rect.left + rect.width / 2}px`;
-      renameTooltip.style.top = `${rect.top - 8}px`;
-    };
-    rename.addEventListener('mouseenter', positionRenameTooltip);
-    rename.addEventListener('focus', positionRenameTooltip);
     rename.addEventListener('click', (e) => {
       e.stopPropagation();
-      stopTitleScroll();
       beginThreadRename(thread, li);
     });
 
-    li.append(btn, rename, renameTooltip);
+    li.addEventListener('contextmenu', (event) => {
+      if (li.querySelector('.ag-thread-rename-form')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void openThreadMenu(thread, contextMenuAnchor(event, li));
+    });
+
+    li.append(btn, rename);
     return li;
+  }
+
+  /** 행과 그룹 머리를 한 줄로 — 화살표 키가 이 순서로 오간다. */
+  function threadNavItems(): HTMLElement[] {
+    return Array.from(threadsList.querySelectorAll<HTMLElement>('.ag-threads-group-btn, .ag-threads-item'));
+  }
+
+  /** Tab 정지점은 목록 안에 하나만 둔다(roving tabindex). */
+  function syncThreadsRoving(focus?: HTMLElement | null): void {
+    const items = threadNavItems();
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const current = (focus && items.includes(focus) ? focus : null)
+      ?? (active && items.includes(active) ? active : null)
+      ?? items.find((item) => item.classList.contains('ag-active'))
+      ?? items[0];
+    for (const item of items) item.tabIndex = item === current ? 0 : -1;
+  }
+
+  function threadNavKey(item: Element | null): string | null {
+    if (!(item instanceof HTMLElement) || !threadsList.contains(item)) return null;
+    if (item.dataset.threadId) return `t:${item.dataset.threadId}`;
+    if (item.dataset.groupKey !== undefined) return `g:${item.dataset.groupKey}`;
+    return null;
+  }
+
+  function isThreadDeleteKey(e: KeyboardEvent): boolean {
+    return threadsPlatformKind === 'mac'
+      ? e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Backspace'
+      : !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Delete';
+  }
+
+  threadsList.addEventListener('focusin', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLElement && target.matches('.ag-threads-group-btn, .ag-threads-item')) {
+      syncThreadsRoving(target);
+    }
+  });
+
+  threadsList.addEventListener('keydown', (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLElement) || !target.matches('.ag-threads-group-btn, .ag-threads-item')) return;
+    const items = threadNavItems();
+    const index = items.indexOf(target);
+    if (isThreadDeleteKey(e)) {
+      const entry = threadRowTargets.get(target);
+      if (!entry) return;
+      e.preventDefault();
+      void deleteThreadWithConfirm(entry.thread).then((deleted) => {
+        if (!deleted) return;
+        const rest = threadNavItems();
+        rest[Math.min(index, rest.length - 1)]?.focus();
+      });
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    let next: HTMLElement | undefined;
+    if (e.key === 'ArrowDown') next = items[index + 1];
+    else if (e.key === 'ArrowUp') next = items[index - 1];
+    else if (e.key === 'Home') next = items[0];
+    else if (e.key === 'End') next = items[items.length - 1];
+    else return;
+    e.preventDefault();
+    next?.focus();
+  });
+
+  /** 문서 그룹 접힘 상태의 상태 점 — 사용자를 기다리는 빨강, 작업 중, 완료 순이다. */
+  function syncGroupRollup(groupBtn: HTMLElement, group: DocumentThreadGroup, expanded: boolean): void {
+    groupBtn.querySelector('.ag-group-status')?.remove();
+    // 펼친 그룹은 행마다 점이 보이므로 그룹 줄에는 올리지 않는다.
+    if (expanded) return;
+    const statuses = group.threads.map((thread) => getChatStatus(thread.id));
+    const rollup = statuses.includes('needs-input')
+      ? 'needs-input' as const
+      : statuses.includes('working')
+        ? 'working' as const
+        : statuses.includes('finished') ? 'finished' as const : null;
+    if (rollup) groupBtn.append(buildStatusDot(rollup, 'ag-group-status'));
   }
 
   /**
    * 문서별 그룹 목록 — 현재 문서 그룹이 맨 위에 펼쳐져 있고,
    * 다른 문서 그룹은 접힌 채로 최근 활동순으로 이어진다.
-   * 그룹 이름 더블클릭·우클릭 → "이동"·"문서 보관" 메뉴.
+   * 그룹 머리 클릭 → 접기/펼치기, 우클릭 → "이동"·"문서 보관" 메뉴.
    */
   function rebuildThreadsList(): void {
     hideThreadPopover();
+    // 다시 그려도 키보드 포커스는 같은 행에 남는다.
+    const focusedKey = threadNavKey(document.activeElement);
     threadsList.replaceChildren();
     const groups = listThreadsByDocument();
     if (groups.length === 0) {
@@ -5907,85 +6195,71 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     for (const group of groups) {
       const toggleKey = group.documentId ?? group.docKey ?? '';
       const isCurrentDoc = explorerGroupIsCurrent(group, currentDocumentId, currentDocKey, groups);
-      const expanded = docGroupToggles.get(toggleKey) ?? isCurrentDoc;
+      const initiallyExpanded = docGroupToggles.get(toggleKey) ?? isCurrentDoc;
       const canMove = Boolean(group.documentId || group.docKey);
 
       const groupLi = el('li', 'ag-threads-group');
       if (isCurrentDoc) groupLi.classList.add('ag-current-doc');
       const groupBtn = el('button', 'ag-threads-group-btn');
       groupBtn.type = 'button';
-      groupBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      groupBtn.tabIndex = -1;
+      groupBtn.dataset.groupKey = toggleKey;
+      groupBtn.setAttribute('aria-expanded', initiallyExpanded ? 'true' : 'false');
       if (canMove) groupBtn.dataset.libraryDoc = 'true';
-      if (canMove) groupBtn.setAttribute('aria-haspopup', 'menu');
       const paper = createIcon('document', 'ag-threads-group-icon');
-      const name = el('span', 'ag-threads-group-name', docGroupLabel(group.docKey));
-      name.title = docGroupLabel(group.docKey);
+      const name = el('span', 'ag-threads-group-name');
+      setMiddleTruncatedText(name, docGroupLabel(group.docKey));
       groupBtn.append(paper, name);
       if (isCurrentDoc) groupBtn.append(el('span', 'ag-threads-group-badge', '현재'));
-      // 접힌 그룹은 안쪽 행이 안 보이므로 상태를 그룹 줄로 끌어올린다.
-      // 사용자를 기다리는 빨강이 먼저, 그다음 작업 중, 마지막이 완료다.
-      if (!expanded) {
-        const statuses = group.threads.map((thread) => getChatStatus(thread.id));
-        const rollup = statuses.includes('needs-input')
-          ? 'needs-input' as const
-          : statuses.includes('working')
-            ? 'working' as const
-            : statuses.includes('finished') ? 'finished' as const : null;
-        if (rollup) groupBtn.append(buildStatusDot(rollup, 'ag-group-status'));
-      }
+      syncGroupRollup(groupBtn, group, initiallyExpanded);
+
+      const buildRows = (cascade: boolean): HTMLElement[] => group.threads.map((thread, i) => {
+        const row = buildThreadRow(thread);
+        if (!isCurrentDoc) row.classList.add('ag-foreign');
+        if (cascade) {
+          row.classList.add('ag-row-enter');
+          row.style.animationDelay = `${Math.min(i, 8) * 22}ms`;
+        }
+        return row;
+      });
+      let rows: HTMLElement[] = [];
+
+      // 목록 전체를 다시 그리지 않고 이 그룹의 행만 넣고 뺀다 — 포커스와
+      // 스크롤이 그대로 남는다.
       const toggleGroup = (): void => {
-        docGroupToggles.set(toggleKey, !expanded);
+        const expanded = !(docGroupToggles.get(toggleKey) ?? isCurrentDoc);
+        docGroupToggles.set(toggleKey, expanded);
+        hideThreadPopover();
+        groupBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        syncGroupRollup(groupBtn, group, expanded);
+        for (const row of rows) row.remove();
         // 펼칠 때만 행이 차례로 미끄러져 들어온다 — 접을 때는 즉시.
-        threadsCascadeKey = expanded ? null : toggleKey;
-        rebuildThreadsList();
+        rows = expanded ? buildRows(true) : [];
+        groupLi.after(...rows);
+        syncThreadsRoving();
       };
-      const openGroupMenu = (x: number, y: number): void => {
-        showActionMenu(x, y, [{
-          label: '이동',
-          disabled: isCurrentDoc,
-          title: isCurrentDoc ? '이미 이 문서를 보고 있습니다' : '현재 문서를 저장하고 이 문서로 이동합니다',
-          onSelect: () => {
-            persistCurrentThread();
-            moveToLibraryDocument?.({
-              documentId: group.documentId,
-              fileName: group.docKey,
-            });
-          },
-        }, {
-          label: '문서 보관',
-          title: '이 문서의 채팅 기록을 모두 삭제합니다',
-          onSelect: () => void archiveDocumentGroup(group),
-        }]);
-      };
+      groupBtn.addEventListener('click', toggleGroup);
       if (canMove) {
-        // 더블클릭 → 메뉴. 목록이 클릭마다 다시 그려져 dblclick 이벤트가
-        // 원래 버튼에 닿지 못하므로, 접기/펼치기를 판정 시간만큼 미뤄 두고
-        // 그 안에 두 번째 클릭이 오면 토글 대신 메뉴를 연다.
-        let pendingToggle: number | null = null;
-        groupBtn.addEventListener('click', (event) => {
-          if (event.detail === 0) {
-            // 키보드(Enter/Space) 활성화는 지연 없이 바로 토글한다.
-            toggleGroup();
-            return;
-          }
-          if (pendingToggle !== null) {
-            clearTimeout(pendingToggle);
-            pendingToggle = null;
-            openGroupMenu(event.clientX, event.clientY);
-            return;
-          }
-          pendingToggle = window.setTimeout(() => {
-            pendingToggle = null;
-            toggleGroup();
-          }, 250);
-        });
         groupBtn.addEventListener('contextmenu', (event) => {
           event.preventDefault();
           event.stopPropagation();
-          openGroupMenu(event.clientX, event.clientY);
+          void (async () => {
+            const choice = await showContextMenu([
+              { id: 'move', label: '이동', enabled: !isCurrentDoc },
+              { type: 'separator' },
+              { id: 'archive', label: '문서 보관', danger: true },
+            ], contextMenuAnchor(event, groupBtn));
+            if (choice === 'move') {
+              persistCurrentThread();
+              moveToLibraryDocument?.({
+                documentId: group.documentId,
+                fileName: group.docKey,
+              });
+            } else if (choice === 'archive') {
+              void archiveDocumentGroup(group);
+            }
+          })();
         });
-      } else {
-        groupBtn.addEventListener('click', toggleGroup);
       }
       groupLi.appendChild(groupBtn);
       // 문서로 건너뛰기 — 연필과 같은 문법으로 오른쪽에 겹쳐 hover 에서 드러난다.
@@ -5994,6 +6268,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         groupLi.classList.add('ag-has-jump');
         const jump = el('button', 'ag-doc-jump');
         jump.type = 'button';
+        jump.tabIndex = -1;
         jump.setAttribute('aria-label', `${docGroupLabel(group.docKey)} 문서로 이동`);
         jump.title = '현재 문서를 저장하고 이 문서로 이동합니다';
         jump.appendChild(createIcon('external'));
@@ -6009,19 +6284,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       }
       threadsList.appendChild(groupLi);
 
-      if (!expanded) continue;
-      const cascade = threadsCascadeKey === toggleKey;
-      group.threads.forEach((thread, i) => {
-        const row = buildThreadRow(thread);
-        if (!isCurrentDoc) row.classList.add('ag-foreign');
-        if (cascade) {
-          row.classList.add('ag-row-enter');
-          row.style.animationDelay = `${Math.min(i, 8) * 22}ms`;
-        }
-        threadsList.appendChild(row);
-      });
+      if (!initiallyExpanded) continue;
+      rows = buildRows(false);
+      threadsList.append(...rows);
     }
-    threadsCascadeKey = null;
+
+    const restore = focusedKey
+      ? threadNavItems().find((item) => threadNavKey(item) === focusedKey) ?? null
+      : null;
+    syncThreadsRoving(restore);
+    restore?.focus({ preventScroll: true });
   }
 
   function setThreadsPanelOpen(open: boolean): void {
@@ -6298,6 +6570,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   threadsNew.addEventListener('click', () => startNewChat());
   threadsPage.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      // 전체 화면 레일에서는 문서 Esc 핸들러가 모드를 접도록 넘긴다.
+      if (fullscreen && !isCompactWorkspace()) return;
       e.preventDefault();
       if (isCompactWorkspace()) {
         setCompactThreadsRailOpen(false);
@@ -7991,7 +8265,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           number.replaceChildren(createIcon('check'));
           number.setAttribute('aria-label', `${index + 1}단계 완료`);
         } else if (progress?.status === 'in-progress') {
-          const spinner = el('span', 'ag-plan-step-spinner');
+          const spinner = el('span', 'ag-plan-step-spinner ui-spinner');
           spinner.setAttribute('aria-hidden', 'true');
           number.replaceChildren(spinner);
           number.setAttribute('aria-label', `${index + 1}단계 진행 중`);
@@ -8736,6 +9010,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       document.removeEventListener('pointerdown', onCompactDrawerPointerDown);
       document.removeEventListener('focusin', onCompactDrawerFocusIn);
       document.removeEventListener('keydown', onDocKeyDown);
+      window.removeEventListener('keydown', onAgentShortcutKeyDown, true);
+      window.removeEventListener('rhwp:agent-command', onAgentCommand);
+      if (latestPillFrame !== null) window.cancelAnimationFrame(latestPillFrame);
       cancelFsMotionTimers();
       endSidebarResize();
       endColumnResize();

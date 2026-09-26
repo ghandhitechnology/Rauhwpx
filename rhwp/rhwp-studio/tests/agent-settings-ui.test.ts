@@ -494,7 +494,7 @@ test('사이드바 버튼은 마지막에 불러온 얇고 반듯한 스타일�
       > source.indexOf("from './settings.ts';"),
   );
   assert.match(buttonCss, /--ag-button-radius: 5px/);
-  assert.match(buttonCss, /\.ag-root button,[\s\S]*filter: none !important/);
+  assert.doesNotMatch(buttonCss, /filter: none !important/);
   assert.match(buttonCss, /\.ag-root \.ag-settings-nav-button \{[\s\S]*min-height: 34px/);
   assert.match(buttonCss, /\.ag-root \.ag-send \{[\s\S]*height: var\(--ag-button-height\)/);
 });

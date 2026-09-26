@@ -204,7 +204,7 @@
   font: inherit;
   font-size: var(--font-size-base);
   font-weight: 600;
-  cursor: pointer;
+  cursor: default;
   box-shadow: var(--shadow-light);
 }
 
@@ -225,7 +225,7 @@
   color: var(--ui-text-secondary);
   font: inherit;
   font-size: var(--font-size-sm);
-  cursor: pointer;
+  cursor: default;
 }
 
 #document-new-action:hover {

@@ -118,7 +118,6 @@
   font-size: 12px;
   transition: background-color 160ms var(--ag-motion-out), transform 160ms var(--ag-motion-out);
 }
-.ag-plan-actions button:active:not(:disabled) { transform: scale(0.98); }
 .ag-plan-minimize { width: 28px; height: 28px; flex-basis: 28px; }
 .ag-plan-minimize,
 .ag-plan-step-summary,

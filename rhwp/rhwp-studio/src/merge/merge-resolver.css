@@ -83,7 +83,7 @@ html.desktop-mac .merge-resolver-header button {
 .merge-conflict-filters input { min-width: 0; padding: 5px 6px; border: 1px solid var(--merge-border); border-radius: 4px; color: inherit; background: var(--merge-surface); font: inherit; }
 
 .merge-conflict-group { border-bottom: 1px solid var(--merge-border); }
-.merge-conflict-group > summary { padding: 9px 8px; cursor: pointer; font-weight: 650; }
+.merge-conflict-group > summary { padding: 9px 8px; cursor: default; font-weight: 650; }
 .merge-group-actions { display: flex; justify-content: flex-end; gap: 4px; padding: 0 8px 6px; }
 .merge-conflict-item {
   width: 100%;
@@ -96,7 +96,7 @@ html.desktop-mac .merge-resolver-header button {
   color: inherit;
   background: transparent;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 .merge-conflict-item:hover,
 .merge-conflict-item.is-selected { background: color-mix(in srgb, #2563eb 11%, transparent); }
@@ -130,7 +130,7 @@ html.desktop-mac .merge-resolver-header button {
 .merge-value-card h3 { margin: 0; padding: 5px 8px; background: var(--merge-panel); font-size: 11px; }
 .merge-value-card pre { max-height: 125px; margin: 0; padding: 8px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.45 ui-monospace, monospace; }
 .merge-resolution-controls { display: grid; gap: 6px; }
-.merge-resolution-button { padding: 7px 9px; border: 1px solid var(--merge-border); border-radius: 5px; color: inherit; background: var(--merge-surface); text-align: left; cursor: pointer; }
+.merge-resolution-button { padding: 7px 9px; border: 1px solid var(--merge-border); border-radius: 5px; color: inherit; background: var(--merge-surface); text-align: left; cursor: default; }
 .merge-resolution-button:hover,
 .merge-resolution-button.is-selected { border-color: var(--ui-link, #2563eb); background: color-mix(in srgb, #2563eb 10%, transparent); }
 .merge-manual-editor { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--merge-border); }
@@ -178,7 +178,7 @@ html.desktop-mac .merge-resolver-header button {
 .merge-danger-button,
 .merge-small-button,
 .merge-inline-button,
-.merge-icon-button { border: 1px solid var(--merge-border); border-radius: 5px; color: inherit; background: var(--merge-surface); cursor: pointer; }
+.merge-icon-button { border: 1px solid var(--merge-border); border-radius: 5px; color: inherit; background: var(--merge-surface); cursor: default; }
 .merge-primary-button { padding: 8px 13px; border-color: var(--ui-accent, #2563eb); color: var(--ui-accent-text, #fff); background: var(--ui-accent, #2563eb); font-weight: 600; }
 .merge-secondary-button,
 .merge-danger-button { padding: 7px 10px; }
@@ -237,7 +237,7 @@ html.desktop-mac .merge-resolver-header button {
 .merge-resolver-heading h1 { font-size: 16px; }
 .merge-resolver-footer { grid-template-columns: minmax(160px, 1fr) auto auto auto; }
 .merge-options { position: relative; }
-.merge-options > summary, .merge-value-details > summary, .merge-manual-details > summary, .merge-conflict-tools > summary { cursor: pointer; padding: 7px 0; color: var(--merge-muted); }
+.merge-options > summary, .merge-value-details > summary, .merge-manual-details > summary, .merge-conflict-tools > summary { cursor: default; padding: 7px 0; color: var(--merge-muted); }
 .merge-completion-meta { position: absolute; bottom: calc(100% + 14px); right: 0; width: min(310px, calc(100vw - 40px)); display: grid; gap: 12px; padding: 16px; border: 1px solid var(--merge-border); border-radius: 8px; background: var(--merge-surface); box-shadow: 0 8px 30px #0003; z-index: 5; }
 .merge-title-input { min-width: 0; width: 100%; box-sizing: border-box; }
 .merge-value-details, .merge-manual-details { margin-top: 12px; }

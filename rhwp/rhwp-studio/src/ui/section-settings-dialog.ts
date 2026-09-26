@@ -278,7 +278,7 @@ export class SectionSettingsDialog extends ModalDialog {
 
     const lbl = document.createElement('label');
     lbl.className = 'dialog-checkbox';
-    lbl.style.cursor = 'pointer';
+    lbl.style.cursor = 'default';
 
     checkbox.style.margin = '0';
     lbl.appendChild(checkbox);

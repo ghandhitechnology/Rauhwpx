@@ -51,7 +51,7 @@
   border-radius: 4px;
   color: var(--ui-text);
 }
-#icon-toolbar .tb-btn:hover:not(:disabled) { background: var(--ui-hover); }
+#icon-toolbar .tb-btn:hover:not(:disabled) { background: var(--ui-hover-quiet, var(--ui-hover)); }
 #icon-toolbar .tb-btn:active:not(:disabled) { background: var(--ui-active); box-shadow: none; }
 #icon-toolbar .tb-btn:is(.active, [aria-pressed='true']) { background: var(--ui-selected); border-color: var(--ribbon-selected-edge); }
 #icon-toolbar .tb-btn:disabled { opacity: .38; }
@@ -182,7 +182,7 @@
   font: 13px/18px var(--font-family-ui);
   text-align: left;
   white-space: nowrap;
-  cursor: pointer;
+  cursor: default;
 }
 .tb-table-menu-item:hover:not(:disabled),
 .tb-table-menu-item:focus-visible { background: var(--ui-hover); }
@@ -374,7 +374,7 @@
   }
 }
 
-/* 리본 반응: 짧은 전환, 큰 아이콘 들림, 켜진 명령은 강조색으로 표시한다. */
+/* 리본 반응: 짧은 전환, 켜진 명령은 강조색으로 표시한다. */
 #icon-toolbar .tb-btn {
   transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
 }
@@ -382,8 +382,6 @@
 #icon-toolbar .tb-btn .tb-chev {
   transition: transform 160ms cubic-bezier(.2, .8, .3, 1);
 }
-#icon-toolbar .tb-lg:hover:not(:disabled) > .tb-ico { transform: translateY(-1px); }
-#icon-toolbar .tb-btn:active:not(:disabled) > .tb-ico { transform: scale(.94); transition-duration: 60ms; }
 #icon-toolbar .tb-btn:focus-visible {
   outline: 2px solid var(--ribbon-accent);
   outline-offset: -2px;
@@ -399,6 +397,4 @@
 @media (prefers-reduced-motion: reduce) {
   #icon-toolbar .tb-btn,
   #icon-toolbar .tb-btn :is(.tb-ico, .tb-chev) { transition: none; }
-  #icon-toolbar .tb-lg:hover:not(:disabled) > .tb-ico,
-  #icon-toolbar .tb-btn:active:not(:disabled) > .tb-ico { transform: none; }
 }

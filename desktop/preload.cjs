@@ -122,6 +122,23 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
     ipcRenderer.on('desktop:close-requested', (_event, request) => callback(request));
   },
   platform: process.platform,
+  setDocumentState: (state) => {
+    ipcRenderer.send('desktop:set-document-state', { edited: state?.edited === true });
+  },
+  notifyAgentTurnFinished: (payload) => {
+    ipcRenderer.send('desktop:agent-turn-finished', {
+      title: String(payload?.title ?? ''),
+      body: String(payload?.body ?? ''),
+    });
+  },
+  setPendingReviewCount: (count) => {
+    ipcRenderer.send('desktop:set-pending-review-count', Number(count) || 0);
+  },
+  showContextMenu: (items) => ipcRenderer.invoke('desktop:show-context-menu', items),
+  showUnsavedChangesSheet: (payload) => ipcRenderer.invoke(
+    'desktop:show-unsaved-changes-sheet',
+    { fileName: String(payload?.fileName ?? '') },
+  ),
   isFullScreen: () => ipcRenderer.invoke('window:is-fullscreen'),
   onFullScreenChange: (callback) => {
     ipcRenderer.on('window:fullscreen-changed', (_event, fullscreen) => {
@@ -145,5 +162,20 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
     ipcRenderer.on('desktop:paste-plain-text', (_event, text) => {
       callback(typeof text === 'string' ? text : '');
     });
+  },
+  setAppMenuModel: (model) => ipcRenderer.send('desktop:set-app-menu-model', model),
+  onMenuCommand: (callback) => {
+    const listener = (_event, payload) => {
+      if (typeof payload?.commandId === 'string') callback(payload.commandId);
+    };
+    ipcRenderer.on('desktop:menu-command', listener);
+    return () => ipcRenderer.removeListener('desktop:menu-command', listener);
+  },
+  onAgentCommand: (callback) => {
+    const listener = (_event, payload) => {
+      if (typeof payload?.command === 'string') callback(payload.command);
+    };
+    ipcRenderer.on('desktop:agent-command', listener);
+    return () => ipcRenderer.removeListener('desktop:agent-command', listener);
   },
 });

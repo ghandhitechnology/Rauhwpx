@@ -67,7 +67,7 @@
   font: inherit;
   font-size: var(--font-size-sm, 11px);
   font-weight: 650;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-workspace-cloud-btn:hover,
@@ -119,7 +119,7 @@
   border-radius: var(--ag-r-chip);
   background: transparent;
   color: var(--ag-text-muted);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-cloud-panel-settings:hover,
@@ -364,7 +364,7 @@
   color: var(--ag-text-secondary);
   font: inherit;
   font-size: var(--font-size-sm, 11px);
-  cursor: pointer;
+  cursor: default;
   white-space: nowrap;
 }
 
@@ -480,7 +480,7 @@
   color: inherit;
   font: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   font-weight: 650;
   line-height: 1.5;
   word-break: keep-all;
@@ -524,7 +524,7 @@
   font-size: var(--font-size-sm, 11px);
   font-weight: 650;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-restored-task-heading > span:nth-child(2) {
@@ -609,7 +609,7 @@
   }
 }
 
-.ag-cloud-merge-button { border: 1px solid var(--ag-border); border-radius: 7px; padding: 6px 10px; background: var(--ag-accent, #2563eb); color: white; font: inherit; font-size: 12px; cursor: pointer; }
+.ag-cloud-merge-button { border: 1px solid var(--ag-border); border-radius: 7px; padding: 6px 10px; background: var(--ag-accent, #2563eb); color: white; font: inherit; font-size: 12px; cursor: default; }
 .ag-cloud-merge-button[hidden] { display: none; }
 .ag-cloud-merge-button:disabled { opacity: .55; cursor: default; }
 
@@ -638,7 +638,7 @@
   font-size: 11px;
 }
 .ag-cloud-more-actions { flex-basis: 100%; width: 100%; }
-.ag-cloud-more-actions > summary { width: fit-content; padding: 8px 0; color: var(--ag-text-secondary); cursor: pointer; font-size: 11px; }
+.ag-cloud-more-actions > summary { width: fit-content; padding: 8px 0; color: var(--ag-text-secondary); cursor: default; font-size: 11px; }
 .ag-cloud-more-actions > summary:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
 .ag-cloud-more-actions[open] { display: flex; flex-wrap: wrap; gap: 6px; }
 .ag-cloud-more-actions[open] > summary { width: 100%; }

@@ -32,7 +32,7 @@ body:not(.ag-sidebar-open) .ag-inline-box {
   font-family: var(--font-family-ui);
   font-size: 11px;
   line-height: 1.4;
-  cursor: pointer;
+  cursor: default;
   box-shadow: var(--shadow-light, 0 2px 8px rgba(0, 0, 0, 0.12));
   animation: ag-inline-in 140ms ease-out;
 }
@@ -126,7 +126,7 @@ body:not(.ag-sidebar-open) .ag-inline-box {
   color: inherit;
   font: inherit;
   line-height: 12px;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-inline-selection-item button:hover {
@@ -153,7 +153,7 @@ body:not(.ag-sidebar-open) .ag-inline-box {
   color: var(--ui-text-secondary);
   font-family: var(--font-family-ui);
   font-size: 11px;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-inline-permission:hover {
@@ -190,7 +190,7 @@ body:not(.ag-sidebar-open) .ag-inline-box {
   font-family: var(--font-family-ui);
   font-size: 11px;
   font-weight: 600;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-inline-send:disabled {

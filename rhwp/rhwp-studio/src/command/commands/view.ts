@@ -39,20 +39,30 @@ function themeModeCommand(mode: ThemeMode, label: string): CommandDef {
   };
 }
 
+/**
+ * 토글 커맨드의 켜짐 상태를 모든 진입점에 반영한다.
+ * 메뉴 항목은 체크 칸에 체크 표시(menuitemcheckbox), 도구 모음 버튼은 눌린 상태로 그린다.
+ */
+function syncToggleCommand(cmdId: string, on: boolean): void {
+  document.querySelectorAll(`[data-cmd="${cmdId}"]`).forEach(el => {
+    el.classList.toggle('active', on);
+    if (el.classList.contains('md-item')) {
+      el.setAttribute('role', 'menuitemcheckbox');
+      el.setAttribute('aria-checked', String(on));
+    }
+  });
+}
+
 export function syncTextMarkMenu(showControlCodes: boolean, showParagraphMarks: boolean): void {
-  document.querySelectorAll('[data-cmd="view:ctrl-mark"]').forEach(el => {
-    el.classList.toggle('active', showControlCodes);
-  });
-  document.querySelectorAll('[data-cmd="view:para-mark"]').forEach(el => {
-    el.classList.toggle('active', showParagraphMarks);
-  });
+  syncToggleCommand('view:ctrl-mark', showControlCodes);
+  syncToggleCommand('view:para-mark', showParagraphMarks);
 }
 
 /** 기본 도구 상자(#icon-toolbar) 접힘 UI를 메뉴/서식바 토글과 동기화한다. */
 export function syncBasicToolboxUi(expanded: boolean): void {
+  syncToggleCommand('view:toolbox-basic', expanded);
   document.querySelectorAll('[data-cmd="view:toolbox-basic"]').forEach((btn) => {
-    btn.classList.toggle('active', expanded);
-    if (!(btn instanceof HTMLElement)) return;
+    if (!(btn instanceof HTMLElement) || btn.classList.contains('md-item')) return;
     btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
     if (btn.classList.contains('sb-collapse-btn')) {
       btn.title = expanded ? '기본 도구 상자 접기' : '기본 도구 상자 펼치기';
@@ -83,9 +93,7 @@ let clipEnabled = !userSettings.getViewSettings().clipView;
  */
 export function syncClipMenu(enabled: boolean): void {
   clipEnabled = enabled;
-  document.querySelectorAll('[data-cmd="view:toggle-clip"]').forEach(el => {
-    el.classList.toggle('active', !enabled);
-  });
+  syncToggleCommand('view:toggle-clip', !enabled);
 }
 
 function refreshCaretAfterViewChange(services: Parameters<CommandDef['execute']>[0]): void {
@@ -280,9 +288,7 @@ export const viewCommands: CommandDef[] = [
       // WASM 실제 상태를 읽어 토글 — 셀 진입 자동 ON 등으로 인한 초기값 불일치 방지
       const next = !services.wasm.getShowTransparentBorders();
       services.wasm.setShowTransparentBorders(next);
-      document.querySelectorAll('[data-cmd="view:border-transparent"]').forEach(el => {
-        el.classList.toggle('active', next);
-      });
+      syncToggleCommand('view:border-transparent', next);
       services.eventBus.emit('transparent-borders-changed', next);
       services.eventBus.emit('document-view-changed');
     },
@@ -306,9 +312,7 @@ export const viewCommands: CommandDef[] = [
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       const next = toggleGridVisibility();
-      document.querySelectorAll('[data-cmd="view:toggle-grid"]').forEach(el => {
-        el.classList.toggle('active', next.visible);
-      });
+      syncToggleCommand('view:toggle-grid', next.visible);
       services.eventBus.emit('grid-view-changed', next);
     },
   },
@@ -327,9 +331,7 @@ export const viewCommands: CommandDef[] = [
         (settings, moveStepMm) => {
           const next = setGridViewSettings(settings);
           ih?.setGridStep(moveStepMm);
-          document.querySelectorAll('[data-cmd="view:toggle-grid"]').forEach(el => {
-            el.classList.toggle('active', next.visible);
-          });
+          syncToggleCommand('view:toggle-grid', next.visible);
           services.eventBus.emit('grid-view-changed', next);
         },
       ).show();
@@ -358,9 +360,7 @@ export const viewCommands: CommandDef[] = [
         if (visible === null) visible = getComputedStyle(el).display !== 'none';
         visible = !visible;
         el.style.display = visible ? '' : 'none';
-        document.querySelectorAll('[data-cmd="view:toolbox-format"]').forEach(btn => {
-          btn.classList.toggle('active', visible!);
-        });
+        syncToggleCommand('view:toolbox-format', visible);
       },
     } satisfies CommandDef;
   })(),

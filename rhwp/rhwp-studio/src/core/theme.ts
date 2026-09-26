@@ -35,9 +35,29 @@ export function getEffectiveTheme(mode: ThemeMode = getThemeMode()): EffectiveTh
   return prefersDark() ? 'dark' : 'light';
 }
 
+let switchFrame = 0;
+
+/**
+ * 테마가 실제로 바뀌는 순간 한 프레임 동안 전환을 끈다(html.theme-switching).
+ * 면마다 다른 transition 시간으로 색이 번지지 않고 한 번에 바뀐다.
+ * 첫 프레임에 새 색이 칠해진 뒤 다음 프레임에 클래스를 뗀다.
+ */
+function suppressTransitionsForSwitch(root: HTMLElement): void {
+  root.classList.add('theme-switching');
+  cancelAnimationFrame(switchFrame);
+  switchFrame = requestAnimationFrame(() => {
+    switchFrame = requestAnimationFrame(() => {
+      switchFrame = 0;
+      root.classList.remove('theme-switching');
+    });
+  });
+}
+
 export function applyTheme(mode: ThemeMode = getThemeMode()): EffectiveTheme {
   const effective = getEffectiveTheme(mode);
   const root = document.documentElement;
+  const previous = root.dataset.themeEffective;
+  if (previous && previous !== effective) suppressTransitionsForSwitch(root);
   root.dataset.themeMode = mode;
   root.dataset.themeEffective = effective;
   syncBrowserColorScheme(root, effective);

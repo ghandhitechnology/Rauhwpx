@@ -41,13 +41,13 @@
   height: 16px;
   border: none;
   background: none;
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-lg);
   color: var(--color-text-muted);
   line-height: 16px;
   text-align: center;
   padding: 0;
-  cursor: pointer;
+  cursor: default;
 }
 
 .dialog-close:hover {
@@ -185,7 +185,7 @@
   display: flex;
   align-items: center;
   gap: 3px;
-  cursor: pointer;
+  cursor: default;
 }
 
 .dialog-radio-group input[type="radio"] {
@@ -209,7 +209,7 @@
   color: var(--color-text);
   color-scheme: inherit;
   font-size: var(--font-size-base);
-  cursor: pointer;
+  cursor: default;
   padding: 0 12px;
 }
 
@@ -344,7 +344,7 @@
   color: var(--color-primary-dark);
   color-scheme: inherit;
   font-size: var(--font-size-base);
-  cursor: pointer;
+  cursor: default;
 }
 
 .page-border-side-btn:hover {
@@ -385,7 +385,7 @@
   padding: 6px 8px;
   border: 1.5px solid var(--ui-border-subtle);
   border-radius: 3px;
-  cursor: pointer;
+  cursor: default;
   background: var(--color-surface);
   min-width: 52px;
 }
@@ -770,15 +770,19 @@
 /* ================================================================
    컨텍스트 메뉴 (우클릭)
    ================================================================ */
+/* 행·강조·체크 표시는 editor-shell.css 의 메뉴 행 규칙을 드롭다운과 함께 쓴다. */
 .context-menu {
   position: fixed;
   min-width: 200px;
+  box-sizing: border-box;
   background: var(--color-surface);
-  border: 1px solid var(--ui-border);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--radius-lg, 8px);
   box-shadow: var(--shadow-dropdown);
   z-index: 20000;
-  padding: 4px 0;
+  padding: 5px;
   font-size: var(--font-size-base);
+  outline: none;
 }
 
 /* ================================================================
@@ -795,7 +799,7 @@
 .dialog-tab {
   padding: 5px 14px;
   font-size: var(--font-size-sm);
-  cursor: pointer;
+  cursor: default;
   border: 1px solid transparent;
   border-bottom: none;
   background: transparent;
@@ -831,7 +835,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  cursor: pointer;
+  cursor: default;
 }
 
 .dialog-checkbox input[type="checkbox"] {
@@ -852,7 +856,7 @@
   background: var(--color-surface);
   color: var(--color-text);
   color-scheme: inherit;
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-sm);
   padding: 0 6px;
 }
@@ -956,7 +960,7 @@
   background: var(--color-accent-bg);
   color: var(--color-text);
   color-scheme: inherit;
-  cursor: pointer;
+  cursor: default;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.5px;
@@ -977,7 +981,7 @@
   border-bottom: none;
   border-radius: 3px 3px 0 0;
   background: none;
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
 }
@@ -1011,7 +1015,7 @@
   background: var(--color-surface);
   color: var(--color-text);
   color-scheme: inherit;
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-base);
   line-height: 24px;
 }
@@ -1061,7 +1065,7 @@
   border: none;
   background: none;
   color: var(--color-text);
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-sm);
   text-align: left;
 }
@@ -1075,7 +1079,7 @@
 }
 .eq-sr-name {
   color: var(--color-text-secondary);
-  font-family: 'Consolas', monospace;
+  font-family: var(--font-family-mono);
   font-size: 11px;
 }
 /* LaTeX 전환 힌트 */
@@ -1131,7 +1135,7 @@
   color: var(--color-text);
   caret-color: var(--caret-color);
   color-scheme: inherit;
-  font-family: 'Consolas', 'Courier New', monospace;
+  font-family: var(--font-family-mono);
   font-size: var(--font-size-md);
   resize: vertical;
   box-sizing: border-box;
@@ -1159,7 +1163,7 @@
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-sm);
 }
 .eq-ac-item:hover,
@@ -1172,7 +1176,7 @@
   text-align: center;
 }
 .eq-ac-name {
-  font-family: 'Consolas', monospace;
+  font-family: var(--font-family-mono);
   font-size: 12px;
 }
 .eq-ac-group {
@@ -1192,7 +1196,7 @@
   padding: 0;
   border: 1px solid var(--color-border-dark);
   border-radius: var(--radius-sm);
-  cursor: pointer;
+  cursor: default;
 }
 
 /* ─── 누름틀 고치기 대화상자 ─── */
@@ -1249,7 +1253,7 @@
   font-size: var(--font-size-base);
   color: var(--color-text);
   margin-top: 4px;
-  cursor: pointer;
+  cursor: default;
 }
 
 /* ─── 찾아가기 대화상자 ─── */
@@ -1262,7 +1266,7 @@
 .goto-tab-btn {
   padding: 4px 14px;
   font-size: var(--font-size-sm);
-  cursor: pointer;
+  cursor: default;
   border: 1px solid transparent;
   border-bottom: none;
   background: transparent;
@@ -1286,7 +1290,7 @@
 .goto-bookmark-item {
   padding: 4px 8px;
   font-size: var(--font-size-sm);
-  cursor: pointer;
+  cursor: default;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1300,7 +1304,7 @@
 .formula-dialog-body { padding: 12px 16px; }
 .formula-row { display: flex; align-items: center; margin-bottom: 10px; gap: 8px; }
 .formula-row label { min-width: 90px; font-size: var(--font-size-md); color: var(--color-text); white-space: nowrap; }
-.formula-input { flex: 1; padding: 6px 8px; border: 1px solid var(--ui-border-light); border-radius: 3px; font-family: Consolas, monospace; font-size: var(--font-size-md); background: var(--color-surface); color: var(--color-text); caret-color: var(--caret-color); color-scheme: inherit; }
+.formula-input { flex: 1; padding: 6px 8px; border: 1px solid var(--ui-border-light); border-radius: 3px; font-family: var(--font-family-mono); font-size: var(--font-size-md); background: var(--color-surface); color: var(--color-text); caret-color: var(--caret-color); color-scheme: inherit; }
 .formula-input:focus { border-color: var(--color-focus-border); outline: none; box-shadow: 0 0 0 2px var(--ui-focus-soft); }
 .formula-select { flex: 1; padding: 5px 8px; border: 1px solid var(--ui-border-light); border-radius: 3px; font-size: var(--font-size-md); background: var(--color-surface); color: var(--color-text); color-scheme: inherit; }
 
@@ -1341,3 +1345,88 @@
 /* 계산식 오류 표시 */
 .formula-error { margin-top: 8px; padding: 8px 12px; background: var(--ui-warning-bg); border: 1px solid var(--ui-warning-border); border-radius: 4px; color: var(--ui-warning-text); font-size: var(--font-size-base); }
 .formula-input-error { border-color: var(--ui-danger-strong) !important; box-shadow: 0 0 0 2px var(--ui-danger-soft) !important; }
+
+/* ================================================================
+   시트 — 확인·경고류 대화상자
+   타이틀바 바로 아래에서 내려오고, 버튼은 오른쪽 아래에 기본 동작이 맨 끝이다.
+   ================================================================ */
+.modal-overlay.modal-overlay--sheet {
+  align-items: flex-start;
+  padding: calc(var(--desktop-titlebar-height, 32px) + 6px) 16px 16px;
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+:root[data-theme-effective='dark'] .modal-overlay.modal-overlay--sheet {
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.modal-overlay.modal-overlay--sheet > .dialog-wrap.dialog-sheet {
+  max-width: 100%;
+  max-height: calc(100dvh - var(--desktop-titlebar-height, 32px) - 22px);
+  border-color: var(--ui-border-strong);
+  border-radius: 12px;
+  animation: dialog-sheet-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.modal-overlay.modal-overlay--sheet > .dialog-wrap.dialog-sheet > .dialog-title {
+  min-height: 0;
+  padding: 18px 20px 0;
+  border-bottom: 0;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: default;
+}
+
+.modal-overlay.modal-overlay--sheet > .dialog-wrap.dialog-sheet > .dialog-body {
+  padding: 6px 20px 18px;
+}
+
+.dialog-sheet-message {
+  color: var(--ui-text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.modal-overlay.modal-overlay--sheet > .dialog-wrap.dialog-sheet > .dialog-footer {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 20px 18px;
+  border-top: 0;
+  background: transparent;
+}
+
+.modal-overlay.modal-overlay--sheet > .dialog-wrap.dialog-sheet .dialog-btn {
+  min-width: 72px;
+  height: 28px;
+  padding: 0 14px;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.modal-overlay.modal-overlay--sheet > .dialog-wrap.dialog-sheet .dialog-btn-primary {
+  border-color: var(--accent-primary);
+  background: var(--accent-primary);
+  color: var(--n-on-accent, #fff);
+}
+
+.modal-overlay.modal-overlay--sheet > .dialog-wrap.dialog-sheet .dialog-btn-primary:hover:not(:disabled) {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+}
+
+.modal-overlay.modal-overlay--sheet > .dialog-wrap.dialog-sheet .dialog-btn:disabled {
+  opacity: 0.45;
+}
+
+@keyframes dialog-sheet-in {
+  from { opacity: 0; transform: translateY(-8px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal-overlay.modal-overlay--sheet > .dialog-wrap.dialog-sheet { animation: none; }
+}

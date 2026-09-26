@@ -24,7 +24,6 @@
 .dialog-hyperlink-preview { min-width: 30px; width: 30px; padding: 0; flex: 0 0 30px; display: grid; place-items: center; color: var(--color-primary); }
 .dialog-hyperlink-preview:disabled { color: var(--color-text-muted); opacity: .5; cursor: default; }
 .dialog-hyperlink #hyperlink-error { min-height: 1em; margin: 12px 0 0; color: var(--ui-danger); }
-.dialog-hyperlink-confirm-body { white-space: pre-line; padding: 28px 24px !important; line-height: 1.65; }
 @media (max-width: 520px) {
   .dialog-wrap.dialog-hyperlink { display: block; }
   .dialog-hyperlink > .dialog-footer { flex-direction: row; justify-content: flex-end; padding: 0 16px 16px; }

@@ -60,7 +60,7 @@
   border-radius: 7px;
   background: transparent;
   color: inherit;
-  cursor: pointer;
+  cursor: default;
   font: inherit;
   text-align: left;
 }

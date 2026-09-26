@@ -118,7 +118,7 @@ export class TableCreateDialog {
     const gridW = GRID_COLS * (CELL_SIZE + CELL_GAP) - CELL_GAP;
     const gridH = GRID_ROWS * (CELL_SIZE + CELL_GAP) - CELL_GAP;
     grid.style.cssText =
-      `position:relative;width:${gridW}px;height:${gridH}px;cursor:pointer;`;
+      `position:relative;width:${gridW}px;height:${gridH}px;cursor:default;`;
 
     this.cells = [];
     for (let r = 0; r < GRID_ROWS; r++) {

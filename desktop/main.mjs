@@ -9,7 +9,6 @@ import {
   autoUpdater as nativeAutoUpdater,
   BrowserWindow,
   Menu,
-  clipboard,
   dialog,
   ipcMain,
   nativeTheme,
@@ -18,6 +17,7 @@ import {
   powerMonitor,
   protocol,
   safeStorage,
+  screen,
   session as electronSession,
   shell,
 } from 'electron';
@@ -77,8 +77,15 @@ import { collectProviderAuth } from './provider-auth.mjs';
 import { applyCloudRecovery } from './cloud-result.mjs';
 import { isNewerStableVersion, selectDebAsset } from './update-policy.mjs';
 import { createUpdateLifecycle, completeWindowClose } from './update-lifecycle.mjs';
-import { documentEditMenuItem } from './edit-menu.mjs';
-import { deliverPlainTextPaste } from './plain-text-paste.mjs';
+import { installAppMenu } from './app-menu.mjs';
+import {
+  AgentAttention,
+  WindowFrameStore,
+  applyDocumentState,
+  installTextContextMenu,
+  popupContextMenu,
+  showUnsavedChangesSheet,
+} from './native-shell.mjs';
 import {
   hasPendingLaunchCleanupSync,
   retainLaunchRootForProcessCleanupSync,
@@ -515,6 +522,24 @@ const nativeBookmarkWriter = new SerializedStateWriter({
   onError: (error) => console.warn('[rauhwpx] native bookmark persist failed:', error),
 });
 
+const windowFrames = new WindowFrameStore({
+  filePath: join(app.getPath('userData'), 'window-frame.json'),
+  screen,
+  writeAtomically: writeNativeFileAtomically,
+});
+const agentAttention = new AgentAttention({ app, Notification: ElectronNotification });
+
+/** 열거나 저장한 네이티브 파일을 Dock·최근 사용 메뉴에 올린다. */
+function noteRecentDocument(sessionId, handleId) {
+  if (process.platform !== 'darwin' && process.platform !== 'win32') return;
+  try {
+    const filePath = nativeFiles.sourcePathForSender(sessionId, handleId);
+    if (filePath) app.addRecentDocument(filePath);
+  } catch (error) {
+    console.warn('[rauhwpx] recent document update failed:', error);
+  }
+}
+
 function normalizeCloudScope(payload = {}) {
   const threadId = typeof payload.threadId === 'string' && payload.threadId.length <= 256
     ? payload.threadId
@@ -859,88 +884,24 @@ async function checkForAppUpdates({ manual = true } = {}) {
 }
 
 function installMenu() {
-  const isMac = process.platform === 'darwin';
-  const checkForUpdates = {
-    label: 'Check for Updates…',
-    click: () => {
+  installAppMenu({
+    checkForUpdates: () => {
       if (!app.isPackaged) {
         void shell.openExternal(RELEASES_URL);
         return;
       }
       void checkForAppUpdates();
     },
-  };
-  const newWindow = {
-    label: 'New Window',
-    accelerator: 'CmdOrCtrl+Shift+N',
-    click: () => queueLaunch(launchRequest({ source: 'new-window' })),
-  };
-  const pasteWithoutFormatting = {
-    id: 'edit-paste-without-formatting',
-    label: 'Paste Without Formatting',
-    accelerator: 'CmdOrCtrl+Shift+V',
-    click: (_menuItem, browserWindow) => {
-      deliverPlainTextPaste(
-        browserWindow ?? BrowserWindow.getFocusedWindow(),
-        () => clipboard.readText(),
-      );
+    openNewWindow: () => queueLaunch(launchRequest({ source: 'new-window' })),
+    isTrustedSender: (event) => {
+      try {
+        sessionForEvent(event);
+        return true;
+      } catch {
+        return false;
+      }
     },
-  };
-  // The stock window menu binds CmdOrCtrl+M to Minimize, which swallows the
-  // editor's Cmd+M chord (equations, footnotes, text colors).
-  const minimizeWindow = {
-    label: 'Minimize',
-    click: (_menuItem, browserWindow) => browserWindow?.minimize(),
-  };
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    ...(isMac ? [{
-      label: 'Rauhwpx',
-      submenu: [
-        { role: 'about' },
-        { type: 'separator' },
-        checkForUpdates,
-        { type: 'separator' },
-        { role: 'hide' },
-        { role: 'hideOthers' },
-        { role: 'unhide' },
-        { type: 'separator' },
-        { role: 'quit' },
-      ],
-    }] : []),
-    {
-      label: 'File',
-      submenu: [
-        newWindow,
-        { type: 'separator' },
-        ...(!isMac ? [checkForUpdates, { type: 'separator' }] : []),
-        { role: isMac ? 'close' : 'quit' },
-      ],
-    },
-    {
-      label: 'Edit',
-      submenu: [
-        documentEditMenuItem('undo', 'Undo', 'CmdOrCtrl+Z'),
-        documentEditMenuItem('redo', 'Redo', isMac ? 'Cmd+Shift+Z' : 'Ctrl+Y'),
-        { type: 'separator' },
-        { role: 'cut' },
-        { role: 'copy' },
-        { role: 'paste' },
-        pasteWithoutFormatting,
-        documentEditMenuItem('delete', 'Delete'),
-        { type: 'separator' },
-        documentEditMenuItem('select-all', 'Select All', 'CmdOrCtrl+A'),
-      ],
-    },
-    { role: 'viewMenu' },
-    {
-      label: 'Window',
-      role: 'window',
-      submenu: isMac
-        ? [minimizeWindow, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
-        : [minimizeWindow, { role: 'close' }],
-    },
-    ...(isMac ? [] : [{ role: 'help', submenu: [{ role: 'about' }] }]),
-  ]));
+  });
 }
 
 function cascadedWindowPosition() {
@@ -956,11 +917,13 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
   if (!closeHubContext) throw new Error('Agent hub context is unavailable');
   const backgroundColor = nativeTheme.shouldUseDarkColors ? '#141416' : '#f5f5f7';
   const isMac = process.platform === 'darwin';
+  // 실행 후 첫 창만 지난 프레임을 되살리고, 이후 창은 28px 계단식으로 연다.
+  const restoredFrame = sessions.windows().length === 0
+    ? windowFrames.takeInitialFrame({ minWidth: 900, minHeight: 640 })
+    : null;
   const window = new BrowserWindow({
-    ...cascadedWindowPosition(),
+    ...(restoredFrame ? restoredFrame.bounds : { ...cascadedWindowPosition(), width: 1440, height: 920 }),
     title: 'Rauhwpx',
-    width: 1440,
-    height: 920,
     minWidth: 900,
     minHeight: 640,
     show: false,
@@ -977,6 +940,9 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
       sandbox: true,
     },
   });
+  const windowId = window.id;
+  windowFrames.track(window);
+  installTextContextMenu({ Menu, webContents: window.webContents, window, isMac });
   const displayOwnerId = window.webContents.id;
   const closeDisplayConnection = () => {
     void cloudDisplayConnections.close(displayOwnerId);
@@ -1014,6 +980,7 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
       pending.reject(new Error('Cloud edit window closed before saving'));
     }
     closeDisplayConnection();
+    agentAttention.forget(windowId);
     documentLeases.releaseSession(session.sessionId);
     nativeFiles.releaseSession(session.sessionId);
     sessions.removeWindow(window);
@@ -1040,6 +1007,7 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
         return null;
       }
       launchFiles.push(result.descriptor);
+      noteRecentDocument(session.sessionId, result.descriptor.handleId);
     }
   } catch (error) {
     window.destroy();
@@ -1081,7 +1049,9 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
     }
   });
   window.once('ready-to-show', () => {
-    if (!window.isDestroyed()) window.show();
+    if (window.isDestroyed()) return;
+    if (restoredFrame?.zoomed) window.maximize();
+    window.show();
   });
   await window.loadURL(devUrl || STUDIO_URL);
   if (!window.isDestroyed() && !window.isVisible()) window.show();
@@ -1190,6 +1160,7 @@ ipcMain.handle('desktop:pick-native-open-file', async (event, options = {}) => {
     sessions.focusSession(result.ownerSessionId);
     return { owned: true };
   }
+  noteRecentDocument(session.sessionId, result.descriptor.handleId);
   return { ...result.descriptor, saveTargetCreated: result.created };
 });
 ipcMain.handle('desktop:pick-legacy-history-folder', async (event) => {
@@ -1223,6 +1194,7 @@ ipcMain.handle('desktop:claim-native-dropped-file', async (event, filePath) => {
     sessions.focusSession(result.ownerSessionId);
     return { owned: true };
   }
+  noteRecentDocument(session.sessionId, result.descriptor.handleId);
   return { ...result.descriptor, saveTargetCreated: result.created };
 });
 ipcMain.handle('desktop:pick-native-save-file', async (event, options = {}) => {
@@ -1271,9 +1243,11 @@ ipcMain.handle('desktop:native-file-validate-save', (event, handleId, identity) 
   const session = sessionForEvent(event);
   return nativeFiles.validateSave(session.sessionId, handleId, identity, documentLeases);
 });
-ipcMain.handle('desktop:native-file-write', (event, handleId, bytes, identity) => {
+ipcMain.handle('desktop:native-file-write', async (event, handleId, bytes, identity) => {
   const session = sessionForEvent(event);
-  return nativeFiles.write(session.sessionId, handleId, bytes, identity, documentLeases);
+  const written = await nativeFiles.write(session.sessionId, handleId, bytes, identity, documentLeases);
+  noteRecentDocument(session.sessionId, handleId);
+  return written;
 });
 ipcMain.handle('desktop:native-file-is-same', (event, firstHandleId, secondHandleId) => {
   const session = sessionForEvent(event);
@@ -1295,6 +1269,7 @@ ipcMain.handle('desktop:reopen-native-document', async (event, documentId) => {
     sessions.focusSession(result.ownerSessionId);
     return { owned: true };
   }
+  noteRecentDocument(session.sessionId, result.descriptor.handleId);
   return { ...result.descriptor, saveTargetCreated: result.created };
 });
 ipcMain.handle('desktop:search-nearby-native-document', async (event, documentId, options = {}) => {
@@ -1758,6 +1733,35 @@ ipcMain.handle('cloud:resolve-result', async (event, payload = {}) => {
   });
 });
 ipcMain.handle('window:is-fullscreen', (event) => sessionForEvent(event).window.isFullScreen());
+ipcMain.on('desktop:set-document-state', (event, state) => {
+  try {
+    applyDocumentState(sessionForEvent(event).window, { edited: state?.edited === true });
+  } catch (error) {
+    console.warn('[rauhwpx] document state update failed:', error);
+  }
+});
+ipcMain.on('desktop:set-pending-review-count', (event, count) => {
+  try {
+    agentAttention.setPendingCount(sessionForEvent(event).window.id, count);
+  } catch (error) {
+    console.warn('[rauhwpx] pending review badge update failed:', error);
+  }
+});
+ipcMain.on('desktop:agent-turn-finished', (event, payload) => {
+  try {
+    agentAttention.turnFinished(sessionForEvent(event).window, payload ?? {});
+  } catch (error) {
+    console.warn('[rauhwpx] agent turn notification failed:', error);
+  }
+});
+ipcMain.handle('desktop:show-context-menu', (event, items) => {
+  const window = sessionForEvent(event).window;
+  return popupContextMenu({ Menu, window, items });
+});
+ipcMain.handle('desktop:show-unsaved-changes-sheet', (event, payload) => {
+  const window = sessionForEvent(event).window;
+  return showUnsavedChangesSheet({ dialog, window, fileName: payload?.fileName });
+});
 ipcMain.handle('desktop:close-response', async (event, requestId, allowClose) => {
   const session = sessionForEvent(event);
   if (session.pendingCloseRequestId !== requestId) return false;
@@ -1906,6 +1910,7 @@ if (!hasSingleInstanceLock) {
     });
     configureAutoUpdater();
     await loadNativeBookmarks();
+    await windowFrames.load();
     installMenu();
     if (!devUrl) installStudioProtocol({ protocol, net, root: studioDist() });
     await hubOwner.ensure();

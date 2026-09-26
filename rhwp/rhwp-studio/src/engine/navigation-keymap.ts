@@ -109,8 +109,29 @@ export function formatShortcutLabel(
   platform: PlatformKind = detectPlatformKind(),
 ): string {
   if (platform !== 'mac') return label;
-  return label
-    .replace(/\bCtrl\+/g, '⌘')
-    .replace(/\bAlt\+/g, '⌥')
-    .replace(/\bShift\+/g, '⇧');
+  // 연속 입력(Ctrl+M,K)은 조각마다 앞쪽 modifier만 떼어 Apple 순서(⌃⌥⇧⌘)로 다시 붙인다.
+  return label.split(',').map(formatMacChord).join(',');
+}
+
+const MAC_MODIFIER_ORDER = ['⌃', '⌥', '⇧', '⌘'] as const;
+const MAC_MODIFIER_SYMBOL: Record<string, (typeof MAC_MODIFIER_ORDER)[number]> = {
+  ctrl: '⌘',
+  cmd: '⌘',
+  meta: '⌘',
+  alt: '⌥',
+  option: '⌥',
+  shift: '⇧',
+};
+
+function formatMacChord(chord: string): string {
+  const found = new Set<string>();
+  let rest = chord;
+  for (;;) {
+    const match = /^(\w+)\+(?=.)/.exec(rest);
+    const symbol = match ? MAC_MODIFIER_SYMBOL[match[1].toLowerCase()] : undefined;
+    if (!match || !symbol) break;
+    found.add(symbol);
+    rest = rest.slice(match[0].length);
+  }
+  return MAC_MODIFIER_ORDER.filter(symbol => found.has(symbol)).join('') + rest;
 }

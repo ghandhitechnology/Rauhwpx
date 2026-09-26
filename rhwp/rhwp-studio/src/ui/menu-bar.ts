@@ -38,6 +38,7 @@ export class MenuBar {
     this.setupTitleClicks();
     this.setupTitleHover();
     this.setupItemClicks();
+    this.setupPointerHighlight();
     this.setupOutsideClose();
     this.setupKeyboardClose();
   }
@@ -63,7 +64,8 @@ export class MenuBar {
     });
     this.container.querySelectorAll<HTMLElement>('.md-item[data-cmd]').forEach(item => {
       item.tabIndex = -1;
-      item.setAttribute('role', 'menuitem');
+      // 토글·선택 항목(menuitemcheckbox/radio)의 역할은 덮어쓰지 않는다.
+      if (!item.hasAttribute('role')) item.setAttribute('role', 'menuitem');
     });
   }
 
@@ -145,12 +147,43 @@ export class MenuBar {
     });
   }
 
+  /**
+   * 키보드로 메뉴를 탐색하는 중이면 마우스와 키보드가 같은 강조 하나를 쓰도록
+   * hover 한 항목에 포커스를 옮긴다. 편집기가 포커스를 가진 채 마우스로 연
+   * 메뉴는 포커스를 건드리지 않는다(IME 조합이 끊기지 않게).
+   * 포인터가 패널을 벗어나면 강조를 거두고 포커스를 메뉴 제목으로 돌린다.
+   */
+  private setupPointerHighlight(): void {
+    this.container.addEventListener('mouseover', (e) => {
+      if (!this.openMenu || !this.openMenu.contains(document.activeElement)) return;
+      const entry = (e.target as HTMLElement).closest<HTMLElement>('.md-item, .md-sub');
+      if (!entry || !this.openMenu.contains(entry)) return;
+      if (entry.classList.contains('disabled')) {
+        if (this.openMenu.contains(document.activeElement) && document.activeElement !== entry.closest('.md-sub')) {
+          this.openMenu.querySelector<HTMLElement>('.menu-title')?.focus({ preventScroll: true });
+        }
+        return;
+      }
+      if (document.activeElement === entry) return;
+      entry.tabIndex = -1;
+      entry.focus({ preventScroll: true });
+    });
+    this.container.addEventListener('mouseout', (e) => {
+      if (!this.openMenu) return;
+      const dropdown = this.openMenu.querySelector<HTMLElement>('.menu-dropdown');
+      const next = e.relatedTarget instanceof Node ? e.relatedTarget : null;
+      if (!dropdown || (next && dropdown.contains(next))) return;
+      if (!dropdown.contains(document.activeElement)) return;
+      this.openMenu.querySelector<HTMLElement>('.menu-title')?.focus({ preventScroll: true });
+    });
+  }
+
   /** 바깥 클릭 → 닫기 */
   private setupOutsideClose(): void {
     document.addEventListener('mousedown', (e) => {
       if (!this.openMenu) return;
       if (!this.container.contains(e.target as Node)) {
-        this.closeAll();
+        this.closeAll(false);
       }
     });
   }
@@ -204,7 +237,7 @@ export class MenuBar {
         return;
       }
       if (e.key === 'Tab') {
-        this.closeAll();
+        this.closeAll(false);
         return;
       }
       if (target?.closest('input, textarea, select, [contenteditable="true"]')
@@ -229,18 +262,21 @@ export class MenuBar {
         submenu.focus();
         return;
       }
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') {
         e.preventDefault();
         e.stopPropagation();
-        if (submenuPanel) {
-          const entries = Array.from(submenuPanel.querySelectorAll<HTMLElement>('.md-item[data-cmd]:not(.disabled)'));
-          const index = entries.indexOf(entry!);
-          entries[(index + (e.key === 'ArrowDown' ? 1 : -1) + entries.length) % entries.length]?.focus();
-          return;
-        }
-        const entries = this.menuEntries(this.openMenu);
+        const entries = submenuPanel
+          ? Array.from(submenuPanel.querySelectorAll<HTMLElement>('.md-item[data-cmd]:not(.disabled)'))
+          : this.menuEntries(this.openMenu);
+        if (!entries.length) return;
         const index = entry ? entries.indexOf(entry) : -1;
-        this.focusEntry(this.openMenu, index + (e.key === 'ArrowDown' ? 1 : -1));
+        let next: number;
+        if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = entries.length - 1;
+        else if (index < 0) next = e.key === 'ArrowDown' ? 0 : entries.length - 1;
+        else next = (index + (e.key === 'ArrowDown' ? 1 : -1) + entries.length) % entries.length;
+        entries[next].tabIndex = -1;
+        entries[next].focus();
         return;
       }
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -249,7 +285,7 @@ export class MenuBar {
         const index = this.menuItems.indexOf(this.openMenu);
         if (launcher && ((e.key === 'ArrowRight' && index === this.menuItems.length - 1)
           || (e.key === 'ArrowLeft' && index === 0))) {
-          this.closeAll();
+          this.closeAll(false);
           launcher.focus();
           return;
         }
@@ -327,7 +363,8 @@ export class MenuBar {
     }
   }
 
-  private closeAll(restoreFocus = false): void {
+  /** restoreFocus 를 생략하면 포커스가 메뉴 안에 남아 있을 때만 원래 자리로 돌린다. */
+  private closeAll(restoreFocus = this.container.contains(document.activeElement)): void {
     this.openMenu?.classList.remove('open');
     this.openMenu?.querySelector('.menu-title')?.setAttribute('aria-expanded', 'false');
     this.container.querySelectorAll<HTMLElement>('.md-sub-panel').forEach(panel => { panel.style.display = ''; });

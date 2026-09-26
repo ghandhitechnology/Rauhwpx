@@ -45,13 +45,12 @@
   overflow-y: auto;
   height: min(330px, 43dvh);
   font-size: 12px;
-  scrollbar-color: var(--ui-border-strong) transparent;
 }
 
 .sym-block-item {
   min-height: 28px;
   padding: 5px 8px;
-  cursor: pointer;
+  cursor: default;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -109,7 +108,6 @@
   overflow-y: auto;
   height: min(330px, 43dvh);
   gap: 0;
-  scrollbar-color: var(--ui-border-strong) transparent;
 }
 
 .sym-cell {
@@ -120,7 +118,7 @@
   min-width: 0;
   aspect-ratio: 1;
   font-size: 19px;
-  cursor: pointer;
+  cursor: default;
   border: 0;
   border-right: 1px solid var(--ui-border-subtle);
   border-bottom: 1px solid var(--ui-border-subtle);
