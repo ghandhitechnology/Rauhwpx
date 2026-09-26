@@ -1985,6 +1985,10 @@ fn measure_char_width_with_policy(
     if c == '\u{00AD}' {
         return Some(0.0);
     }
+    // 묶음 빈칸(U+00A0)은 한컴 조판상 일반 빈칸과 같은 em/2 폭이다. 실폰트 hmtx 의
+    // NBSP 폭(함초롬바탕 0.3em 등)을 쓰면 `①<묶음 빈칸>` 선택지 뒤 본문이
+    // 한컴(macOS) PDF 보다 ~0.18em 왼쪽으로 당겨진다.
+    let c = if c == '\u{00A0}' { ' ' } else { c };
     // CSS font-family 체인에서 첫 번째 폰트명으로 메트릭 조회
     let primary_name = font_family.split(',').next().unwrap_or(font_family).trim();
     // HcrDeclared(macOS): 표준 Windows 폰트(바탕·궁서·돋움·굴림 계열)는 macOS
