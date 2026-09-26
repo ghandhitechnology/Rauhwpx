@@ -1144,7 +1144,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'edit_object',
-    description: `Move, resize, wrap, crop, reorder or delete a picture/shape (address from get_page_geometry objects; in a cell: cell/cellPath plus the cell paraIdx). xMm/yMm/relativeTo/wrap float an inline object (defaults paragraph, square). One of widthMm/heightMm keeps the ratio unless keepAspect:false. cropMm: mm cut per side of the original picture. zOrder: floating body objects. delete:true alone. ${WRITE_POINTER}`,
+    description: `Move, resize, wrap, crop, reorder or delete a picture/shape (address from get_page_geometry objects; in a cell: cell/cellPath plus the cell paraIdx). xMm/yMm/relativeTo/wrap float an inline object (defaults paragraph, square). One of widthMm/heightMm keeps the ratio unless keepAspect:false. cropMm trims mm off each side of the shown picture (negative restores). zOrder: floating body objects. delete:true alone. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int(),

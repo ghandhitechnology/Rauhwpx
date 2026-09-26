@@ -319,16 +319,28 @@ test('edit_object: 사용자가 크기를 바꾼 그림은 거절 시 드리프�
   assert.equal(env.paras[0].controls[0].props['width'], 1234);
 });
 
-test('edit_object: cropMm 은 원본 기준으로 자르고 표시 크기를 같은 배율로 줄인다', async () => {
+test('edit_object: cropMm 은 보이는 그림의 각 변을 표시 mm 만큼 자르고 배율을 지킨다', async () => {
   const env = makeEnv(docWithPicture());
-  const r = await env.staged('edit_object', { sectionIdx: 0, paraIdx: 0, controlIdx: 0, cropMm: { left: 2.5, right: 2.5 } });
+  await env.staged('edit_object', { sectionIdx: 0, paraIdx: 0, controlIdx: 0, cropMm: { left: 2.5, right: 2.5 } });
   const props = env.paras[0].controls[0].props;
   assert.equal(props['cropLeft'], mmToHu(2.5));
   assert.equal(props['cropRight'], mmToHu(2.5));
   assert.equal(props['width'], 2835 - 2 * mmToHu(2.5));
   assert.equal(props['height'], 1417);
-  assert.deepEqual(r.object.cropMm, { left: 2.5, right: 2.5 });
-  await expectErr(env.call('edit_object', { sectionIdx: 0, paraIdx: 0, controlIdx: 0, cropMm: { left: 6, right: 6 } }), 'INVALID_ARGS', /original width/);
+  await expectErr(env.call('edit_object', { sectionIdx: 0, paraIdx: 0, controlIdx: 0, cropMm: { left: 3, right: 3 } }), 'INVALID_ARGS', /displayed width/);
+});
+
+test('edit_object: cropMm 은 엔진 자르기 단위가 표시 크기와 달라도 표시 mm 로 자른다', async () => {
+  // 30mm 로 넣은 60px 그림: 원본 폭은 표시 폭(8504), 내부 자르기 오른쪽은 자연 크기(4500) — 게터는 4004 를 잘린 양으로 낸다
+  const env = makeEnv([{ text: 'x', controls: [picture(0, {
+    width: 8504, height: 5669, originalWidth: 8504, originalHeight: 5669, cropRight: 4004, cropBottom: 2669,
+  })] }]);
+  await env.staged('edit_object', { sectionIdx: 0, paraIdx: 0, controlIdx: 0, cropMm: { left: 3 } });
+  const props = env.paras[0].controls[0].props;
+  assert.equal(props['cropLeft'], Math.round(mmToHu(3) * 4500 / 8504));
+  assert.equal(props['cropRight'], 4004);
+  assert.equal(props['width'], 8504 - mmToHu(3));
+  assert.equal(props['height'], 5669);
 });
 
 test('edit_object: 앞뒤 순서는 스냅샷으로 되돌리고 글자처럼 취급 개체에는 거절한다', async () => {

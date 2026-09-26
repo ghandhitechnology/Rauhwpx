@@ -164,9 +164,10 @@ export function planObjectEdit(
 }
 
 /**
- * cropMm {left?,top?,right?,bottom?} — 원본 이미지 기준으로 각 변에서 잘라 낼 mm.
- * 크기를 따로 주지 않으면 보이는 원본이 줄어든 만큼 표시 크기도 줄여 배율을 지킨다
- * (남은 부분이 원래 상자로 늘어나지 않게).
+ * cropMm {left?,top?,right?,bottom?} — 지금 보이는 그림의 각 변에서 더 잘라 낼 mm (음수는
+ * 잘라 낸 만큼 되살린다). 엔진 자르기 값은 원본 기준 "잘린 양"이지만 그 원본 폭(originalWidth)과
+ * 내부 자르기 좌표의 단위가 삽입 경로마다 달라, 보이는 원본 폭 대비 표시 폭의 배율로 옮겨
+ * 적는다. 크기를 따로 주지 않으면 잘라 낸 만큼 표시 크기도 줄여 배율을 지킨다.
  */
 function planCrop(
   raw: unknown, current: Record<string, unknown>, rescale: boolean,
@@ -178,30 +179,32 @@ function planCrop(
   const unknownKeys = Object.keys(rec).filter((key) => !(CROP_SIDES as readonly string[]).includes(key));
   if (unknownKeys.length > 0) throw invalid(`unknown cropMm key ${unknownKeys.join('/')} — valid keys: ${CROP_SIDES.join(', ')}`);
   const cur = Object.fromEntries(CROP_SIDES.map((side) => [side, num(current[CROP_KEYS[side]])])) as Record<typeof CROP_SIDES[number], number>;
+  const width = num(current['width']);
+  const height = num(current['height']);
+  const extentW = num(current['originalWidth']) > 0 ? num(current['originalWidth']) : width;
+  const extentH = num(current['originalHeight']) > 0 ? num(current['originalHeight']) : height;
+  const visibleW = extentW - cur.left - cur.right;
+  const visibleH = extentH - cur.top - cur.bottom;
+  if (width <= 0 || height <= 0 || visibleW <= 0 || visibleH <= 0) throw invalid('this picture cannot be cropped');
+  // 표시 HU → 엔진 자르기 단위
+  const scale = { left: visibleW / width, right: visibleW / width, top: visibleH / height, bottom: visibleH / height };
   const next = { ...cur };
   for (const side of CROP_SIDES) {
-    const mm = mmArg(rec, side, { min: 0 });
-    if (mm !== undefined) next[side] = mmToHu(mm);
+    const mm = mmArg(rec, side);
+    if (mm !== undefined) next[side] = Math.max(0, cur[side] + Math.round(mmToHu(mm) * scale[side]));
   }
-  const extentW = num(current['originalWidth']) > 0 ? num(current['originalWidth']) : num(current['width']);
-  const extentH = num(current['originalHeight']) > 0 ? num(current['originalHeight']) : num(current['height']);
-  if (extentW > 0 && next.left + next.right >= extentW) {
-    throw invalid(`cropMm left + right must stay under the original width ${huToMm(extentW)}mm`);
-  }
-  if (extentH > 0 && next.top + next.bottom >= extentH) {
-    throw invalid(`cropMm top + bottom must stay under the original height ${huToMm(extentH)}mm`);
-  }
+  const nextW = extentW - next.left - next.right;
+  const nextH = extentH - next.top - next.bottom;
+  if (nextW <= 0) throw invalid(`cropMm left + right must stay under the displayed width ${huToMm(width)}mm`);
+  if (nextH <= 0) throw invalid(`cropMm top + bottom must stay under the displayed height ${huToMm(height)}mm`);
   const props: Record<string, unknown> = {
     cropLeft: next.left, cropTop: next.top, cropRight: next.right, cropBottom: next.bottom,
   };
-  if (rescale && extentW > 0 && extentH > 0) {
-    const visible = (extent: number, a: number, b: number): number => Math.max(1, extent - a - b);
-    const w = num(current['width']);
-    const h = num(current['height']);
-    const newW = Math.round(w * visible(extentW, next.left, next.right) / visible(extentW, cur.left, cur.right));
-    const newH = Math.round(h * visible(extentH, next.top, next.bottom) / visible(extentH, cur.top, cur.bottom));
-    if (newW !== w) props['width'] = Math.max(1, newW);
-    if (newH !== h) props['height'] = Math.max(1, newH);
+  if (rescale) {
+    const newW = Math.max(1, Math.round(width * nextW / visibleW));
+    const newH = Math.max(1, Math.round(height * nextH / visibleH));
+    if (newW !== width) props['width'] = newW;
+    if (newH !== height) props['height'] = newH;
   }
   return props;
 }
@@ -222,12 +225,6 @@ export function describeObject(kind: ObjectKind, props: Record<string, unknown>)
     out['xMm'] = huToMm(signedHu(props['horzOffset']));
     out['yMm'] = huToMm(signedHu(props['vertOffset']));
     out['wrap'] = WRAP_NAME[String(props['textWrap'])] ?? props['textWrap'];
-  }
-  if (kind === 'picture') {
-    const crop = Object.fromEntries(CROP_SIDES
-      .map((side) => [side, huToMm(num(props[CROP_KEYS[side]]))] as const)
-      .filter(([, mm]) => mm > 0));
-    if (Object.keys(crop).length > 0) out['cropMm'] = crop;
   }
   return out;
 }
