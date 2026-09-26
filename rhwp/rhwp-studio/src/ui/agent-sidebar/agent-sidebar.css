@@ -3544,6 +3544,15 @@ button.ag-skill-copy {
   font-size: var(--font-size-sm, 11px);
 }
 
+/* 중단된 턴이 남긴 검토 카드의 안내줄 — diff 와 동작 버튼 사이에 고정한다. */
+.ag-review-note {
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--ag-border);
+  color: var(--ag-warning, #d99532);
+  font-size: var(--font-size-sm, 11px);
+}
+
 .ag-review-actions {
   display: flex;
   flex: 0 0 auto;

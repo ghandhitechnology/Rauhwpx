@@ -87,6 +87,14 @@ if (!process.env.CHROME_PATH && !process.env.PUPPETEER_EXECUTABLE_PATH) {
   if (fs.existsSync(macChrome)) process.env.CHROME_PATH = macChrome;
 }
 
+// 제공자 행 수는 PROVIDER_ORDER 를 그대로 따른다 — 제공자가 바뀌면 기대값도 따라간다.
+const expectedProviderRows = (() => {
+  const src = fs.readFileSync(
+    path.join(studioRoot, 'src/ui/agent-sidebar/providers.ts'), 'utf8');
+  const match = src.match(/PROVIDER_ORDER\s*=\s*\[([\s\S]*?)\]/);
+  return match?.[1].match(/'[^']+'/g)?.length ?? 0;
+})();
+
 const hubPort = await findAvailablePort(Number(process.env.RHWP_AGENT_PORT || '5741'));
 const vitePort = await findAvailablePort(Number(process.env.VITE_PORT || '7741'));
 const viteUrl = `http://127.0.0.1:${vitePort}`;
@@ -203,7 +211,10 @@ try {
       assert(settings.sections.includes(name), `${name} 구역이 있어야 한다 (${settings.sections})`);
     }
     assert(settings.hubDetail === '연결됨', `허브 행 상태: ${settings.hubDetail}`);
-    assert(settings.providerRows === 5, `제공자 행 5개여야 한다: ${settings.providerRows}`);
+    assert(
+      settings.providerRows === expectedProviderRows,
+      `제공자 행 ${expectedProviderRows}개여야 한다: ${settings.providerRows}`,
+    );
     // 제공자 프로브는 비동기 — 모든 행에서 '확인 중…' 이 걷힐 때까지 기다린다.
     await page.waitForFunction(
       () => [...document.querySelectorAll('.ag-settings-provider-row .ag-settings-row-detail')]

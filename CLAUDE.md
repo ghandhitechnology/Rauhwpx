@@ -56,7 +56,7 @@ Pipeline: **parser → model → document_core → renderer → serializer**, ex
 
 ### rhwp-studio (`rhwp-studio/src/`)
 
-TypeScript, no UI framework. `engine/` wraps the wasm module; `core/`, `view/`, `command/`, `history/` (undo), `ui/` (dialogs, command palette, `agent-sidebar/`), `hwpctl/`, `embed/`. The `agent/` directory is the studio side of the AI bridge: `bridge.ts` (WS client), `tool-executor.ts` (implements the studio side of the MCP tools against the engine, including the apply_edits batch path), `pending-edits.ts` + `pending-overlay.ts` (verified semantic staging — in **안전 (safe)** profile successful turns hold staged edits for user review; in **전체 접근 (unrestricted)** successful turns auto-commit as a single undo step; failed turns restore in both), plus registry-generated atomic engine edits for operations in the current capability catalog.
+TypeScript, no UI framework. `engine/` wraps the wasm module; `core/`, `view/`, `command/`, `history/` (undo), `ui/` (dialogs, command palette, `agent-sidebar/`), `hwpctl/`, `embed/`. The `agent/` directory is the studio side of the AI bridge: `bridge.ts` (WS client), `tool-executor.ts` (implements the studio side of the MCP tools against the engine, including the apply_edits batch path), `pending-edits.ts` + `pending-overlay.ts` (verified semantic staging — in **안전 (safe)** profile successful turns hold staged edits for user review; in **전체 접근 (unrestricted)** successful turns auto-commit as a single undo step; any non-successful turn end holds the edits for review in both, marked as stopped), plus registry-generated atomic engine edits for operations in the current capability catalog.
 
 ### rhwp-agent (`rhwp-agent/`)
 

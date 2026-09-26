@@ -213,6 +213,28 @@ export function providerTurnEndMatches(
   return activeTurnId === null || eventTurnId === activeTurnId;
 }
 
+/**
+ * turn-end 한 건의 스테이징 처리를 가른다.
+ * 성공은 명시적 종료 이유에만 인정하고, 그 외 모든 종료(오류·중단·max_tokens·
+ * 재연결·알 수 없는 이유)는 어떤 권한 모드에서도 편집을 버리지 않고 검토로
+ * 보낸다. 자동 커밋은 성공한 unrestricted 턴뿐이다.
+ */
+export function turnEndDisposition(
+  event: { stopReason?: unknown; errorMessage?: unknown },
+  permissionProfile: PermissionProfile,
+  turnHadError: boolean,
+): { succeeded: boolean; outcome: 'review' | 'commit' } {
+  const succeeded = !turnHadError
+    && !event.errorMessage
+    && (event.stopReason === 'end_turn'
+      || event.stopReason === 'completed'
+      || event.stopReason === 'success');
+  return {
+    succeeded,
+    outcome: succeeded && permissionProfile === 'unrestricted' ? 'commit' : 'review',
+  };
+}
+
 export interface ChatHistoryEntry {
   role: 'user' | 'assistant';
   text: string;
@@ -1872,24 +1894,16 @@ export class AgentBridgeImpl implements AgentBridge {
   }
 
   /**
-   * 성공한 턴의 편집 처리는 권한 프로필이 가른다:
-   * 안전(safe) → 'review' (사용자 승인 대기), 전체(unrestricted) → 'commit' (자동 반영).
-   */
-  private successfulTurnOutcome(): 'review' | 'commit' {
-    return this.permissionProfile === 'safe' ? 'review' : 'commit';
-  }
-
-  /**
-   * 결과를 모르는 턴 종료(재연결 등)의 기본값: 안전 모드는 편집을 검토 대기로
-   * 남겨 사용자가 결정하고, 전체 모드는 기존대로 롤백한다.
+   * 결과를 모르는 턴 종료(재연결·시작 실패 등)의 기본값. 어떤 비성공 종료도
+   * 편집을 되돌리지 않는다 — 기본값은 어느 모드에서나 'review' + 중단 표시다.
    */
   private endPendingTurn(
-    outcome: 'commit' | 'reject' | 'review' =
-      this.permissionProfile === 'safe' ? 'review' : 'reject',
+    outcome: 'commit' | 'review' = 'review',
+    turnStopped = true,
   ) {
     if (!this.pendingTurnOpen) return;
     try {
-      this.pendingEdits.endTurn(outcome);
+      this.pendingEdits.endTurn(outcome, { turnStopped });
     } finally {
       this.executor.endTurn();
       this.pendingTurnOpen = false;
@@ -2759,15 +2773,12 @@ export class AgentBridgeImpl implements AgentBridge {
         this.turnRunning = false;
         this.activeProviderTurnId = null;
         this.abortProviderToolRequests(eventTurnId ?? undefined);
-        let succeeded = !this.turnHadError
-          && !event.errorMessage
-          && (event.stopReason === 'end_turn'
-            || event.stopReason === 'completed'
-            || event.stopReason === 'success');
+        const disposition = turnEndDisposition(event, this.permissionProfile, this.turnHadError);
+        let succeeded = disposition.succeeded;
         this.turnHadError = false;
         if (this.pendingTurnOpen) {
           try {
-            this.endPendingTurn(succeeded ? this.successfulTurnOutcome() : 'reject');
+            this.endPendingTurn(disposition.outcome, !succeeded);
           } catch (e) {
             succeeded = false;
             console.warn('[AgentBridge] endTurn 실패:', e);

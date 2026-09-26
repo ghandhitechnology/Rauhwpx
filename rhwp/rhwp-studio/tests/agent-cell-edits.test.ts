@@ -335,7 +335,7 @@ test('replace_range: 원자적 replaceText op 에 cell 이 그대로 전달된�
     },
     'claude',
   );
-  // markDelete + insertText 조합이 아니라 단일 원자적 op 이다
+  // 삭제 + 삽입 두 op 조합이 아니라 단일 원자적 op 이다
   assert.equal(pendingCalls.length, 1);
   assert.equal(pendingCalls[0].method, 'replaceText');
   const range = pendingCalls[0].args[0] as { cell?: CellAddr };

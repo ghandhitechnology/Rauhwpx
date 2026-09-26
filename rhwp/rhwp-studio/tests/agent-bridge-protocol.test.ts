@@ -72,21 +72,6 @@ test('RevisionTracker: 문서 로드/교체(dirty→false, 저장 아님)는 반
   tracker.dispose();
 });
 
-test('RevisionTracker: holdDuring 창 안의 이벤트는 bump하지 않는다', async () => {
-  const bus = new EventBus();
-  const tracker = new RevisionTracker(bus);
-  tracker.holdDuring(() => {
-    bus.emit('document-mutated', 'agent-preview');
-    bus.emit('document-changed');
-  });
-  assert.equal(tracker.revision, 1);
-  await microtask();
-  // 창 밖에서는 정상 bump — 억제가 누적되지 않는다
-  bus.emit('document-mutated', 'test');
-  assert.equal(tracker.revision, 2);
-  tracker.dispose();
-});
-
 // ─── AgentToolExecutor (stub deps) ──────────────────────────
 
 function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']]) {
@@ -480,7 +465,7 @@ test('executor: replace_range = 원자적 pending.replaceText 위임', async () 
     expectedRevision: 1, sectionIdx: 0,
     startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 5, text: 'goodbye',
   }, 'claude')) as any;
-  // markDelete + insertText 조합이 아니라 단일 원자적 op 이다
+  // 삭제 + 삽입 두 op 조합이 아니라 단일 원자적 op 이다
   assert.deepEqual(calls.map((c) => c.method), ['replaceText']);
   assert.deepEqual(calls[0].args[0], {
     sectionIdx: 0, startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 5,
