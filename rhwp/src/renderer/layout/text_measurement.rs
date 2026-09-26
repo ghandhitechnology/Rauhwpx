@@ -2082,7 +2082,7 @@ fn measure_char_width_with_policy(
         return measure_char_width_with_policy(fallback_chain, bold, italic, c, font_size, policy);
     };
     // HWP 반각 처리: space 및 한컴이 반각으로 처리하는 구두점/기호
-    let w = if c == ' ' {
+    let w = if c == ' ' && !super::super::hft_metrics::has_native_space_width(mm.metric.name) {
         mm.metric.em_size / 2
     } else {
         let glyph_w = mm.metric.get_width(c)?;

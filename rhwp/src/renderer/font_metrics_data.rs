@@ -196,6 +196,9 @@ fn resolve_metric_alias(name: &str) -> &str {
 }
 
 pub fn find_metric(name: &str, bold: bool, italic: bool) -> Option<MetricMatch> {
+    if let Some(metric) = super::hft_metrics::find_metric(name, bold, italic) {
+        return Some(metric);
+    }
     let name = resolve_metric_alias(name);
     // 정확한 매칭 (name + bold + italic)
     if let Some(m) = FONT_METRICS

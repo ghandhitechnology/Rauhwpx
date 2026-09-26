@@ -22,6 +22,7 @@ pub mod font_paths;
 pub(crate) mod form_caption;
 pub mod height_cursor;
 pub mod height_measurer;
+mod hft_metrics;
 pub mod html;
 pub mod hyperlinks;
 pub(crate) mod image_header;
@@ -1303,6 +1304,7 @@ pub(crate) fn hft_substitute_faces(font_family: &str) -> &'static [&'static str]
         // 그대로 두고, 미설치 시 글리프 소스만 같은 face 의 TTF 로 대체한다.
         "한양견명조" => &["HY견명조", "HYmjrE"],
         "한양견고딕" => &["HY견고딕", "HYgtrE"],
+        "신명 디나루" => &["돋움", "한컴돋움", "Haansoft Dotum"],
         _ => &[],
     }
 }
@@ -1339,6 +1341,7 @@ pub(crate) fn hancom_substitute_faces(font_family: &str) -> &'static [&'static s
 pub(crate) fn hft_metric_fallback(font_family: &str) -> Option<&'static str> {
     match font_family.trim() {
         "HCI Poppy" => Some("Palatino Linotype"),
+        "신명 디나루" => Some("돋움"),
         _ => None,
     }
 }
@@ -1391,6 +1394,9 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
     }
     if font_family.trim() == "HCI Poppy" {
         return HCI_POPPY_FALLBACK;
+    }
+    if font_family.trim() == "신명 디나루" {
+        return "'돋움','한컴돋움','Haansoft Dotum','Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR',sans-serif";
     }
     // 한양 HFT → 한컴 TTF 쌍(hft_substitute_faces 와 같은 매핑)을 generic 체인
     // 앞에 둔다. 미설치 환경에선 자연스럽게 다음 후보로 넘어간다.
