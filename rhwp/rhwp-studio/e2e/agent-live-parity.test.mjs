@@ -70,8 +70,10 @@ try {
         bridge.pendingEdits.beginTurn('claude');
         const results = [];
         try {
-          for (const [tool, args] of calls) {
-            results.push(await bridge.executor.execute(tool, { ...args, expectedRevision: bridge.revision.revision }, 'claude'));
+          for (const [tool, { $textBox, ...args }] of calls) {
+            // $textBox: 바로 앞 insert_shape 가 돌려준 글상자 셀 주소로 쓴다
+            const target = $textBox ? results.at(-1).textBox : {};
+            results.push(await bridge.executor.execute(tool, { ...args, ...target, expectedRevision: bridge.revision.revision }, 'claude'));
           }
         } finally {
           bridge.pendingEdits.endTurn('review');
@@ -116,7 +118,23 @@ try {
     const tables = structure.sections[0].tables ?? [];
     const notes = (await read('list_footnotes')).notes;
     const styles = (await read('list_styles')).styles;
+    // 본문 그림/도형 — get_page_geometry objects 의 주소를 문서 순서로 모은다
+    const objects = new Map();
+    const pageCount = await page.evaluate(() => window.__wasm.pageCount);
+    for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+      for (const o of (await read('get_page_geometry', { pageIndex, include: ['objects'] })).objects) {
+        if ((o.type !== 'image' && o.type !== 'shape') || o.cellIdx !== undefined || o.area) continue;
+        objects.set(`${o.paraIdx}:${o.controlIdx}`, o);
+      }
+    }
+    const ordered = [...objects.values()].sort((a, b) => a.paraIdx - b.paraIdx || a.controlIdx - b.controlIdx);
     return {
+      /** n 번째 본문 그림/도형의 edit_object 주소 */
+      object(type, n = 0) {
+        const found = ordered.filter((o) => o.type === type)[n];
+        assert.ok(found, `${type} #${n} on the pages`);
+        return { sectionIdx: 0, paraIdx: found.paraIdx, controlIdx: found.controlIdx };
+      },
       p(prefix) {
         const found = paragraphs.find((para) => para.text.startsWith(prefix));
         assert.ok(found, `paragraph starting with "${prefix}"`);
@@ -157,8 +175,15 @@ try {
       ['edit_header_footer', { sectionIdx: 0, which: 'header', lines: ['Parity header'] }],
     ]);
   }
-
   const image = pngBase64(24, 16);
+  {
+    // edit_object 대상 — 글자처럼 취급하는 그림 하나
+    const ctx = await context();
+    await commit([['insert_image', {
+      sectionIdx: 0, paraIdx: ctx.p('Closing'), charOffset: ctx.len('Closing'), imageBase64: image, extension: 'png',
+      naturalWidthPx: 24, naturalHeightPx: 16, widthMm: 14,
+    }]]);
+  }
   const cases = [
     ['insert_text', (c) => [['insert_text', { sectionIdx: 0, paraIdx: c.p('First'), charOffset: 5, text: ' inserted' }]]],
     ['insert_text splits the table paragraph', (c) => [['insert_text', { sectionIdx: 0, paraIdx: c.p('Third'), charOffset: 5, text: ' A\nB ' }]]],
@@ -262,18 +287,55 @@ try {
       ['insert_text', { sectionIdx: 0, paraIdx: c.p('Opening'), charOffset: 2, text: 'X\nY' }],
     ]],
     ['delete_table', (c) => [['delete_table', at(c.table)]]],
+    // 그림·도형 — 속성은 문단 보관본, 앞뒤 순서는 스냅샷, 삭제는 지운 내용을 보관한 문단으로 되돌린다
+    ['edit_object floats and resizes an inline picture', (c) => [['edit_object', {
+      ...c.object('image'), xMm: 25, yMm: 4, relativeTo: 'paragraph', widthMm: 16,
+    }]]],
+    ['edit_object wraps, crops and resizes a floating picture', (c) => [['edit_object', {
+      ...c.object('image'), wrap: 'topAndBottom', cropMm: { left: 1, right: 1 }, heightMm: 8,
+    }]]],
+    ['insert_shape rectangle', (c) => [['insert_shape', {
+      sectionIdx: 0, paraIdx: c.lastPara, charOffset: 0, shape: 'rectangle', widthMm: 40, heightMm: 15, xMm: 10, yMm: 5, fillColor: '#EEEEEE',
+    }]]],
+    ['insert_shape textBox with text', (c) => [
+      ['insert_shape', { sectionIdx: 0, paraIdx: c.lastPara, shape: 'textBox', widthMm: 50, heightMm: 12, xMm: 60, yMm: 5 }],
+      ['insert_text', { $textBox: true, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'Boxed text' }],
+    ]],
+    ['edit_object moves, resizes and rewraps a shape', (c) => [['edit_object', {
+      ...c.object('shape'), relativeTo: 'page', xMm: 30, yMm: 40, widthMm: 30, heightMm: 12, wrap: 'square',
+    }]]],
+    ['edit_object zOrder', (c) => [['edit_object', { ...c.object('shape'), zOrder: 'back' }]]],
+    ['apply_edits with insert_shape and edit_object', (c) => [['apply_edits', { edits: [
+      { tool: 'insert_shape', args: { sectionIdx: 0, paraIdx: c.lastPara, shape: 'line', widthMm: 80, heightMm: 0, yMm: 60 } },
+      { tool: 'edit_object', args: { ...c.object('image'), yMm: 20 } },
+    ] }]]],
+    ['a line break before a staged picture edit', (c) => {
+      const target = c.object('image');
+      return [
+        ['edit_object', { ...target, xMm: 5 }],
+        ['insert_text', { sectionIdx: 0, paraIdx: target.paraIdx, charOffset: 0, text: 'X\nY' }],
+      ];
+    }],
+    ['edit_object deletes a shape', (c) => [['edit_object', { ...c.object('shape'), delete: true }]]],
+    ['edit_object deletes a picture', (c) => [['edit_object', { ...c.object('image'), delete: true }]]],
   ];
 
   const report = [];
-  for (const [name, build] of cases) {
+  // PARITY_ONLY=<부분 문자열,...> 로 이름이 맞는 사례만 돌린다 (기준 문서는 그대로 만든다)
+  const only = process.env.PARITY_ONLY?.split(',').filter(Boolean);
+  for (const [name, build] of cases.filter(([name]) => !only || only.some((part) => name.includes(part)))) {
     const before = await pages('before');
-    const first = await stage(build(await context()));
+    const first = await stage(build(await context())).catch((error) => {
+      throw new Error(`${name}: ${error.message}`);
+    });
     assert.ok(first.setId, `${name}: a change set is staged`);
     const staged = await pages('staged');
     await page.evaluate((id) => window.__parity.reject(id), first.setId);
     await expectPages('rejected', 'before', before, `${name}: reject restores the pre-turn pages`);
 
-    const second = await stage(build(await context()));
+    const second = await stage(build(await context())).catch((error) => {
+      throw new Error(`${name} (restaged): ${error.message}`);
+    });
     await expectPages('restaged', 'staged', staged, `${name}: staging the same edit again renders the same pages`);
     assert.equal(await page.evaluate((id) => window.__parity.approve(id), second.setId), true, `${name}: approve succeeds`);
     await expectPages('approved', 'staged', staged, `${name}: approve keeps the live preview unchanged`);
