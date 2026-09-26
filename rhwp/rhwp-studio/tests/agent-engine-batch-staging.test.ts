@@ -86,14 +86,41 @@ test('a failing engine batch restores the document and stages nothing', async ()
   assert.equal(env.pending.hasPending(), false);
 });
 
-test('paragraph digest diff finds the changed span and the shift after it', () => {
+test('paragraph digest diff finds each changed span and the shift after it', () => {
   assert.deepEqual(diffParagraphDigests(['a', 'b', 'c'], ['a', 'x', 'y', 'c']), {
-    span: { paraStart: 1, paraEnd: 2 }, shift: { from: 2, delta: 1 },
+    spans: [{ paraStart: 1, paraEnd: 2 }], shifts: [{ from: 2, delta: 1 }],
   });
   assert.deepEqual(diffParagraphDigests(['a', 'b', 'c'], ['a', 'c']), {
-    span: { paraStart: 1, paraEnd: 1 }, shift: { from: 2, delta: -1 },
+    spans: [{ paraStart: 1, paraEnd: 1 }], shifts: [{ from: 2, delta: -1 }],
   });
-  assert.deepEqual(diffParagraphDigests(['a', 'b'], ['a', 'b']), { span: null, shift: null });
+  assert.deepEqual(diffParagraphDigests(['a', 'b'], ['a', 'b']), { spans: [], shifts: [] });
+  // 떨어진 두 변경: 뒤 문단 수정(이동 없음)과 앞쪽 삽입 — 사이 문단(b, c)은 삽입만큼 민다
+  assert.deepEqual(diffParagraphDigests(['a', 'b', 'c', 'd', 'e'], ['a', 'X', 'b', 'c', 'D', 'e']), {
+    spans: [{ paraStart: 1, paraEnd: 1 }, { paraStart: 4, paraEnd: 4 }], shifts: [{ from: 1, delta: 1 }],
+  });
+  // 앞 삭제 + 뒤 삽입은 합이 0이어도 구간별로 민다 (뒤쪽 구간부터)
+  assert.deepEqual(diffParagraphDigests(['a', 'b', 'c', 'd', 'e'], ['a', 'c', 'd', 'Y', 'e']), {
+    spans: [{ paraStart: 1, paraEnd: 1 }, { paraStart: 3, paraEnd: 3 }],
+    shifts: [{ from: 4, delta: 1 }, { from: 2, delta: -1 }],
+  });
+});
+
+test('pending ops between two separate engine batch changes follow their paragraphs', async () => {
+  const env = makeEnv(['a', 'b', 'c', 'd', 'e']);
+  env.pending.beginTurn('claude');
+  await env.call('insert_text', { sectionIdx: 0, paraIdx: 2, charOffset: 0, text: 'Q' });
+  await env.call('apply_engine_edits', {
+    operations: [
+      { method: 'insertText', args: [0, 3, 1, '!'] },
+      { method: 'splitParagraph', args: [0, 0, 1] },
+    ],
+  });
+  assert.deepEqual(env.body, ['a', '', 'b', 'Qc', 'd!', 'e']);
+  const [insert] = env.pending.getChangeSets()[0].ops;
+  assert.equal(insert.kind === 'insert' && insert.range.startParaIdx, 3);
+  env.pending.endTurn('review');
+  env.pending.reject(env.pending.getChangeSets()[0].id);
+  assert.deepEqual(env.body, ['a', 'b', 'c', 'd', 'e']);
 });
 
 test('rejectAll reverts a later engine batch set even after an earlier set was staged', async () => {

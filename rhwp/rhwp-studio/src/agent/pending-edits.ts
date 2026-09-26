@@ -23,28 +23,92 @@ export interface PendingEditDeps {
 }
 
 /**
- * 엔진 배치 전후 한 구역의 문단 지문 목록을 비교해 바뀐 구간을 찾는다. 앞뒤로 같은
- * 문단을 걷어 내고 남은 가운데를 바뀐 구간으로 본다 — 적용 후 좌표 span, 그리고 그
- * 뒤 문단이 움직인 양(from 은 적용 전 좌표). 바뀐 문단이 없으면 둘 다 null.
+ * 엔진 배치 전후 한 구역의 문단 지문 목록을 비교해 바뀐 구간들을 찾는다. 앞뒤로 같은
+ * 문단을 걷어 낸 가운데를 Myers diff 로 맞춰, 떨어져 있는 여러 변경을 구간별로 나눈다.
+ * spans 는 적용 후 좌표, shifts 는 구간 뒤 문단이 움직인 양(from 은 적용 전 좌표)이며
+ * 문서 뒤쪽 구간부터 정렬돼 있어 차례로 적용하면 된다(되돌릴 때는 역순).
  */
 export function diffParagraphDigests(
   before: ReadonlyArray<string | null>, after: ReadonlyArray<string | null>,
-): { span: { paraStart: number; paraEnd: number } | null; shift: { from: number; delta: number } | null } {
+): { spans: Array<{ paraStart: number; paraEnd: number }>; shifts: Array<{ from: number; delta: number }> } {
   let head = 0;
   while (head < before.length && head < after.length && before[head] === after[head]) head++;
   let tail = 0;
   while (tail < before.length - head && tail < after.length - head
     && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
-  const beforeEnd = before.length - tail - 1;
-  const afterEnd = after.length - tail - 1;
-  if (beforeEnd < head && afterEnd < head) return { span: null, shift: null };
-  const delta = after.length - before.length;
-  // 문단만 지운 배치는 바뀐 구간이 비므로 지워진 자리의 문단 하나를 표시한다
+  const midBefore = before.slice(head, before.length - tail);
+  const midAfter = after.slice(head, after.length - tail);
+  if (midBefore.length === 0 && midAfter.length === 0) return { spans: [], shifts: [] };
+  // 가운데를 같은 문단끼리 맞춘다. 차이가 너무 크면 가운데 전체를 한 구간으로 본다.
+  const matches = myersMatches(midBefore, midAfter, 512) ?? [];
+  const spans: Array<{ paraStart: number; paraEnd: number }> = [];
+  const shifts: Array<{ from: number; delta: number }> = [];
+  // 문단만 지운 구간은 비므로 지워진 자리의 문단 하나를 표시한다
   const last = Math.max(after.length - 1, 0);
-  const span = afterEnd >= head
-    ? { paraStart: head, paraEnd: afterEnd }
-    : { paraStart: Math.min(head, last), paraEnd: Math.min(head, last) };
-  return { span, shift: delta === 0 ? null : { from: beforeEnd + 1, delta } };
+  let i = 0;
+  let j = 0;
+  const region = (beforeNext: number, afterNext: number): void => {
+    if (beforeNext === i && afterNext === j) return;
+    const afterStart = head + j;
+    spans.push(afterNext > j
+      ? { paraStart: afterStart, paraEnd: head + afterNext - 1 }
+      : { paraStart: Math.min(afterStart, last), paraEnd: Math.min(afterStart, last) });
+    const delta = (afterNext - j) - (beforeNext - i);
+    if (delta !== 0) shifts.push({ from: head + beforeNext, delta });
+  };
+  for (const [mi, mj] of matches) {
+    region(mi, mj);
+    i = mi + 1;
+    j = mj + 1;
+  }
+  region(midBefore.length, midAfter.length);
+  shifts.reverse();
+  return { spans, shifts };
+}
+
+/**
+ * Myers O((N+M)D) diff — 일치하는 (before, after) 인덱스 쌍을 오름차순으로 돌려준다.
+ * 편집 거리가 maxD 를 넘으면 null.
+ */
+function myersMatches<T>(a: ReadonlyArray<T>, b: ReadonlyArray<T>, maxD: number): Array<[number, number]> | null {
+  const n = a.length;
+  const m = b.length;
+  const offset = n + m + 1;
+  const v = new Int32Array(2 * offset + 1);
+  // trace[d] = d 단계 직전의 v 중 k ∈ [-d, d] 조각
+  const trace: Int32Array[] = [];
+  for (let d = 0; d <= Math.min(n + m, maxD); d++) {
+    trace.push(v.slice(offset - d, offset + d + 1));
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1])
+        ? v[offset + k + 1]
+        : v[offset + k - 1] + 1;
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) { x++; y++; }
+      v[offset + k] = x;
+      if (x >= n && y >= m) return backtrackMyers(a.length, b.length, d, trace);
+    }
+  }
+  return null;
+}
+
+function backtrackMyers(n: number, m: number, dEnd: number, trace: Int32Array[]): Array<[number, number]> {
+  const matches: Array<[number, number]> = [];
+  let x = n;
+  let y = m;
+  for (let d = dEnd; d > 0; d--) {
+    const prev = trace[d];
+    const at = (k: number): number => prev[k + d];
+    const k = x - y;
+    const prevK = k === -d || (k !== d && at(k - 1) < at(k + 1)) ? k + 1 : k - 1;
+    const prevX = at(prevK);
+    const prevY = prevX - prevK;
+    while (x > prevX && y > prevY) { matches.push([x - 1, y - 1]); x--; y--; }
+    x = prevX;
+    y = prevY;
+  }
+  while (x > 0 && y > 0) { matches.push([x - 1, y - 1]); x--; y--; }
+  return matches.reverse();
 }
 
 /** shiftPointAfterInsert 의 삽입 서술자 */
@@ -757,8 +821,8 @@ export class PendingEditManager {
     if (digestsBefore && digestsAfter) {
       for (let sectionIdx = 0; sectionIdx < digestsAfter.length; sectionIdx++) {
         const diff = diffParagraphDigests(digestsBefore[sectionIdx] ?? [], digestsAfter[sectionIdx]);
-        if (diff.span) touched.push({ sectionIdx, ...diff.span });
-        if (diff.shift) shifts.push({ sectionIdx, ...diff.shift });
+        for (const span of diff.spans) touched.push({ sectionIdx, ...span });
+        for (const shift of diff.shifts) shifts.push({ sectionIdx, ...shift });
       }
     }
     const obj: ObjectOp = {
