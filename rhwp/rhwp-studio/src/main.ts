@@ -864,7 +864,7 @@ const commandServices: CommandServices = {
     return {
       opCount: sets().reduce((sum, set) => sum + set.ops.length, 0),
       approveAll: () => sets().every((set) => pending.approve(set.id)),
-      rejectAll: () => { for (const set of sets()) pending.reject(set.id); },
+      rejectAll: () => pending.rejectAll(),
     };
   },
 };

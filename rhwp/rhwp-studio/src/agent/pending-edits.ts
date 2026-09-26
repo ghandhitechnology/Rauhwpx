@@ -1077,26 +1077,56 @@ export class PendingEditManager {
   reject(changeSetId: string): void {
     const set = this.sets.find((s) => s.id === changeSetId);
     if (!set) return;
-    if (set === this.open) this.open = null;
     // approve 와 같은 이유로 되돌림 시작 전에 한 번만 샘플링한다.
     const userEditSeqNow = this.userEditSeq;
     this.selfMutating++;
     try {
-      const { kept, dropped, causes, deferred } = this.partitionDriftedOps(set);
-      const all = [...set.ops];
-      set.ops = kept;
-      const failed = this.revertAppliedOps(kept, dropped, userEditSeqNow, deferred);
+      this.rejectSet(set, userEditSeqNow);
       this.settledSetSeq++;
-      this.reconcilePreviewLayout();
-      this.emitDocEvents('agent-reject');
-      this.discardOpSnapshots([...kept, ...dropped]);
-      this.removeSet(set);
-      this.syncOverlay();
-      this.emitDrops(changeSetId, { ...set, ops: all }, dropped, causes, failed, true);
-      this.emitChange({ type: 'rejected', changeSetId });
     } finally {
       this.selfMutating--;
     }
+  }
+
+  /**
+   * 대기 중인 모든 set 을 최신 것부터 거절한다. 오래된 것부터 거절하면 나중 set 의
+   * op 이 "되돌림 대상 밖의 나중 op" 으로 남아 앞 set 의 스냅샷·문단 복원을 막고,
+   * 매 거절마다 settledSetSeq 가 올라 나중 set 의 스냅샷 복원도 막힌다. 문서에 남긴
+   * 것이 없는 set 은 정착 순번을 끝에 한 번만 올려 앞 set 의 스냅샷을 살린다.
+   */
+  rejectAll(): void {
+    const targets = this.sets.filter((set) => set.ops.length > 0).reverse();
+    if (targets.length === 0) return;
+    const userEditSeqNow = this.userEditSeq;
+    let settlePending = false;
+    this.selfMutating++;
+    try {
+      for (const set of targets) {
+        // 되돌리지 못하고 남긴 op 이 있으면 그 이전 스냅샷은 그것까지 지우므로 즉시 정착한다.
+        if (this.rejectSet(set, userEditSeqNow)) this.settledSetSeq++;
+        else settlePending = true;
+      }
+    } finally {
+      if (settlePending) this.settledSetSeq++;
+      this.selfMutating--;
+    }
+  }
+
+  /** set 하나를 되돌리고 제거한다. 문서에 남긴 op(드리프트·되돌림 실패)이 있으면 true. */
+  private rejectSet(set: PendingChangeSet, userEditSeqNow: number): boolean {
+    if (set === this.open) this.open = null;
+    const { kept, dropped, causes, deferred } = this.partitionDriftedOps(set);
+    const all = [...set.ops];
+    set.ops = kept;
+    const failed = this.revertAppliedOps(kept, dropped, userEditSeqNow, deferred);
+    this.reconcilePreviewLayout();
+    this.emitDocEvents('agent-reject');
+    this.discardOpSnapshots([...kept, ...dropped]);
+    this.removeSet(set);
+    this.syncOverlay();
+    this.emitDrops(set.id, { ...set, ops: all }, dropped, causes, failed, true);
+    this.emitChange({ type: 'rejected', changeSetId: set.id });
+    return dropped.length > 0 || failed.size > 0;
   }
 
   /**

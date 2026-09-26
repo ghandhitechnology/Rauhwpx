@@ -95,3 +95,17 @@ test('paragraph digest diff finds the changed span and the shift after it', () =
   });
   assert.deepEqual(diffParagraphDigests(['a', 'b'], ['a', 'b']), { span: null, shift: null });
 });
+
+test('rejectAll reverts a later engine batch set even after an earlier set was staged', async () => {
+  const env = makeEnv(ORIGINAL);
+  env.pending.beginTurn('claude');
+  await env.call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'A' });
+  env.pending.endTurn('review');
+  env.pending.beginTurn('claude');
+  await env.call('apply_engine_edits', { operations: [{ method: 'insertText', args: [0, 2, 0, 'B'] }] });
+  env.pending.endTurn('review');
+  assert.deepEqual(env.body, ['A첫 문단', '둘째 문단', 'B셋째 문단']);
+  env.pending.rejectAll();
+  assert.deepEqual(env.body, ORIGINAL);
+  assert.equal(env.pending.hasPending(), false);
+});
