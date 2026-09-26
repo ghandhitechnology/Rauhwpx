@@ -1974,6 +1974,130 @@ pub(super) fn measure_known_font_run_width(
     })
 }
 
+pub(crate) fn active_shaping_face_available(name: &str) -> bool {
+    ACTIVE_SHAPING_FONTS.with(|active| {
+        active
+            .borrow()
+            .iter()
+            .any(|font| font.family.eq_ignore_ascii_case(name))
+    })
+}
+
+fn embedded_face_char_em_advance(name: &str, bold: bool, italic: bool, c: char) -> Option<f64> {
+    ACTIVE_SHAPING_FONTS.with(|active| {
+        let active = active.borrow();
+        let font = active
+            .iter()
+            .filter(|font| font.family.eq_ignore_ascii_case(name))
+            .min_by_key(|font| {
+                let Ok(face) = ttf_parser::Face::parse(&font.bytes, font.face_index) else {
+                    return u16::MAX;
+                };
+                face.weight()
+                    .to_number()
+                    .abs_diff(if bold { 700 } else { 400 })
+                    + 1000 * u16::from(face.is_italic() != italic)
+            })?;
+        let face = ttf_parser::Face::parse(&font.bytes, font.face_index).ok()?;
+        let glyph = face.glyph_index(c)?;
+        let advance = face.glyph_hor_advance(glyph)?;
+        (face.units_per_em() > 0).then(|| f64::from(advance) / f64::from(face.units_per_em()))
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn custom_font_face_available(name: &str) -> bool {
+    active_shaping_face_available(name)
+        || crate::renderer::font_paths::custom_font_face_available(name)
+}
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(catch, js_namespace = globalThis, js_name = getImportedFontMetricsRevision)]
+    fn imported_font_metrics_revision() -> Result<u32, JsValue>;
+    #[wasm_bindgen(catch, js_namespace = globalThis, js_name = getImportedFontMetricsBytes)]
+    fn imported_font_metrics_bytes(
+        name: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Result<JsValue, JsValue>;
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct WasmCustomFontMetrics {
+    revision: u32,
+    fonts: std::collections::HashMap<(String, bool, bool), Option<std::sync::Arc<[u8]>>>,
+    advances: std::collections::HashMap<(String, bool, bool, char), Option<f64>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static WASM_CUSTOM_FONT_METRICS: std::cell::RefCell<WasmCustomFontMetrics> =
+        std::cell::RefCell::new(WasmCustomFontMetrics::default());
+}
+
+#[cfg(target_arch = "wasm32")]
+fn imported_face_bytes(name: &str, bold: bool, italic: bool) -> Option<std::sync::Arc<[u8]>> {
+    let revision = imported_font_metrics_revision().unwrap_or(0);
+    let key = (name.to_lowercase(), bold, italic);
+    WASM_CUSTOM_FONT_METRICS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.revision != revision {
+            cache.revision = revision;
+            cache.fonts.clear();
+            cache.advances.clear();
+        }
+        if let Some(bytes) = cache.fonts.get(&key) {
+            return bytes.clone();
+        }
+        let bytes = imported_font_metrics_bytes(name, bold, italic)
+            .ok()
+            .filter(|value| !value.is_null() && !value.is_undefined())
+            .map(|value| std::sync::Arc::<[u8]>::from(js_sys::Uint8Array::new(&value).to_vec()));
+        cache.fonts.insert(key, bytes.clone());
+        bytes
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn custom_font_face_available(name: &str) -> bool {
+    active_shaping_face_available(name) || imported_face_bytes(name, false, false).is_some()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn custom_face_char_em_advance(name: &str, bold: bool, italic: bool, c: char) -> Option<f64> {
+    embedded_face_char_em_advance(name, bold, italic, c)
+        .or_else(|| crate::renderer::font_paths::custom_face_char_em_advance(name, bold, italic, c))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn custom_face_char_em_advance(name: &str, bold: bool, italic: bool, c: char) -> Option<f64> {
+    let embedded = embedded_face_char_em_advance(name, bold, italic, c);
+    if embedded.is_some() {
+        return embedded;
+    }
+    let bytes = imported_face_bytes(name, bold, italic)?;
+    let key = (name.to_lowercase(), bold, italic, c);
+    WASM_CUSTOM_FONT_METRICS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(advance) = cache.advances.get(&key) {
+            return *advance;
+        }
+        let advance = ttf_parser::Face::parse(&bytes, 0).ok().and_then(|face| {
+            let glyph = face.glyph_index(c)?;
+            let advance = face.glyph_hor_advance(glyph)?;
+            (face.units_per_em() > 0).then(|| f64::from(advance) / f64::from(face.units_per_em()))
+        });
+        cache.advances.insert(key, advance);
+        advance
+    })
+}
+
 fn measure_char_width_with_policy(
     font_family: &str,
     bold: bool,
@@ -1998,7 +2122,7 @@ fn measure_char_width_with_policy(
     // 단 치환은 한컴 FontMap 규칙과 동일하게 "요청 face가 없을 때만" 발동한다 —
     // --font-path 로 실제 TTF(예: 돋움체)가 주어지면 페인트 경로는 실폰트를 쓰고
     // (text_replay) 측정도 실폰트 메트릭(돋움체=고정폭)이어야 양쪽이 일치한다.
-    let face_available = crate::renderer::font_paths::custom_font_face_available(primary_name);
+    let face_available = custom_font_face_available(primary_name);
     // 치환 메트릭은 치환 서체가 실제로 설치돼 있을 때만(그 서체로 그려질 때) 쓴다.
     // 치환 서체도 없으면 페인트는 제네릭 폴백으로 내려가므로 요청 face의 베이크드
     // 정본 폭(돋움체 전각 구두점 등)이 더 가깝다.
@@ -2006,7 +2130,7 @@ fn measure_char_width_with_policy(
         crate::renderer::hancom_substitute_faces(primary_name)
             .iter()
             .copied()
-            .find(|s| crate::renderer::font_paths::custom_font_face_available(s))
+            .find(|s| custom_font_face_available(s))
             .unwrap_or(primary_name)
     } else {
         primary_name
@@ -2016,9 +2140,7 @@ fn measure_char_width_with_policy(
     // 공백은 HWP em/2 문서 규약이 우선이고, cmap 에 없는 글자는 베이크드
     // 경로로 폴백한다.
     if policy == FontMetricsPolicy::HcrDeclared && face_available && c != ' ' {
-        if let Some(mut em_advance) =
-            crate::renderer::font_paths::custom_face_char_em_advance(primary_name, c)
-        {
+        if let Some(mut em_advance) = custom_face_char_em_advance(primary_name, bold, italic, c) {
             // 한컴 반각 강제는 문서 규약이라 실폰트에도 동일하게 적용한다 —
             // 실 hmtx 가 전각이면 구두점/인용부호를 em/2 로 줄인다.
             if (matches!(c, '\u{2018}'..='\u{2027}') || is_halfwidth_cjk_quote(c))

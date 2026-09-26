@@ -1177,6 +1177,7 @@ impl DocumentCore {
         // HcrDeclared 폭 측정의 한컴 FontMap 치환은 "요청 face 가 없을 때만"
         // 발동하므로 측정 경로가 custom font 실재 여부를 알아야 한다.
         // (파일별 파싱은 최초 1회, 미설정이면 no-op)
+        #[cfg(not(target_arch = "wasm32"))]
         crate::renderer::font_paths::register_font_face_availability(&[]);
         crate::renderer::layout::enter_resolved_shaping_fonts(
             self.layout_engine.resolved_shaping_fonts(),
@@ -3810,8 +3811,28 @@ impl DocumentCore {
     /// section_index/is_first_in_column 계측은 측정 통일 작업의 진단·후속용으로 유지한다.
     pub(crate) fn paginate(&mut self) {
         let fonts = self.collect_resolved_shaping_fonts();
+        let has_embedded_hft = self
+            .document
+            .doc_info
+            .font_faces
+            .iter()
+            .flatten()
+            .any(|declared| {
+                declared.alt_type == 2
+                    && fonts
+                        .iter()
+                        .any(|face| face.family.eq_ignore_ascii_case(&declared.name))
+            });
         self.layout_engine.set_resolved_shaping_fonts(fonts.clone());
         crate::renderer::layout::with_resolved_shaping_fonts(fonts, || {
+            // 바이트 검증을 마친 내장 HFT만 원래 face 이름으로 다시 해소한다.
+            if has_embedded_hft {
+                self.styles = crate::renderer::style_resolver::resolve_styles_with_variant(
+                    &self.document.doc_info,
+                    self.dpi,
+                    self.document.layout_profile().hwp3_layout(),
+                );
+            }
             self.paginate_with_resolved_shaping_fonts()
         });
     }

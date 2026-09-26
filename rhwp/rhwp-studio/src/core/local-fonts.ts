@@ -128,6 +128,11 @@ const PROBE_TEXTS = [
   '한글과 English 12345',
 ];
 const LOCAL_FONT_NAME_READ_CONCURRENCY = 4;
+let importedFontGeneration = 0;
+
+export function getImportedFontGeneration(): number {
+  return importedFontGeneration;
+}
 export const LOCAL_FONT_BYTE_READ_CONCURRENCY = 4;
 export const LOCAL_FONT_MAX_BYTES_PER_FACE = 32 * 1024 * 1024;
 export const LOCAL_FONT_MAX_AGGREGATE_BYTES = 128 * 1024 * 1024;
@@ -612,6 +617,7 @@ export async function importLocalFontFiles(files: readonly File[]): Promise<Loca
       document.fonts.add(face);
       if (existing) document.fonts.delete(existing.face);
       importedFontFaces.set(faceKey, { record, bytes, face });
+      importedFontGeneration++;
       aggregateBytes = reserved + bytes.byteLength;
       imported.push(record);
     } catch {
@@ -1187,11 +1193,38 @@ export function resolveLocalFont(fontName: string): LocalFontRecord | null {
     ?? resolveFromLookup(cachedFontLookup, target);
 }
 
-/** 가져온 파일의 SFNT 바이트 복사본. 설치 글꼴은 동기 조회할 수 없다. */
-export function getImportedLocalFontBytes(fontName: string): ArrayBuffer | null {
+/** 가져온 파일의 SFNT 바이트 복사본. 같은 family의 style face를 구분한다. */
+export function getImportedLocalFontBytes(
+  fontName: string,
+  bold = false,
+  italic = false,
+): ArrayBuffer | null {
   const record = resolveLocalFont(fontName);
   if (!record?.runtimeFamily) return null;
-  return importedFontFaces.get(localFontFaceKey(record))?.bytes.slice(0) ?? null;
+  const target = normalizeFontAlias(fontName);
+  const family = normalizeFontAlias(record.family);
+  const exactFace = target === normalizeFontAlias(record.postscriptName)
+    || (target !== family && target === normalizeFontAlias(record.fullName))
+    || target === normalizeFontAlias(`${record.family} ${record.style}`);
+  const aliases = importedFontLookup.aliases.get(target) ?? [];
+  const variants = (target === family || target === normalizeFontAlias(record.runtimeFamily)
+    ? importedFontLookup.families.get(family) ?? []
+    : aliases).filter(candidate => candidate.runtimeFamily === record.runtimeFamily);
+  const selected = !exactFace && variants.length > 1
+    ? variants.sort((a, b) => {
+      const distance = (candidate: LocalFontRecord): number =>
+        (importedFontSlant(candidate.style) === (italic ? 'italic' : 'normal') ? 0 : 1000)
+        + Math.abs(Number(importedFontWeight(candidate.style)) - (bold ? 700 : 400));
+      return distance(a) - distance(b);
+    })[0]
+    : record;
+  return importedFontFaces.get(localFontFaceKey(selected))?.bytes.slice(0) ?? null;
+}
+
+/** 가져온 face가 실제로 등록됐는지 바이트 복사 없이 확인한다. */
+export function hasImportedLocalFontFace(fontName: string): boolean {
+  const record = resolveLocalFont(fontName);
+  return !!record?.runtimeFamily && importedFontFaces.has(localFontFaceKey(record));
 }
 
 /** CSS family와 달리 style별 native Typeface cache를 구분하는 안정 키다. */
@@ -1373,6 +1406,7 @@ export function getLocalFontState(): LocalFontState {
 export function resetLocalFontsForTests(): void {
   cacheLocalFontSnapshot(null);
   importedFontFaces.clear();
+  importedFontGeneration++;
   importedFontLookup = emptyLocalFontLookup();
   nextImportedFamilyId = 0;
   storageLoaded = false;

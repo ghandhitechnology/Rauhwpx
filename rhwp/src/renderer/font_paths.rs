@@ -266,6 +266,19 @@ static CUSTOM_FACE_NAMES: std::sync::RwLock<std::collections::BTreeSet<String>> 
 static CUSTOM_FACE_SOURCES: std::sync::RwLock<std::collections::BTreeMap<String, (PathBuf, u32)>> =
     std::sync::RwLock::new(std::collections::BTreeMap::new());
 
+#[derive(Clone)]
+struct CustomFaceVariant {
+    file: PathBuf,
+    index: u32,
+    weight: u16,
+    italic: bool,
+}
+
+/// 같은 family의 Regular/Bold/Italic face를 실제 hmtx 선택에도 보존한다.
+static CUSTOM_FACE_VARIANTS: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::BTreeMap<String, Vec<CustomFaceVariant>>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::BTreeMap::new()));
+
 /// 파일별 hmtx 캐시 — face 단위가 아니라 파일 단위로 한 번만 파싱한다.
 struct RealFaceHmtx {
     units_per_em: u16,
@@ -298,6 +311,7 @@ fn register_font_file_faces(file: &Path) {
         return;
     };
     let mut aliases = Vec::new();
+    let mut variants = Vec::new();
     if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
         if let Some(alias) = normalize_face_alias(stem) {
             aliases.push((alias, 0));
@@ -307,6 +321,19 @@ fn register_font_file_faces(file: &Path) {
         let Ok(face) = ttf_parser::Face::parse(&bytes, index) else {
             break;
         };
+        let variant = CustomFaceVariant {
+            file: file.to_path_buf(),
+            index,
+            weight: face.weight().to_number(),
+            italic: face.is_italic(),
+        };
+        if index == 0 {
+            if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
+                if let Some(alias) = normalize_face_alias(stem) {
+                    variants.push((alias, variant.clone()));
+                }
+            }
+        }
         for name in face.names() {
             if matches!(
                 name.name_id,
@@ -319,7 +346,8 @@ fn register_font_file_faces(file: &Path) {
             ) {
                 if let Some(value) = name.to_string() {
                     if let Some(alias) = normalize_face_alias(&value) {
-                        aliases.push((alias, index));
+                        aliases.push((alias.clone(), index));
+                        variants.push((alias, variant.clone()));
                     }
                 }
             }
@@ -334,6 +362,17 @@ fn register_font_file_faces(file: &Path) {
             sources
                 .entry(alias)
                 .or_insert_with(|| (file.to_path_buf(), index));
+        }
+    }
+    if let Ok(mut sources) = CUSTOM_FACE_VARIANTS.write() {
+        for (alias, variant) in variants {
+            let faces = sources.entry(alias).or_default();
+            if !faces
+                .iter()
+                .any(|face| face.file == variant.file && face.index == variant.index)
+            {
+                faces.push(variant);
+            }
         }
     }
 }
@@ -418,13 +457,20 @@ fn real_face_hmtx(file: &Path, index: u32) -> Option<std::sync::Arc<RealFaceHmtx
 /// face 미등록 또는 cmap 에 글리프가 없으면 None — 호출자가 베이크드
 /// 메트릭 경로로 폴백한다. 한컴은 파일이 있는 face 를 실폰트 폭으로
 /// 조판하므로 베이크드 테이블(구버전 TTF 기준)보다 이 값이 정확하다.
-pub fn custom_face_char_em_advance(name: &str, c: char) -> Option<f64> {
+pub fn custom_face_char_em_advance(name: &str, bold: bool, italic: bool, c: char) -> Option<f64> {
     let alias = normalize_face_alias(name)?;
-    let (file, index) = CUSTOM_FACE_SOURCES
-        .read()
-        .ok()
-        .and_then(|sources| sources.get(&alias).cloned())?;
-    let metrics = real_face_hmtx(&file, index)?;
+    let variant = CUSTOM_FACE_VARIANTS.read().ok().and_then(|sources| {
+        sources.get(&alias).and_then(|faces| {
+            faces
+                .iter()
+                .min_by_key(|face| {
+                    face.weight.abs_diff(if bold { 700 } else { 400 })
+                        + 1000 * u16::from(face.italic != italic)
+                })
+                .cloned()
+        })
+    })?;
+    let metrics = real_face_hmtx(&variant.file, variant.index)?;
     let advance = *metrics.advance_by_char.get(&(c as u32))?;
     (metrics.units_per_em > 0).then(|| advance as f64 / metrics.units_per_em as f64)
 }

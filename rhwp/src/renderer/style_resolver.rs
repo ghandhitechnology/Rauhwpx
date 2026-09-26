@@ -575,6 +575,11 @@ pub(crate) fn resolve_font_substitution(
     alt_type: u8,
     lang_index: usize,
 ) -> Option<&'static str> {
+    // 실제 face가 준비된 HFT는 대체 서체명으로 바꾸지 않는다. 글꼴을 나중에
+    // 가져온 경우에도 refreshLayout이 이 스타일을 다시 해소한다.
+    if alt_type == 2 && custom_hft_face_available(name) {
+        return None;
+    }
     // HWP3 원본/일부 한컴 재저장본은 HCI 영문 폰트를 TTF(type=1) 또는
     // unknown(type=0)으로 싣기도 한다. 한컴은 같은 face를 보여주므로
     // alt_type 차이와 무관하게 legacy 영문 HFT 치환을 우선 적용한다.
@@ -591,6 +596,25 @@ pub(crate) fn resolve_font_substitution(
 
     // TTF(type=1) 또는 알수없음(type=0) 치환
     resolve_ttf_font(name)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn custom_hft_face_available(name: &str) -> bool {
+    crate::renderer::layout::active_shaping_face_available(name)
+        || crate::renderer::font_paths::custom_font_face_available(name)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(catch, js_namespace = globalThis, js_name = hasImportedFontMetricsFace)]
+    fn imported_hft_face_available(name: &str) -> Result<bool, wasm_bindgen::JsValue>;
+}
+
+#[cfg(target_arch = "wasm32")]
+fn custom_hft_face_available(name: &str) -> bool {
+    crate::renderer::layout::active_shaping_face_available(name)
+        || imported_hft_face_available(name).unwrap_or(false)
 }
 
 fn resolve_legacy_latin_font(name: &str, lang_index: usize) -> Option<&'static str> {
