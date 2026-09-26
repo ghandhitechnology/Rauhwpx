@@ -20,6 +20,8 @@ export function createComposerRestingMotion(opts: {
   composer: HTMLElement;
   /** 전환 중 제자리를 지켜야 하는 안쪽 요소들. 보이지 않는 요소는 건너뛴다. */
   movingParts: () => HTMLElement[];
+  /** 모양이 바뀌기 직전. 바뀐 뒤와 비교할 배치를 여기서 잰다. */
+  beforeChange?: (resting: boolean) => void;
   onChange?: (resting: boolean) => void;
 }): ComposerRestingMotion {
   const { composer } = opts;
@@ -66,6 +68,7 @@ export function createComposerRestingMotion(opts: {
       visibleParts().map((part) => [part, box.bottom - part.getBoundingClientRect().top] as const),
     );
     stop();
+    opts.beforeChange?.(next);
     resting = next;
     composer.classList.toggle('ag-resting', next);
     opts.onChange?.(next);

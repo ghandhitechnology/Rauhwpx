@@ -30,6 +30,8 @@ export interface MarkdownRenderOptions {
   links?: boolean;
   /** 수식 노드를 외부 렌더러(KaTeX 등)에 맡긴다. false면 원문을 보존한다. */
   renderMath?: (node: MarkdownNode, source: string, displayMode: boolean, raw: string) => boolean;
+  /** 파일 경로처럼 보이는 인라인 코드에 확장자 배지를 붙인다. */
+  fileChips?: boolean;
 }
 
 /* ── 한계값 ────────────────────────────────────────────────
@@ -600,11 +602,31 @@ function appendMath(
   add(parent, node);
 }
 
+const FILE_BADGES: Readonly<Record<string, string>> = {
+  ts: 'TS', tsx: 'TS', mts: 'TS', cts: 'TS', js: 'JS', jsx: 'JS', mjs: 'JS', cjs: 'JS',
+  rs: 'RS', py: 'PY', json: 'JSON', css: 'CSS', html: 'HTML', md: 'MD', toml: 'TOML',
+  yml: 'YML', yaml: 'YML', sh: 'SH', go: 'GO', swift: 'SWIFT', kt: 'KT', java: 'JAVA',
+  c: 'C', h: 'H', cpp: 'C++', hpp: 'C++', sql: 'SQL', txt: 'TXT', csv: 'CSV', xml: 'XML',
+  svg: 'SVG', png: 'PNG', jpg: 'JPG', jpeg: 'JPG', gif: 'GIF', webp: 'WEBP', pdf: 'PDF',
+  hwp: 'HWP', hwpx: 'HWPX', hml: 'HML', docx: 'DOCX', xlsx: 'XLSX', pptx: 'PPTX',
+};
+const RE_FILE_PATH = /^\/?(?:[\p{L}\p{N}_@.~-]+\/)*[\p{L}\p{N}_@-][\p{L}\p{N}_@.-]*\.([A-Za-z0-9+]{1,5})(?::\d+(?::\d+)?)?$/u;
+
+/** 파일 경로로 보이는 인라인 코드면 확장자 배지 문자열을 돌려준다. */
+export function fileBadgeFor(code: string): string | null {
+  const match = RE_FILE_PATH.exec(code.trim());
+  return match ? FILE_BADGES[(match[1] ?? '').toLowerCase()] ?? null : null;
+}
+
+/** 굵게·기울임 안의 코드처럼 한 겹 중첩된 인라인 마크업까지만 푼다. */
+const MAX_INLINE_DEPTH = 3;
+
 function appendInline(
   host: MarkdownHost,
   parent: MarkdownNode,
   text: string,
   options: MarkdownRenderOptions,
+  depth = 0,
 ): void {
   for (const token of tokenizeInline(text)) {
     if (token.kind === 'text') {
@@ -633,15 +655,25 @@ function appendInline(
       add(parent, link);
       continue;
     }
-    const tag = token.kind === 'code'
-      ? 'code'
-      : token.kind === 'strong'
-        ? 'strong'
-        : token.kind === 'del'
-          ? 'del'
-          : 'em';
+    if (token.kind === 'code') {
+      const badge = options.fileChips ? fileBadgeFor(token.text) : null;
+      const node = element(host, 'code', badge ? 'ag-md-code ag-md-file' : 'ag-md-code');
+      if (badge) {
+        const mark = element(host, 'span', 'ag-md-file-badge');
+        mark.textContent = badge;
+        mark.setAttribute?.('aria-hidden', 'true');
+        add(node, mark);
+        add(node, host.createTextNode(token.text));
+      } else {
+        node.textContent = token.text;
+      }
+      add(parent, node);
+      continue;
+    }
+    const tag = token.kind === 'strong' ? 'strong' : token.kind === 'del' ? 'del' : 'em';
     const node = element(host, tag, `ag-md-${token.kind}`);
-    node.textContent = token.text;
+    if (depth < MAX_INLINE_DEPTH) appendInline(host, node, token.text, options, depth + 1);
+    else node.textContent = token.text;
     add(parent, node);
   }
 }
@@ -772,6 +804,16 @@ function appendList(
     add(parentList, li);
     lastItem = li;
   }
+}
+
+/** 이미 나눈 블록을 target 에 붙인다. 블록마다 최상위 노드가 정확히 하나 생긴다. */
+export function appendMarkdownBlocks(
+  target: MarkdownNode,
+  blocks: readonly Block[],
+  host?: MarkdownHost,
+  options: MarkdownRenderOptions = {},
+): void {
+  appendBlocks(resolveHost(host), target, blocks, options);
 }
 
 /** Markdown 을 안전한 DOM 노드로 그려 target 에 붙인다. */
