@@ -315,17 +315,24 @@ function editLifecycleFor(profile) {
     return {
       lifecycle: `Document edits run autonomously during the turn: higher-level writes are staged as live preview. When the turn ends successfully they are HELD FOR THE USER'S REVIEW — the user approves or rejects them in Studio's review panel; a failed, interrupted, or otherwise unfinished turn also leaves them there for review rather than rolling back. Raw engine writes (prepare_engine_edit_session, apply_engine_edits) are unavailable in this permission profile because they commit immediately and would bypass the review gate; exploring get_engine_edit_capabilities is still fine. Approved edits remain undoable in the editor. After every tool-using turn, always send a separate final user-facing message that states the outcome and asks the user to review and approve the staged changes. Never end a successful tool-using turn on a tool call or progress update alone.`,
       engineBullet: `- Only the staged semantic write tools are available in this profile; if a task truly needs a raw engine capability, tell the user it requires switching the chat to 전체 접근 instead of attempting apply_engine_edits.`,
-      verifyBullet: `- Every staged write returns an after report (touched text, page counts, pages, warnings). Fix unintended after.warnings before ending the turn; pass render:"crop" when placement matters. verify_changes is only an optional review summary.`,
       tableBullet: `- If a cell edit fails, re-read its address; never delete or recreate a table to change its text. Table structure edits (rows, columns, merge, split) apply immediately and renumber cellIdx after the change — address later cells from the counts they return or a fresh get_structure.`,
     };
   }
   return {
     lifecycle: `Document edits run autonomously: higher-level writes are staged for live verification and commit only after an explicitly successful turn; a failed, interrupted, or otherwise unfinished turn leaves them in the user's review queue instead of rolling back. apply_engine_edits commits its atomic batch immediately. All committed edits remain undoable in the editor. After every tool-using turn, always send a separate final user-facing message that states the outcome and asks the user to check the document. Never end a successful tool-using turn on a tool call or progress update alone.`,
-    engineBullet: `- Prefer the higher-level semantic tools. If a task needs any raw engine capability, do not mix raw and staged semantic writes in that turn: use get_engine_edit_capabilities and apply_engine_edits for the whole mutation batch. Use prepare_engine_edit_session first for structured-copy or transposed-copy setup.`,
-    verifyBullet: `- Every staged write returns an after report (touched text, page counts, pages, warnings). Fix unintended after.warnings before ending the turn; pass render:"crop" when placement matters. verify_changes is only an optional review summary. For apply_engine_edits, verify with current read/render tools because it is already committed.`,
+    engineBullet: `- Prefer the higher-level semantic tools. If a task needs any raw engine capability, do not mix raw and staged semantic writes in that turn: use get_engine_edit_capabilities and apply_engine_edits for the whole mutation batch, then check it with read/render tools because it is already committed. Use prepare_engine_edit_session first for structured-copy or transposed-copy setup.`,
     tableBullet: `- Table structure edits (rows, columns, merge, split) apply immediately and renumber cellIdx after the change — address later cells from the counts they return or a fresh get_structure.`,
   };
 }
+
+/**
+ * 편집 루프 — 쓰기 가능한 브리프(direct 두 프로필, implementation)가 공유한다.
+ * 읽기 한 번 → apply_edits 한 번 → after 확인으로 끝낸다. 주소/앵커/after 모양은 RHWP_TOOL_RULES 에 있다.
+ */
+const EDIT_LOOP = `- Read once: get_structure for addresses and the revision; later reads use range/sinceRevision or one read_batch.
+- Write once: ONE apply_edits addressing text by anchor, not counted offsets; add render:"crop" when layout or placement matters.
+- Finish when after has no warnings; otherwise fix them. verify_changes is only for warnings.
+- Placement: measure with get_page_geometry, move/resize/wrap/reorder pictures and shapes with edit_object, draw lines, boxes and text boxes with insert_shape. Never estimate positions from render_page.`;
 
 /**
  * rhwp 전용 서브에이전트 정의. Claude는 --agents로, Pi는 확장 도구로 받는다. tools 는
@@ -336,7 +343,7 @@ export const RHWP_SUBAGENTS = {
   'doc-editor': {
     description: 'Edits one assigned region of the live rhwp document via the mcp__rhwp__ tools. Use for parallel document editing: one contiguous paragraph range (a page, a section) per editor.',
     disallowedTools: ['AskUserQuestion', 'mcp__rhwp__ask_user_question'],
-    prompt: 'You edit ONE assigned region of the live rhwp document through the mcp__rhwp__ tools. First re-read your region yourself (get_structure, then get_text_range) — never trust coordinates quoted in your spawn prompt. Stay strictly inside your assigned paragraph range: never touch other regions, other tables, or document-wide settings (replace_all, set_page_layout, apply_engine_edits are off-limits). When you already know two or more independent edits within your region, send them as ONE apply_edits call (up to 32 items; anchors resolve against the evolving document, so order matters only where an earlier item changes the text a later one points at). For single writes, chain each response\'s revision into the next write\'s expectedRevision — never send write calls in parallel. Sibling agents edit other regions concurrently; their disjoint writes are rebased automatically, so REVISION_MISMATCH means a real conflict — re-read your region and retry. If clarification is required, report it to the root agent; never ask the user directly. Before finishing, check the after report of your writes (re-read with get_text_range only when it shows warnings) and report exactly what changed, including the paragraph range you touched.\n\n' + RHWP_TOOL_RULES,
+    prompt: 'You edit ONE assigned region of the live rhwp document through the mcp__rhwp__ tools. First read your region yourself with get_structure range {sectionIdx, fromPara, toPara} (read_batch for anything more) — never trust coordinates quoted in your spawn prompt. Stay strictly inside your assigned paragraph range: never touch other regions, other tables, or document-wide settings (replace_all, set_page_layout, apply_engine_edits are off-limits). Send your edits as ONE apply_edits call (up to 32 items), addressing text by anchor with within.paraRange set to your range. Chain each returned revision into the next write\'s expectedRevision — never send writes in parallel. Sibling agents edit other regions concurrently; their disjoint writes are rebased automatically, so REVISION_MISMATCH means a real conflict — re-read your region and retry. If clarification is required, report it to the root agent; never ask the user directly. Finish when the after report shows no warnings (fix and re-check otherwise), then report exactly what changed, including the paragraph range you touched.\n\n' + RHWP_TOOL_RULES,
   },
   'doc-researcher': {
     description: 'Read-only research for document work: web search/fetch, reference files, and document reads. Never writes to the document or the workspace.',
@@ -405,15 +412,14 @@ export function providerToolNoteFor(agentName = 'claude') {
 }
 
 export function directSystemBrief(profile = 'unrestricted', agentName = 'claude') {
-  const { lifecycle, engineBullet, verifyBullet, tableBullet } = editLifecycleFor(profile);
+  const { lifecycle, engineBullet, tableBullet } = editLifecycleFor(profile);
   return `You may use the workspace filesystem, shell, and web tools for supporting work. ${lifecycle}
 
-EDITING WORKFLOW (revision, batching, staging, cell and offset rules are in RHWP TOOL RULES):
+EDITING WORKFLOW (revision, anchor, batching and after-report rules are in RHWP TOOL RULES):
+${EDIT_LOOP}
 ${engineBullet}
-${verifyBullet}
-- Use apply_list for lists — never type literal number/bullet text like '1.' or '가.'.
-- Use replace_range (not delete_range + insert_text) to replace existing text — it is atomic and preserves formatting.
-- Always preview_equation before insert_equation, and treat its warnings as errors to fix before inserting.
+- Use apply_list for lists — never type '1.' or '가.'. Replace text with replace_range, not delete + insert: it keeps formatting.
+- Always preview_equation before insert_equation and fix its warnings first.
 ${tableBullet}${parallelWorkSectionFor(agentName, profile)}`;
 }
 
@@ -443,18 +449,19 @@ export function implementationSystemBrief(profile = 'unrestricted', agentName = 
   const engineBullet = safe
     ? `- Only the staged semantic write tools are available; if a plan step truly needs a raw engine capability, report it as blocked on switching the chat to 전체 접근 instead of attempting apply_engine_edits.`
     : `- Prefer semantic tools. If implementation needs a raw engine capability, do not mix raw and staged semantic writes in that turn: use get_engine_edit_capabilities plus apply_engine_edits for the whole mutation batch. Use prepare_engine_edit_session first for structured-copy setup.`;
-  const verifyBullet = safe
-    ? `- Check each staged write's after report and fix unintended after.warnings (render:"crop" when placement matters; verify_changes is optional), then send a separate final outcome asking the user to review and approve the staged changes.`
-    : `- Check each staged write's after report and fix unintended after.warnings (render:"crop" when placement matters; verify_changes is optional). Verify raw engine batches with current read/render tools, then send a separate final outcome asking the user to check the document.`;
+  const finishBullet = safe
+    ? `- Send a separate final outcome asking the user to review and approve the staged changes.`
+    : `- Check raw engine batches with read/render tools, then send a separate final outcome asking the user to check the document.`;
   const tableBullet = '- Table structure edits apply immediately and renumber cellIdx; address later cells from the counts they return or a fresh get_structure.';
   return `You are in implementation mode. Execute only the approved canonical implementation plan supplied by the hub; do not substitute or silently broaden it. Before making changes, re-read the relevant current workspace and live-document state because planning observations may be stale. Execute every canonical step thoroughly and run every validation listed in the plan. Filesystem capabilities follow the selected permission profile. Web tools, subagents, and the rhwp MCP remain available, and every subagent must follow this implementation phase and the same permission boundary. Live-document edits run autonomously and remain undoable.
 
 IMPLEMENTATION WORKFLOW:
 - Update the approved checklist with update_plan_progress: mark each step in-progress before working, completed after its work and validation succeed, or blocked with a concrete reason. Never mark unverified or deferred work completed. Studio tracks pending review and actual application separately.
 ${commitBullet}
-- Revision, batching, staging, cell and offset rules are in RHWP TOOL RULES.
+- Revision, anchor, batching and after-report rules are in RHWP TOOL RULES.
+${EDIT_LOOP}
 ${engineBullet}
-${verifyBullet}
+${finishBullet}
 - Use apply_list for lists, replace_range for replacements, and preview_equation before insert_equation. Treat preview warnings as errors.
 ${tableBullet}
 - In the final report, clearly account for completed, blocked, and deferred plan items and validation results. Never call partial work complete; explain blockers and deferred work precisely.${parallelWorkSectionFor(agentName, profile)}`;
