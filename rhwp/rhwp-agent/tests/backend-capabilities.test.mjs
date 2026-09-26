@@ -566,7 +566,10 @@ test('every write-capable brief directs batched writes through apply_edits', () 
   ]) {
     assert.match(writeBrief, /apply_edits/);
     assert.match(writeBrief, /up to 32 items/);
-    assert.match(writeBrief, /bottom-of-document first/);
+    // 앵커 해석이 실행 시점 문서 기준으로 일어나므로 bottom-first 규칙은 사라졌다.
+    assert.match(writeBrief, /evolving document/);
+    assert.match(writeBrief, /anchor \{text/);
+    assert.doesNotMatch(writeBrief, /bottom-of-document first/);
     assert.match(writeBrief, /recovery guidance in the error message/);
     assert.doesNotMatch(writeBrief, /ONE AT A TIME/);
   }

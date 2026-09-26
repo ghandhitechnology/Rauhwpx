@@ -37,7 +37,7 @@ test('threads clear deleted template ids only after an authoritative catalog arr
 });
 
 test('template mapping expires when the open document revision changes', () => {
-  assert.match(executor, /if \(tool === 'get_structure'\) this\.documentInspectionRevision = this\.revision/);
+  assert.match(executor, /this\.documentInspectionRevision = this\.revision/);
   assert.match(executor, /this\.documentInspectionRevision !== this\.revision/);
   assert.match(executor, /this\.documentInspectionRevision = null/);
 });

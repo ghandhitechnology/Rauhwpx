@@ -5204,11 +5204,14 @@ function handleMcpMessage(record, sock, msg) {
             return;
           }
         }
-        // apply_edits 는 항목 수만큼 변이+마감 리플로우를 안고 오므로 배치 크기에
-        // 비례해 늘린다. 전체 문서 직렬화+base64 전송도 큰 파일에서는 길어질 수 있어
-        // 별도 예산을 준다 (둘 다 mcp-stdio 의 180s 한도 아래로 유지).
-        const timeoutMs = tool === 'apply_edits'
-          ? Math.min(STUDIO_TOOL_TIMEOUT_MS + 2_000 * (Array.isArray(args.edits) ? args.edits.length : 0), 120_000)
+        // apply_edits/read_batch 는 항목 수만큼 변이+마감 리플로우를 안고 오므로 배치
+        // 크기에 비례해 늘린다. 전체 문서 직렬화+base64 전송도 큰 파일에서는 길어질 수
+        // 있어 별도 예산을 준다 (모두 mcp-stdio 의 180s 한도 아래로 유지).
+        const batchItems = tool === 'apply_edits' ? args.edits
+          : tool === 'read_batch' ? args.reads
+            : null;
+        const timeoutMs = batchItems !== null
+          ? Math.min(STUDIO_TOOL_TIMEOUT_MS + 2_000 * (Array.isArray(batchItems) ? batchItems.length : 0), 120_000)
           : tool === 'materialize_document_snapshot'
             ? 120_000
             : STUDIO_TOOL_TIMEOUT_MS;

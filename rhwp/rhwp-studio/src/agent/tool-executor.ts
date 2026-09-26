@@ -14,7 +14,7 @@ import type { RevisionTracker } from './revision.ts';
 import type { PendingEditManager } from './pending-edits.ts';
 import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, DocumentTemplate, ObjectOp, PendingOp, PermissionProfile } from './types.ts';
 import { AgentToolError } from './types.ts';
-import { EditJournal } from './edit-journal.ts';
+import { EditJournal, type EditJournalEntry } from './edit-journal.ts';
 import { renderChartPng, validateChartSpec } from './chart-render.ts';
 import { cropImageOnCanvas, REFERENCE_READ_MAX_PIXELS, type ImageCropper, type PixelBox } from './image-crop.ts';
 import type { ChartSpec } from './chart-render.ts';
@@ -73,13 +73,61 @@ interface StructureTable {
   /** 문단 예산이 이 표의 셀 텍스트 수집 도중/이전에 소진됐다 (JSON 출력에는 싣지 않는다) */
   textCut: boolean;
 }
+/** get_structure range 인자 — 파싱·검증 후 수집을 이 본문 문단 범위로 좁힌다. */
+interface StructureRange { sectionIdx: number; fromPara: number; toPara: number }
 interface StructureData {
   sectionCount: number;
   pageCount: number;
   truncated: boolean;
+  range?: StructureRange;
   sections: Array<{ sectionIdx: number; paragraphCount: number; paragraphs: StructureParagraph[] }>;
   tablesBySection: Map<number, StructureTable[]>;
 }
+
+/** get_structure(sinceRevision) 한 변경 구간 — 현재 좌표 범위 + 대체된 from-시점 범위 + 그 구간의 문단/표. */
+interface StructureDeltaChange {
+  sectionIdx: number;
+  paraStart: number;
+  paraEnd: number;
+  wasRanges: Array<[number, number]>;
+  paragraphs: StructureParagraph[];
+  tables: StructureTable[];
+}
+
+/** compact 구조 텍스트용 치환 — 탭/개행을 한 줄에 실을 수 있는 문자로 바꾼다. */
+function cleanStructureText(text: string): string {
+  return text.replace(/\t/g, '⇥').replace(/\r?\n|\r/g, '⏎');
+}
+function previewStructureText(text: string, length: number): string {
+  return cleanStructureText(text) + (text.length < length ? '…' : '');
+}
+
+/** anchor.within 의 검색 범위 — collectTextMatches 의 선택적 scope 인자와 같은 모양. */
+interface AnchorScope {
+  sectionIdx?: number;
+  /** [startParaIdx, endParaIdx] 본문 문단 범위(포함) — 셀 매치는 표의 본문 문단으로 판정한다. */
+  paraRange?: [number, number];
+  /** 이 최상위 셀(안의 중첩 표까지) 안의 매치만 본다. */
+  cell?: { paraIdx: number; controlIdx: number; cellIdx: number };
+}
+
+/** collectTextMatches 매치 하나가 앵커로 확정된 모양 + 호출자가 준 position. */
+interface ResolvedAnchor {
+  sectionIdx: number;
+  paraIdx: number;
+  charOffset: number;
+  length: number;
+  cell?: CellAddr;
+  position?: 'before' | 'after' | 'replace';
+}
+
+/** anchor 와 숫자 좌표를 섞어 보낼 때 걸러내는 좌표 인자 목록 (optAnchor 가 사용). */
+const ANCHOR_COORD_KEYS = [
+  'sectionIdx', 'paraIdx', 'charOffset',
+  'startParaIdx', 'startCharOffset', 'endParaIdx', 'endCharOffset',
+  'startOffset', 'endOffset',
+  'cell', 'cellPath',
+];
 
 
 /** Every Studio tool that can create or stage a document mutation. */
@@ -150,6 +198,35 @@ const BATCHABLE_EDIT_TOOLS: ReadonlySet<string> = new Set([
   'set_zone_borders',
   'delete_table',
   'insert_equation',
+]);
+
+/**
+ * read_batch 에 넣을 수 있는 읽기 전용 문서 도구 — 허브의 BATCHABLE_READ_TOOL_NAMES
+ * 와 일치해야 한다 (agent-write-tools-guard 소스 가드). render_page 와
+ * materialize_document_snapshot 은 이미지/바이트 결과가 중첩 JSON 으로 의미를 잃어
+ * 제외하고, 템플릿 읽기는 다른 문서를 여는 도구라 제외한다. 목록 밖의 이름은 항목
+ * 오류로 개별 보고된다.
+ */
+const BATCHABLE_READ_TOOLS: ReadonlySet<string> = new Set([
+  'get_structure',
+  'get_text_range',
+  'get_selection',
+  'get_fields',
+  'get_document_info',
+  'find_text',
+  'get_page_geometry',
+  'get_para_format',
+  'get_char_format',
+  'get_table_properties',
+  'get_table_layout',
+  'get_engine_edit_capabilities',
+  'list_styles',
+  'list_numberings',
+  'get_outline',
+  'list_footnotes',
+  'list_bookmarks',
+  'preview_equation',
+  'verify_changes',
 ]);
 type TurnWriteMode = 'none' | 'semantic' | 'raw';
 
@@ -577,6 +654,10 @@ export class AgentToolExecutor {
   // 병렬 서브에이전트 리베이스용 편집 저널 — 정밀 기록된 핵심 텍스트 쓰기만 담고,
   // 기록되지 않은 revision bump 는 자동으로 '불명'(리베이스 불가) 취급된다.
   private journal = new EditJournal();
+  // apply_edits 안쪽의 개별 쓰기가 쌓는 저널 엔트리 — runAtomicBatch 가 bump 를
+  // 한 번으로 묶으므로 항목별 기록을 여기 모았다가 배치이 끝난 revision 에 전부
+  // 귀속시킨다 (안 모으면 배치이 델타/리베이스 커버리지 구멍으로 보인다).
+  private journalBatch: EditJournalEntry[] | null = null;
   // verify_changes 증분 커서 — `${agent}:${changeSetId}` 별로 이번 턴에 이미 보고한 op id.
   private verifiedOpIds = new Map<string, Set<string>>();
 
@@ -636,7 +717,6 @@ export class AgentToolExecutor {
       // await 필수 — 비동기 툴(insert_chart)의 rejection 도 여기서 에러 코드로 매핑된다
       const result = await this.dispatch(tool, args, agent, capability);
       assertToolRequestActive(capability);
-      if (tool === 'get_structure') this.documentInspectionRevision = this.revision;
       return result;
     } catch (e) {
       if (claimedMode) this.turnWriteMode = 'none';
@@ -689,6 +769,7 @@ export class AgentToolExecutor {
       case 'template_apply_paragraph_format': return this.templateApplyParagraphFormat(args, agent, capability);
       case 'template_insert_block': return this.templateInsertBlock(args, agent, capability);
       case 'apply_edits': return this.applyEdits(args, agent);
+      case 'read_batch': return this.readBatch(args, agent, capability);
       case 'insert_text': return this.insertText(args, agent);
       case 'delete_range': return this.deleteRange(args, agent);
       case 'replace_range': return this.replaceRange(args, agent);
@@ -868,8 +949,12 @@ export class AgentToolExecutor {
     );
   }
 
-  /** 방금 수행한 쓰기를 편집 저널에 정밀 기록한다 — (revBefore, 현재 revision] 전체 귀속. */
+  /** 방금 수행한 쓰기를 편집 저널에 정밀 기록한다 — (revBefore, 현재 revision] 전체 귀속. apply_edits 안이면 버퍼에 쌓아 배치 끝 revision 에 일괄 귀속한다. */
   private recordJournal(revBefore: number, sectionIdx: number, paraStart: number, paraEnd: number, paraDelta: number): void {
+    if (this.journalBatch) {
+      this.journalBatch.push({ sectionIdx, paraStart, paraEnd, paraDelta });
+      return;
+    }
     this.journal.record(revBefore, this.revision, { sectionIdx, paraStart, paraEnd, paraDelta });
   }
 
@@ -1019,7 +1104,15 @@ export class AgentToolExecutor {
     if (format !== 'text' && format !== 'json') {
       throw new AgentToolError('INVALID_ARGS', `format must be 'text' or 'json' (got ${JSON.stringify(format)})`);
     }
+    // sinceRevision 델타는 라이브 문서 저널에만 의미가 있다 — 템플릿 읽기는
+    // revisionLabel 경로로 들어오므로 여기서 걸러진다.
+    if (args['sinceRevision'] !== undefined && args['sinceRevision'] !== null && revisionLabel === undefined) {
+      return this.getStructureDelta(args, format as 'text' | 'json');
+    }
     const data = this.collectStructure(args);
+    // 템플릿 매핑 게이트의 "문서를 봤다" 표시는 전체 읽기만 세운다 — range/sinceRevision
+    // 부분 읽기로는 구조 전체를 검토했다고 볼 수 없다.
+    if (!data.range) this.documentInspectionRevision = this.revision;
     if (format === 'json') {
       const sectionsOut = data.sections.map((s) => {
         const tables = data.tablesBySection.get(s.sectionIdx);
@@ -1032,6 +1125,7 @@ export class AgentToolExecutor {
         sectionCount: data.sectionCount,
         pageCount: data.pageCount,
         truncated: data.truncated,
+        ...(data.range ? { range: data.range } : {}),
         sections: sectionsOut,
       };
     }
@@ -1044,36 +1138,86 @@ export class AgentToolExecutor {
     };
   }
 
-  /** get_structure 의 문단·표 수집 — 본문 문단이 먼저 예산(maxParagraphs)을 쓰고 표 셀 문단이 나머지를 쓴다. */
+  /** get_structure 의 문단·표 수집 — 본문 문단이 먼저 예산(maxParagraphs)을 쓰고 표 셀 문단이 나머지를 쓴다. range 가 있으면 그 범위만 읽는다. */
   private collectStructure(args: Record<string, unknown>): StructureData {
     const maxPreviewChars = Math.min(Math.max(optInt(args, 'maxPreviewChars', 120), 0), 500);
     const maxParagraphs = Math.min(Math.max(optInt(args, 'maxParagraphs', 500), 1), 2000);
+    const range = this.parseStructureRange(args);
     const { wasm } = this.deps;
     const sectionCount = wasm.getSectionCount();
     const sections: StructureData['sections'] = [];
-    let total = 0;
+    const budget = { count: 0 };
     let truncated = false;
     for (let sec = 0; sec < sectionCount; sec++) {
+      if (range && sec !== range.sectionIdx) continue;
       const paragraphCount = wasm.getParagraphCount(sec);
-      const paragraphs: StructureParagraph[] = [];
-      for (let para = 0; para < paragraphCount; para++) {
-        if (total >= maxParagraphs) {
-          truncated = true;
-          break;
-        }
-        const length = wasm.getParagraphLength(sec, para);
-        const previewLen = Math.min(length, maxPreviewChars);
-        const text = previewLen > 0 ? wasm.getTextRange(sec, para, 0, previewLen) : '';
-        paragraphs.push({ paraIdx: para, length, text });
-        total++;
-      }
-      sections.push({ sectionIdx: sec, paragraphCount, paragraphs });
+      const span = this.collectStructureSpan(
+        sec, range ? range.fromPara : 0, range ? range.toPara : paragraphCount - 1,
+        maxPreviewChars, maxParagraphs, budget,
+      );
+      truncated ||= span.truncated;
+      sections.push({ sectionIdx: sec, paragraphCount, paragraphs: span.paragraphs });
       if (truncated) break;
     }
 
     // 표: 섹션별 tables[] 로 셀 주소 + 셀 텍스트를 노출한다 (문단 예산 공유).
     const tablesBySection = new Map<number, StructureTable[]>();
+    for (let sec = 0; sec < sectionCount; sec++) {
+      if (range && sec !== range.sectionIdx) continue;
+      const paraCount = wasm.getParagraphCount(sec);
+      const collected = this.collectStructureTables(
+        sec, range ? range.fromPara : 0, range ? range.toPara : paraCount - 1,
+        maxPreviewChars, maxParagraphs, budget,
+      );
+      truncated ||= collected.truncated;
+      for (const table of collected.tables) {
+        const list = tablesBySection.get(sec) ?? [];
+        list.push(table);
+        tablesBySection.set(sec, list);
+      }
+    }
+    return { sectionCount, pageCount: wasm.pageCount, truncated, range, sections, tablesBySection };
+  }
+
+  private collectStructureSpan(
+    sectionIdx: number,
+    fromPara: number,
+    toPara: number,
+    maxPreviewChars: number,
+    maxParagraphs: number,
+    budget: { count: number },
+  ): { paragraphs: StructureParagraph[]; truncated: boolean } {
+    const { wasm } = this.deps;
+    const paragraphs: StructureParagraph[] = [];
+    let truncated = false;
+    for (let para = fromPara; para <= toPara; para++) {
+      if (budget.count >= maxParagraphs) {
+        truncated = true;
+        break;
+      }
+      const length = wasm.getParagraphLength(sectionIdx, para);
+      const previewLen = Math.min(length, maxPreviewChars);
+      const text = previewLen > 0 ? wasm.getTextRange(sectionIdx, para, 0, previewLen) : '';
+      paragraphs.push({ paraIdx: para, length, text });
+      budget.count++;
+    }
+    return { paragraphs, truncated };
+  }
+
+  /** sectionIdx 의 fromPara..toPara 본문 문단에 앵커된 표를 수집한다 — 셀 주소/텍스트, 문단 예산 공유. */
+  private collectStructureTables(
+    sectionIdx: number,
+    fromPara: number,
+    toPara: number,
+    maxPreviewChars: number,
+    maxParagraphs: number,
+    budget: { count: number },
+  ): { tables: StructureTable[]; truncated: boolean } {
+    const { wasm } = this.deps;
+    const tables: StructureTable[] = [];
+    let tablesTruncated = false;
     for (const t of this.listTables()) {
+      if (t.sectionIdx !== sectionIdx || t.paraIdx < fromPara || t.paraIdx > toPara) continue;
       let table: StructureTable;
       try {
         const dims = wasm.getTableDimensions(t.sectionIdx, t.paraIdx, t.controlIdx);
@@ -1090,8 +1234,8 @@ export class AgentToolExecutor {
           for (let cp = 0; cp < cellParaCount; cp++) {
             // 예산 소진 시에도 표/셀 좌표(주소 지정에 필수)는 계속 내보내고
             // 셀 텍스트 수집만 멈춘다 — 표가 통째로 사라지면 셀 주소를 만들 수 없다.
-            if (total >= maxParagraphs) {
-              truncated = true;
+            if (budget.count >= maxParagraphs) {
+              tablesTruncated = true;
               table.textCut = true;
               break;
             }
@@ -1101,7 +1245,7 @@ export class AgentToolExecutor {
               ? wasm.getTextInCell(t.sectionIdx, t.paraIdx, t.controlIdx, cellIdx, cp, 0, previewLen)
               : '';
             cellParas.push({ cellParaIdx: cp, length, text });
-            total++;
+            budget.count++;
           }
           table.cells.push({
             cellIdx, row: info.row, col: info.col, rowSpan: info.rowSpan, colSpan: info.colSpan,
@@ -1111,11 +1255,186 @@ export class AgentToolExecutor {
       } catch {
         continue; // 접근 실패한 표는 건너뛴다 (best-effort)
       }
-      const list = tablesBySection.get(t.sectionIdx) ?? [];
-      list.push(table);
-      tablesBySection.set(t.sectionIdx, list);
+      tables.push(table);
     }
-    return { sectionCount, pageCount: wasm.pageCount, truncated, sections, tablesBySection };
+    return { tables, truncated: tablesTruncated };
+  }
+
+  /** get_structure range 인자 파싱 — sectionIdx/fromPara/toPara 경계를 지금 문서에서 검증한다. */
+  private parseStructureRange(args: Record<string, unknown>): StructureRange | undefined {
+    const raw = args['range'];
+    if (raw === undefined || raw === null) return undefined;
+    const rec = asRecord(raw);
+    const sectionIdx = reqInt(rec, 'sectionIdx');
+    const fromPara = reqInt(rec, 'fromPara');
+    const toPara = reqInt(rec, 'toPara');
+    const { wasm } = this.deps;
+    const sectionCount = wasm.getSectionCount();
+    if (sectionIdx < 0 || sectionIdx >= sectionCount) {
+      throw new AgentToolError('INVALID_ARGS', `range.sectionIdx ${sectionIdx} out of range (0..${sectionCount - 1})`);
+    }
+    const paraCount = wasm.getParagraphCount(sectionIdx);
+    if (fromPara < 0 || fromPara > toPara) {
+      throw new AgentToolError('INVALID_ARGS', `range.fromPara ${fromPara} must satisfy 0 <= fromPara <= toPara`);
+    }
+    if (toPara >= paraCount) {
+      throw new AgentToolError('INVALID_ARGS', `range.toPara ${toPara} out of range for section ${sectionIdx} (0..${paraCount - 1})`);
+    }
+    return { sectionIdx, fromPara, toPara };
+  }
+
+  /**
+   * get_structure(sinceRevision) — 저널이 (since, 현재] 구간을 덮으면 바뀐 문단만
+   * 싣고, 덮지 못하면 FULL_REFRESH_REQUIRED 를 던진다 (저널 보존 한도를 넘은
+   * revision 이거나 사용자 편집·비저널 bump 가 끼어 있다).
+   */
+  private getStructureDelta(args: Record<string, unknown>, format: 'text' | 'json'): unknown {
+    const since = args['sinceRevision'];
+    if (typeof since !== 'number' || !Number.isSafeInteger(since) || since < 0) {
+      throw new AgentToolError('INVALID_ARGS', `sinceRevision must be a nonnegative integer (got ${JSON.stringify(since)})`);
+    }
+    const current = this.revision;
+    if (since > current) {
+      throw new AgentToolError('INVALID_ARGS', `sinceRevision ${since} is ahead of the current revision ${current}`);
+    }
+    const delta = this.journal.diff(since, current, (sec) => this.deps.wasm.getParagraphCount(sec));
+    if (delta === null) {
+      throw new AgentToolError(
+        'FULL_REFRESH_REQUIRED',
+        `No usable edit history between revisions ${since} and ${current} — the journal only retains recent agent writes (older entries age out, and user edits leave gaps). `
+          + 'Re-read with get_structure without sinceRevision and keep the returned revision.',
+      );
+    }
+    const range = this.parseStructureRange(args);
+    const maxPreviewChars = Math.min(Math.max(optInt(args, 'maxPreviewChars', 120), 0), 500);
+    const maxParagraphs = Math.min(Math.max(optInt(args, 'maxParagraphs', 500), 1), 2000);
+    const budget = { count: 0 };
+    const changes: StructureDeltaChange[] = [];
+    let truncated = false;
+    outer:
+    for (const [sec, sectionDelta] of delta) {
+      for (const ch of sectionDelta.changes) {
+        let lo = ch.paraStart;
+        let hi = ch.paraEnd;
+        if (range) {
+          if (sec !== range.sectionIdx) continue;
+          lo = Math.max(lo, range.fromPara);
+          hi = Math.min(hi, range.toPara);
+          if (lo > hi) continue;
+        }
+        const paraCount = this.deps.wasm.getParagraphCount(sec);
+        lo = Math.max(0, Math.min(lo, paraCount - 1));
+        hi = Math.max(lo, Math.min(hi, paraCount - 1));
+        const span = this.collectStructureSpan(sec, lo, hi, maxPreviewChars, maxParagraphs, budget);
+        const tables = this.collectStructureTables(sec, lo, hi, maxPreviewChars, maxParagraphs, budget);
+        truncated ||= span.truncated || tables.truncated;
+        changes.push({
+          sectionIdx: sec, paraStart: lo, paraEnd: hi, wasRanges: ch.wasRanges,
+          paragraphs: span.paragraphs, tables: tables.tables,
+        });
+        if (truncated) break outer;
+      }
+    }
+    const indexShifts: Array<{ sectionIdx: number; at: number; delta: number }> = [];
+    for (const [sec, sectionDelta] of delta) {
+      if (range && sec !== range.sectionIdx) continue;
+      for (const s of sectionDelta.indexShifts) indexShifts.push({ sectionIdx: sec, at: s.at, delta: s.delta });
+    }
+    const pageCount = this.deps.wasm.pageCount;
+    if (format === 'json') {
+      return {
+        revision: current,
+        sinceRevision: since,
+        pageCount,
+        truncated,
+        changes: changes.map((c) => ({
+          ...c,
+          tables: c.tables.map(({ textCut: _cut, ...table }) => table),
+        })),
+        indexShifts,
+      };
+    }
+    const text = this.renderStructureDelta(since, pageCount, truncated, changes, indexShifts);
+    return { revision: current, sinceRevision: since, pageCount, truncated, mcpContent: [{ type: 'text', text }] };
+  }
+
+  /**
+   * sinceRevision 델타의 compact 텍스트 — 바뀐 현재 문단 구간 + 그 구간이 대체한
+   * from-시점 문단 범위(was) + 저장 인덱스의 누적 이동 경계(shift).
+   */
+  private renderStructureDelta(
+    since: number,
+    pageCount: number,
+    truncated: boolean,
+    changes: StructureDeltaChange[],
+    indexShifts: Array<{ sectionIdx: number; at: number; delta: number }>,
+  ): string {
+    const lines: string[] = [];
+    lines.push(`revision ${this.revision} · ${pageCount} pages · changes since revision ${since}`
+      + (truncated ? ' · TRUNCATED by maxParagraphs (raise it or use find_text)' : ''));
+    lines.push(STRUCTURE_LEGEND);
+    lines.push(
+      `Delta: "s<sec> changed pA[-pB] (was pX[-pY],…)" = paragraphs that changed since revision ${since}, in current indexes; `
+      + '"was" = that revision\'s indexes this range replaced ("was new" = all created since) — saved indexes inside a was are stale, re-read them. '
+      + '"s<sec> shift pA+ → N" = a saved paraIdx >= A outside every was is now at A+N.',
+    );
+    const secs = [...new Set([
+      ...changes.map((c) => c.sectionIdx),
+      ...indexShifts.map((s) => s.sectionIdx),
+    ])].sort((a, b) => a - b);
+    for (const sec of secs) {
+      for (const change of changes) {
+        if (change.sectionIdx !== sec) continue;
+        const spanText = change.paraStart === change.paraEnd
+          ? `p${change.paraStart}`
+          : `p${change.paraStart}-p${change.paraEnd}`;
+        const wasText = change.wasRanges.length === 0
+          ? 'new'
+          : change.wasRanges.map(([a, b]) => (a === b ? `p${a}` : `p${a}-p${b}`)).join(', ');
+        lines.push(`s${sec} changed ${spanText} (was ${wasText}):`);
+        // 델타 구간 안에서는 빈 문단도 접지 않는다 — 에이전트는 바뀐 문단만 다시 본다.
+        for (const para of change.paragraphs) {
+          lines.push(`s${sec} p${para.paraIdx} (${para.length})${para.length > 0 ? ` ${previewStructureText(para.text, para.length)}` : ''}`);
+        }
+        for (const table of change.tables) {
+          this.emitStructureTable(lines, sec, table);
+        }
+      }
+      for (const shift of indexShifts) {
+        if (shift.sectionIdx !== sec) continue;
+        lines.push(`s${sec} shift p${shift.at}+ → ${shift.delta >= 0 ? '+' : ''}${shift.delta}`);
+      }
+    }
+    if (changes.length === 0 && indexShifts.length === 0) {
+      lines.push('(no recorded paragraph changes)');
+    }
+    return lines.join('\n');
+  }
+
+  /** compact 구조 텍스트의 표 블록 — "  table s0 p5 c0 3x4" 머리 + 행마다 "[cellIdx] text | …". */
+  private emitStructureTable(lines: string[], sec: number, table: StructureTable): void {
+    lines.push(`  table s${sec} p${table.paraIdx} c${table.controlIdx} ${table.rowCount}x${table.colCount}`
+      + (table.textCut ? ' (cell text cut by maxParagraphs)' : ''));
+    const rows = new Map<number, string[]>();
+    for (const cell of table.cells) {
+      const spans = `${cell.rowSpan !== 1 ? ` rs${cell.rowSpan}` : ''}${cell.colSpan !== 1 ? ` cs${cell.colSpan}` : ''}`;
+      const body = cell.paragraphs.map((p) => {
+        if (p.length === 0) {
+          const nested = this.cellParaHostsNestedTable(
+            sec, { paraIdx: table.paraIdx, controlIdx: table.controlIdx, cellIdx: cell.cellIdx }, p.cellParaIdx,
+          );
+          return nested ? '⊞' : '';
+        }
+        const cut = p.text.length < p.length;
+        return cleanStructureText(p.text) + (cut ? `…(${p.length})` : '');
+      }).join('⏎');
+      const row = rows.get(cell.row) ?? [];
+      row.push(`[${cell.cellIdx}${spans}]${body ? ` ${body}` : ''}`);
+      rows.set(cell.row, row);
+    }
+    for (const [row, cells] of [...rows.entries()].sort((a, b) => a[0] - b[0])) {
+      lines.push(`  r${row} ${cells.join(' | ')}`);
+    }
   }
 
   /**
@@ -1127,39 +1446,14 @@ export class AgentToolExecutor {
     const lines: string[] = [];
     const sectionWord = data.sectionCount === 1 ? 'section' : 'sections';
     lines.push(`${revisionLabel} · ${data.pageCount} pages · ${data.sectionCount} ${sectionWord}`
+      + (data.range ? ` · range s${data.range.sectionIdx} p${data.range.fromPara}-p${data.range.toPara}` : '')
       + (data.truncated ? ' · TRUNCATED by maxParagraphs (raise it or use find_text)' : ''));
     lines.push(STRUCTURE_LEGEND);
-    const clean = (text: string): string => text.replace(/\t/g, '⇥').replace(/\r?\n|\r/g, '⏎');
-    const preview = (text: string, length: number): string =>
-      clean(text) + (text.length < length ? '…' : '');
     for (const section of data.sections) {
       const sec = section.sectionIdx;
       lines.push(`s${sec} · ${section.paragraphCount} paragraphs`);
       const tables = [...(data.tablesBySection.get(sec) ?? [])];
-      const emitTable = (table: StructureTable): void => {
-        lines.push(`  table s${sec} p${table.paraIdx} c${table.controlIdx} ${table.rowCount}x${table.colCount}`
-          + (table.textCut ? ' (cell text cut by maxParagraphs)' : ''));
-        const rows = new Map<number, string[]>();
-        for (const cell of table.cells) {
-          const spans = `${cell.rowSpan !== 1 ? ` rs${cell.rowSpan}` : ''}${cell.colSpan !== 1 ? ` cs${cell.colSpan}` : ''}`;
-          const body = cell.paragraphs.map((p) => {
-            if (p.length === 0) {
-              const nested = this.cellParaHostsNestedTable(
-                sec, { paraIdx: table.paraIdx, controlIdx: table.controlIdx, cellIdx: cell.cellIdx }, p.cellParaIdx,
-              );
-              return nested ? '⊞' : '';
-            }
-            const cut = p.text.length < p.length;
-            return clean(p.text) + (cut ? `…(${p.length})` : '');
-          }).join('⏎');
-          const row = rows.get(cell.row) ?? [];
-          row.push(`[${cell.cellIdx}${spans}]${body ? ` ${body}` : ''}`);
-          rows.set(cell.row, row);
-        }
-        for (const [row, cells] of [...rows.entries()].sort((a, b) => a[0] - b[0])) {
-          lines.push(`  r${row} ${cells.join(' | ')}`);
-        }
-      };
+      const emitTable = (table: StructureTable): void => this.emitStructureTable(lines, sec, table);
       let emptyStart = -1;
       let emptyEnd = -1;
       const flushEmpty = (): void => {
@@ -1177,7 +1471,7 @@ export class AgentToolExecutor {
           continue;
         }
         flushEmpty();
-        lines.push(`s${sec} p${para.paraIdx} (${para.length})${para.length > 0 ? ` ${preview(para.text, para.length)}` : ''}`);
+        lines.push(`s${sec} p${para.paraIdx} (${para.length})${para.length > 0 ? ` ${previewStructureText(para.text, para.length)}` : ''}`);
         for (const table of anchored) {
           emitTable(table);
           tables.splice(tables.indexOf(table), 1);
@@ -1457,8 +1751,13 @@ export class AgentToolExecutor {
     };
   }
 
-  /** 본문+셀 전수 텍스트 검색 — find_text / replace_all 공용 스캐너 */
-  private collectTextMatches(query: string, caseSensitive: boolean, maxResults: number): {
+  /**
+   * 본문+셀 전수 텍스트 검색 — find_text / replace_all / 텍스트 앵커 해석의 공용 스캐너.
+   * scope(anchor.within)가 있으면 범위 밖 문단/표는 아예 건너뛴다 — 걸러 낸 뒤의
+   * 매치 수가 정확해야 모호함 판별이 맞기 때문이다. 셀 매치의 범위 좌표는 표가 놓인
+   * 본문 문단(paraIdx) 기준이다.
+   */
+  private collectTextMatches(query: string, caseSensitive: boolean, maxResults: number, scope?: AnchorScope): {
     matches: Array<{
       sectionIdx: number; paraIdx: number; charOffset: number; length: number;
       context: string; cell?: CellAddr; cellPath?: CellPathEntry[];
@@ -1502,10 +1801,25 @@ export class AgentToolExecutor {
       }
       return true;
     };
+    // scope 의 본문 좌표 필터. within.cell 이 있으면 본문 매치는 전부 제외되고
+    // 셀 매치에는 표가 놓인 본문 문단 번호를 대입한다.
+    const paraInScope = (sec: number, bodyPara: number): boolean =>
+      scope?.cell === undefined
+      && (scope?.sectionIdx === undefined || sec === scope.sectionIdx)
+      && (scope?.paraRange === undefined
+        || (bodyPara >= scope.paraRange[0] && bodyPara <= scope.paraRange[1]));
+    // 표 스캔 필터 — cell 스코프일 때는 그 표만 살리고 paraRange/sectionIdx 도 같이 건다.
+    const tableInScope = (sec: number, tablePara: number, controlIdx: number): boolean =>
+      (scope?.sectionIdx === undefined || sec === scope.sectionIdx)
+      && (scope?.paraRange === undefined
+        || (tablePara >= scope.paraRange[0] && tablePara <= scope.paraRange[1]))
+      && (scope?.cell === undefined
+        || (tablePara === scope.cell.paraIdx && controlIdx === scope.cell.controlIdx));
     const sectionCount = wasm.getSectionCount();
     outer: for (let sec = 0; sec < sectionCount; sec++) {
       const paraCount = wasm.getParagraphCount(sec);
       for (let para = 0; para < paraCount; para++) {
+        if (!paraInScope(sec, para)) continue;
         const len = wasm.getParagraphLength(sec, para);
         if (len === 0) continue;
         const text = wasm.getTextRange(sec, para, 0, len);
@@ -1553,9 +1867,11 @@ export class AgentToolExecutor {
         }
       };
       cellScan: for (const t of this.listTables()) {
+        if (!tableInScope(t.sectionIdx, t.paraIdx, t.controlIdx)) continue;
         try {
           const dims = wasm.getTableDimensions(t.sectionIdx, t.paraIdx, t.controlIdx);
           for (let cellIdx = 0; cellIdx < dims.cellCount; cellIdx++) {
+            if (scope?.cell && cellIdx !== scope.cell.cellIdx) continue;
             const cell: CellAddr = { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx };
             const cellParaCount = wasm.getCellParagraphCount(t.sectionIdx, t.paraIdx, t.controlIdx, cellIdx);
             for (let cp = 0; cp < cellParaCount; cp++) {
@@ -1630,6 +1946,213 @@ export class AgentToolExecutor {
       truncated,
       ...(truncated ? { note: `only the first ${maxMatches} matches were replaced — call replace_all again with the returned revision to continue.` } : {}),
     };
+  }
+
+  // ─── 텍스트 앵커 (anchor) ────────────────────────────────
+
+  /**
+   * anchor {text, occurrence?, within?, position?} 를 실행 시점 문서의 실제 매치로
+   * 해석한다. 매치는 collectTextMatches 로 찾고 within 스코프는 스캔 자체에 건다.
+   * 매치 0건·occurrence 없는 다매치·범위 밖 occurrence 는 후보 주소를 담아
+   * INVALID_ARGS 로 실패한다. apply_edits 항목도 이 경로를 타므로 앞 항목이 바꾼
+   * 문서 기준으로 해석된다.
+   */
+  private optAnchor(args: Record<string, unknown>): ResolvedAnchor | null {
+    const raw = args['anchor'];
+    if (raw === undefined || raw === null) return null;
+    const clash = ANCHOR_COORD_KEYS.filter((k) => args[k] !== undefined && args[k] !== null);
+    if (clash.length > 0) {
+      throw new AgentToolError(
+        'INVALID_ARGS',
+        `pass either anchor or numeric coordinates, not both (got ${clash.join('/')}) — anchor.within scopes the search instead`,
+      );
+    }
+    const a = asRecord(raw);
+    const unknown = Object.keys(a).filter((k) => !['text', 'occurrence', 'within', 'position'].includes(k));
+    if (unknown.length > 0) {
+      throw new AgentToolError('INVALID_ARGS', `unknown anchor key ${unknown.join('/')} — valid keys: text, occurrence, within, position`);
+    }
+    const text = reqString(a, 'text');
+    if (text.length < 1) {
+      throw new AgentToolError('INVALID_ARGS', 'anchor.text must be a non-empty string');
+    }
+    const rawOccurrence = a['occurrence'];
+    const occurrence = rawOccurrence === undefined || rawOccurrence === null
+      ? undefined
+      : reqInt(a, 'occurrence');
+    if (occurrence !== undefined && occurrence < 1) {
+      throw new AgentToolError('INVALID_ARGS', 'anchor.occurrence is 1-based (must be >= 1)');
+    }
+    if (occurrence !== undefined && occurrence > 64) {
+      throw new AgentToolError('INVALID_ARGS', 'anchor.occurrence > 64 — narrow the search with anchor.within instead');
+    }
+    const rawPos = a['position'];
+    if (rawPos !== undefined && rawPos !== null && rawPos !== 'before' && rawPos !== 'after' && rawPos !== 'replace') {
+      throw new AgentToolError('INVALID_ARGS', `anchor.position must be "before" | "after" | "replace" (got ${JSON.stringify(rawPos)})`);
+    }
+    const scope = this.anchorScope(a['within']);
+    // occurrence 번째까지는 읽어야 하고, 없으면 단일/다매치 판별용 소수만 본다.
+    const cap = Math.min(Math.max(occurrence ?? 0, 8), 64);
+    const { matches } = this.collectTextMatches(text, false, cap, scope);
+    if (matches.length === 0) {
+      if (scope) {
+        const outside = this.collectTextMatches(text, false, 6).matches;
+        if (outside.length > 0) {
+          throw new AgentToolError(
+            'INVALID_ARGS',
+            `anchor ${JSON.stringify(this.truncateForMessage(text))} matched nothing inside anchor.within — ${outside.length} hit(s) exist outside it: ${this.anchorCandidates(outside)}`,
+          );
+        }
+      }
+      throw new AgentToolError(
+        'INVALID_ARGS',
+        `anchor ${JSON.stringify(this.truncateForMessage(text))} matched nothing in the document — check the exact wording with find_text`,
+      );
+    }
+    let picked = matches[0];
+    if (occurrence !== undefined) {
+      if (occurrence > matches.length) {
+        throw new AgentToolError(
+          'INVALID_ARGS',
+          `anchor occurrence ${occurrence} but only ${matches.length} match(es) for ${JSON.stringify(this.truncateForMessage(text))}: ${this.anchorCandidates(matches)}`,
+        );
+      }
+      picked = matches[occurrence - 1];
+    } else if (matches.length > 1) {
+      throw new AgentToolError(
+        'INVALID_ARGS',
+        `anchor ${JSON.stringify(this.truncateForMessage(text))} is ambiguous — ${matches.length} matches; pass occurrence (1-based). Candidates: ${this.anchorCandidates(matches)}`,
+      );
+    }
+    return {
+      sectionIdx: picked.sectionIdx,
+      paraIdx: picked.paraIdx,
+      charOffset: picked.charOffset,
+      length: picked.length,
+      ...(picked.cell ? { cell: picked.cell } : {}),
+      position: rawPos as ResolvedAnchor['position'],
+    };
+  }
+
+  /** anchor.within {sectionIdx?, paraRange?, cell?} → AnchorScope (빈 객체/모르는 키는 INVALID_ARGS). */
+  private anchorScope(raw: unknown): AnchorScope | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    const w = asRecord(raw);
+    const unknown = Object.keys(w).filter((k) => !['sectionIdx', 'paraRange', 'cell'].includes(k));
+    if (unknown.length > 0) {
+      throw new AgentToolError('INVALID_ARGS', `unknown anchor.within key ${unknown.join('/')} — valid keys: sectionIdx, paraRange, cell`);
+    }
+    const scope: AnchorScope = {};
+    const sectionIdx = w['sectionIdx'];
+    if (sectionIdx !== undefined && sectionIdx !== null) {
+      if (typeof sectionIdx !== 'number' || !Number.isSafeInteger(sectionIdx) || sectionIdx < 0) {
+        throw new AgentToolError('INVALID_ARGS', 'anchor.within.sectionIdx must be a nonnegative integer');
+      }
+      scope.sectionIdx = sectionIdx;
+    }
+    const paraRange = w['paraRange'];
+    if (paraRange !== undefined && paraRange !== null) {
+      if (!Array.isArray(paraRange) || paraRange.length !== 2
+        || paraRange.some((n) => typeof n !== 'number' || !Number.isSafeInteger(n) || (n as number) < 0)) {
+        throw new AgentToolError('INVALID_ARGS', 'anchor.within.paraRange must be [startParaIdx, endParaIdx] (inclusive, 0-based)');
+      }
+      if ((paraRange[1] as number) < (paraRange[0] as number)) {
+        throw new AgentToolError('INVALID_ARGS', 'anchor.within.paraRange is reversed');
+      }
+      scope.paraRange = [paraRange[0] as number, paraRange[1] as number];
+    }
+    const cell = w['cell'];
+    if (cell !== undefined && cell !== null) {
+      const c = asRecord(cell);
+      for (const key of ['paraIdx', 'controlIdx', 'cellIdx'] as const) {
+        const v = c[key];
+        if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) {
+          throw new AgentToolError('INVALID_ARGS', `anchor.within.cell.${key} must be a nonnegative integer — paraIdx/controlIdx name the table's body paragraph, cellIdx the cell`);
+        }
+      }
+      scope.cell = { paraIdx: c['paraIdx'] as number, controlIdx: c['controlIdx'] as number, cellIdx: c['cellIdx'] as number };
+    }
+    if (Object.keys(scope).length === 0) {
+      throw new AgentToolError('INVALID_ARGS', 'anchor.within needs at least one of sectionIdx, paraRange, cell');
+    }
+    return scope;
+  }
+
+  /** 앵커 오류에 싣는 후보 목록 (최대 5개) — get_structure 줄 표기에 맞춘 주소 + 문맥. */
+  private anchorCandidates(matches: Array<{
+    sectionIdx: number; paraIdx: number; charOffset: number; context: string; cell?: CellAddr;
+  }>): string {
+    return matches.slice(0, 5).map((m, i) => {
+      const where = m.cell
+        ? `s${m.sectionIdx} cell(p${m.cell.paraIdx} c${m.cell.controlIdx} [${m.cell.cellIdx}]) p${m.paraIdx}@${m.charOffset}`
+        : `s${m.sectionIdx} p${m.paraIdx}@${m.charOffset}`;
+      return `${i + 1}) ${where} "${m.context.replace(/\n/g, '⏎')}"`;
+    }).join('; ');
+  }
+
+  private truncateForMessage(text: string): string {
+    return text.length > 60 ? `${text.slice(0, 60)}…` : text;
+  }
+
+  /** 앵커 해석된 주소를 write 결과에 그대로 싣는다 (anchor 필드). */
+  private anchorEcho(m: ResolvedAnchor): Record<string, unknown> {
+    const echo: Record<string, unknown> = {
+      sectionIdx: m.sectionIdx,
+      paraIdx: m.paraIdx,
+      charOffset: m.charOffset,
+      endCharOffset: m.charOffset + m.length,
+    };
+    if (m.cell) {
+      echo['cell'] = { paraIdx: m.cell.paraIdx, controlIdx: m.cell.controlIdx, cellIdx: m.cell.cellIdx };
+      if (m.cell.path) echo['cellPath'] = m.cell.path;
+    }
+    return echo;
+  }
+
+  /** 범위형 도구의 position 검사 — 매치 자체가 범위이므로 'replace' 만 허용한다. */
+  private anchorPositionOrReplace(m: ResolvedAnchor, tool: string): void {
+    const position = m.position ?? 'replace';
+    if (position !== 'replace') {
+      throw new AgentToolError(
+        'INVALID_ARGS',
+        `anchor.position must be "replace" for ${tool} — the match itself is the range (got ${JSON.stringify(m.position)})`,
+      );
+    }
+  }
+
+  /** 앵커 매치를 범위형 쓰기(delete_range/replace_range)의 숫자 인자로 옮긴 args 사본. */
+  private anchorRangeArgs(args: Record<string, unknown>, m: ResolvedAnchor): Record<string, unknown> {
+    const out: Record<string, unknown> = {
+      ...args,
+      anchor: undefined, cell: undefined, cellPath: undefined,
+      sectionIdx: m.sectionIdx,
+      startParaIdx: m.paraIdx, startCharOffset: m.charOffset,
+      endParaIdx: m.paraIdx, endCharOffset: m.charOffset + m.length,
+    };
+    if (m.cell) {
+      out['cell'] = { paraIdx: m.cell.paraIdx, controlIdx: m.cell.controlIdx, cellIdx: m.cell.cellIdx };
+      if (m.cell.path) out['cellPath'] = m.cell.path;
+    }
+    return out;
+  }
+
+  /**
+   * 앵커 쓰기의 revision 검사. 좌표는 실행 시점 매치에서 왔으므로 리베이스할 좌표가
+   * 없다 — expected 와 current 사이의 bump 가 전부 저널에 있으면(정밀 쓰기뿐) 그대로
+   * 통과시키고, 아니면 "같은 호출 재전송" 안내와 함께 REVISION_MISMATCH 로 떨어진다.
+   */
+  private requireRevisionAnchored(args: Record<string, unknown>): void {
+    const expected = args['expectedRevision'];
+    if (typeof expected !== 'number' || !Number.isSafeInteger(expected)) {
+      throw new AgentToolError('INVALID_ARGS', 'expectedRevision (integer) is required for write tools');
+    }
+    const current = this.revision;
+    if (expected === current) return;
+    if (expected < current && this.journal.covers(expected, current)) return;
+    throw new AgentToolError(
+      'REVISION_MISMATCH',
+      `Document is now at revision ${current}; you expected ${expected}. The anchor re-resolves on retry — resend the same call with expectedRevision=${current}; no re-read needed.`,
+    );
   }
 
   /** 문서 구조(개요/조문) 트리 — 긴 문서 내비게이션용. 본문은 생략하고 제목만 싣는다. */
@@ -2804,25 +3327,37 @@ export class AgentToolExecutor {
       return { tool, args: rec['args'] === undefined ? {} : asRecord(rec['args']) };
     });
     const results: unknown[] = [];
-    this.deps.pending.runAtomicBatch(() => {
-      edits.forEach((edit, index) => {
-        let itemResult: unknown;
-        try {
-          itemResult = this.dispatch(edit.tool, { ...edit.args, expectedRevision: this.revision }, agent);
-        } catch (e) {
-          const code = e instanceof AgentToolError ? e.code : 'RPC_ERROR';
-          const message = e instanceof Error ? e.message : String(e);
-          throw new AgentToolError(
-            code,
-            `edits[${index}] (${edit.tool}) failed — the whole batch was rolled back, nothing was applied: ${message}`,
-          );
-        }
-        // 항목별 revision 은 배치 중간 값이라 오해를 부른다 — 최상위 값만 유효하다.
-        // note 는 edit_header_footer 처럼 런타임 경고를 담을 때만 오므로 그대로 둔다.
-        const { revision: _r, ...rest } = asRecord(itemResult);
-        results.push({ tool: edit.tool, ...rest });
+    // runAtomicBatch 안에서는 revision 이 배치 시작 값에 멈춰 있어 개별 record 가
+    // 빈 구간에 버려진다 — 항목별 저널 엔트리를 모았다가 성공 시 최종 revision 에 귀속한다.
+    const revBeforeBatch = this.revision;
+    const buffered: EditJournalEntry[] = [];
+    this.journalBatch = buffered;
+    try {
+      this.deps.pending.runAtomicBatch(() => {
+        edits.forEach((edit, index) => {
+          let itemResult: unknown;
+          try {
+            itemResult = this.dispatch(edit.tool, { ...edit.args, expectedRevision: this.revision }, agent);
+          } catch (e) {
+            const code = e instanceof AgentToolError ? e.code : 'RPC_ERROR';
+            const message = e instanceof Error ? e.message : String(e);
+            throw new AgentToolError(
+              code,
+              `edits[${index}] (${edit.tool}) failed — the whole batch was rolled back, nothing was applied: ${message}`,
+            );
+          }
+          // 항목별 revision 은 배치 중간 값이라 오해를 부른다 — 최상위 값만 유효하다.
+          // note 는 edit_header_footer 처럼 런타임 경고를 담을 때만 오므로 그대로 둔다.
+          const { revision: _r, ...rest } = asRecord(itemResult);
+          results.push({ tool: edit.tool, ...rest });
+        });
       });
-    });
+    } finally {
+      this.journalBatch = null;
+    }
+    for (const entry of buffered) {
+      this.journal.record(revBeforeBatch, this.revision, entry);
+    }
     // 한 턴의 항목은 모두 같은 change set 에 쌓인다 — 항목마다 반복하지 않고 한 번만 싣는다.
     const changeSetIds = new Set(results.map((item) => asRecord(item)['changeSetId']));
     const sharedChangeSetId = changeSetIds.size === 1 ? [...changeSetIds][0] : undefined;
@@ -2839,7 +3374,80 @@ export class AgentToolExecutor {
     };
   }
 
+  /**
+   * read_batch — 1..16 개의 읽기 전용 도구를 순서대로 실행한다. apply_edits 와 달리
+   * 원자성은 없다 (읽기라 부작용이 없다): 항목마다 성공 결과 또는
+   * {error:{code,message}} 를 모으므로 한 항목의 실패가 배치를 멈추지 않는다.
+   * 최상위 revision 은 배치이 끝난 시점의 문서 리비전이다.
+   */
+  private async readBatch(args: Record<string, unknown>, agent: AgentName, capability?: ToolCapabilityContext): Promise<unknown> {
+    this.requireDocLoaded();
+    const rawReads = args['reads'];
+    if (!Array.isArray(rawReads) || rawReads.length < 1 || rawReads.length > 16) {
+      throw new AgentToolError('INVALID_ARGS', 'reads must be an array of 1..16 {tool, args} items');
+    }
+    const results: unknown[] = [];
+    for (const raw of rawReads) {
+      results.push(await this.readBatchItem(raw, agent, capability));
+    }
+    return { revision: this.revision, results };
+  }
+
+  private async readBatchItem(raw: unknown, agent: AgentName, capability?: ToolCapabilityContext): Promise<unknown> {
+    let tool: string | null = null;
+    try {
+      const rec = asRecord(raw);
+      const t = rec['tool'];
+      tool = typeof t === 'string' ? t : null;
+      if (!tool || !BATCHABLE_READ_TOOLS.has(tool)) {
+        throw new AgentToolError(
+          'INVALID_ARGS',
+          `read item tool must be one of ${[...BATCHABLE_READ_TOOLS].join('|')} (got ${JSON.stringify(t)})`,
+        );
+      }
+      const itemArgs = rec['args'] === undefined ? {} : asRecord(rec['args']);
+      assertToolRequestActive(capability);
+      assertToolCapability(tool, capability);
+      const rawResult = await this.dispatch(tool, itemArgs, agent, capability);
+      // 항목별 revision 은 읽는 순서대로 문서가 바뀔 수 있어 오해를 부른다 —
+      // 최상위 revision 만 유효하다.
+      const { revision: _r, ...rest } = asRecord(rawResult);
+      // mcpContent 텍스트 블록은 중첩 JSON 에서 꺼내기 어려우니 text 필드로 푼다.
+      const content = rest['mcpContent'];
+      if (Array.isArray(content)) {
+        delete rest['mcpContent'];
+        rest['text'] = content
+          .map((block) => asRecord(block)['text'])
+          .filter((s): s is string => typeof s === 'string')
+          .join('');
+      }
+      return { tool, ...rest };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      const code = e instanceof AgentToolError
+        ? e.code
+        : message.includes(DOC_NOT_LOADED_MESSAGE) ? 'DOC_NOT_LOADED' : 'RPC_ERROR';
+      return { tool, error: { code, message } };
+    }
+  }
+
   private insertText(args: Record<string, unknown>, agent: AgentName): unknown {
+    const anchor = this.optAnchor(args);
+    if (anchor) {
+      if ((anchor.position ?? 'after') === 'replace') {
+        // 앵커 매치를 통째로 새 텍스트로 바꾼다 — replace_range 와 같은 원자 경로.
+        this.requireRevisionAnchored(args);
+        const res = asRecord(this.replaceRangeChecked(this.anchorRangeArgs(args, anchor), agent, 0));
+        res['anchor'] = this.anchorEcho(anchor);
+        return res;
+      }
+      this.requireRevisionAnchored(args);
+      const cell = anchor.cell ? { ...anchor.cell } : undefined;
+      const charOffset = anchor.position === 'before'
+        ? anchor.charOffset
+        : anchor.charOffset + anchor.length;
+      return this.insertTextAt(args, agent, anchor.sectionIdx, anchor.paraIdx, charOffset, cell, 0, anchor);
+    }
     const sectionIdx = reqInt(args, 'sectionIdx');
     let paraIdx = reqInt(args, 'paraIdx');
     const charOffset = reqInt(args, 'charOffset');
@@ -2847,6 +3455,20 @@ export class AgentToolExecutor {
     const shift = this.requireRevisionRebasable(args, sectionIdx, cell ? cell.paraIdx : paraIdx, cell ? cell.paraIdx : paraIdx);
     if (cell) cell.paraIdx += shift;
     else paraIdx += shift;
+    return this.insertTextAt(args, agent, sectionIdx, paraIdx, charOffset, cell, shift, null);
+  }
+
+  /** insert_text 본체 — 좌표는 이미 확정(숫자 인자+리베이스 또는 실행 시점 앵커)된 값. */
+  private insertTextAt(
+    args: Record<string, unknown>,
+    agent: AgentName,
+    sectionIdx: number,
+    paraIdx: number,
+    charOffset: number,
+    cell: CellAddr | undefined,
+    shift: number,
+    anchor: ResolvedAnchor | null,
+  ): unknown {
     // \r\n / \r → \n 정규화 (wasm 은 \n 만 문단 분할로 처리한다)
     const text = reqString(args, 'text').replace(/\r\n?/g, '\n');
     if (text.length < 1 || text.length > 10_000) {
@@ -2877,6 +3499,7 @@ export class AgentToolExecutor {
       },
       postEdit: this.readPostEditDigest(sectionIdx, r.insertedRange.startParaIdx, r.insertedRange.startCharOffset, cell),
       ...(shift !== 0 ? { rebasedParaShift: shift } : {}),
+      ...(anchor ? { anchor: this.anchorEcho(anchor) } : {}),
     };
   }
 
@@ -2948,7 +3571,19 @@ export class AgentToolExecutor {
   }
 
   private deleteRange(args: Record<string, unknown>, agent: AgentName): unknown {
+    const anchor = this.optAnchor(args);
+    if (anchor) {
+      this.anchorPositionOrReplace(anchor, 'delete_range');
+      this.requireRevisionAnchored(args);
+      const res = asRecord(this.deleteRangeChecked(this.anchorRangeArgs(args, anchor), agent, 0));
+      res['anchor'] = this.anchorEcho(anchor);
+      return res;
+    }
     const shift = this.requireRevisionRebasable(args, ...rangeRebaseAnchor(args));
+    return this.deleteRangeChecked(args, agent, shift);
+  }
+
+  private deleteRangeChecked(args: Record<string, unknown>, agent: AgentName, shift: number): unknown {
     const range = this.validateRange(args, shift);
     if (range.cell) this.guardNestedTableInCellRange(range);
     if (range.startParaIdx === range.endParaIdx && range.startCharOffset === range.endCharOffset) {
@@ -2978,7 +3613,19 @@ export class AgentToolExecutor {
   }
 
   private replaceRange(args: Record<string, unknown>, agent: AgentName): unknown {
+    const anchor = this.optAnchor(args);
+    if (anchor) {
+      this.anchorPositionOrReplace(anchor, 'replace_range');
+      this.requireRevisionAnchored(args);
+      const res = asRecord(this.replaceRangeChecked(this.anchorRangeArgs(args, anchor), agent, 0));
+      res['anchor'] = this.anchorEcho(anchor);
+      return res;
+    }
     const shift = this.requireRevisionRebasable(args, ...rangeRebaseAnchor(args));
+    return this.replaceRangeChecked(args, agent, shift);
+  }
+
+  private replaceRangeChecked(args: Record<string, unknown>, agent: AgentName, shift: number): unknown {
     const range = this.validateRange(args, shift);
     if (range.cell) this.guardNestedTableInCellRange(range);
     if (range.startParaIdx === range.endParaIdx && range.startCharOffset === range.endCharOffset) {
@@ -3015,14 +3662,31 @@ export class AgentToolExecutor {
   }
 
   private applyCharFormat(args: Record<string, unknown>, agent: AgentName): unknown {
-    const sectionIdx = reqInt(args, 'sectionIdx');
-    let paraIdx = reqInt(args, 'paraIdx');
-    const startOffset = reqInt(args, 'startOffset');
-    const endOffset = reqInt(args, 'endOffset');
-    const cell = optCell(args);
-    const shift = this.requireRevisionRebasable(args, sectionIdx, cell ? cell.paraIdx : paraIdx, cell ? cell.paraIdx : paraIdx);
-    if (cell) cell.paraIdx += shift;
-    else paraIdx += shift;
+    const anchor = this.optAnchor(args);
+    let sectionIdx: number;
+    let paraIdx: number;
+    let startOffset: number;
+    let endOffset: number;
+    let cell: CellAddr | undefined;
+    let shift = 0;
+    if (anchor) {
+      this.anchorPositionOrReplace(anchor, 'apply_char_format');
+      this.requireRevisionAnchored(args);
+      sectionIdx = anchor.sectionIdx;
+      paraIdx = anchor.paraIdx;
+      startOffset = anchor.charOffset;
+      endOffset = anchor.charOffset + anchor.length;
+      cell = anchor.cell ? { ...anchor.cell } : undefined;
+    } else {
+      sectionIdx = reqInt(args, 'sectionIdx');
+      paraIdx = reqInt(args, 'paraIdx');
+      startOffset = reqInt(args, 'startOffset');
+      endOffset = reqInt(args, 'endOffset');
+      cell = optCell(args);
+      shift = this.requireRevisionRebasable(args, sectionIdx, cell ? cell.paraIdx : paraIdx, cell ? cell.paraIdx : paraIdx);
+      if (cell) cell.paraIdx += shift;
+      else paraIdx += shift;
+    }
     this.validateAddress(sectionIdx, paraIdx, startOffset, cell);
     this.validateAddress(sectionIdx, paraIdx, endOffset, cell);
     if (endOffset < startOffset) {
@@ -3089,6 +3753,7 @@ export class AgentToolExecutor {
     return {
       revision: this.revision, changeSetId: r.changeSetId, applied: true,
       ...(shift !== 0 ? { rebasedParaShift: shift } : {}),
+      ...(anchor ? { anchor: this.anchorEcho(anchor) } : {}),
     };
   }
 
@@ -3731,12 +4396,40 @@ export class AgentToolExecutor {
   }
 
   private applyParaFormat(args: Record<string, unknown>, agent: AgentName): unknown {
-    const sectionIdx = reqInt(args, 'sectionIdx');
-    let paraIdx = reqInt(args, 'paraIdx');
-    const cell = optCell(args);
-    const paraShift = this.requireRevisionRebasable(args, sectionIdx, cell ? cell.paraIdx : paraIdx, cell ? cell.paraIdx : paraIdx);
-    if (cell) cell.paraIdx += paraShift;
-    else paraIdx += paraShift;
+    const anchor = this.optAnchor(args);
+    let sectionIdx: number;
+    let paraIdx: number;
+    let cell: CellAddr | undefined;
+    let paraShift = 0;
+    if (anchor) {
+      this.requireRevisionAnchored(args);
+      if (anchor.cell?.path) {
+        // paraFormat 의 중첩 셀 ByPath 엔진 경로가 없다 — 숫자 인자 쪽과 같은 한계.
+        throw new AgentToolError(
+          'INVALID_ARGS',
+          'anchor resolved inside a nested cell — apply_para_format reaches only top-level cells',
+        );
+      }
+      sectionIdx = anchor.sectionIdx;
+      // position: replace(기본) 는 매치 문단, before/after 는 그 이웃 문단.
+      if (anchor.position === 'before') paraIdx = anchor.paraIdx - 1;
+      else if (anchor.position === 'after') paraIdx = anchor.paraIdx + 1;
+      else paraIdx = anchor.paraIdx;
+      cell = anchor.cell ? { ...anchor.cell } : undefined;
+      if (paraIdx < 0) {
+        throw new AgentToolError(
+          'INVALID_ARGS',
+          'anchor.position "before" but the match sits in the first paragraph — nothing before it',
+        );
+      }
+    } else {
+      sectionIdx = reqInt(args, 'sectionIdx');
+      paraIdx = reqInt(args, 'paraIdx');
+      cell = optCell(args);
+      paraShift = this.requireRevisionRebasable(args, sectionIdx, cell ? cell.paraIdx : paraIdx, cell ? cell.paraIdx : paraIdx);
+      if (cell) cell.paraIdx += paraShift;
+      else paraIdx += paraShift;
+    }
     this.validateAddress(sectionIdx, paraIdx, undefined, cell);
 
     const props: Record<string, unknown> = {};
@@ -3824,6 +4517,8 @@ export class AgentToolExecutor {
     return {
       revision: this.revision, changeSetId: r.changeSetId, applied: true,
       ...(paraShift !== 0 ? { rebasedParaShift: paraShift } : {}),
+      // 앵커 쓰기는 해석된 대상 문단 주소를 돌려준다 (position 은 이미 반영됨).
+      ...(anchor ? { anchor: { sectionIdx, paraIdx, ...(cell ? { cell: { paraIdx: cell.paraIdx, controlIdx: cell.controlIdx, cellIdx: cell.cellIdx } } : {}) } } : {}),
     };
   }
 
