@@ -368,6 +368,16 @@ pub fn custom_font_face_available(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// `name` face 의 등록 파일 경로와 TTC face index — 측정·페인트 경로가
+/// Typeface 를 직접 만들 때 쓴다. face 미등록이면 None.
+pub fn custom_face_source(name: &str) -> Option<(PathBuf, u32)> {
+    let alias = normalize_face_alias(name)?;
+    CUSTOM_FACE_SOURCES
+        .read()
+        .ok()
+        .and_then(|sources| sources.get(&alias).cloned())
+}
+
 /// face 이름의 등록 파일에서 cmap·hmtx 를 한 번만 읽어 캐시한다.
 fn real_face_hmtx(file: &Path, index: u32) -> Option<std::sync::Arc<RealFaceHmtx>> {
     let key = (file.to_path_buf(), index);

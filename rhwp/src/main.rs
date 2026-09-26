@@ -1130,7 +1130,9 @@ fn export_svg(args: &[String]) -> i32 {
 
     let source_format = rhwp::parser::detect_format(&data);
 
-    // 문서 로드
+    // 로드 시점 재조판이 폰트 실측을 하므로 custom face 등록은 문서 구성보다 먼저다
+    // (export-png 의 같은 규칙과 정합).
+    rhwp::renderer::font_paths::register_font_face_availability(&font_paths);
     let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes_with_font_metrics(
         &data,
         font_metrics,
@@ -1889,6 +1891,10 @@ fn export_png(args: &[String]) -> i32 {
         }
     };
 
+    // 로드 시점 재조판(누락 lineseg 재구성)이 폰트 실측을 이미 하므로, custom face
+    // 등록은 문서 구성보다 먼저여야 한다 — 나중에 등록하면 수식 레이아웃이
+    // 베이크드 메트릭으로 굳어 렌더 시점의 페인트와 어긋난다.
+    rhwp::renderer::font_paths::register_font_face_availability(&font_paths);
     let mut core = match rhwp::document_core::DocumentCore::from_local_file_bytes_with_font_metrics(
         &data,
         font_metrics,

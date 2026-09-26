@@ -242,24 +242,38 @@ pub(crate) fn measure_legacy_run_native(
     if let Some(hit) = RUN_CACHE.with(|cache| cache.borrow().get(&key).copied()) {
         return hit;
     }
-    let (typeface, tables) = LEGACY_FACE.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        slot.get_or_insert_with(|| {
-            let font_mgr = FontMgr::default();
-            // skia::font_lookup 의 system_families 필터와 같은 이유 — 없는 family 를
-            // CoreText 에 넘기면 downloadable font 조회가 대기할 수 있어 선차단한다.
-            if !font_mgr
-                .family_names()
-                .any(|name| name.eq_ignore_ascii_case("HYhwpEQ"))
-            {
-                return None;
-            }
-            let face = font_mgr.match_family_style("HYhwpEQ", FontStyle::normal())?;
-            let tables = LegacyTables::load(&face)?;
-            Some((face, std::rc::Rc::new(tables)))
-        })
-        .clone()
-    })?;
+    let (typeface, tables) = match LEGACY_FACE.with(|slot| slot.borrow().clone()) {
+        Some(Some((face, tables))) => (face, tables),
+        // 미해소 결과는 캐시하지 않는다 — custom face(--font-path)는 렌더 진입 시
+        // 등록돼 첫 측정(페이지네이션) 때는 아직 없을 수 있다.
+        _ => {
+            let resolved = (|| {
+                let font_mgr = FontMgr::default();
+                // 본문 페인트와 같은 조달 순서 — custom(--font-path) 등록 face 를
+                // 시스템 설치와 동일하게 본다. 없으면 시스템으로 내려간다.
+                let face = crate::renderer::font_paths::custom_face_source("HYhwpEQ")
+                    .and_then(|(file, index)| {
+                        std::fs::read(file)
+                            .ok()
+                            .and_then(|bytes| font_mgr.new_from_data(&bytes, Some(index as usize)))
+                    })
+                    .or_else(|| {
+                        // skia::font_lookup 의 system_families 필터와 같은 이유 — 없는
+                        // family 를 CoreText 에 넘기면 downloadable font 조회가 대기할
+                        // 수 있어 선차단한다.
+                        font_mgr
+                            .family_names()
+                            .any(|name| name.eq_ignore_ascii_case("HYhwpEQ"))
+                            .then(|| font_mgr.match_family_style("HYhwpEQ", FontStyle::normal()))
+                            .flatten()
+                    })?;
+                let tables = LegacyTables::load(&face)?;
+                Some((face, std::rc::Rc::new(tables)))
+            })()?;
+            LEGACY_FACE.with(|slot| *slot.borrow_mut() = Some(Some(resolved.clone())));
+            resolved
+        }
+    };
     // painter 와 같은 문자→PUA 매핑.
     let glyphs: String = text
         .chars()

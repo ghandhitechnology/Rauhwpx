@@ -141,6 +141,12 @@ const SANS_CJK_FALLBACK_FAMILIES: &[&str] = &[
     "Malgun Gothic",
     "맑은 고딕",
     "Apple SD Gothic Neo",
+    // 동-장르 한컴 번들을 이종(세리프) 계열 후보보다 앞에 둔다 — 위
+    // SERIF_CJK_FALLBACK_FAMILIES 와 같은 규칙.
+    "Haansoft Dotum",
+    "한컴돋움",
+    "HCR Dotum",
+    "함초롬돋움",
     "Noto Serif KR",
     "Noto Serif CJK KR",
     "Nanum Myeongjo",
@@ -159,6 +165,14 @@ const SERIF_CJK_FALLBACK_FAMILIES: &[&str] = &[
     "Batang",
     "바탕",
     "AppleMyungjo",
+    // 세리프 계열이 하나도 없는 호스트(한글 팩 미설치 Windows Server 등)에서
+    // 명조 본문이 산세리프(Malgun Gothic)로 떨어지는 것을 막는다 — 한컴은
+    // 미설치 폰트를 자체 번들 서체로 치환하므로(generic_fallback CSS 체인과
+    // 같은 규칙) 동-장르 한컴 번들을 이종 계열 후보보다 앞에 둔다.
+    "Haansoft Batang",
+    "한컴바탕",
+    "HCR Batang",
+    "함초롬바탕",
     "Noto Sans KR",
     "Noto Sans CJK KR",
     "Nanum Gothic",

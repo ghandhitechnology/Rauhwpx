@@ -1278,6 +1278,8 @@ impl SkiaLayerRenderer {
                             render_equation(
                                 canvas,
                                 &self.font_mgr,
+                                &self.custom_typefaces,
+                                &self.bundled_typefaces,
                                 &self.system_families,
                                 &equation.layout_box,
                                 bbox.x,
