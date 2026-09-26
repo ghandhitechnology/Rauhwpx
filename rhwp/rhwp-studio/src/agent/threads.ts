@@ -55,7 +55,27 @@ export interface ThreadToolRecord {
   status: 'running' | 'completed' | 'failed' | 'stopped';
   resultPreview: string;
   elapsedMs: number | null;
+  /**
+   * 스튜디오 실행기의 잘리지 않은 결과로 만든 결과 줄. 미리보기(2000자)로는 다시 만들 수
+   * 없는 항목별 결과와 줄인 그림을 보존한다. 없으면 미리보기에서 다시 읽는다.
+   */
+  outcome?: ThreadToolOutcome;
 }
+
+/** 도구 행 결과 줄 — ui/agent-sidebar/tool-presentation.ts 의 ToolOutcomeView 와 같은 모양. */
+export interface ThreadToolOutcome {
+  ok: boolean;
+  text: string;
+  detail?: string;
+  notices: string[];
+  items?: Array<{ ok: boolean; text: string }>;
+  /** 줄인 결과 그림 (data URL) */
+  image?: string;
+  label?: string;
+}
+
+/** 저장하는 결과 그림 상한 — 대화 기록이 그림으로 불어나지 않게 한다. */
+export const THREAD_TOOL_IMAGE_MAX_CHARS = 200_000;
 
 export interface ThreadTaskRecord {
   taskId: string;
@@ -327,6 +347,35 @@ function parseThreadTool(value: unknown): ThreadToolRecord | null {
     status: parseTimelineStatus(tool.status),
     resultPreview: typeof tool.resultPreview === 'string' ? tool.resultPreview : '',
     elapsedMs: parseFiniteNonNegative(tool.elapsedMs),
+    ...parseToolOutcomeField(tool.outcome),
+  };
+}
+
+function parseToolOutcomeField(value: unknown): { outcome?: ThreadToolOutcome } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.ok !== 'boolean' || typeof raw.text !== 'string') return {};
+  const strings = (list: unknown): string[] => Array.isArray(list)
+    ? list.filter((item): item is string => typeof item === 'string').slice(0, 32)
+    : [];
+  const items = Array.isArray(raw.items)
+    ? raw.items.flatMap((item) => {
+      const entry = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+      return typeof entry.ok === 'boolean' && typeof entry.text === 'string' ? [{ ok: entry.ok, text: entry.text }] : [];
+    }).slice(0, 64)
+    : null;
+  const image = typeof raw.image === 'string' && raw.image.startsWith('data:image/')
+    && raw.image.length <= THREAD_TOOL_IMAGE_MAX_CHARS ? raw.image : null;
+  return {
+    outcome: {
+      ok: raw.ok,
+      text: raw.text,
+      notices: strings(raw.notices),
+      ...(typeof raw.detail === 'string' ? { detail: raw.detail } : {}),
+      ...(items ? { items } : {}),
+      ...(image ? { image } : {}),
+      ...(typeof raw.label === 'string' ? { label: raw.label } : {}),
+    },
   };
 }
 

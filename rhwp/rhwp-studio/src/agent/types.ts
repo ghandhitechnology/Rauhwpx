@@ -866,6 +866,18 @@ export type SidebarEvent =
   | ({ type: 'implementation-started'; planId: string } & AgentWorkflowState)
   | ({ type: 'plan-progress'; planId: string } & AgentWorkflowState)
   | { type: 'planning-document-saved'; revision: number }
+  /**
+   * 스튜디오 실행기가 도구 하나를 끝냈다 — 사이드바 도구 행이 잘리지 않은 결과(그림 포함)로
+   * 결과 줄을 그린다. 프로바이더 callId 가 없으므로 이름과 인자로 행을 찾는다.
+   */
+  | {
+      type: 'tool-executed';
+      tool: string;
+      args: unknown;
+      ok: boolean;
+      result?: unknown;
+      error?: { code: string; message: string };
+    }
   | { type: 'skills-catalog'; catalog: SkillCatalog }
   | { type: 'harness-list-result'; requestId: string; rows: HarnessSkillRow[] }
   | { type: 'skill-commit-result'; requestId: string; outcome: SkillCommitOutcome }

@@ -79,7 +79,9 @@ import {
   type ThreadMessage,
   type ThreadAttachment,
   type ThreadTaskRecord,
+  type ThreadToolOutcome,
   type ThreadToolRecord,
+  THREAD_TOOL_IMAGE_MAX_CHARS,
 } from '../../agent/threads.ts';
 import {
   clearChatStatus,
@@ -97,6 +99,14 @@ import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts'
 import { createEffortSlider } from './effort-slider.ts';
 import { createComposerRestingMotion } from './composer-resting.ts';
 import { createSubagentFleet, isSpawnToolName } from './subagent-fleet.ts';
+import { createToolRow, type ToolRowHandle } from './tool-row.ts';
+import {
+  baseToolName,
+  parseToolArgs,
+  presentToolResult,
+  summarizeActivity,
+  type ToolOutcomeView,
+} from './tool-presentation.ts';
 import { createSettingsPanel } from './settings.ts';
 import {
   normalizeSettingsDestination,
@@ -232,7 +242,8 @@ interface TurnActivityState {
   label: HTMLElement;
   content: HTMLElement;
   toolCount: number;
-  firstToolName: string;
+  /** 활동 제목(“편집 3번 · 읽기 2번”)을 만드는 호출 목록 */
+  calls: Array<{ callId: string; tool: string; argsJson: string; failed: boolean }>;
   failedToolCount: number;
   activeTools: Map<string, string>;
   acceptingTools: boolean;
@@ -240,12 +251,67 @@ interface TurnActivityState {
 }
 
 interface ToolRowState {
-  status: HTMLElement;
-  result: HTMLPreElement;
+  row: ToolRowHandle;
   scroller: HTMLElement;
-  elapsed: HTMLElement;
   startedAt: number;
   activity: TurnActivityState;
+  /** 접두어를 뗀 도구 이름과 인자 — 실행기 결과를 이 행에 맞출 때 쓴다 */
+  name: string;
+  args: Record<string, unknown>;
+  argsJson: string;
+  /** 스튜디오 실행기가 먼저 알려 준 결과 */
+  executed?: { ok: boolean; outcome: ToolOutcomeView };
+}
+
+/** 실행기 결과가 행보다 먼저 도착했을 때 잠시 붙잡아 두는 기록. */
+interface PendingExecution {
+  name: string;
+  args: Record<string, unknown>;
+  ok: boolean;
+  outcome: ToolOutcomeView;
+  at: number;
+}
+
+/** 실행기 인자와 프로바이더 인자가 같은 호출인가 — 양쪽에 다 있는 키만 비교한다
+ *  (허브 스키마가 기본값을 채우거나 모르는 키를 떨어뜨리므로). */
+function sameToolArgs(provider: Record<string, unknown>, executed: Record<string, unknown>): boolean {
+  for (const key of Object.keys(executed)) {
+    if (!(key in provider)) continue;
+    if (JSON.stringify(provider[key]) !== JSON.stringify(executed[key])) return false;
+  }
+  return true;
+}
+
+/** 저장용 결과 줄 — 그림은 줄여서 따로 채우므로 여기서는 뺀다. */
+function storedOutcome(outcome: ToolOutcomeView): ThreadToolOutcome {
+  const { image: _image, ...rest } = outcome;
+  return rest;
+}
+
+/** 결과 그림을 기록에 넣을 크기로 줄인다 (긴 변 640px, webp). 실패하면 null. */
+function shrinkToolImage(src: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, 640 / Math.max(img.naturalWidth, img.naturalHeight, 1));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return resolve(null);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const url = canvas.toDataURL('image/webp', 0.82);
+        resolve(url.length <= THREAD_TOOL_IMAGE_MAX_CHARS ? url : null);
+      } catch {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
 }
 
 type ThreadActivityMessage = Extract<ThreadMessage, { kind: 'activity' }>;
@@ -518,13 +584,6 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + '…' : s;
 }
 
-function prettyJson(s: string): string {
-  try {
-    return JSON.stringify(JSON.parse(s), null, 2);
-  } catch {
-    return s;
-  }
-}
 
 /**
  * 손그림 버튼용 displacement 필터 정의. CSS 의 filter: url(#ag-sketch-line)
@@ -611,6 +670,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   /** 현재 스트리밍 중인 assistant 텍스트 (tool-call 이후에는 새로 연다). */
   let streamBubble: HTMLElement | null = null;
   const toolRows = new Map<string, ToolRowState>();
+  let pendingExecutions: PendingExecution[] = [];
   let turnActivity: TurnActivityState | null = null;
   let turnToolCount = 0;
   let turnFailedToolCount = 0;
@@ -5416,31 +5476,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function renderStoredTool(tool: ThreadToolRecord, agent: AgentName): HTMLElement {
-    const row = el('div', `ag-tool-row ag-${agent}`);
-    const head = el('button', 'ag-tool-head');
-    head.type = 'button';
-    head.setAttribute('aria-expanded', 'false');
-    const status = el('span', `ag-tool-status ${tool.status === 'completed' ? 'ag-ok' : 'ag-err'}`);
-    status.setAttribute('role', 'img');
-    status.setAttribute('aria-label', tool.status === 'completed' ? '완료' : '오류');
-    status.appendChild(createIcon(tool.status === 'completed' ? 'check' : 'close'));
-    const name = el('span', 'ag-tool-name', tool.tool);
-    const summary = el('span', 'ag-tool-summary', truncate(tool.argsJson, 60));
-    const elapsed = el('span', 'ag-tool-elapsed', tool.elapsedMs === null ? '' : `${tool.elapsedMs}ms`);
-    head.append(status, name, summary, elapsed, createChevron('ag-tool-chevron'));
-    const body = el('div', 'ag-tool-body');
-    body.hidden = true;
-    body.append(
-      el('pre', 'ag-tool-args', prettyJson(tool.argsJson)),
-      el('pre', 'ag-tool-result', tool.resultPreview),
-    );
-    head.addEventListener('click', () => {
-      body.hidden = !body.hidden;
-      row.classList.toggle('ag-tool-open', !body.hidden);
-      head.setAttribute('aria-expanded', body.hidden ? 'false' : 'true');
-    });
-    row.append(head, body);
-    return row;
+    const row = createToolRow({ agent, tool: tool.tool, argsJson: tool.argsJson });
+    row.setState(tool.status);
+    row.setRawResult(tool.resultPreview);
+    if (tool.elapsedMs !== null) row.elapsed.textContent = `${tool.elapsedMs}ms`;
+    if (tool.status !== 'running') {
+      row.setOutcome(tool.outcome ?? (tool.status === 'stopped' ? null : presentToolResult({
+        tool: tool.tool,
+        argsJson: tool.argsJson,
+        ok: tool.status === 'completed',
+        preview: tool.resultPreview,
+      })));
+    }
+    return row.root;
   }
 
   function renderStoredActivity(message: ThreadActivityMessage, agent: AgentName): HTMLElement {
@@ -5451,9 +5499,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     toggle.setAttribute('aria-expanded', 'false');
     toggle.append(
       createIcon('terminal', 'ag-activity-icon'),
-      el('span', 'ag-activity-label', message.tools.length === 1
-        ? message.tools[0].tool
-        : `${message.tools.length}개의 도구를 호출함`),
+      el('span', 'ag-activity-label', summarizeActivity(message.tools.map((tool) => ({
+        tool: tool.tool,
+        argsJson: tool.argsJson,
+        failed: tool.status === 'failed' || tool.status === 'stopped',
+      })))),
       createChevron('ag-activity-chevron'),
     );
     const collapse = el('div', 'ag-activity-collapse');
@@ -6753,9 +6803,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function activityLabel(activity: TurnActivityState): string {
-    return activity.toolCount === 1
-      ? activity.firstToolName
-      : `${activity.toolCount}개의 도구를 호출함`;
+    return summarizeActivity(activity.calls);
   }
 
   function settleActivity(activity: TurnActivityState) {
@@ -7050,7 +7098,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       label,
       content,
       toolCount: 0,
-      firstToolName: '',
+      calls: [],
       failedToolCount: 0,
       activeTools: new Map(),
       acceptingTools: true,
@@ -7101,53 +7149,90 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   ): void {
     const activity = ensureTurnActivity(evt.agent, milestone);
     activity.toolCount += 1;
-    if (activity.toolCount === 1) activity.firstToolName = evt.tool;
+    activity.calls.push({ callId: evt.callId, tool: evt.tool, argsJson: evt.argsJson, failed: false });
     activity.activeTools.set(evt.callId, evt.tool);
     turnToolCount += 1;
     setActivityLabel(activity, activityLabel(activity));
 
-    const row = el('div', `ag-tool-row ag-${evt.agent}`);
-    const head = el('button', 'ag-tool-head');
-    head.type = 'button';
-    head.setAttribute('aria-expanded', 'false');
-    // 로그 행의 주소: 왼쪽 거터의 op 번호 → 상태 → 도구 이름 → 인자 → 소요 시간.
-    const opId = el('span', 'ag-op-id', String(activity.toolCount).padStart(2, '0'));
-    opId.setAttribute('aria-hidden', 'true');
-    const status = el('span', 'ag-tool-status ag-pending');
-    status.setAttribute('role', 'img');
-    status.setAttribute('aria-label', '실행 중');
-    const name = el('span', 'ag-tool-name', evt.tool);
-    const summary = el('span', 'ag-tool-summary', truncate(evt.argsJson, 60));
-    const elapsed = el('span', 'ag-tool-elapsed');
-    const chevron = createChevron('ag-tool-chevron');
-    head.append(opId, status, name, summary, elapsed, chevron);
-
-    const body = el('div', 'ag-tool-body');
-    body.hidden = true;
-    const args = el('pre', 'ag-tool-args', prettyJson(evt.argsJson));
-    const result = el('pre', 'ag-tool-result');
-    body.append(args, result);
-
-    head.addEventListener('click', () => {
-      body.hidden = !body.hidden;
-      row.classList.toggle('ag-tool-open', !body.hidden);
-      head.setAttribute('aria-expanded', body.hidden ? 'false' : 'true');
+    // 로그 행의 주소: 왼쪽 거터의 op 번호 → 상태 → 동작 → 인자 요약 → 소요 시간.
+    const row = createToolRow({
+      agent: evt.agent,
+      tool: evt.tool,
+      argsJson: evt.argsJson,
+      opNumber: activity.toolCount,
     });
-
-    row.append(head, body);
     const followActivity = isActivityFollowingLatest(activity.content);
-    withAutoScroll(() => activity.content.appendChild(row));
+    withAutoScroll(() => activity.content.appendChild(row.root));
     if (followActivity) scrollActivityToLatest(activity.content);
-    toolRows.set(evt.callId, {
-      status,
-      result,
+    const entry: ToolRowState = {
+      row,
       scroller: activity.content,
-      elapsed,
       startedAt: performance.now(),
       activity,
-    });
+      name: row.view.name,
+      args: parseToolArgs(evt.argsJson),
+      argsJson: evt.argsJson,
+    };
+    toolRows.set(evt.callId, entry);
+    // 실행기가 행보다 먼저 끝났으면 붙잡아 둔 결과를 바로 붙인다.
+    const now = performance.now();
+    pendingExecutions = pendingExecutions.filter((item) => now - item.at < 30_000);
+    const early = pendingExecutions.findIndex((item) =>
+      item.name === entry.name && sameToolArgs(entry.args, item.args));
+    if (early >= 0) {
+      const [execution] = pendingExecutions.splice(early, 1);
+      attachExecution(evt.callId, entry, execution);
+    }
     // 다음 text-delta 는 activity 아래의 최종 답변 후보로 연다.
     streamBubble = null;
+  }
+
+  /** 실행기 결과를 행과 기록에 붙인다. 그림은 줄여서 기록에 따로 넣는다. */
+  function attachExecution(callId: string, entry: ToolRowState, execution: { ok: boolean; outcome: ToolOutcomeView }): void {
+    entry.executed = execution;
+    const followActivity = isActivityFollowingLatest(entry.scroller);
+    entry.row.setOutcome(execution.outcome);
+    if (followActivity) scrollActivityToLatest(entry.scroller);
+    const record = transcriptTools.get(callId)?.tool;
+    if (!record) return;
+    record.outcome = storedOutcome(execution.outcome);
+    persistCurrentThread();
+    const image = execution.outcome.image;
+    if (!image) return;
+    void shrinkToolImage(image).then((small) => {
+      if (!small || !record.outcome) return;
+      record.outcome = { ...record.outcome, image: small };
+      persistCurrentThread();
+    });
+  }
+
+  /**
+   * 스튜디오 실행기가 끝낸 도구를 아직 결과가 없는 행에 맞춘다. 같은 이름·인자의 가장
+   * 오래된 행이 주인이다. 행이 아직 없으면(프로바이더 이벤트가 늦으면) 잠시 붙잡아 둔다.
+   */
+  function handleToolExecuted(e: Extract<SidebarEvent, { type: 'tool-executed' }>): void {
+    const name = baseToolName(e.tool);
+    const args = e.args && typeof e.args === 'object' && !Array.isArray(e.args)
+      ? e.args as Record<string, unknown>
+      : {};
+    let argsJson = '{}';
+    try { argsJson = JSON.stringify(args); } catch { /* 순환 인자는 없다 */ }
+    const outcome = presentToolResult({
+      tool: name,
+      argsJson,
+      ok: e.ok,
+      preview: '',
+      result: e.result,
+      error: e.error ?? null,
+    });
+    const execution = { ok: e.ok, outcome };
+    for (const [callId, entry] of toolRows) {
+      if (entry.executed || entry.name !== name || !sameToolArgs(entry.args, args)) continue;
+      attachExecution(callId, entry, execution);
+      return;
+    }
+    pendingExecutions.push({ name, args, ok: e.ok, outcome, at: performance.now() });
+    if (pendingExecutions.length > 16) pendingExecutions.shift();
   }
 
   function resolveToolRow(evt: Extract<AgentStreamEvent, { type: 'tool-result' }>): void {
@@ -7155,16 +7240,26 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (!entry) return;
     const followActivity = isActivityFollowingLatest(entry.scroller);
     toolRows.delete(evt.callId);
-    entry.status.classList.remove('ag-pending');
-    entry.status.classList.add(evt.ok ? 'ag-ok' : 'ag-err');
-    entry.status.setAttribute('aria-label', evt.ok ? '완료' : '오류');
-    entry.status.replaceChildren(createIcon(evt.ok ? 'check' : 'close'));
-    entry.elapsed.textContent = formatElapsed(entry.startedAt);
-    entry.result.textContent = evt.resultPreview;
+    entry.row.setState(evt.ok ? 'completed' : 'failed');
+    entry.row.elapsed.textContent = formatElapsed(entry.startedAt);
+    entry.row.setRawResult(evt.resultPreview);
+    // 실행기 결과가 있고 성패가 같으면 그쪽이 더 자세하다 (잘리지 않은 결과·그림).
+    if (!entry.executed || entry.executed.ok !== evt.ok) {
+      entry.row.setOutcome(presentToolResult({
+        tool: entry.name,
+        argsJson: entry.argsJson,
+        ok: evt.ok,
+        preview: evt.resultPreview,
+      }));
+      const record = transcriptTools.get(evt.callId)?.tool;
+      if (record?.outcome && entry.executed) delete record.outcome;
+    }
     entry.activity.activeTools.delete(evt.callId);
     if (!evt.ok) {
       entry.activity.failedToolCount += 1;
       turnFailedToolCount += 1;
+      const call = entry.activity.calls.find((item) => item.callId === evt.callId);
+      if (call) call.failed = true;
     }
     setActivityLabel(entry.activity, activityLabel(entry.activity));
     settleActivity(entry.activity);
@@ -7178,18 +7273,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function sweepUnresolvedToolRows(): void {
     const touchedActivities = new Set<TurnActivityState>();
     for (const [callId, entry] of toolRows) {
-      entry.status.classList.remove('ag-pending');
-      entry.status.classList.add('ag-err');
-      entry.status.setAttribute('aria-label', '중단');
-      entry.status.replaceChildren(createIcon('close'));
-      if (!entry.elapsed.textContent) entry.elapsed.textContent = '중단';
-      if (!entry.result.textContent) entry.result.textContent = '(결과 없이 종료됨)';
+      entry.row.setState('stopped');
+      if (!entry.row.elapsed.textContent) entry.row.elapsed.textContent = '중단';
+      if (!entry.row.result.textContent) entry.row.setRawResult('(결과 없이 종료됨)');
       entry.activity.activeTools.delete(callId);
       entry.activity.failedToolCount += 1;
       turnFailedToolCount += 1;
+      const call = entry.activity.calls.find((item) => item.callId === callId);
+      if (call) call.failed = true;
       touchedActivities.add(entry.activity);
     }
     toolRows.clear();
+    pendingExecutions = [];
     for (const activity of touchedActivities) {
       setActivityLabel(activity, activityLabel(activity));
       settleActivity(activity);
@@ -7355,6 +7450,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     if (handlePlanningSidebarEvent(e)) return;
     switch (e.type) {
+      case 'tool-executed':
+        handleToolExecuted(e);
+        break;
       case 'user-question-requested': {
         flushPendingAssistantRender();
         flushAssistantBuffer({ kind: 'progress' });
