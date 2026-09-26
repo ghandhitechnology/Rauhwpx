@@ -30,8 +30,15 @@ export type ObjectOverlayRef =
       cellPath?: CellAddr['path'];
     }
   | {
+      /** 에이전트가 고치거나 넣은 그림/도형 — 개체 상자를 op 종류(수정/삽입)로 칠한다 */
+      sort: 'object'; kind: 'image' | 'shape';
+      sectionIdx: number; paraIdx: number; controlIdx: number;
+      cellIdx?: number; cellParaIdx?: number; innerControlIdx?: number;
+      cellPath?: CellAddr['path'];
+    }
+  | {
       /** 지워진 내용의 위치 — 대상은 이미 없으므로 앵커 마커만 그린다 */
-      sort: 'removed'; what: 'table' | 'row' | 'col';
+      sort: 'removed'; what: 'table' | 'row' | 'col' | 'object';
       sectionIdx: number; paraIdx: number; controlIdx: number;
       /** 표 삭제 시 컨트롤이 있던 문단 내 텍스트 오프셋 */
       offset?: number;
@@ -915,7 +922,7 @@ export class PendingOverlayRenderer {
   private removedText(op: LegacyOverlayOp): string {
     if (op.removedText?.trim()) return op.removedText;
     const what = op.objRef?.sort === 'removed' ? op.objRef.what : 'table';
-    return what === 'row' ? '빈 행' : what === 'col' ? '빈 열' : '빈 표';
+    return what === 'row' ? '빈 행' : what === 'col' ? '빈 열' : what === 'object' ? '개체' : '빈 표';
   }
 
   /** 삭제된 컨트롤의 텍스트 오프셋 → 캐럿 좌표 (없으면 문단 앞). */
@@ -974,6 +981,17 @@ export class PendingOverlayRenderer {
       }
       case 'table': {
         const b = wasm.getTableBBox(ref.sectionIdx, ref.paraIdx, ref.controlIdx);
+        return [{ pageIndex: b.pageIndex, x: b.x, y: b.y, width: b.width, height: b.height }];
+      }
+      case 'object': {
+        // 도형 상자 API 는 본문 도형만 잰다 — 셀 안 도형은 표시를 건너뛴다 (호출부가 throw 를 삼킨다)
+        const b = ref.kind === 'shape'
+          ? (ref.cellIdx === undefined ? wasm.getShapeBBox(ref.sectionIdx, ref.paraIdx, ref.controlIdx) : null)
+          : wasm.getObjectBBox(
+            'image', ref.sectionIdx, ref.paraIdx, ref.controlIdx,
+            ref.cellIdx, ref.cellParaIdx, ref.innerControlIdx, ref.cellPath,
+          );
+        if (!b) throw new Error('shape in a cell has no bbox API');
         return [{ pageIndex: b.pageIndex, x: b.x, y: b.y, width: b.width, height: b.height }];
       }
       case 'agentObject': {

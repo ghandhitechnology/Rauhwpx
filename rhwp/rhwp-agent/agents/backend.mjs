@@ -310,6 +310,9 @@ const INSTRUCTION_PLANNING_BRIEF = `Planning mode can read the current app-only 
  * safe: 성공한 턴의 스테이징 편집은 사용자 검토 대기로 남고, raw 엔진 쓰기는 차단된다.
  * unrestricted: 성공한 턴에 자동 커밋된다 (기존 동작).
  */
+/** 그림·도형 배치 안내 — direct/implementation 브리프가 함께 싣는다. */
+const OBJECT_BULLET = '- Pictures and shapes: insert_image and insert_shape place them (floating positions in mm); edit_object moves, resizes, wraps, crops, reorders or deletes them by the address get_page_geometry objects report. Write text-box text with the text tools and the cell/cellPath that insert_shape returns.';
+
 function editLifecycleFor(profile) {
   if (profile === 'safe') {
     return {
@@ -414,7 +417,8 @@ ${verifyBullet}
 - Use apply_list for lists — never type literal number/bullet text like '1.' or '가.'.
 - Use replace_range (not delete_range + insert_text) to replace existing text — it is atomic and preserves formatting.
 - Always preview_equation before insert_equation, and treat its warnings as errors to fix before inserting.
-${tableBullet}${parallelWorkSectionFor(agentName, profile)}`;
+${tableBullet}
+${OBJECT_BULLET}${parallelWorkSectionFor(agentName, profile)}`;
 }
 
 export const DIRECT_SYSTEM_BRIEF = directSystemBrief('unrestricted');
@@ -457,6 +461,7 @@ ${engineBullet}
 ${verifyBullet}
 - Use apply_list for lists, replace_range for replacements, and preview_equation before insert_equation. Treat preview warnings as errors.
 ${tableBullet}
+${OBJECT_BULLET}
 - In the final report, clearly account for completed, blocked, and deferred plan items and validation results. Never call partial work complete; explain blockers and deferred work precisely.${parallelWorkSectionFor(agentName, profile)}`;
 }
 

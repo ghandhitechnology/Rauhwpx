@@ -1026,9 +1026,9 @@ export interface ObjectAnchor {
  *
  * 모든 객체 연산은 도구 호출 시점에 엔진에 적용된다 (미리보기 = 승인 결과).
  * 되돌림 수단은 연산마다 정해진다:
- * - 문단 보관본(captureParagraph): 표 생성·구조·속성, 표 삭제, 스타일, 기존 머리말/꼬리말
- *   — 한 본문 문단 안에서 끝나는 변경을 그 문단째로 되돌린다.
- * - 문서 스냅샷: 그림/수식 (문단 보관을 지원하지 않는 WASM 에서는 위 연산도)
+ * - 문단 보관본(captureParagraph): 표 생성·구조·속성, 표 삭제, 스타일, 기존 머리말/꼬리말,
+ *   그림/도형 편집·삭제, 도형 삽입 — 한 본문 문단 안에서 끝나는 변경을 그 문단째로 되돌린다.
+ * - 문서 스냅샷: 그림/수식 삽입, 개체 앞뒤 순서 (문단 보관을 지원하지 않는 WASM 에서는 위 연산도)
  * - 역연산: 문단 서식, 쪽 설정, 새 머리말/꼬리말, 각주, 책갈피 (보관본이 거부될 때의 폴백 포함)
  */
 export type ObjectOp =
@@ -1215,6 +1215,52 @@ export type ObjectOp =
       prevText?: string;
     }
   | {
+      /**
+       * 그림/도형의 배치·크기·자르기·앞뒤 순서 변경 (edit_object). 문단 보관본으로 되돌리고,
+       * 앞뒤 순서는 다른 문단의 개체와 맞바꿀 수 있어 문서 스냅샷으로 되돌린다.
+       */
+      type: 'editObject';
+      kind: 'picture' | 'shape';
+      sectionIdx: number;
+      /** 개체를 품은 문단 — cell 이 있으면 셀 문단, controlIdx 는 셀 문단 안 인덱스 */
+      paraIdx: number;
+      controlIdx: number;
+      cell?: CellAddr;
+      /** set{Picture,Shape}Properties 에 넘기는 엔진 속성 (HWPUNIT) */
+      props: Record<string, unknown>;
+      /** 역연산용 적용 전 값 (props 와 같은 키) */
+      prevProps: Record<string, unknown>;
+      zOrder?: 'front' | 'back' | 'forward' | 'backward';
+      /** 적용 직후 크기 — 드리프트 판별자 */
+      applied?: { width: number; height: number };
+    }
+  | {
+      /** 그림/도형 삭제 — 문단 보관본으로 되돌린다 */
+      type: 'deleteObject';
+      kind: 'picture' | 'shape';
+      sectionIdx: number;
+      paraIdx: number;
+      controlIdx: number;
+      cell?: CellAddr;
+      /** 삭제된 컨트롤의 문단 내 텍스트 오프셋 — 오버레이 앵커 위치 */
+      removedOffset?: number;
+      /** 개체 설명 (오버레이 팝오버·diff) */
+      removedText?: string;
+    }
+  | {
+      /** 도형 삽입 (insert_shape) — 본문 문단에만 놓는다 */
+      type: 'insertShape';
+      shape: 'line' | 'rectangle' | 'ellipse' | 'textBox';
+      sectionIdx: number; paraIdx: number; charOffset: number;
+      /** createShapeControl 인자 */
+      create: Record<string, unknown>;
+      /** 생성 직후 setShapeProperties 로 적용하는 배치·선·채우기 */
+      props: Record<string, unknown>;
+      anchor?: ObjectAnchor;
+      /** 적용 직후 크기 — 드리프트 판별자 */
+      applied?: { width: number; height: number };
+    }
+  | {
       type: 'bookmark';
       op: 'add' | 'delete' | 'rename';
       sectionIdx: number; paraIdx: number;
@@ -1240,6 +1286,7 @@ export type TableStructureOpName =
 export function objectOverlayKind(obj: ObjectOp): 'insert' | 'modify' | 'remove' {
   switch (obj.type) {
     case 'deleteTable':
+    case 'deleteObject':
       return 'remove';
     case 'tableStructure':
       return obj.op === 'delete_row' || obj.op === 'delete_col' ? 'remove'
@@ -1249,6 +1296,7 @@ export function objectOverlayKind(obj: ObjectOp): 'insert' | 'modify' | 'remove'
     case 'insertImage':
     case 'insertEquation':
     case 'insertNote':
+    case 'insertShape':
       return 'insert';
     case 'headerFooter':
       return obj.existedBefore ? 'modify' : 'insert';

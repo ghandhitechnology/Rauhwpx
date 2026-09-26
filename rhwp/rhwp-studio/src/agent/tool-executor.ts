@@ -17,6 +17,7 @@ import { AgentToolError } from './types.ts';
 import { EditJournal, type EditJournalEntry } from './edit-journal.ts';
 import { renderChartPng, validateChartSpec } from './chart-render.ts';
 import { cropImageOnCanvas, REFERENCE_READ_MAX_PIXELS, type ImageCropper, type PixelBox } from './image-crop.ts';
+import { describeObject, EDIT_OBJECT_ARG_KEYS, planInsertShape, planObjectEdit, type ObjectKind } from './object-edit-args.ts';
 import type { ChartSpec } from './chart-render.ts';
 import {
   applyEngineEdits,
@@ -150,6 +151,8 @@ export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'apply_style',
   'insert_image',
   'insert_equation',
+  'edit_object',
+  'insert_shape',
   'set_page_layout',
   'edit_header_footer',
   'insert_page_break',
@@ -198,6 +201,8 @@ const BATCHABLE_EDIT_TOOLS: ReadonlySet<string> = new Set([
   'set_zone_borders',
   'delete_table',
   'insert_equation',
+  'edit_object',
+  'insert_shape',
 ]);
 
 /**
@@ -568,6 +573,14 @@ function optCell(args: Record<string, unknown>): CellAddr | undefined {
   return cell;
 }
 
+/** 셀 안 개체의 엔진 경로 — 한 칸 셀 주소도 경로로 바꾸고 마지막 cellParaIndex 는 개체 문단이다 */
+function objectCellPath(cell: CellAddr, paraIdx: number): CellPathEntry[] {
+  const path = cell.path?.map((entry) => ({ ...entry }))
+    ?? [{ controlIndex: cell.controlIdx, cellIndex: cell.cellIdx, cellParaIndex: 0 }];
+  path[path.length - 1].cellParaIndex = paraIdx;
+  return path;
+}
+
 function cellPathAt(cell: CellAddr, paraIdx: number): string {
   const path = cell.path?.map((entry) => ({ ...entry }));
   if (!path?.length) throw new AgentToolError('INVALID_ARGS', 'cellPath is required for nested cell access');
@@ -847,6 +860,8 @@ export class AgentToolExecutor {
       case 'insert_image': return this.insertImage(args, agent, capability);
       case 'read_reference_image': return this.readReferenceImage(args);
       case 'insert_equation': return this.insertEquation(args, agent);
+      case 'edit_object': return this.editObject(args, agent);
+      case 'insert_shape': return this.insertShape(args, agent);
       case 'preview_equation': return this.previewEquation(args);
       case 'set_page_layout': return this.setPageLayout(args, agent);
       case 'edit_header_footer': return this.editHeaderFooter(args, agent);
@@ -1076,6 +1091,8 @@ export class AgentToolExecutor {
     try {
       cellCount = wasm.getTableDimensions(sectionIdx, cell.paraIdx, cell.controlIdx).cellCount;
     } catch {
+      // 글상자는 한 칸짜리 셀처럼 경로(cellIndex 0)로만 짚는다 (insert_shape textBox 주소)
+      if (cell.path && cell.cellIdx === 0 && this.isTextBoxPath(sectionIdx, cell)) return;
       throw new AgentToolError(
         'INVALID_ARGS',
         `No table control at section ${sectionIdx}, paragraph ${cell.paraIdx}, controlIdx ${cell.controlIdx} — use get_structure to list tables`,
@@ -1090,6 +1107,15 @@ export class AgentToolExecutor {
       } catch {
         throw new AgentToolError('INVALID_ARGS', 'cellPath does not resolve to a table cell');
       }
+    }
+  }
+
+  private isTextBoxPath(sectionIdx: number, cell: CellAddr): boolean {
+    try {
+      this.deps.wasm.getCellParagraphCountByPath(sectionIdx, cell.paraIdx, JSON.stringify(cell.path));
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -3072,7 +3098,12 @@ export class AgentToolExecutor {
           case 'createTable':
           case 'insertImage':
           case 'insertNote':
+          case 'insertShape':
             if (o.anchor) pushPara(o.sectionIdx, o.anchor.paraIdx);
+            break;
+          case 'editObject':
+          case 'deleteObject':
+            pushPara(o.sectionIdx, o.cell ? o.cell.paraIdx : o.paraIdx);
             break;
           case 'insertEquation':
             if (o.cell) pushPara(o.sectionIdx, o.paraIdx, o.cell);
@@ -5049,6 +5080,113 @@ export class AgentToolExecutor {
       ...(preview.baselinePx !== undefined ? { baselineMm: pxToMm(preview.baselinePx) } : {}),
       warnings: preview.warnings,
       diagnostics: preview.diagnostics,
+    };
+  }
+
+  /**
+   * 그림/도형의 종류와 현재 속성. 셀 안 개체는 셀 문단 좌표(paraIdx)와 그 문단 안
+   * 인덱스(controlIdx)로 가리키고 경로 API 로 읽는다.
+   */
+  private readEditableObject(
+    sectionIdx: number, paraIdx: number, controlIdx: number, cell?: CellAddr,
+  ): { kind: ObjectKind; props: Record<string, unknown> } {
+    const { wasm } = this.deps;
+    const path = cell ? objectCellPath(cell, paraIdx) : null;
+    const read = (kind: ObjectKind): Record<string, unknown> => (path
+      ? kind === 'picture'
+        ? wasm.getCellPicturePropertiesByPath(sectionIdx, cell!.paraIdx, path, controlIdx)
+        : wasm.getCellShapePropertiesByPath(sectionIdx, cell!.paraIdx, path, controlIdx)
+      : kind === 'picture'
+        ? wasm.getPictureProperties(sectionIdx, paraIdx, controlIdx)
+        : wasm.getShapeProperties(sectionIdx, paraIdx, controlIdx)) as unknown as Record<string, unknown>;
+    for (const kind of ['picture', 'shape'] as const) {
+      try {
+        return { kind, props: read(kind) };
+      } catch { /* 다음 종류로 */ }
+    }
+    throw new AgentToolError(
+      'INVALID_ARGS',
+      `No picture or shape at section ${sectionIdx}, paragraph ${paraIdx}, controlIdx ${controlIdx}${cell ? ' in that cell' : ''} — get_page_geometry objects carry their addresses`,
+    );
+  }
+
+  private editObject(args: Record<string, unknown>, agent: AgentName): unknown {
+    this.requireRevision(args);
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    const paraIdx = reqInt(args, 'paraIdx');
+    const controlIdx = reqInt(args, 'controlIdx');
+    const cell = optCell(args);
+    this.validateAddress(sectionIdx, paraIdx, undefined, cell);
+    const { kind, props: current } = this.readEditableObject(sectionIdx, paraIdx, controlIdx, cell);
+    const at = { sectionIdx, paraIdx, controlIdx, ...(cell ? { cell } : {}) };
+    const hostPara = cell ? cell.paraIdx : paraIdx;
+    if (args['delete'] !== undefined && args['delete'] !== null) {
+      if (args['delete'] !== true) throw new AgentToolError('INVALID_ARGS', 'delete must be true');
+      const extra = EDIT_OBJECT_ARG_KEYS.filter((key) => args[key] !== undefined && args[key] !== null);
+      if (extra.length > 0) throw new AgentToolError('INVALID_ARGS', `delete cannot be combined with ${extra.join('/')}`);
+      if (cell && kind === 'shape') throw new AgentToolError('INVALID_ARGS', 'shapes inside table cells cannot be deleted');
+      const description = typeof current['description'] === 'string' ? current['description'] : '';
+      const obj: ObjectOp = {
+        type: 'deleteObject', kind, ...at,
+        removedText: description || (kind === 'picture' ? '그림' : '도형'),
+      };
+      const r = this.stageObjectOp(agent, obj, sectionIdx, hostPara);
+      return {
+        revision: this.revision,
+        changeSetId: r.changeSetId,
+        deleted: { kind, sectionIdx, paraIdx, controlIdx },
+        note: 'later objects in the same paragraph moved down one controlIdx.',
+      };
+    }
+    const plan = planObjectEdit(args, kind, current);
+    if (plan.zOrder && (cell || (plan.props['treatAsChar'] ?? current['treatAsChar']) === true)) {
+      throw new AgentToolError('INVALID_ARGS', 'zOrder applies to floating objects in the body — make it floating first');
+    }
+    const obj: ObjectOp = {
+      type: 'editObject', kind, ...at,
+      props: plan.props, prevProps: plan.prevProps,
+      ...(plan.zOrder ? { zOrder: plan.zOrder } : {}),
+    };
+    const r = this.stageObjectOp(agent, obj, sectionIdx, hostPara);
+    const staged = r.obj as Extract<ObjectOp, { type: 'editObject' }>;
+    let after = current;
+    try {
+      after = this.readEditableObject(sectionIdx, staged.paraIdx, staged.controlIdx, staged.cell).props;
+    } catch { /* 적용 전 값으로 보고한다 */ }
+    return {
+      revision: this.revision,
+      changeSetId: r.changeSetId,
+      object: { sectionIdx, paraIdx: staged.paraIdx, controlIdx: staged.controlIdx, ...describeObject(kind, after) },
+    };
+  }
+
+  private insertShape(args: Record<string, unknown>, agent: AgentName): unknown {
+    this.requireRevision(args);
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    const paraIdx = reqInt(args, 'paraIdx');
+    const charOffset = optInt(args, 'charOffset', 0);
+    if (args['cell'] !== undefined || args['cellPath'] !== undefined) {
+      throw new AgentToolError('INVALID_ARGS', 'insert_shape places shapes in body paragraphs only');
+    }
+    this.validateAddress(sectionIdx, paraIdx, charOffset);
+    const plan = planInsertShape(args, { sectionIdx, paraIdx, charOffset });
+    const obj: ObjectOp = {
+      type: 'insertShape', shape: plan.shape, sectionIdx, paraIdx, charOffset,
+      create: plan.create, props: plan.props,
+    };
+    const r = this.stageObjectOp(agent, obj, sectionIdx, paraIdx);
+    const anchor = (r.obj as Extract<ObjectOp, { type: 'insertShape' }>).anchor!;
+    return {
+      revision: this.revision,
+      changeSetId: r.changeSetId,
+      shape: { sectionIdx, paraIdx: anchor.paraIdx, controlIdx: anchor.controlIdx },
+      // 글상자 글은 셀 주소로 쓴다 — 안쪽 문단은 paraIdx 0 부터
+      ...(plan.shape === 'textBox' ? {
+        textBox: {
+          cell: { paraIdx: anchor.paraIdx, controlIdx: anchor.controlIdx, cellIdx: 0 },
+          cellPath: [{ controlIndex: anchor.controlIdx, cellIndex: 0, cellParaIndex: 0 }],
+        },
+      } : {}),
     };
   }
 

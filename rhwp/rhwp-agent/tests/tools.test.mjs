@@ -22,8 +22,8 @@ import { toolDefinitionChars } from '../tool-telemetry.mjs';
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 87개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 87);
+test('도구는 정확히 89개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 89);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -127,7 +127,7 @@ test('anchor 내부 필드는 validate 훅이 모양을 고정한다', () => {
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 75);
+  assert.equal(direct.size, 77);
   assert.equal(byName.get('commit_product_skill')?.category, 'instruction-write');
   assert.equal(byName.get('list_harness_skills')?.category, 'instruction-read');
   assert.ok(direct.has('commit_product_skill'));

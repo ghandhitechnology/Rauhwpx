@@ -589,7 +589,9 @@ export class PendingEditManager {
     // Deleting an inserted object cannot recover the host's saved line metrics.
     // Keep its original layout for reject and the approved change's undo entry.
     // 문단 보관을 못 잡은 보관 대상(구버전 WASM, HF 위치 조회 실패)도 스냅샷으로 되돌린다.
+    // 앞뒤 순서는 다른 문단의 이웃 개체와 순번을 맞바꿀 수 있어 한 문단 보관으로는 부족하다.
     if (obj.type === 'insertImage' || obj.type === 'insertEquation'
+      || (obj.type === 'editObject' && obj.zOrder !== undefined)
       || (paraCapture === null && this.revertsByParagraph(obj))) {
       this.deps.inputHandler.prepareSnapshotCapacity?.(1);
       snapshotId = wasm.saveSnapshot();
@@ -609,6 +611,11 @@ export class PendingEditManager {
           obj.removedOffset = positions?.[obj.controlIdx] ?? 0;
         }
       } catch { /* 보관 실패 시 앵커만 놓는다 */ }
+    }
+    if (obj.type === 'deleteObject' && !obj.cell && typeof wasm.getControlTextPositions === 'function') {
+      try {
+        obj.removedOffset = wasm.getControlTextPositions(obj.sectionIdx, obj.paraIdx)[obj.controlIdx] ?? 0;
+      } catch { /* 문단 앞에 앵커를 놓는다 */ }
     }
     try {
       this.applyObjectOp(obj);
@@ -1252,6 +1259,28 @@ export class PendingEditManager {
           sort: 'removed', what: 'table', sectionIdx: obj.sectionIdx,
           paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx, offset: obj.removedOffset,
         };
+      case 'deleteObject':
+        return {
+          sort: 'removed', what: 'object', sectionIdx: obj.sectionIdx,
+          paraIdx: obj.cell ? obj.cell.paraIdx : obj.paraIdx,
+          controlIdx: obj.cell ? obj.cell.controlIdx : obj.controlIdx, offset: obj.removedOffset,
+        };
+      case 'editObject': {
+        const kind = obj.kind === 'picture' ? 'image' : 'shape';
+        if (obj.cell) {
+          return {
+            sort: 'object', kind, sectionIdx: obj.sectionIdx,
+            paraIdx: obj.cell.paraIdx, controlIdx: obj.cell.controlIdx,
+            cellIdx: obj.cell.cellIdx, cellParaIdx: obj.paraIdx, innerControlIdx: obj.controlIdx,
+            cellPath: obj.cell.path ? this.cellPathEntriesAt(obj.cell, obj.paraIdx) : undefined,
+          };
+        }
+        return { sort: 'object', kind, sectionIdx: obj.sectionIdx, paraIdx: obj.paraIdx, controlIdx: obj.controlIdx };
+      }
+      case 'insertShape':
+        return obj.anchor
+          ? { sort: 'object', kind: 'shape', sectionIdx: obj.sectionIdx, paraIdx: obj.anchor.paraIdx, controlIdx: obj.anchor.controlIdx }
+          : null;
       case 'setTableProps':
       case 'setColumnWidths':
       case 'fitToPage':
@@ -1383,10 +1412,55 @@ export class PendingEditManager {
 
   /** 셀 그림의 엔진 cellPath — 단일 셀 주소도 한 칸짜리 경로로 바꾼다 (마지막 cellParaIndex = 셀 문단) */
   private imageCellPath(obj: Extract<ObjectOp, { type: 'insertImage' }>): NonNullable<CellAddr['path']> {
-    const cell = obj.cell!;
+    return this.objectCellPath(obj.cell!, obj.paraIdx);
+  }
+
+  private objectCellPath(cell: CellAddr, cellPara: number): NonNullable<CellAddr['path']> {
     return cell.path
-      ? this.cellPathEntriesAt(cell, obj.paraIdx)
-      : [{ controlIndex: cell.controlIdx, cellIndex: cell.cellIdx, cellParaIndex: obj.paraIdx }];
+      ? this.cellPathEntriesAt(cell, cellPara)
+      : [{ controlIndex: cell.controlIdx, cellIndex: cell.cellIdx, cellParaIndex: cellPara }];
+  }
+
+  /** edit_object 대상 속성 읽기 — 셀 개체는 경로 API 로 읽는다 */
+  private readObjectProps(
+    obj: Extract<ObjectOp, { type: 'editObject' | 'deleteObject' }>,
+  ): Record<string, unknown> {
+    const wasm = this.deps.wasm;
+    if (obj.cell) {
+      const path = this.objectCellPath(obj.cell, obj.paraIdx);
+      return (obj.kind === 'picture'
+        ? wasm.getCellPicturePropertiesByPath(obj.sectionIdx, obj.cell.paraIdx, path, obj.controlIdx)
+        : wasm.getCellShapePropertiesByPath(obj.sectionIdx, obj.cell.paraIdx, path, obj.controlIdx)) as unknown as Record<string, unknown>;
+    }
+    return (obj.kind === 'picture'
+      ? wasm.getPictureProperties(obj.sectionIdx, obj.paraIdx, obj.controlIdx)
+      : wasm.getShapeProperties(obj.sectionIdx, obj.paraIdx, obj.controlIdx)) as unknown as Record<string, unknown>;
+  }
+
+  /** edit_object 속성 쓰기 (적용·역연산 공용) */
+  private writeObjectProps(
+    obj: Extract<ObjectOp, { type: 'editObject' }>, props: Record<string, unknown>,
+  ): void {
+    const wasm = this.deps.wasm;
+    let res: { ok: boolean } | undefined;
+    if (obj.cell) {
+      const path = this.objectCellPath(obj.cell, obj.paraIdx);
+      res = obj.kind === 'picture'
+        ? wasm.setCellPicturePropertiesByPath(obj.sectionIdx, obj.cell.paraIdx, path, obj.controlIdx, props)
+        : wasm.setCellShapePropertiesByPath(obj.sectionIdx, obj.cell.paraIdx, path, obj.controlIdx, props);
+    } else {
+      res = obj.kind === 'picture'
+        ? wasm.setPictureProperties(obj.sectionIdx, obj.paraIdx, obj.controlIdx, props)
+        : wasm.setShapeProperties(obj.sectionIdx, obj.paraIdx, obj.controlIdx, props);
+    }
+    if (res?.ok === false) throw new AgentToolError('RPC_ERROR', `set ${obj.kind} properties failed`);
+  }
+
+  /** 적용 직후 크기 — editObject/insertShape 드리프트 판별자 */
+  private objectSize(props: Record<string, unknown>): { width: number; height: number } | undefined {
+    const width = props['width'];
+    const height = props['height'];
+    return typeof width === 'number' && typeof height === 'number' ? { width, height } : undefined;
   }
 
   /**
@@ -1587,6 +1661,54 @@ export class PendingEditManager {
         );
         if (!res.ok) throw new AgentToolError('RPC_ERROR', 'insertEquation failed');
         obj.anchor = { paraIdx: res.paraIdx, controlIdx: res.controlIdx, charOffset: obj.charOffset };
+        this.shiftControlIdxRefs(obj.sectionIdx, res.paraIdx, res.controlIdx, 1, obj);
+        return;
+      }
+      case 'editObject': {
+        if (Object.keys(obj.props).length > 0) this.writeObjectProps(obj, obj.props);
+        if (obj.zOrder) {
+          const res = wasm.changeObjectZOrder(obj.sectionIdx, obj.paraIdx, obj.controlIdx, obj.zOrder);
+          if (res?.ok !== true) throw new AgentToolError('RPC_ERROR', 'changeObjectZOrder failed');
+        }
+        try {
+          obj.applied = this.objectSize(this.readObjectProps(obj));
+        } catch { /* 판별자 없이 존재만 확인한다 */ }
+        return;
+      }
+      case 'deleteObject': {
+        let res: { ok: boolean } | undefined;
+        if (obj.cell) {
+          if (obj.kind !== 'picture') throw new AgentToolError('INVALID_ARGS', 'shapes inside cells cannot be deleted');
+          res = wasm.deleteCellPictureControlByPath(
+            obj.sectionIdx, obj.cell.paraIdx, this.objectCellPath(obj.cell, obj.paraIdx), obj.controlIdx,
+          );
+        } else {
+          res = obj.kind === 'picture'
+            ? wasm.deletePictureControl(obj.sectionIdx, obj.paraIdx, obj.controlIdx)
+            : wasm.deleteShapeControl(obj.sectionIdx, obj.paraIdx, obj.controlIdx);
+        }
+        if (res?.ok !== true) throw new AgentToolError('RPC_ERROR', `delete ${obj.kind} failed`);
+        if (obj.cell) this.shiftCellObjectRefsAt(obj.cell, obj.paraIdx, obj.controlIdx, -1, obj);
+        else this.shiftControlIdxRefs(obj.sectionIdx, obj.paraIdx, obj.controlIdx, -1, obj);
+        return;
+      }
+      case 'insertShape': {
+        const res = wasm.createShapeControl(obj.create);
+        if (res?.ok !== true) throw new AgentToolError('RPC_ERROR', 'createShapeControl failed');
+        let placed = false;
+        try {
+          placed = wasm.setShapeProperties(obj.sectionIdx, res.paraIdx, res.controlIdx, obj.props)?.ok === true;
+        } finally {
+          // 배치 실패 시 기본 배치의 도형을 남기지 않는다
+          if (!placed) wasm.deleteShapeControl(obj.sectionIdx, res.paraIdx, res.controlIdx);
+        }
+        if (!placed) throw new AgentToolError('RPC_ERROR', 'setShapeProperties failed');
+        obj.anchor = { paraIdx: res.paraIdx, controlIdx: res.controlIdx, charOffset: obj.charOffset };
+        try {
+          obj.applied = this.objectSize(
+            wasm.getShapeProperties(obj.sectionIdx, res.paraIdx, res.controlIdx) as unknown as Record<string, unknown>,
+          );
+        } catch { /* 판별자 없이 존재만 확인한다 */ }
         this.shiftControlIdxRefs(obj.sectionIdx, res.paraIdx, res.controlIdx, 1, obj);
         return;
       }
@@ -1861,6 +1983,22 @@ export class PendingEditManager {
           if (ok) this.shiftControlIdxRefs(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx, -1, obj);
           return ok;
         }
+        case 'editObject': {
+          // 한 칸 앞/뒤는 반대 방향으로 되돌릴 수 있다 — 맨 앞/뒤는 스냅샷으로만 되돌린다
+          if (obj.zOrder === 'front' || obj.zOrder === 'back') return false;
+          if (obj.zOrder) {
+            const back = obj.zOrder === 'forward' ? 'backward' : 'forward';
+            if (wasm.changeObjectZOrder(obj.sectionIdx, obj.paraIdx, obj.controlIdx, back)?.ok !== true) return false;
+          }
+          if (Object.keys(obj.prevProps).length > 0) this.writeObjectProps(obj, obj.prevProps);
+          return true;
+        }
+        case 'insertShape': {
+          if (!obj.anchor) return false;
+          const ok = wasm.deleteShapeControl(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx)?.ok === true;
+          if (ok) this.shiftControlIdxRefs(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx, -1, obj);
+          return ok;
+        }
         case 'tableStructure': {
           // 행/열 삽입만 역연산이 있다 — 나머지 구조 op 는 문단 보관본으로만 되돌린다
           if ((obj.op !== 'insert_row' && obj.op !== 'insert_col') || obj.insertedIndex === undefined) return false;
@@ -1966,8 +2104,11 @@ export class PendingEditManager {
    */
   private captureHost(obj: ObjectOp): number | null {
     switch (obj.type) {
-      case 'createTable': return obj.anchor ? obj.anchor.paraIdx : obj.paraIdx;
-      case 'applyStyle': return obj.cell ? obj.cell.paraIdx : obj.paraIdx;
+      case 'createTable':
+      case 'insertShape': return obj.anchor ? obj.anchor.paraIdx : obj.paraIdx;
+      case 'applyStyle':
+      case 'deleteObject': return obj.cell ? obj.cell.paraIdx : obj.paraIdx;
+      case 'editObject': return obj.zOrder ? null : obj.cell ? obj.cell.paraIdx : obj.paraIdx;
       case 'headerFooter': return obj.existedBefore ? obj.hostParaIdx ?? null : null;
       default: return isTableTargetOp(obj) ? obj.tableParaIdx : null;
     }
@@ -1976,6 +2117,8 @@ export class PendingEditManager {
   /** 문단 보관본(없으면 스냅샷)으로 되돌리는 op 인가 — createTable 외에는 역연산이 없다 */
   private revertsByParagraph(obj: ObjectOp): boolean {
     return obj.type === 'createTable' || obj.type === 'applyStyle'
+      || obj.type === 'insertShape' || obj.type === 'deleteObject'
+      || (obj.type === 'editObject' && !obj.zOrder)
       || (obj.type === 'headerFooter' && obj.existedBefore)
       || isTableTargetOp(obj);
   }
@@ -2074,16 +2217,27 @@ export class PendingEditManager {
   private shiftCellObjectRefs(
     acting: Extract<ObjectOp, { type: 'insertEquation' | 'insertImage' }>, atIdx: number, delta: 1 | -1,
   ): void {
-    if (!acting.cell) return;
-    const hit = (idx: number): boolean => (delta === 1 ? idx >= atIdx : idx > atIdx);
+    if (acting.cell) this.shiftCellObjectRefsAt(acting.cell, acting.paraIdx, atIdx, delta, acting);
+  }
+
+  /** 셀 문단 하나의 컨트롤 목록이 바뀌면 그 문단의 다른 pending 개체 인덱스를 민다 */
+  private shiftCellObjectRefsAt(
+    cell: CellAddr, cellPara: number, atIdx: number, delta: 1 | -1, exclude: ObjectOp, reinsertedAfterSeq?: number,
+  ): void {
+    const hit = (idx: number, op: PendingOp): boolean => {
+      if (delta === -1) return idx > atIdx;
+      if (idx !== atIdx) return idx > atIdx;
+      return reinsertedAfterSeq === undefined || (op.seq ?? 0) > reinsertedAfterSeq;
+    };
     for (const set of this.sets) {
       for (const op of set.ops) {
-        if (op.kind !== 'object' || op.obj === acting) continue;
-        if (op.obj.type !== 'insertEquation' && op.obj.type !== 'insertImage') continue;
+        if (op.kind !== 'object' || op.obj === exclude) continue;
         const o = op.obj;
-        if (o.cell && sameCell(o.cell, acting.cell) && o.paraIdx === acting.paraIdx
-          && o.anchor && hit(o.anchor.controlIdx)) {
+        if (!('cell' in o) || !o.cell || !sameCell(o.cell, cell) || !('paraIdx' in o) || o.paraIdx !== cellPara) continue;
+        if ((o.type === 'insertEquation' || o.type === 'insertImage') && o.anchor && hit(o.anchor.controlIdx, op)) {
           o.anchor = { ...o.anchor, controlIdx: o.anchor.controlIdx + delta };
+        } else if ((o.type === 'editObject' || o.type === 'deleteObject') && hit(o.controlIdx, op)) {
+          o.controlIdx += delta;
         }
       }
     }
@@ -2256,6 +2410,24 @@ export class PendingEditManager {
           }
           return script === obj.script ? null : 'object-changed';
         }
+        case 'editObject': {
+          // 같은 자리에 같은 종류의 개체가 적용 직후 크기로 남아 있어야 한다 (사용자가 옮긴 크기·다른 개체 판별)
+          const size = this.objectSize(this.readObjectProps(obj));
+          return !obj.applied || (size && size.width === obj.applied.width && size.height === obj.applied.height)
+            ? null : 'object-changed';
+        }
+        case 'deleteObject':
+          // 개체는 이미 없다 — 되돌림 직전의 문단 지문이 사용자 수정을 가린다
+          return (obj.cell ? obj.cell.paraIdx : obj.paraIdx) < wasm.getParagraphCount(obj.sectionIdx)
+            ? null : 'paragraph-changed';
+        case 'insertShape': {
+          if (!obj.anchor) return 'object-changed';
+          const size = this.objectSize(
+            wasm.getShapeProperties(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx) as unknown as Record<string, unknown>,
+          );
+          return !obj.applied || (size && size.width === obj.applied.width && size.height === obj.applied.height)
+            ? null : 'object-changed';
+        }
         case 'tableStructure':
         case 'setCellProps':
         case 'setTableProps':
@@ -2380,7 +2552,7 @@ export class PendingEditManager {
         if (op.kind === 'object') {
           const o = op.obj;
           if (o === exclude) continue;
-          if ((o.type === 'createTable' || (o.type === 'insertImage' && !o.cell))
+          if ((o.type === 'createTable' || o.type === 'insertShape' || (o.type === 'insertImage' && !o.cell))
             && o.sectionIdx === sectionIdx && o.anchor
             && o.anchor.paraIdx === paraIdx && hit(o.anchor.controlIdx, op)) {
             o.anchor = { ...o.anchor, controlIdx: o.anchor.controlIdx + delta };
@@ -2391,8 +2563,11 @@ export class PendingEditManager {
           } else if (isTableTargetOp(o)
             && o.sectionIdx === sectionIdx && o.tableParaIdx === paraIdx && hit(o.controlIdx, op)) {
             o.controlIdx += delta;
+          } else if ((o.type === 'editObject' || o.type === 'deleteObject') && !o.cell
+            && o.sectionIdx === sectionIdx && o.paraIdx === paraIdx && hit(o.controlIdx, op)) {
+            o.controlIdx += delta;
           } else if ((o.type === 'paraFormat' || o.type === 'applyStyle' || o.type === 'insertEquation'
-            || o.type === 'insertImage')
+            || o.type === 'insertImage' || o.type === 'editObject' || o.type === 'deleteObject')
             && o.cell && o.sectionIdx === sectionIdx
             && o.cell.paraIdx === paraIdx && hit(o.cell.controlIdx, op)) {
             o.cell = this.shiftCellControl(o.cell, delta);
@@ -2954,7 +3129,14 @@ export class PendingEditManager {
     const obj = op.obj;
     switch (obj.type) {
       case 'createTable':
+      case 'insertShape':
         if (obj.anchor) this.shiftControlIdxRefs(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx, -1, obj);
+        return;
+      case 'deleteObject':
+        if (obj.cell) this.shiftCellObjectRefsAt(obj.cell, obj.paraIdx, obj.controlIdx, 1, obj, op.seq ?? 0);
+        else this.shiftControlIdxRefs(obj.sectionIdx, obj.paraIdx, obj.controlIdx, 1, obj, op.seq ?? 0);
+        return;
+      case 'editObject':
         return;
       case 'insertImage':
       case 'insertEquation':
@@ -3166,10 +3348,12 @@ export class PendingEditManager {
   /** 객체 op 의 본문 기준 문단 인덱스 (요약/보관 대상 판별용 — 문단 좌표가 없으면 null) */
   private objectBodyParaIdx(obj: ObjectOp): number | null {
     switch (obj.type) {
-      case 'createTable': case 'insertImage': case 'insertNote':
+      case 'createTable': case 'insertImage': case 'insertNote': case 'insertShape':
         return obj.anchor ? obj.anchor.paraIdx : obj.paraIdx;
       case 'insertEquation':
         return obj.cell ? obj.cell.paraIdx : (obj.anchor ? obj.anchor.paraIdx : obj.paraIdx);
+      case 'editObject': case 'deleteObject':
+        return obj.cell ? obj.cell.paraIdx : obj.paraIdx;
       case 'tableStructure': case 'deleteTable': case 'setCellProps': case 'setTableProps':
       case 'setColumnWidths': case 'fitToPage': case 'setZoneProps': case 'applyFormula': case 'setCaption':
         return obj.tableParaIdx;
@@ -3193,8 +3377,8 @@ export class PendingEditManager {
     if (obj.sectionIdx !== sectionIdx) return;
     const shiftBody = (paraIdx: number, charOffset: number): DocPoint => shift({ paraIdx, charOffset });
     switch (obj.type) {
-      case 'createTable': case 'insertImage': case 'insertEquation': case 'insertNote': {
-        if (obj.type !== 'createTable' && obj.type !== 'insertNote' && obj.cell) {
+      case 'createTable': case 'insertImage': case 'insertEquation': case 'insertNote': case 'insertShape': {
+        if (obj.type !== 'createTable' && obj.type !== 'insertNote' && obj.type !== 'insertShape' && obj.cell) {
           if (insCell) {
             // 같은 셀 내부 텍스트 변화만 셀 문단 좌표를 움직인다
             if (sameCell(obj.cell, insCell)) {
@@ -3240,6 +3424,20 @@ export class PendingEditManager {
       case 'setNoteText':
         if (!insCell) obj.paraIdx = shiftBody(obj.paraIdx, 0).paraIdx;
         return;
+      case 'editObject': case 'deleteObject': {
+        // 개체의 글자 위치는 모른다 — 문단만 민다 (분할/병합은 trackControls 가 엔진 기준으로 다시 잡는다)
+        if (obj.cell) {
+          if (!insCell) obj.cell = { ...obj.cell, paraIdx: shiftBody(obj.cell.paraIdx, 0).paraIdx };
+          else if (sameCell(obj.cell, insCell)) obj.paraIdx = shift({ paraIdx: obj.paraIdx, charOffset: 0 }).paraIdx;
+          return;
+        }
+        if (insCell) return;
+        const offset = obj.type === 'deleteObject' ? obj.removedOffset ?? 0 : 0;
+        const p = shiftBody(obj.paraIdx, offset);
+        obj.paraIdx = p.paraIdx;
+        if (obj.type === 'deleteObject' && obj.removedOffset !== undefined) obj.removedOffset = p.charOffset;
+        return;
+      }
       case 'bookmark': {
         if (insCell) return;
         const p = shiftBody(obj.paraIdx, obj.charOffset ?? 0);
@@ -3380,7 +3578,7 @@ export class PendingEditManager {
         const o = op.obj;
         if (o.sectionIdx !== sectionIdx) continue;
         switch (o.type) {
-          case 'createTable': case 'insertImage': case 'insertNote': case 'insertEquation':
+          case 'createTable': case 'insertImage': case 'insertNote': case 'insertEquation': case 'insertShape':
             if (o.type === 'insertEquation' && o.cell) {
               cellRef(() => o.cell, (cell) => {
                 o.cell = cell;
@@ -3411,6 +3609,19 @@ export class PendingEditManager {
                 set: (paraIdx, controlIdx, textPos) => {
                   o.paraIdx = paraIdx; o.ctrlIdx = controlIdx;
                   if (o.charOffset !== undefined) o.charOffset = textPos;
+                },
+              });
+            }
+            break;
+          case 'editObject': case 'deleteObject':
+            if (o.cell) {
+              cellRef(() => o.cell, (cell) => { o.cell = cell; });
+            } else if (inRange(o.paraIdx)) {
+              refs.push({
+                paraIdx: o.paraIdx, controlIdx: o.controlIdx,
+                set: (paraIdx, controlIdx, textPos) => {
+                  o.paraIdx = paraIdx; o.controlIdx = controlIdx;
+                  if (o.type === 'deleteObject' && o.removedOffset !== undefined) o.removedOffset = textPos;
                 },
               });
             }

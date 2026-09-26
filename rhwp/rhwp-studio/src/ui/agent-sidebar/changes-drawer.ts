@@ -191,6 +191,8 @@ function needsSectionHeadings(sections: readonly (number | null)[]): boolean {
   return sections.length > 1 || (sections.length === 1 && sections[0] !== 0);
 }
 
+const SHAPE_LABELS = { line: '선', rectangle: '사각형', ellipse: '타원', textBox: '글상자' } as const;
+
 function pendingObjectDetail(op: PendingOp): string {
   if (op.kind === 'template') return `템플릿 ${op.label}`;
   if (op.kind === 'format') {
@@ -208,6 +210,9 @@ function pendingObjectDetail(op: PendingOp): string {
     case 'createTable': return `표 삽입 · ${obj.rows}행 × ${obj.cols}열`;
     case 'insertImage': return `그림 삽입${obj.description ? ` · ${obj.description}` : ''}`;
     case 'insertEquation': return `수식 삽입 · ${obj.script}`;
+    case 'insertShape': return `도형 삽입 · ${SHAPE_LABELS[obj.shape]}`;
+    case 'editObject': return `${obj.kind === 'picture' ? '그림' : '도형'} 배치 변경`;
+    case 'deleteObject': return `${obj.kind === 'picture' ? '그림' : '도형'} 삭제`;
     case 'tableStructure': return `표 ${({
       insert_row: '행 삽입', insert_col: '열 삽입', delete_row: '행 삭제',
       delete_col: '열 삭제', merge_cells: '셀 병합', split_cell: '셀 나누기',
