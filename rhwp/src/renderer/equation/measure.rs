@@ -238,6 +238,15 @@ pub(crate) fn measure_legacy_run_native(
             const { RefCell::new(None) };
         static RUN_CACHE: RefCell<HashMap<(String, u64, bool, bool), Option<LegacyRunMetrics>>> =
             RefCell::new(HashMap::new());
+        // 미해소 run 마다 CoreText 시스템 family 목록을 다시 만들면 폰트 서비스 IPC가
+        // 반복된다. custom face 는 나중에 등록될 수 있으므로 그 조회만 매번 재시도한다.
+        static SYSTEM_FONT_SOURCE: (FontMgr, bool) = {
+            let font_mgr = FontMgr::default();
+            let has_legacy_face = font_mgr
+                .family_names()
+                .any(|name| name.eq_ignore_ascii_case("HYhwpEQ"));
+            (font_mgr, has_legacy_face)
+        };
     }
     let key = (text.to_string(), font_size.to_bits(), italic, bold);
     if let Some(hit) = RUN_CACHE.with(|cache| cache.borrow().get(&key).copied()) {
@@ -248,8 +257,7 @@ pub(crate) fn measure_legacy_run_native(
         // 미해소 결과는 캐시하지 않는다 — custom face(--font-path)는 렌더 진입 시
         // 등록돼 첫 측정(페이지네이션) 때는 아직 없을 수 있다.
         _ => {
-            let resolved = (|| {
-                let font_mgr = FontMgr::default();
+            let resolved = SYSTEM_FONT_SOURCE.with(|(font_mgr, has_legacy_face)| {
                 // 본문 페인트와 같은 조달 순서 — custom(--font-path) 등록 face 를
                 // 시스템 설치와 동일하게 본다. 없으면 시스템으로 내려간다.
                 let face = crate::renderer::font_paths::custom_face_source("HYhwpEQ")
@@ -262,15 +270,13 @@ pub(crate) fn measure_legacy_run_native(
                         // skia::font_lookup 의 system_families 필터와 같은 이유 — 없는
                         // family 를 CoreText 에 넘기면 downloadable font 조회가 대기할
                         // 수 있어 선차단한다.
-                        font_mgr
-                            .family_names()
-                            .any(|name| name.eq_ignore_ascii_case("HYhwpEQ"))
+                        has_legacy_face
                             .then(|| font_mgr.match_family_style("HYhwpEQ", FontStyle::normal()))
                             .flatten()
                     })?;
                 let tables = LegacyTables::load(&face)?;
                 Some((face, std::rc::Rc::new(tables)))
-            })()?;
+            })?;
             LEGACY_FACE.with(|slot| *slot.borrow_mut() = Some(Some(resolved.clone())));
             resolved
         }
