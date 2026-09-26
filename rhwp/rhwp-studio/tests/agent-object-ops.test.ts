@@ -639,6 +639,51 @@ test('행 삽입 앞뒤로 같은 셀 번호에 쓴 텍스트도 reject 가 모�
   assert.deepEqual(events, [], '아무 편집도 문서에 남지 않는다');
 });
 
+test('구조 op 이 셀 번호를 바꾸면 앞선 pending 셀 편집 주소가 따라가고 승인 뒤 거절도 옮겨 간 셀에서 되돌린다', async () => {
+  const { call, pending, tables } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b', 'c'], ['d', 'e', 'f']],
+  })) as { changeSetId: string };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  const at = { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx };
+  pending.beginTurn('claude');
+  await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X', cell: { ...at, cellIdx: 5 } });
+  await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'Y', cell: { ...at, cellIdx: 1 } });
+  pending.endTurn('review');
+  const [first] = pending.getChangeSets();
+  pending.beginTurn('claude');
+  await call('edit_table', { ...at, op: 'delete_row', rowIdx: 0 });
+  pending.endTurn('review');
+  assert.deepEqual(tables[0].cells.map((p) => p[0]), ['d', 'e', 'Xf']);
+  const [x, y] = first.ops;
+  assert.equal(x.kind === 'insert' && x.range.cell?.cellIdx, 2, '셀 5 는 행 삭제 뒤 셀 2 다');
+  assert.ok(y.kind === 'insert' && y.range.cell!.cellIdx < 0, '지워진 셀의 편집은 어떤 셀도 가리키지 않는다');
+  // 행 삭제를 승인한 뒤 앞 set 을 거절하면 X 는 옮겨 간 셀에서 되돌아간다
+  assert.equal(pending.approve(pending.getChangeSets()[1].id), true);
+  pending.reject(first.id);
+  assert.deepEqual(tables[0].cells.map((p) => p[0]), ['d', 'e', 'f']);
+});
+
+test('같은 턴에서 셀을 채운 뒤 행을 넣으면 미리보기 주소가 따라가고 reject 는 모두 되돌린다', async () => {
+  const { call, pending, tables } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
+  })) as { changeSetId: string };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  const at = { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx };
+  const fill = (await call('insert_text', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 1, text: '!', cell: { ...at, cellIdx: 3 },
+  })) as { changeSetId: string };
+  await call('edit_table', { ...at, op: 'insert_col', colIdx: 0, right: false });
+  const [insert] = pending.getChangeSets()[0].ops;
+  assert.equal(insert.kind === 'insert' && insert.range.cell?.cellIdx, 5);
+  assert.equal(tables[0].cells[5][0], 'd!');
+  pending.reject(fill.changeSetId);
+  assert.deepEqual(tables[0].cells.map((p) => p[0]), ['a', 'b', 'c', 'd']);
+});
+
 test('delete_table → approve: 삭제를 그대로 확정한다', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const c = (await call('create_table', {

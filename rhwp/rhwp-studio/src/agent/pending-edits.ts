@@ -274,6 +274,20 @@ function isTableTargetOp(obj: ObjectOp): obj is TableTargetOp {
   return 'tableParaIdx' in obj;
 }
 
+/** 구조 op 이 없앤 셀의 주소 표식 — 음수라 어떤 셀과도 겹치지 않는다 */
+const PARKED_CELL_SPAN = 1_000_000;
+function parkCellIdx(tag: number, cellIdx: number): number {
+  return -(tag * PARKED_CELL_SPAN + cellIdx + 1);
+}
+function unparkCellIdx(parked: number): { tag: number; cellIdx: number } {
+  const raw = -parked - 1;
+  return { tag: Math.floor(raw / PARKED_CELL_SPAN), cellIdx: raw % PARKED_CELL_SPAN };
+}
+/** 없어진 셀에 묶여 지금은 가리킬 셀이 없는 주소인가 */
+function isParkedCell(cell: CellAddr | undefined): boolean {
+  return cell !== undefined && cell.cellIdx < 0;
+}
+
 /**
  * 에이전트 대기 편집(pending edit) 관리자.
  *
@@ -303,6 +317,8 @@ export class PendingEditManager {
   private userEditSeq = 0;
   /** A settled set may change state captured by another set's document snapshot. */
   private settledSetSeq = 0;
+  /** 표 구조 op 이 없앤 셀에 묶인 pending 셀 주소 표식 순번 */
+  private cellParkSeq = 0;
   /** 매니저 자신의 변이(approve/reject/무효화) 중 카운터 증가 억제 — 재진입 가드 */
   private selfMutating = 0;
   /**
@@ -687,6 +703,12 @@ export class PendingEditManager {
       this.deps.inputHandler.retainExternalSnapshot?.();
     }
     const dimsBefore = this.tableDims(obj);
+    // 구조 op 은 flat cellIdx 를 다시 매긴다 — 이 표 셀을 가리키는 앞선 pending op 이
+    // 있으면 적용 전 셀 앵커(행, 열)를 읽어 두었다가 적용 후 주소를 옮긴다.
+    const cellsBefore = obj.type === 'tableStructure'
+      && this.hasPendingCellRefs(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx)
+      ? this.tableCellAnchors(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx)
+      : null;
     // 지워지는 행/열/표는 적용 후엔 읽을 수 없다 — 앵커 팝오버와 diff 에 쓸
     // 내용과 위치를 먼저 보관한다 (표시용, best-effort).
     if (obj.type === 'deleteTable'
@@ -727,6 +749,7 @@ export class PendingEditManager {
       paraCapture.digest = after === null ? null : this.paragraphDigest(obj.sectionIdx, after);
     }
     this.adjustSiblingDims(obj, dimsBefore, this.tableDims(obj));
+    if (obj.type === 'tableStructure' && cellsBefore) this.remapCellsAfterStructure(obj, cellsBefore, dimsBefore);
     if (obj.type === 'insertEquation') {
       try {
         const preview = JSON.parse(wasm.renderEquationPreview(obj.script, obj.fontSizeHu, obj.colorRef));
@@ -1416,6 +1439,8 @@ export class PendingEditManager {
           continue;
         }
         if (op.kind === 'object') {
+          if (('cell' in op.obj && isParkedCell(op.obj.cell))
+            || (op.obj.type === 'setCellProps' && op.obj.cellIdx < 0)) continue;
           const ref = this.objectOverlayRef(op.obj);
           if (ref) {
             ops.push({
@@ -1427,6 +1452,7 @@ export class PendingEditManager {
           }
           continue;
         }
+        if (isParkedCell(op.range.cell)) continue;
         if (op.kind === 'replace') {
           ops.push({
             kind: 'replace',
@@ -2232,6 +2258,7 @@ export class PendingEditManager {
               obj.sectionIdx, obj.tableParaIdx, obj.controlIdx,
               obj.op === 'insert_row' ? -1 : 0, obj.op === 'insert_col' ? -1 : 0, obj,
             );
+            this.unmapCellsAfterStructureRevert(obj);
             return true;
           }
           return false;
@@ -2468,6 +2495,131 @@ export class PendingEditManager {
         }
       }
     }
+  }
+
+  /** pending op 의 표 셀 주소들 — 주소를 옮길 수 있게 setter 와 함께 모은다 */
+  private forEachTableCellRef(
+    sectionIdx: number, tableParaIdx: number, controlIdx: number,
+    visit: (cellIdx: number, set: (next: number) => void) => void, exclude?: ObjectOp,
+  ): void {
+    const visitAddr = (cell: CellAddr | undefined, sec: number, assign: (next: CellAddr) => void): void => {
+      if (!cell || sec !== sectionIdx || cell.paraIdx !== tableParaIdx || cell.controlIdx !== controlIdx) return;
+      visit(cell.cellIdx, (next) => {
+        const path = cell.path?.map((entry, index) => (index === 0 ? { ...entry, cellIndex: next } : entry));
+        assign({ ...cell, cellIdx: next, ...(path ? { path } : {}) });
+      });
+    };
+    for (const set of this.sets) {
+      for (const op of set.ops) {
+        if (op.kind === 'field' || op.kind === 'template') continue;
+        if (op.kind === 'object') {
+          const o = op.obj;
+          if (o === exclude) continue;
+          if ((o.type === 'setCellProps' || (o.type === 'applyFormula' && o.cellIdx !== undefined))
+            && o.sectionIdx === sectionIdx && o.tableParaIdx === tableParaIdx && o.controlIdx === controlIdx) {
+            visit(o.cellIdx!, (next) => { o.cellIdx = next; });
+          } else if ('cell' in o && o.cell) {
+            visitAddr(o.cell, o.sectionIdx, (next) => { (o as { cell?: CellAddr }).cell = next; });
+          }
+          continue;
+        }
+        visitAddr(op.range.cell, op.range.sectionIdx, (next) => { op.range.cell = next; });
+        const applied = op.applied;
+        if (applied) visitAddr(applied.range.cell, applied.range.sectionIdx, (next) => { applied.range.cell = next; });
+      }
+    }
+  }
+
+  private hasPendingCellRefs(sectionIdx: number, tableParaIdx: number, controlIdx: number): boolean {
+    let found = false;
+    this.forEachTableCellRef(sectionIdx, tableParaIdx, controlIdx, () => { found = true; });
+    return found;
+  }
+
+  /** flat cellIdx 순서의 셀 앵커(행, 열). 읽지 못하면 null. */
+  private tableCellAnchors(sectionIdx: number, tableParaIdx: number, controlIdx: number): Array<{ row: number; col: number }> | null {
+    const wasm = this.deps.wasm;
+    try {
+      const count = wasm.getTableDimensions(sectionIdx, tableParaIdx, controlIdx).cellCount;
+      const anchors: Array<{ row: number; col: number }> = [];
+      for (let cellIdx = 0; cellIdx < count; cellIdx++) {
+        const info = wasm.getCellInfo(sectionIdx, tableParaIdx, controlIdx, cellIdx);
+        anchors.push({ row: info.row, col: info.col });
+      }
+      return anchors;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 구조 op 적용 뒤 앞선 pending op 의 셀 주소를 새 cellIdx 로 옮긴다. 셀은 (행, 열) 앵커로
+   * 식별한다. 없어진 셀(지운 행/열, 병합돼 사라진 셀)의 주소는 표식을 붙인 음수로 묶어
+   * 미리보기와 검증이 엉뚱한 셀을 보지 않게 하고, 구조 op 을 되돌리면 원래 주소로 푼다.
+   */
+  private remapCellsAfterStructure(
+    obj: Extract<ObjectOp, { type: 'tableStructure' }>,
+    before: Array<{ row: number; col: number }>,
+    dimsBefore: { rowCount: number; colCount: number } | null,
+  ): void {
+    const after = this.tableCellAnchors(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx);
+    if (!after) return;
+    const dimsAfter = this.tableDims(obj);
+    const dRows = dimsBefore && dimsAfter ? dimsAfter.rowCount - dimsBefore.rowCount : 0;
+    const dCols = dimsBefore && dimsAfter ? dimsAfter.colCount - dimsBefore.colCount : 0;
+    const byAnchor = new Map(after.map((a, cellIdx) => [`${a.row}:${a.col}`, cellIdx]));
+    const map = before.map(({ row, col }) => {
+      let r = row;
+      let c = col;
+      switch (obj.op) {
+        case 'insert_row': if (row >= obj.insertedIndex!) r++; break;
+        case 'insert_col': if (col >= obj.insertedIndex!) c++; break;
+        case 'delete_row':
+          if (row === obj.rowIdx) return -1;
+          if (row > obj.rowIdx!) r--;
+          break;
+        case 'delete_col':
+          if (col === obj.colIdx) return -1;
+          if (col > obj.colIdx!) c--;
+          break;
+        case 'merge_cells':
+          if (row >= obj.startRow! && row <= obj.endRow! && col >= obj.startCol! && col <= obj.endCol!
+            && !(row === obj.startRow && col === obj.startCol)) return -1;
+          break;
+        case 'split_cell':
+          if (row > obj.rowIdx!) r += dRows;
+          if (col > obj.colIdx!) c += dCols;
+          break;
+      }
+      return byAnchor.get(`${r}:${c}`) ?? -1;
+    });
+    obj.cellMap = map;
+    obj.parkTag = ++this.cellParkSeq;
+    const tag = obj.parkTag;
+    this.forEachTableCellRef(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, (cellIdx, set) => {
+      if (cellIdx < 0 || cellIdx >= map.length) return;
+      set(map[cellIdx] >= 0 ? map[cellIdx] : parkCellIdx(tag, cellIdx));
+    }, obj);
+  }
+
+  /** 구조 op 을 되돌린 뒤 remapCellsAfterStructure 가 옮긴 셀 주소를 적용 전으로 되돌린다 */
+  private unmapCellsAfterStructureRevert(obj: Extract<ObjectOp, { type: 'tableStructure' }>): void {
+    const map = obj.cellMap;
+    if (!map || obj.parkTag === undefined) return;
+    const tag = obj.parkTag;
+    const inverse = new Map<number, number>();
+    map.forEach((next, prev) => { if (next >= 0) inverse.set(next, prev); });
+    this.forEachTableCellRef(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, (cellIdx, set) => {
+      if (cellIdx < 0) {
+        const parked = unparkCellIdx(cellIdx);
+        if (parked.tag === tag) set(parked.cellIdx);
+        return;
+      }
+      const prev = inverse.get(cellIdx);
+      if (prev !== undefined) set(prev);
+    }, obj);
+    obj.cellMap = undefined;
+    obj.parkTag = undefined;
   }
 
   /** 같은 표에 pending 구조 op(행/열 삽입·삭제·병합·표 삭제)이 있는가 */
@@ -3388,6 +3540,7 @@ export class PendingEditManager {
         return;
       default:
         this.adjustSiblingDims(obj, postDims, this.tableDims(obj));
+        if (obj.type === 'tableStructure') this.unmapCellsAfterStructureRevert(obj);
     }
   }
 

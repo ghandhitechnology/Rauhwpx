@@ -1096,6 +1096,12 @@ export type ObjectOp =
       dims?: { rowCount: number; colCount: number };
       /** delete_row/delete_col: 삭제 전에 보관한 대상의 텍스트 (오버레이 팝오버·diff) */
       removedText?: string;
+      /**
+       * 적용 전 cellIdx → 적용 후 cellIdx (-1 = 없어진 셀). 앞선 pending 셀 op 주소를
+       * 옮기고, 되돌릴 때 거꾸로 되돌리는 데 쓴다. parkTag 는 없어진 셀에 묶인 주소 표식.
+       */
+      cellMap?: number[];
+      parkTag?: number;
     }
   | {
       /** 표 전체 삭제 — 문단 보관본으로 되돌린다 */
