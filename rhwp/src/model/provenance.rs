@@ -6,13 +6,34 @@
 //! 분기의 1:1 기계 대응만, 시멘틱 변경 없음).
 
 /// Runtime font measurement policy, independent of the source format.
-/// Not serialized into document files. The default preserves the Windows
-/// reference corpus; Mac Hancom uses the declared HCR font metrics.
+/// Not serialized into document files. The reference platform is Hancom for
+/// macOS, which measures every face with its own declared advances
+/// (`HcrDeclared`, the default). `HancomWindows` keeps the Windows
+/// substitution rules (#2156 Haansoft Batang Latin widths, 함초롬돋움 sans
+/// fallback) for the Windows reference corpus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub enum FontMetricsPolicy {
-    #[default]
     HancomWindows,
+    #[default]
     HcrDeclared,
+}
+
+impl FontMetricsPolicy {
+    /// CLI/WASM policy name.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "hcr-declared" | "mac" => Some(Self::HcrDeclared),
+            "hancom-windows" | "windows" => Some(Self::HancomWindows),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HancomWindows => "hancom-windows",
+            Self::HcrDeclared => "hcr-declared",
+        }
+    }
 }
 
 /// 파싱된 문서의 원본 컨테이너 포맷.

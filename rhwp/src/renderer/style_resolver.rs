@@ -297,6 +297,8 @@ pub struct ResolvedStyleSet {
     /// [#2070] HWP3 → HWP5 변환본 여부 (Document::is_hwp3_variant 전파).
     /// 변환본 한정 레거시 폭 규칙(전체 폭) 게이트에 사용.
     pub hwp3_variant: bool,
+    /// '쪽 번호'(Page Number) 스타일의 글자 모양 ID — 쪽 번호 매기기 글꼴/크기 기준.
+    pub page_number_char_shape: Option<u32>,
 }
 
 /// DocInfo 참조 테이블을 해소된 스타일 목록으로 변환한다.
@@ -325,7 +327,19 @@ pub fn resolve_styles_with_variant(
         numberings,
         bullets,
         hwp3_variant: is_hwp3_variant,
+        page_number_char_shape: page_number_char_shape(doc_info),
     }
+}
+
+/// 한컴은 쪽 번호 매기기 번호를 기본 스타일 '쪽 번호'(Page Number)의 글자 모양으로
+/// 그린다 (HWPX `hh:style name="쪽 번호"`, HWP5 STYLE 레코드 동일).
+fn page_number_char_shape(doc_info: &DocInfo) -> Option<u32> {
+    doc_info
+        .styles
+        .iter()
+        .find(|s| s.local_name == "쪽 번호" || s.english_name == "Page Number")
+        .map(|s| s.char_shape_id as u32)
+        .filter(|id| (*id as usize) < doc_info.char_shapes.len())
 }
 
 /// CharShape + FontFace → ResolvedCharStyle 목록
@@ -400,9 +414,13 @@ fn resolve_single_char_style(cs: &CharShape, doc_info: &DocInfo, dpi: f64) -> Re
 ///
 /// 반환값: 0=한국어, 1=영어(라틴), 2=한자, 3=일본어, 4=기타, 5=기호, 6=사용자
 ///
-/// 공백/일반 구두점은 언어 중립으로 간주하여 기본값(한국어)을 반환한다.
-/// 호출부에서 "이전 문자의 언어를 따르는" 로직을 별도 처리해야 한다.
+/// 공백/제어문자는 언어 중립으로 간주하여 기본값(한국어)을 반환한다.
+/// 호출부에서 "이전 문자의 언어를 따르는" 로직을 별도 처리해야 한다
+/// (`composer::is_lang_neutral`).
 pub fn detect_lang_category(ch: char) -> usize {
+    if is_latin_slot_punctuation(ch) {
+        return 1;
+    }
     let cp = ch as u32;
     match cp {
         // [#2070] ㆍ(아래아, U+318D)는 한컴이 USER 스크립트 폰트로 렌더한다.
@@ -443,10 +461,30 @@ pub fn detect_lang_category(ch: char) -> usize {
         // CJK 기호/구두점 (한자 구두점이 아닌 기호 영역)
         0x3000..=0x303F => 5,
 
-        // 공백/ASCII 구두점/제어문자 → 한국어(기본값)로 반환
+        // 공백/제어문자 → 한국어(기본값)로 반환
         // 호출부에서 "이전 문자의 언어를 따르는" 로직으로 처리
         _ => 0,
     }
+}
+
+/// 한컴이 영문(라틴) 글꼴 슬롯으로 그리는 구두점·기호인지 판별한다.
+///
+/// 한컴(macOS) PDF 실측(hy-001: 한글=휴먼명조, 영문=HCI Poppy, 기호=한양신명조):
+/// 한글 뒤의 `, . ( ) < > * ~` 와 `‘ ’` 는 휴먼명조가 아니라 영문 글꼴(HCI Poppy)
+/// 윤곽으로, `·` 는 HCI Poppy 대체 글꼴(Palatino)로 그려진다. 앞 글자의 언어를
+/// 따르지 않는다. 86712 실문서(Windows)도 같은 글자 모양의 `“ ”` 가 한양신명조
+/// (기호 슬롯) 가 아닌 영문 슬롯 글꼴로 그려진다. 공백만 앞 글자의 언어를 따른다.
+///
+/// 줄 나눔의 단어 경계 판정은 이 분류와 별개다 (`line_breaking::is_latin`).
+pub fn is_latin_slot_punctuation(ch: char) -> bool {
+    matches!(ch as u32,
+        // ASCII 구두점/기호 (영문자/숫자/공백/DEL 제외)
+        0x0021..=0x002F | 0x003A..=0x0040 | 0x005B..=0x0060 | 0x007B..=0x007E |
+        // Latin-1 Supplement 구두점/기호 (NBSP 제외)
+        0x00A1..=0x00BF |
+        // 따옴표 ‘ ’ ‚ ‛ “ ” „ ‟
+        0x2018..=0x201F
+    )
 }
 
 /// FontFace 테이블에서 폰트 이름 조회 + 폰트 치환 적용
@@ -508,7 +546,8 @@ fn resolve_legacy_latin_font(name: &str, lang_index: usize) -> Option<&'static s
     }
 
     match name {
-        "HCI Poppy" => Some("Palatino Linotype"),
+        // HCI Poppy 는 치환하지 않는다: 자체 HFT 폭 메트릭(font_metrics_data)으로 재고
+        // Palatino 계열 설치 서체로 그린다 (`renderer::hft_substitute_faces`).
         "HCI Tulip"
         | "HCI Morning Glory"
         | "HCI Centaurea"
@@ -554,6 +593,11 @@ fn resolve_legacy_latin_font(name: &str, lang_index: usize) -> Option<&'static s
 /// 한국어(0)와 영어(1)가 다른 결과를 가지는 폰트는 언어별 분기 처리.
 /// 대부분의 HFT 폰트는 언어에 무관하게 동일한 결과를 갖는다.
 fn resolve_hft_font(name: &str, lang_index: usize) -> Option<&'static str> {
+    // 한컴(macOS)은 기호 슬롯의 한양신명조(HFT) 글자를 함초롬바탕으로 그린다.
+    // hy-001 PDF 의 □ 는 HCRBatang 글꼴 텍스트(advance 0.97em, 밑변이 기준선)다.
+    if lang_index == 5 && name == "한양신명조" {
+        return Some("함초롬바탕");
+    }
     // === 직접 TTF 매핑 (모든 언어 공통) ===
     let common = match name {
         // [#2430] 한양 4종·휴먼명조는 치환하지 않고 원명 유지 — 한글 실측
@@ -620,7 +664,6 @@ fn resolve_hft_font(name: &str, lang_index: usize) -> Option<&'static str> {
         "고딕" => Some("돋움"),
         // 영문 HFT
         "산세리프" => Some("Calibri"),
-        "HCI Poppy" => Some("Palatino Linotype"),
         "수식" => Some("HY신명조"),
         "한글 풀어쓰기" => Some("HY견명조"),
         _ => None,
@@ -1338,10 +1381,19 @@ mod tests {
 
     #[test]
     fn test_detect_lang_category_default() {
-        // 공백, 구두점 등은 기본값(한국어=0)
+        // 공백은 기본값(한국어=0) — 호출부가 앞 글자의 언어를 따르게 한다
         assert_eq!(detect_lang_category(' '), 0);
-        assert_eq!(detect_lang_category('.'), 0);
-        assert_eq!(detect_lang_category(','), 0);
+        assert_eq!(detect_lang_category('\u{00A0}'), 0);
+    }
+
+    #[test]
+    fn test_detect_lang_category_punctuation_uses_latin_slot() {
+        // 한컴(macOS) PDF: 구두점·따옴표는 영문 글꼴 슬롯으로 그린다
+        for ch in [
+            '.', ',', '(', ')', '<', '>', '*', '~', '\u{00B7}', '‘', '’', '“', '”',
+        ] {
+            assert_eq!(detect_lang_category(ch), 1, "{ch:?}");
+        }
     }
 
     // === 언어별 폰트 해소 테스트 ===

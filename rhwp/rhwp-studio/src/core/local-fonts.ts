@@ -7,7 +7,7 @@
  */
 import { REGISTERED_FONTS } from './font-loader.ts';
 import { convertHftToOpenType } from './hft-font.ts';
-import { normalizeMalformedCmapSentinels } from './sfnt-repair.ts';
+import { normalizeMalformedCmapSentinels, repairUnderstatedCompositeBounds } from './sfnt-repair.ts';
 
 /** queryLocalFonts 반환 타입 (DOM 표준 미포함) */
 interface FontData {
@@ -35,6 +35,11 @@ export interface LocalFontRecord {
   aliases: string[];
   /** 이번 세션에 가져온 face 이름. 번들 CSS 대체 글꼴보다 먼저 선택한다. */
   runtimeFamily?: string;
+  /**
+   * 설치 face 의 합성 글리프 bbox 복구 필요 여부 (`repairUnderstatedCompositeBounds`).
+   * 한 번 읽어 판정한 결과를 감지 snapshot 에 저장해, 복구가 필요 없는 글꼴은 다시 읽지 않는다.
+   */
+  sfntBoundsRepair?: boolean;
 }
 
 export interface LocalFontSnapshot {
@@ -138,6 +143,13 @@ let importedFontLookup: LocalFontLookup = emptyLocalFontLookup();
 let nextImportedFamilyId = 0;
 let storageLoaded = false;
 let lastStorageError: string | null = null;
+/** 설치 face 의 합성 글리프 bbox 복구 필요 여부 (face key → 판정). snapshot 재로드와 무관하게 유지한다. */
+const sfntBoundsRepairByFaceKey = new Map<string, boolean>();
+/** 복구한 설치 글꼴을 이번 세션에 등록한 CSS family (face key → family). */
+const repairedLocalFamilyByFaceKey = new Map<string, string>();
+/** 복구 판정/등록이 진행 중인 설치 family (중복 조회 방지). */
+const localFamilyRepairs = new Map<string, Promise<boolean>>();
+let nextRepairedFamilyId = 0;
 /** 동시에 들어온 CanvasKit SFNT 바이트 조회만 합치는 in-flight cache. */
 const localFontBytesByPostscriptName = new Map<string, Promise<ArrayBuffer | null>>();
 let localFontByteBatchTail: Promise<void> = Promise.resolve();
@@ -460,7 +472,8 @@ function normalizeLocalFontRecords(value: unknown): LocalFontRecord[] {
       ?? displayCandidates[0]
       ?? preferredLocalFontDisplayName(aliases.filter(name => HANGUL_RE.test(name)), [record.fullName, record.family])
       ?? record.family;
-    const normalized = { ...record, displayName, aliases };
+    const normalized: LocalFontRecord = { ...record, displayName, aliases };
+    if (typeof data.sfntBoundsRepair === 'boolean') normalized.sfntBoundsRepair = data.sfntBoundsRepair;
     const key = normalizeFontAlias(normalized.postscriptName || normalized.fullName || normalized.family);
     if (key && !records.has(key)) records.set(key, normalized);
   }
@@ -531,18 +544,27 @@ export async function importLocalFontFiles(files: readonly File[]): Promise<Loca
   const rejected: string[] = [];
   let aggregateBytes = Array.from(importedFontFaces.values())
     .reduce((sum, entry) => sum + entry.bytes.byteLength, 0);
+  const candidates: FontImportCandidate[] = [];
   for (const file of files) {
     if (!/\.(ttf|otf|hft)$/i.test(file.name)
       || file.size <= 0 || file.size > LOCAL_FONT_MAX_BYTES_PER_FACE) {
       rejected.push(file.name);
-      continue;
+    } else {
+      candidates.push({ file, order: candidates.length });
     }
+  }
+  const selectedBytes = candidates.reduce((sum, candidate) => sum + candidate.file.size, 0);
+  const fitsBudget = aggregateBytes + selectedBytes <= LOCAL_FONT_MAX_AGGREGATE_BYTES
+    && importedFontFaces.size + candidates.length <= LOCAL_FONT_MAX_FACES_PER_DOCUMENT;
+  // 예산을 넘으면 선택 순서 대신 문서가 쓰는 글꼴 → 대표 글꼴 → 작은 파일 순으로 채운다.
+  const ordered = fitsBudget ? candidates : await prioritizeFontImports(candidates);
+  for (const { file, converted: preconverted } of ordered) {
     let bytes: ArrayBuffer;
     let converted: ArrayBuffer | null;
     try {
-      const source = await file.arrayBuffer();
-      converted = convertHftToOpenType(source, file.name);
-      bytes = normalizeMalformedCmapSentinels(converted ?? source);
+      const source = preconverted ?? await file.arrayBuffer();
+      converted = preconverted ?? convertHftToOpenType(source, file.name);
+      bytes = repairSfntBytes(converted ?? source).bytes;
       if (bytes.byteLength > LOCAL_FONT_MAX_BYTES_PER_FACE) {
         rejected.push(file.name);
         continue;
@@ -598,6 +620,149 @@ export async function importLocalFontFiles(files: readonly File[]): Promise<Loca
   }
   refreshImportedFontLookup();
   return { imported, rejected };
+}
+
+interface FontImportCandidate {
+  file: File;
+  order: number;
+  /** 우선순위 판단을 위해 미리 변환한 HFT (다시 변환하지 않는다). */
+  converted?: ArrayBuffer | null;
+}
+
+/** 가져오기 우선순위를 정할 때 참고하는 현재 문서의 글꼴 이름. */
+let activeDocumentFontAliases = new Set<string>();
+
+/** 현재 문서가 쓰는 글꼴을 알린다. 글꼴 가져오기 예산을 이 글꼴부터 채운다. */
+export function setActiveDocumentFonts(fontNames: readonly string[]): void {
+  activeDocumentFontAliases = new Set(fontNames.map(normalizeFontAlias).filter(Boolean));
+}
+
+/**
+ * 예산(face 수·총 바이트)을 넘는 선택에서 가져올 순서를 정한다.
+ * 0: 열린 문서가 쓰는 face, 1: 번들 대체 글꼴이 있는 대표 한글 글꼴, 2: 나머지.
+ * 같은 단계에서는 작은 파일부터 채워, 거대한 확장 글꼴 하나가 여러 핵심 face 를 밀어내지 않게 한다.
+ */
+async function prioritizeFontImports(candidates: readonly FontImportCandidate[]): Promise<FontImportCandidate[]> {
+  const registeredAliases = new Set(Array.from(REGISTERED_FONTS, normalizeFontAlias));
+  const ranked = await Promise.all(candidates.map(async (candidate) => {
+    let names = emptySfntFontNames();
+    let converted: ArrayBuffer | null | undefined;
+    try {
+      if (/\.hft$/i.test(candidate.file.name)) {
+        converted = convertHftToOpenType(await candidate.file.arrayBuffer(), candidate.file.name);
+      }
+      const blob = converted ? new Blob([converted]) : candidate.file;
+      names = await readSfntFontNames({
+        family: '', fullName: '', postscriptName: '', style: '', blob: async () => blob,
+      });
+    } catch {
+      // 이름을 못 읽은 파일은 가장 낮은 단계로 두고, 실제 가져오기에서 다시 판정한다.
+    }
+    const aliases = [...names.families, ...names.fullNames, ...names.postscriptNames].map(normalizeFontAlias);
+    const tier = aliases.some(alias => activeDocumentFontAliases.has(alias)) ? 0
+      : names.families.some(name => registeredAliases.has(normalizeFontAlias(name))) ? 1
+        : 2;
+    const size = converted?.byteLength ?? candidate.file.size;
+    return { candidate: converted === undefined ? candidate : { ...candidate, converted }, tier, size };
+  }));
+  ranked.sort((a, b) => a.tier - b.tier || a.size - b.size || a.candidate.order - b.candidate.order);
+  return ranked.map(entry => entry.candidate);
+}
+
+/** 브라우저 sanitizer/래스터라이저가 잘못 다루는 SFNT 결함을 고친다. 고칠 게 없으면 원본 버퍼다. */
+function repairSfntBytes(source: ArrayBuffer): { bytes: ArrayBuffer; boundsRepaired: boolean } {
+  const sanitized = normalizeMalformedCmapSentinels(source);
+  const bytes = repairUnderstatedCompositeBounds(sanitized);
+  return { bytes, boundsRepaired: bytes !== sanitized };
+}
+
+/** 합성 글리프 bbox 를 복구해 이번 세션에 등록한 설치 face 의 CSS family. 없으면 null. */
+export function repairedLocalFontFamily(record: Pick<LocalFontRecord, 'family' | 'fullName' | 'postscriptName'>): string | null {
+  return repairedLocalFamilyByFaceKey.get(localFontFaceKey(record)) ?? null;
+}
+
+/**
+ * 문서가 쓰는 설치 글꼴 중 합성 글리프 bbox 가 잘못된 face 를 복구해 FontFace 로 등록한다.
+ *
+ * Canvas2D 는 설치 글꼴을 CSS 이름으로 그리므로 OS 가 원본(잘린) 글리프를 쓴다. 복구가
+ * 실제로 필요한 family 만 전체 face 를 바이트로 읽어 별도 CSS family 로 등록하고, 판정은
+ * 감지 snapshot 에 저장해 복구가 필요 없는 글꼴은 이후 다시 읽지 않는다.
+ * 새로 등록한 face 가 있으면 true.
+ */
+export async function repairLocalFontFacesFor(fontNames: readonly string[]): Promise<boolean> {
+  if (cachedSnapshot?.source !== 'local-font-access'
+    || typeof FontFace === 'undefined'
+    || typeof document === 'undefined'
+    || !document.fonts) return false;
+  const familyKeys = new Set<string>();
+  for (const fontName of fontNames) {
+    const target = normalizeFontAlias(fontName);
+    if (!target || importedFontLookup.aliases.has(target)) continue;
+    for (const record of cachedFontLookup.aliases.get(target) ?? []) {
+      familyKeys.add(normalizeFontAlias(record.family));
+    }
+  }
+  const pending: Promise<boolean>[] = [];
+  for (const familyKey of familyKeys) {
+    let repair = localFamilyRepairs.get(familyKey);
+    if (!repair) {
+      const faces = (cachedFontLookup.families.get(familyKey) ?? [])
+        .filter(record => record.postscriptName)
+        .slice(0, LOCAL_FONT_MAX_FACES_PER_DOCUMENT);
+      if (faces.length === 0 || faces.every(record => sfntBoundsRepairVerdict(record) === false)) continue;
+      repair = registerRepairedLocalFamily(faces);
+      localFamilyRepairs.set(familyKey, repair);
+      // 실패한 조회는 다음 문서에서 다시 시도한다.
+      void repair.then(ok => { if (!ok) localFamilyRepairs.delete(familyKey); }, () => localFamilyRepairs.delete(familyKey));
+    }
+    pending.push(repair);
+  }
+  if (pending.length === 0) return false;
+  const results = await Promise.all(pending.map(repair => repair.catch(() => false)));
+  await persistSfntRepairVerdicts();
+  return results.some(Boolean);
+}
+
+function sfntBoundsRepairVerdict(record: LocalFontRecord): boolean | undefined {
+  return sfntBoundsRepairByFaceKey.get(localFontFaceKey(record)) ?? record.sfntBoundsRepair;
+}
+
+/** 이번 세션에 내린 복구 판정을 감지 snapshot 에 저장한다. */
+async function persistSfntRepairVerdicts(): Promise<void> {
+  if (!cachedSnapshot?.fontRecords) return;
+  let changed = false;
+  for (const record of cachedSnapshot.fontRecords) {
+    const verdict = sfntBoundsRepairByFaceKey.get(localFontFaceKey(record));
+    if (verdict === undefined || record.sfntBoundsRepair === verdict) continue;
+    record.sfntBoundsRepair = verdict;
+    changed = true;
+  }
+  if (changed) await writeStoredSnapshot(cachedSnapshot);
+}
+
+async function registerRepairedLocalFamily(faces: readonly LocalFontRecord[]): Promise<boolean> {
+  const bytesByPostscriptName = await enqueueLocalFontBytesBatch(faces);
+  if (!faces.some(record => sfntBoundsRepairVerdict(record) === true)) return false;
+  // 같은 family 의 다른 굵기/기울임도 함께 등록해야 굵게 쓴 글자가 합성 굵게로 바뀌지 않는다.
+  const family = `rhwp-local-repaired-${++nextRepairedFamilyId}`;
+  const registered: LocalFontRecord[] = [];
+  for (const record of faces) {
+    const bytes = bytesByPostscriptName.get(normalizeFontAlias(record.postscriptName));
+    if (!bytes) continue;
+    try {
+      const face = new FontFace(family, bytes, {
+        style: importedFontSlant(record.style),
+        weight: importedFontWeight(record.style),
+      });
+      await face.load();
+      document.fonts.add(face);
+      registered.push(record);
+    } catch {
+      // 등록하지 못한 face 는 설치 글꼴로 계속 그린다.
+    }
+  }
+  for (const record of registered) repairedLocalFamilyByFaceKey.set(localFontFaceKey(record), family);
+  return registered.length > 0;
 }
 
 async function collectLocalFontRecords(fontDataList: readonly FontData[]): Promise<LocalFontRecord[]> {
@@ -1081,7 +1246,10 @@ async function readLocalFontBytesBatch(records: readonly LocalFontRecord[]): Pro
             reservedBytes -= reserved;
             continue;
           }
-          bytesByPostscriptName.set(normalizeFontAlias(record.postscriptName), bytes);
+          // 가져온 파일과 같은 복구를 거쳐야 CanvasKit 도 잘린 합성 글리프를 그대로 그리지 않는다.
+          const repaired = repairSfntBytes(bytes);
+          sfntBoundsRepairByFaceKey.set(localFontFaceKey(record), repaired.boundsRepaired);
+          bytesByPostscriptName.set(normalizeFontAlias(record.postscriptName), repaired.bytes);
         } catch (error) {
           if (reserved > 0) reservedBytes -= reserved;
           firstReadError ??= error;
@@ -1210,4 +1378,9 @@ export function resetLocalFontsForTests(): void {
   storageLoaded = false;
   lastStorageError = null;
   localFontBytesByPostscriptName.clear();
+  sfntBoundsRepairByFaceKey.clear();
+  repairedLocalFamilyByFaceKey.clear();
+  localFamilyRepairs.clear();
+  nextRepairedFamilyId = 0;
+  activeDocumentFontAliases = new Set();
 }

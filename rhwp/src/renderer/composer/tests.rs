@@ -855,10 +855,14 @@ fn test_split_runs_by_lang_english_only() {
 #[test]
 fn test_is_lang_neutral() {
     assert!(is_lang_neutral(' '));
-    assert!(is_lang_neutral('.'));
-    assert!(is_lang_neutral(','));
-    assert!(is_lang_neutral('!'));
-    assert!(is_lang_neutral('('));
+    // 구두점은 영문 글꼴 슬롯 (한컴 PDF 실측) — 앞 글자의 언어를 따르지 않는다
+    assert!(!is_lang_neutral('.'));
+    assert!(!is_lang_neutral(','));
+    assert!(!is_lang_neutral('('));
+    // 줄 나눔 단어 경계에서는 여전히 중립
+    assert!(is_word_break_neutral('.'));
+    assert!(is_word_break_neutral('('));
+    assert!(!is_word_break_neutral('\u{2018}'));
     assert!(!is_lang_neutral('A'));
     assert!(!is_lang_neutral('가'));
     assert!(!is_lang_neutral('漢'));

@@ -140,6 +140,26 @@ fn empty_paragraph_fallback_line_metrics(
     ))
 }
 
+/// 병합 셀 요구 높이 `(시작 행, 걸침 수, 요구 높이, 허용 오차)` 를 끝 행 순서로 적용한다.
+/// 부족분이 허용 오차를 넘으면 걸친 마지막 행에 더한다.
+/// 끝 행이 앞선 요구부터 확정하므로, 겹친 병합 셀이 같은 성장분을 이중으로 더하지 않는다
+/// (tb-org-02: rs=2 셀 콘텐츠가 r7 을 키우면 r7..r9 rs=3 선언 높이는 이미 충족 — 한컴 동일).
+pub(crate) fn grow_rows_for_span_requirements(
+    row_heights: &mut [f64],
+    requirements: &mut [(usize, usize, f64, f64)],
+) {
+    requirements.sort_by_key(|&(r, span, _, _)| r + span);
+    for &(r, span, required, tolerance) in requirements.iter() {
+        if span == 0 || r + span > row_heights.len() {
+            continue;
+        }
+        let combined: f64 = row_heights[r..r + span].iter().sum();
+        if required > combined + tolerance {
+            row_heights[r + span - 1] += required - combined;
+        }
+    }
+}
+
 /// Whether a composed table-cell line contributes its stored trailing spacing.
 ///
 /// Full-cell and partial-cell paint both stop at the final visible line box.  The
@@ -1604,6 +1624,9 @@ impl HeightMeasurer {
             }
         }
 
+        // 병합 셀 요구 높이 — 선언 높이(2-b)와 콘텐츠 높이(2-c)를 끝 행 순서로 함께 적용
+        let mut span_requirements: Vec<(usize, usize, f64, f64)> = Vec::new();
+
         // 2-b단계: 병합 셀에서 미지 행 높이를 반복적으로 해결
         {
             let mut constraints: Vec<(usize, usize, f64)> = Vec::new();
@@ -1658,12 +1681,8 @@ impl HeightMeasurer {
             // resolve_row_heights(table_layout)와 동일 규칙 — 분할 표의 컷
             // 회계(mt.row_heights)에도 반영되어야 rowspan 중첩 문서의 쪽당
             // +15% 조밀(연결맵 −35쪽 지배 성분)이 정합한다.
-            for &(r, span, total_h) in &constraints {
-                let known_sum: f64 = (r..r + span).map(|i| row_heights[i]).sum();
-                if total_h > known_sum + 0.5 {
-                    row_heights[r + span - 1] += total_h - known_sum;
-                }
-            }
+            // 적용은 2-c 콘텐츠 요구와 함께 끝 행 순서로 한다 (grow_rows_for_span_requirements).
+            span_requirements.extend(constraints.iter().map(|&(r, span, h)| (r, span, h, 0.5)));
         }
 
         // 2-c단계: 병합 셀의 실제 컨텐츠 높이가 결합 행 높이 초과 시 마지막 행 확장
@@ -1933,13 +1952,10 @@ impl HeightMeasurer {
                         .max(wrap_bottom);
                     content_height + pad_top + pad_bottom
                 };
-                let combined: f64 = (r..r + span).map(|i| row_heights[i]).sum();
-                if required_height > combined {
-                    let deficit = required_height - combined;
-                    row_heights[r + span - 1] += deficit;
-                }
+                span_requirements.push((r, span, required_height, 0.0));
             }
         }
+        grow_rows_for_span_requirements(&mut row_heights, &mut span_requirements);
 
         // A RowBreak table can carry a complete saved row grid even when its cell paragraphs have
         // no LINE_SEG records. Fallback font metrics are useful for rejecting a stale grid, but
@@ -3138,6 +3154,19 @@ impl HeightMeasurer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// tb-org-02: r6..r7 rs=2 콘텐츠가 r7 을 키우면 r7..r9 rs=3 선언 높이는 이미 충족된다.
+    /// 선언 잔여를 먼저 r9 에 더하면 같은 82HU 가 두 번 들어간다 (한컴: r7 만 성장).
+    #[test]
+    fn span_requirements_apply_in_end_row_order_without_double_growth() {
+        let mut rows = vec![1782.0, 4918.0, 100.0, 280.0];
+        let mut reqs = vec![
+            (1, 3, 5380.0, 0.5),          // 선언 rs=3 (r1..r3)
+            (0, 2, 1782.0 + 5000.0, 0.0), // 콘텐츠 rs=2 (r0..r1)
+        ];
+        grow_rows_for_span_requirements(&mut rows, &mut reqs);
+        assert_eq!(rows, vec![1782.0, 5000.0, 100.0, 280.0]);
+    }
     use crate::model::paragraph::{LineSeg, Paragraph};
     use crate::model::table::{Cell, Table};
     use crate::renderer::layout::LayoutEngine;

@@ -537,6 +537,11 @@ impl PaintOp {
                         write_text_positions_for_text(buf, display_text, &run.style);
                     }
                 }
+                write_glyph_offsets(
+                    buf,
+                    display_text.as_deref().unwrap_or(&run.text),
+                    &run.style,
+                );
                 if !run.style.tab_leaders.is_empty() {
                     buf.push_str(",\"tabLeaders\":");
                     write_tab_leaders(buf, &run.style.tab_leaders);
@@ -1499,6 +1504,23 @@ fn write_text_positions(buf: &mut String, run: &TextRunNode) {
 fn write_text_positions_for_text(buf: &mut String, text: &str, style: &TextStyle) {
     let positions = compute_char_positions(text, style);
     write_position_values(buf, &positions);
+}
+
+/// 반각 칸에 전각 glyph 를 그리는 구두점의 glyph x 오프셋 (`[[글자 index, dx], ...]`).
+/// replay 글자(`displayText` 가 있으면 그것) 기준이며 해당 글자가 없으면 생략한다.
+fn write_glyph_offsets(buf: &mut String, text: &str, style: &TextStyle) {
+    let offsets = crate::renderer::halfwidth_punct_glyph_offsets(text, style);
+    if offsets.is_empty() {
+        return;
+    }
+    buf.push_str(",\"glyphOffsets\":[");
+    for (idx, (char_idx, dx)) in offsets.iter().enumerate() {
+        if idx > 0 {
+            buf.push(',');
+        }
+        let _ = write!(buf, "[{char_idx},{dx:.3}]");
+    }
+    buf.push(']');
 }
 
 fn write_position_values(buf: &mut String, positions: &[f64]) {

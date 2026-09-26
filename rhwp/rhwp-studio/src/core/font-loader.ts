@@ -102,8 +102,6 @@ const FONT_LIST: FontEntry[] = [
   { name: '나눔고딕', file: 'fonts/NanumGothic-Regular.woff2' },
   { name: '나눔명조', file: 'fonts/NanumMyeongjo-Regular.woff2' },
   { name: '나눔고딕코딩', file: 'fonts/NanumGothicCoding-Regular.woff2' },
-  // === 영문 폰트 → OS 폴백 (번들 제거) ===
-  { name: 'Palatino Linotype', file: 'fonts/NotoSerifKR-Regular.woff2' },
   // === Noto (OFL, 로컬) ===
   { name: 'Noto Sans KR', file: 'fonts/NotoSansKR-Regular.woff2' },
   // Task #1224: generic_fallback sans 체인 말단의 'Noto Sans KR ExtraLight' 해석용.

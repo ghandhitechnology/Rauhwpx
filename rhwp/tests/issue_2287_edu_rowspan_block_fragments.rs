@@ -40,9 +40,18 @@ fn text_stats(node: &RenderNode, ymax: &mut f64, runs: &mut usize) {
     }
 }
 
+/// 줄 단위로 찾는다 — 구두점은 영문 글꼴 슬롯이라 `조(학생 안전교육)` 가 여러 run 으로 나뉜다.
 fn find_text(node: &RenderNode, needle: &str) -> bool {
-    if let RenderNodeType::TextRun(run) = &node.node_type {
-        if run.text.contains(needle) {
+    if let RenderNodeType::TextLine(_) = &node.node_type {
+        let line: String = node
+            .children
+            .iter()
+            .filter_map(|c| match &c.node_type {
+                RenderNodeType::TextRun(run) => Some(run.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        if line.contains(needle) {
             return true;
         }
     }

@@ -1017,6 +1017,27 @@ pub(crate) fn split_runs_by_lang(runs: Vec<ComposedTextRun>) -> Vec<ComposedText
             // 한글 음절은 확실한 한국어이므로 구분해야 함
             let is_neutral = is_lang_neutral(ch);
 
+            // 탭 뒤 구간이 여러 언어 run 으로 쪼개지면 탭에서 run 을 끝낸다.
+            // 오른쪽/가운데 탭 정렬은 "\t 로 끝나는 run" 뒤의 여러 run 을 한 블록으로
+            // 정렬하므로 (`right_tab_block_width`), 탭이 다음 run 머리에 남으면
+            // 그 run 만 탭스톱에 붙고 나머지가 뒤로 밀린다 (aift 목차 "\t(페이지 표기)").
+            if ch == '\t' && tab_segment_spans_langs(&chars[i + 1..]) {
+                let text: String = chars[current_start..=i].iter().collect();
+                result.push(ComposedTextRun {
+                    text,
+                    char_style_id: run.char_style_id,
+                    lang_index: current_lang,
+                    char_overlap: run.char_overlap.clone(),
+                    footnote_marker: None,
+                    display_text: None,
+                });
+                current_start = i + 1;
+                if let Some(next) = chars[i + 1..].iter().find(|&&c| !is_lang_neutral(c)) {
+                    current_lang = detect_lang_category(*next);
+                }
+                continue;
+            }
+
             if is_neutral {
                 // 중립 문자: 현재 언어 유지
                 continue;
@@ -1057,18 +1078,34 @@ pub(crate) fn split_runs_by_lang(runs: Vec<ComposedTextRun>) -> Vec<ComposedText
     result
 }
 
-/// 언어 중립 문자인지 판별한다 (공백, ASCII 구두점, 일반 기호 등).
+/// 탭 뒤 구간(다음 탭 전까지)의 비중립 문자가 둘 이상의 언어 슬롯에 걸치는지.
+fn tab_segment_spans_langs(rest: &[char]) -> bool {
+    let mut langs = rest
+        .iter()
+        .take_while(|&&c| c != '\t')
+        .filter(|&&c| !is_lang_neutral(c))
+        .map(|&c| detect_lang_category(c));
+    let Some(first) = langs.next() else {
+        return false;
+    };
+    langs.any(|lang| lang != first)
+}
+
+/// 글꼴 슬롯이 언어 중립인 문자인지 판별한다 (공백/제어문자).
 /// 이 문자들은 Run 분할을 유발하지 않고 이전 문자의 언어를 따른다.
+///
+/// 구두점은 여기에 속하지 않는다. 한컴은 구두점을 영문 글꼴로 그린다
+/// (`style_resolver::is_latin_slot_punctuation`).
 pub(crate) fn is_lang_neutral(ch: char) -> bool {
-    let cp = ch as u32;
-    matches!(cp,
-        // 공백/제어문자
-        0x0000..=0x0020 |
-        // ASCII 구두점/기호 (영문자/숫자 제외)
-        0x0021..=0x002F | 0x003A..=0x0040 | 0x005B..=0x0060 | 0x007B..=0x007F |
-        // Latin-1 Supplement 구두점 (문자 제외)
-        0x00A0..=0x00BF
-    )
+    matches!(ch as u32, 0x0000..=0x0020 | 0x007F | 0x00A0)
+}
+
+/// 줄 나눔에서 영문 단어 토큰을 끊지 않는 문자 (공백/제어문자, ASCII·Latin-1 구두점).
+/// 글꼴 슬롯 판정(`is_lang_neutral`)과 별개로 기존 단어 경계를 유지한다.
+pub(crate) fn is_word_break_neutral(ch: char) -> bool {
+    is_lang_neutral(ch)
+        || (super::style_resolver::is_latin_slot_punctuation(ch)
+            && !('\u{2018}'..='\u{201F}').contains(&ch))
 }
 
 /// 문단 내 인라인 컨트롤(표/도형)의 위치를 식별한다.
@@ -2725,13 +2762,25 @@ fn pua_plain_text_display(ch: char) -> Option<&'static str> {
         // 2025 행정업무운영 편람 p08 TOC bullet. Hancom PDF renders this
         // private-use marker as a filled square bullet.
         0xF031C => Some("■"),
-        // 2025 행정업무운영 편람 p15 callout bullet. Hancom PDF renders this
-        // private-use marker as a filled right-pointing pointer, not tofu.
-        0xF02FC => Some("►"),
+        // U+F02FC(글머리 ►)는 함초롬바탕/돋움 등 한컴 글꼴이 반각(0.485em) 글리프를
+        // 직접 가진다. 문자열을 전각 ►로 바꾸면 렌더 advance 가 레이아웃과 어긋나므로
+        // 원문을 유지하고, 글꼴 체인에 글리프가 없을 때만 렌더러가
+        // `pua_missing_glyph_substitute` 로 대체한다.
         // [Task #1001] 한컴 변환본 (HWP3→HWP5) 의 글머리표 PUA. 한컴 viewer 는
         // 빈 체크박스 모양으로 표시. "□" (U+25A1 WHITE SQUARE) 매핑.
         // 실제 sample16-hwp5 의 PUA codepoint 는 U+F03C5 (글자 분석 결과).
         0xF03C5 => Some("□"),
+        _ => None,
+    }
+}
+
+/// 한컴 글꼴에만 있는 PUA 글리프가 렌더 글꼴 체인 어디에도 없을 때 대신 그릴 표준 문자.
+///
+/// 레이아웃 폭은 원문 PUA 글자 기준이므로, 렌더러는 대체 글리프를 그 advance 에 맞춰
+/// 그린다 (2025 행정업무운영 편람 p15 callout bullet: 한컴은 채운 오른쪽 포인터로 표시).
+pub fn pua_missing_glyph_substitute(ch: char) -> Option<char> {
+    match ch as u32 {
+        0xF02FC => Some('\u{25BA}'), // ► BLACK RIGHT-POINTING POINTER
         _ => None,
     }
 }

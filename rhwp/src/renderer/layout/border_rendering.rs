@@ -279,55 +279,9 @@ pub(crate) fn render_edge_borders(
     let mut nodes = Vec::new();
     let row_count = if row_y.len() > 1 { row_y.len() - 1 } else { 0 };
 
-    // 수평 엣지 렌더링
-    for (ri, h_row) in h_edges.iter().enumerate() {
-        let y = table_y + row_y.get(ri).copied().unwrap_or(0.0);
-        // 행 경계의 열 위치: 경계 아래 행 (또는 마지막 행) 기준
-        let ref_row = ri.min(row_count.saturating_sub(1));
-        let ref_cx = &row_col_x[ref_row.min(row_col_x.len() - 1)];
-        let mut seg_start: Option<usize> = None;
-        let mut seg_border: Option<BorderLine> = None;
-
-        for (ci, edge_opt) in h_row.iter().enumerate() {
-            let same_style = match (edge_opt, &seg_border) {
-                (Some(e), Some(s)) => {
-                    e.line_type == s.line_type && e.width == s.width && e.color == s.color
-                }
-                _ => false,
-            };
-
-            if let Some(border) = edge_opt {
-                if same_style {
-                    // 같은 스타일 → 세그먼트 연장
-                } else {
-                    // 다른 스타일 → 이전 세그먼트 마무리
-                    if let (Some(start), Some(ref sb)) = (seg_start, seg_border) {
-                        let x1 = table_x + ref_cx[start];
-                        let x2 = table_x + ref_cx[ci];
-                        nodes.extend(create_border_line_nodes(tree, &sb, x1, y, x2, y));
-                    }
-                    seg_start = Some(ci);
-                    seg_border = Some(*border);
-                }
-            } else {
-                if let (Some(start), Some(ref sb)) = (seg_start, seg_border) {
-                    let x1 = table_x + ref_cx[start];
-                    let x2 = table_x + ref_cx[ci];
-                    nodes.extend(create_border_line_nodes(tree, &sb, x1, y, x2, y));
-                }
-                seg_start = None;
-                seg_border = None;
-            }
-        }
-        // 마지막 세그먼트
-        if let (Some(start), Some(ref sb)) = (seg_start, seg_border) {
-            let x1 = table_x + ref_cx[start];
-            let x2 = table_x + ref_cx.get(h_row.len()).copied().unwrap_or(ref_cx[start]);
-            nodes.extend(create_border_line_nodes(tree, &sb, x1, y, x2, y));
-        }
-    }
-
     // 수직 엣지 렌더링 (행별로 x 위치가 다를 수 있음)
+    // 한컴은 수직선을 모두 그린 뒤 수평선을 그린다. 흰색 등 다른 색의 수직 엣지가
+    // 수평 괘선과 교차해도 수평 괘선이 끊기지 않도록 같은 순서를 따른다.
     for (ci, v_col) in v_edges.iter().enumerate() {
         let mut seg_start: Option<usize> = None;
         let mut seg_border: Option<BorderLine> = None;
@@ -376,6 +330,54 @@ pub(crate) fn render_edge_borders(
             let y1 = table_y + row_y[start];
             let y2 = table_y + row_y.get(v_col.len()).copied().unwrap_or(row_y[start]);
             nodes.extend(create_border_line_nodes(tree, &sb, seg_x, y1, seg_x, y2));
+        }
+    }
+
+    // 수평 엣지 렌더링
+    for (ri, h_row) in h_edges.iter().enumerate() {
+        let y = table_y + row_y.get(ri).copied().unwrap_or(0.0);
+        // 행 경계의 열 위치: 경계 아래 행 (또는 마지막 행) 기준
+        let ref_row = ri.min(row_count.saturating_sub(1));
+        let ref_cx = &row_col_x[ref_row.min(row_col_x.len() - 1)];
+        let mut seg_start: Option<usize> = None;
+        let mut seg_border: Option<BorderLine> = None;
+
+        for (ci, edge_opt) in h_row.iter().enumerate() {
+            let same_style = match (edge_opt, &seg_border) {
+                (Some(e), Some(s)) => {
+                    e.line_type == s.line_type && e.width == s.width && e.color == s.color
+                }
+                _ => false,
+            };
+
+            if let Some(border) = edge_opt {
+                if same_style {
+                    // 같은 스타일 → 세그먼트 연장
+                } else {
+                    // 다른 스타일 → 이전 세그먼트 마무리
+                    if let (Some(start), Some(ref sb)) = (seg_start, seg_border) {
+                        let x1 = table_x + ref_cx[start];
+                        let x2 = table_x + ref_cx[ci];
+                        nodes.extend(create_border_line_nodes(tree, &sb, x1, y, x2, y));
+                    }
+                    seg_start = Some(ci);
+                    seg_border = Some(*border);
+                }
+            } else {
+                if let (Some(start), Some(ref sb)) = (seg_start, seg_border) {
+                    let x1 = table_x + ref_cx[start];
+                    let x2 = table_x + ref_cx[ci];
+                    nodes.extend(create_border_line_nodes(tree, &sb, x1, y, x2, y));
+                }
+                seg_start = None;
+                seg_border = None;
+            }
+        }
+        // 마지막 세그먼트
+        if let (Some(start), Some(ref sb)) = (seg_start, seg_border) {
+            let x1 = table_x + ref_cx[start];
+            let x2 = table_x + ref_cx.get(h_row.len()).copied().unwrap_or(ref_cx[start]);
+            nodes.extend(create_border_line_nodes(tree, &sb, x1, y, x2, y));
         }
     }
 

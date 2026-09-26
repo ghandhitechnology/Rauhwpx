@@ -5,6 +5,7 @@ use skia_safe::{
 use super::font_lookup::{
     legacy_typeface_for_style, match_system_family_style, SystemFontFamilies,
 };
+use super::text_replay::draw_text_run;
 
 use crate::renderer::equation::ast::MatrixStyle;
 use crate::renderer::equation::layout::{
@@ -769,7 +770,7 @@ fn draw_text(
                 let mut pen = x - if centered { width / 2.0 } else { 0.0 };
                 for (run, skew) in runs {
                     font.set_skew_x(if skew { -0.2 } else { 0.0 });
-                    canvas.draw_str(&run, (pen as f32, baseline_y as f32), &font, &paint);
+                    draw_text_run(canvas, &run, (pen as f32, baseline_y as f32), &font, &paint);
                     pen += font.measure_str(&run, Some(&paint)).0 as f64;
                 }
                 return;
@@ -809,7 +810,13 @@ fn draw_text(
     } else {
         x
     };
-    canvas.draw_str(text, (draw_x as f32, baseline_y as f32), &font, &paint);
+    draw_text_run(
+        canvas,
+        text,
+        (draw_x as f32, baseline_y as f32),
+        &font,
+        &paint,
+    );
 }
 
 fn equation_typeface_for_text_in_families(

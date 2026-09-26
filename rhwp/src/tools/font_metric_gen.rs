@@ -2,6 +2,7 @@
 //!
 //! TTF 파일에서 head/cmap/hmtx/maxp/name 테이블을 파싱하여
 //! 글리프 폭 데이터를 추출하고, Rust 소스코드로 출력한다.
+//! 한컴 영문 HFT(HME*.HFT)는 자체 폭 테이블에서 ASCII 폭을 읽는다.
 //!
 //! 사용법:
 //!   cargo run --bin font-metric-gen -- ttfs/windows/malgun.ttf
@@ -307,10 +308,88 @@ fn parse_ttf(path: &Path) -> Result<FontMetric, String> {
     parse_ttf_all(path).and_then(|v| v.into_iter().next().ok_or_else(|| "폰트 없음".to_string()))
 }
 
+// ─── HFT (한컴 전용 "Han Unified Font File") 영문 폭 테이블 ───
+
+const HFT_MAGIC: &[u8] = b"Han Unified Font File";
+
+fn read_u16_le(data: &[u8], off: usize) -> u16 {
+    u16::from_le_bytes([data[off], data[off + 1]])
+}
+
+fn read_u32_le(data: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+}
+
+fn hft_c_string(data: &[u8], off: usize, len: usize) -> String {
+    let raw = &data[off..off + len];
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(len);
+    String::from_utf8_lossy(&raw[..end]).to_string()
+}
+
+/// 한컴 영문 HFT(HME*.HFT: HCI Poppy/Tulip 등)의 글자 폭 테이블을 읽는다.
+///
+/// 헤더 배치는 Studio `core/hft-font.ts` 와 같다 (little-endian):
+/// - 0x2C: 스타일 포함 face 명, 0x6C: family 명, 0x1AA/0x1AE: 폭/outline 테이블 위치
+/// - 폭 테이블 `[u32 크기][u16 첫 코드][u16 끝 코드][u16 플래그][u16 폭...]`
+/// - outline 테이블 `[u32 크기][u16 em]...` — HME* 36종 모두 em 512
+///
+/// 0x20~0x7E 만 ASCII 와 같은 코드다. 0x7F 이후 슬롯은 HFT 고유 배치라 제외한다.
+fn parse_hft(path: &Path, data: &[u8]) -> Result<FontMetric, String> {
+    let err = |msg: &str| format!("{}: HFT {}", path.display(), msg);
+    if data.len() < 0x200 {
+        return Err(err("헤더 없음"));
+    }
+    let face = hft_c_string(data, 0x2C, 0x40);
+    let family_name = hft_c_string(data, 0x6C, 0x20);
+    if !family_name.is_ascii() || family_name.is_empty() {
+        return Err(err("영문 family 명이 아님"));
+    }
+    let table = read_u32_le(data, 0x1AA) as usize;
+    let outline = read_u32_le(data, 0x1AE) as usize;
+    if table + 10 > data.len() || outline + 6 > data.len() {
+        return Err(err("테이블 위치 오류"));
+    }
+    let first = read_u16_le(data, table + 4) as u32;
+    let last = read_u16_le(data, table + 6) as u32;
+    if last < first || table + 10 + ((last - first + 1) as usize) * 2 > outline {
+        return Err(err("폭 테이블 범위 오류"));
+    }
+    let em_size = read_u16_le(data, outline + 4);
+    if em_size == 0 {
+        return Err(err("em 0"));
+    }
+    let mut char_widths = HashMap::new();
+    for code in first..=last.min(0x7E) {
+        let w = read_u16_le(data, table + 10 + ((code - first) as usize) * 2);
+        if w > 0 {
+            char_widths.insert(code, w);
+        }
+    }
+    let style = face
+        .strip_prefix(family_name.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    Ok(FontMetric {
+        family_name,
+        file_name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+        em_size,
+        bold: style.contains("bold") || style.contains("demi"),
+        italic: style.contains("italic") || style.contains("oblique"),
+        char_widths,
+    })
+}
+
 fn parse_ttf_all(path: &Path) -> Result<Vec<FontMetric>, String> {
     let data = fs::read(path).map_err(|e| format!("{}: {}", path.display(), e))?;
     if data.len() < 12 {
         return Err(format!("{}: 파일이 너무 작음", path.display()));
+    }
+    if data.starts_with(HFT_MAGIC) {
+        return parse_hft(path, &data).map(|metric| vec![metric]);
     }
 
     let offsets = get_font_offsets(&data);
@@ -617,15 +696,16 @@ struct LatinRange {
 
 fn extract_latin_ranges(char_widths: &HashMap<u32, u16>) -> Vec<LatinRange> {
     let ranges: Vec<(u32, u32)> = vec![
-        (0x0020, 0x007E), // Basic Latin (space ~ tilde)
-        (0x00A0, 0x00FF), // Latin-1 Supplement
-        (0x0370, 0x03FF), // Greek and Coptic
-        (0x2000, 0x206F), // General Punctuation
-        (0x2200, 0x22FF), // Mathematical Operators
-        (0x25A0, 0x25FF), // Geometric Shapes, including white bullet
-        (0x3000, 0x303F), // CJK Symbols and Punctuation
-        (0x3130, 0x318F), // Hangul Compatibility Jamo
-        (0xFF00, 0xFF5E), // Fullwidth Latin
+        (0x0020, 0x007E),   // Basic Latin (space ~ tilde)
+        (0x00A0, 0x00FF),   // Latin-1 Supplement
+        (0x0370, 0x03FF),   // Greek and Coptic
+        (0x2000, 0x206F),   // General Punctuation
+        (0x2200, 0x22FF),   // Mathematical Operators
+        (0x25A0, 0x25FF),   // Geometric Shapes, including white bullet
+        (0x3000, 0x303F),   // CJK Symbols and Punctuation
+        (0x3130, 0x318F),   // Hangul Compatibility Jamo
+        (0xFF00, 0xFF5E),   // Fullwidth Latin
+        (0xF0000, 0xF08FF), // 한컴 전용 PUA 기호 (함초롬 계열 글머리표 ► U+F02FC 등)
     ];
 
     let mut result = Vec::new();
@@ -912,7 +992,10 @@ fn main() {
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let name = e.file_name().to_string_lossy().to_lowercase();
-                name.ends_with(".ttf") || name.ends_with(".otf") || name.ends_with(".ttc")
+                name.ends_with(".ttf")
+                    || name.ends_with(".otf")
+                    || name.ends_with(".ttc")
+                    || name.ends_with(".hft")
             })
             .collect();
         entries.sort_by_key(|e| e.file_name());

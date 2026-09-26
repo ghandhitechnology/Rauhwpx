@@ -3,7 +3,7 @@
 //! 문단 텍스트를 토큰화하고 줄 나눔을 수행한다.
 //! 한글 어절/글자, 영어 단어/하이픈, CJK 개별 분할을 지원한다.
 
-use super::{find_active_char_shape, is_lang_neutral};
+use super::{find_active_char_shape, is_lang_neutral, is_word_break_neutral};
 use crate::model::control::Control;
 use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph};
 use crate::model::shape::{HorzRelTo, TextWrap, VertRelTo};
@@ -300,8 +300,8 @@ fn is_hangul(ch: char) -> bool {
 
 /// 라틴 문자 여부 (영문+숫자)
 fn is_latin(ch: char) -> bool {
-    let lang = detect_lang_category(ch);
-    lang == 1 // English/Latin
+    // 단어 경계용 분류: 영문자/숫자만. 구두점은 영문 글꼴 슬롯이지만 단어를 이루지 않는다.
+    detect_lang_category(ch) == 1 && !super::super::style_resolver::is_latin_slot_punctuation(ch)
 }
 
 /// CJK 문자 여부 (한자/일본어 — 개별 분할 대상)
@@ -690,7 +690,7 @@ fn tokenize_paragraph_with_controls(
                     if ctrls.peek().is_some_and(|&(p, ..)| p == i) {
                         break;
                     }
-                    if !is_latin(c) && !is_lang_neutral(c) {
+                    if !is_latin(c) && !is_word_break_neutral(c) {
                         break;
                     }
                     // 하이픈 모드: 하이픈에서 분할 (하이픈 포함 후 분리)
