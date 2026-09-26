@@ -16,7 +16,8 @@ const chatMarkdown = readFileSync(
 );
 
 test('assistant responses render as flat Markdown transcripts', () => {
-  assert.match(source, /renderChatMarkdown\(bubble, text\)/);
+  assert.match(source, /renderChatMarkdown\(bubble, text, opts\)/);
+  assert.match(source, /renderAssistantMessage\(pending, .*STREAMING_RENDER\)/);
   assert.match(source, /window\.requestAnimationFrame/);
   assert.match(chatMarkdown, /katexModule\.render/);
   assert.match(chatMarkdown, /import\('katex'\)/);
@@ -39,11 +40,13 @@ test('conversation follows streamed output until the user scrolls away', () => {
   assert.match(source, /new MutationObserver/);
   assert.match(source, /scrollConversationToMessage/);
   assert.match(source, /scrollConversationToEnd/);
-  assert.match(source, /return content\.classList\.contains\('ag-msg-user'\) \? content : messagesEnd/);
+  assert.match(source, /if \(content\.classList\.contains\('ag-msg-user'\)\) return content;/);
+  assert.match(source, /return settledIsLast \? settledAnswer : messagesEnd;/);
   assert.doesNotMatch(source, /return questionController\.root/);
   assert.match(source, /function conversationScrollTarget\(node: HTMLElement\)/);
   assert.match(source, /conversationAnchorTop\(node\) - conversationFocusOffset\(\)/);
-  assert.match(source, /Math\.min\(target, Math\.max\(0, messages\.scrollHeight - messages\.clientHeight\)\)/);
+  assert.match(source, /const maxScroll = Math\.max\(0, messages\.scrollHeight - messages\.clientHeight\);/);
+  assert.match(source, /return Math\.min\(target, maxScroll\);/);
   assert.match(source, /followConversation = isConversationFollowingTurn\(\)/);
   assert.match(source, /appendConversation\(userBubble\)/);
   assert.match(source, /scrollConversationToMessage\(userBubble, \{ smooth: true \}\)/);

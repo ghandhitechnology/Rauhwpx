@@ -4,13 +4,14 @@ import assert from 'node:assert/strict';
 import {
   appendMarkdown,
   escapeMarkdown,
+  fileBadgeFor,
   planToMarkdown,
   safeMarkdownHref,
   tokenizeInline,
   tokenizeMarkdown,
   type MarkdownRenderOptions,
 } from '../src/ui/agent-sidebar/plan-markdown.ts';
-import { normalizeKoreanLatex } from '../src/ui/agent-sidebar/chat-markdown.ts';
+import { normalizeKoreanLatex, stableStreamingBlocks } from '../src/ui/agent-sidebar/chat-markdown.ts';
 import type { StructuredPlan } from '../src/agent/types.ts';
 
 /* DOM 없이 렌더러를 검증하는 최소 노드. 실제 Document 와 같은 형태만 흉내낸다. */
@@ -282,4 +283,36 @@ test('계획 본문의 마크다운 기호는 문법으로 되살아나지 않�
 test('비정상적으로 큰 입력에서도 블록 수가 제한된다', () => {
   const blocks = tokenizeMarkdown('문단\n\n'.repeat(5_000));
   assert.ok(blocks.length <= 1_200);
+});
+
+test('굵은 글씨 안의 인라인 코드도 코드로 그린다', () => {
+  const root = render('**도구 (`edit_picture`: 이동)**');
+  assert.equal(root.outline(), 'div(p.ag-md-p(strong.ag-md-strong(#text,code.ag-md-code,#text)))');
+  assert.equal(root.textContent, '도구 (edit_picture: 이동)');
+});
+
+test('파일 경로처럼 보이는 인라인 코드에만 확장자 배지를 붙인다', () => {
+  assert.equal(fileBadgeFor('types.ts'), 'TS');
+  assert.equal(fileBadgeFor('src/ui/agent-sidebar/index.ts:5303'), 'TS');
+  assert.equal(fileBadgeFor('samples/보고서.hwpx'), 'HWPX');
+  assert.equal(fileBadgeFor('/Users/me/rhwp/src/lib.rs'), 'RS');
+  assert.equal(fileBadgeFor('render_page'), null);
+  assert.equal(fileBadgeFor('bridge.pendingEdits'), null);
+  assert.equal(fileBadgeFor('a b.ts'), null);
+  const root = render('`types.ts` 와 `props`', { fileChips: true });
+  assert.equal(root.outline(), 'div(p.ag-md-p(code.ag-md-code(span.ag-md-file-badge,#text),#text,code.ag-md-code))');
+  assert.equal(render('`types.ts`').outline(), 'div(p.ag-md-p(code.ag-md-code))');
+});
+
+test('스트리밍 중에는 다음 블록이 시작된 블록만 완성으로 본다', () => {
+  const kinds = (source: string) => stableStreamingBlocks(tokenizeMarkdown(source), source)
+    .map((block) => block.kind === 'list' ? `list:${block.items.length}` : block.kind);
+  assert.deepEqual(kinds('첫 문단'), []);
+  assert.deepEqual(kinds('첫 문단\n\n둘째 문'), ['paragraph']);
+  assert.deepEqual(kinds('첫 문단\n\n'), ['paragraph']);
+  assert.deepEqual(kinds('## 제목\n- 하나\n- 둘\n- 셋은 아직'), ['heading', 'list:2']);
+  assert.deepEqual(kinds('앞\n\n```ts\nconst a = 1;\n\n'), ['paragraph']);
+  assert.deepEqual(kinds('앞\n\n```ts\nconst a = 1;\n```\n\n'), ['paragraph', 'code']);
+  assert.deepEqual(kinds('| a | b |\n|---|---|\n| 1 | 2 |'), []);
+  assert.deepEqual(kinds('앞\n\n```md\n~~~\n\n'), ['paragraph']);
 });

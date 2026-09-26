@@ -51,7 +51,7 @@ import {
 } from '../../agent/models.ts';
 import { loadAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
 import { userSettings } from '../../core/user-settings.ts';
-import { renderChatMarkdown } from './chat-markdown.ts';
+import { renderChatMarkdown, type ChatMarkdownOptions } from './chat-markdown.ts';
 import { safeMarkdownHref } from './plan-markdown.ts';
 import {
   createEmptyThread,
@@ -271,12 +271,18 @@ const COMPOSER_REST_SCROLL_PX = 24;
 const COMPOSER_REST_GESTURE_MS = 120;
 /** 한 줄 입력의 textarea 높이 상한. 넘으면 접지 않는다. */
 const COMPOSER_REST_MAX_INPUT_PX = 40;
+/** 대화 끝이 이만큼 가려져야 입력기를 접는다. 접힐 때 넓어지는 높이보다 커야 한다. */
+const COMPOSER_REST_END_CLEARANCE_PX = 80;
 const SIDEBAR_MOTION_DURATION_MS = 320;
 /* 전체 화면 전환은 한 번의 교차 페이드다(agent-sidebar.css
    --ag-fs-crossfade-duration 과 같은 값). 타이머는 끝날 때까지의 여유분을 포함한다. */
 const FS_CROSSFADE_MS = 220;
 const FS_MOTION_SETTLE_MS = FS_CROSSFADE_MS + 60;
 const COMPACT_RAIL_HOVER_OPEN_DELAY_MS = 260;
+const STREAMING_RENDER = { streaming: true, animate: true } as const;
+/** '최근' 버튼은 마지막 내용이 이만큼 가려지면 나타나고, 이 아래로 드러나면 사라진다. */
+const LATEST_SHOW_PX = 48;
+const LATEST_HIDE_PX = 8;
 
 const CLIPBOARD_IMAGE_EXTENSION: Readonly<Record<string, string>> = {
   'image/png': 'png',
@@ -582,6 +588,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let chatStartPendingThreadId: string | null = null;
   /** 현재 스트리밍 중인 assistant 텍스트 (tool-call 이후에는 새로 연다). */
   let streamBubble: HTMLElement | null = null;
+  /** 끝난 턴의 최종 답변. 다음 턴이 시작될 때까지 스크롤 기준점으로 남는다. */
+  let settledAnswer: HTMLElement | null = null;
+  /** '최근'을 누른 뒤에는 이번 턴 동안 답변 머리 대신 대화 끝을 따라간다. */
+  let followConversationEnd = false;
   const toolRows = new Map<string, ToolRowState>();
   let turnActivity: TurnActivityState | null = null;
   let turnToolCount = 0;
@@ -2922,6 +2932,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const turnPendingLabel = el('span', 'ag-turn-pending-label');
   turnPending.append(createHieumGlyph(), turnPendingLabel);
   messages.append(turnPending, messagesEnd);
+  /** 마지막 내용의 아래끝이 대화 영역 아래로 내려가 있으면 뒤처진 상태다. */
+  function lastConversationContent(): HTMLElement | null {
+    let last = messagesEnd.previousElementSibling;
+    if (last === turnPending && turnPending.hidden) last = turnPending.previousElementSibling;
+    return last instanceof HTMLElement ? last : null;
+  }
+  /** 마지막 내용의 아래끝이 대화 영역 아래끝보다 얼마나 내려가 있는지. */
+  function latestOverflowPx(): number {
+    const last = lastConversationContent();
+    if (!last) return Number.NEGATIVE_INFINITY;
+    return last.getBoundingClientRect().bottom - messages.getBoundingClientRect().bottom;
+  }
   const onMessagesScroll = (): void => {
     const previousTop = conversationLastScrollTop;
     conversationLastScrollTop = messages.scrollTop;
@@ -2980,7 +3002,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const now = performance.now();
     if (now - composerRestScrollAt > COMPOSER_REST_GESTURE_MS) composerRestScrollPx = 0;
     composerRestScrollAt = now;
-    if (composerRest.resting || messages.scrollTop <= 0 || !canComposerRest()) {
+    // 대화 끝이 충분히 가려진 뒤에만 접는다. 접히며 넓어진 화면에 끝이 다시 드러나
+    // 곧바로 펼쳐지는 되튐을 막는다.
+    const endHiddenPx = messagesEnd.getBoundingClientRect().top - messages.getBoundingClientRect().bottom;
+    if (composerRest.resting || messages.scrollTop <= 0 || !canComposerRest() || endHiddenPx < COMPOSER_REST_END_CLEARANCE_PX) {
       composerRestScrollPx = 0;
       return;
     }
@@ -3002,6 +3027,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   messages.addEventListener('pointerdown', onMessagesPointerDown);
   const messagesMutationObserver = typeof MutationObserver === 'function'
     ? new MutationObserver(() => {
+        syncConversationSpacer();
         if (followConversation) scrollConversationToEnd();
         scheduleLatestPillUpdate();
       })
@@ -3020,13 +3046,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           messagesResizeFrame = null;
           syncConversationSpacer();
           if (followConversation) scrollConversationToEnd();
+          scheduleLatestPillUpdate();
         });
       })
     : null;
   messagesResizeObserver?.observe(messages);
 
-  /* 위로 읽는 중에 보이는 "최신" 알약. 최신 턴 자리보다 위에 있을 때만
-     뜨고, 누르면 그 자리로 부드럽게 내려가 다시 새 출력을 따라간다. */
+  /* 위로 읽는 중에 보이는 "최신" 알약. 마지막 내용이 가려졌을 때만 뜨고,
+     누르면 마지막 내용이 입력기 바로 위에 오도록 내려가 대화 끝을 따라간다. */
   const latestDock = el('div', 'ag-latest-dock');
   const latestPill = el('button', 'ag-latest-pill');
   latestPill.type = 'button';
@@ -3036,35 +3063,24 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   latestDock.appendChild(latestPill);
   let latestPillFrame: number | null = null;
 
-  function isAboveLatestTurn(): boolean {
-    if (followConversation) return false;
-    const anchor = latestTurnAnchor();
-    if (!anchor) return messages.scrollHeight - messages.scrollTop - messages.clientHeight > 56;
-    return messages.scrollTop < conversationScrollTarget(anchor) - 64;
-  }
-
   function scheduleLatestPillUpdate(): void {
     if (latestPillFrame !== null) return;
     latestPillFrame = window.requestAnimationFrame(() => {
       latestPillFrame = null;
-      const show = messages.isConnected && isAboveLatestTurn();
+      // 끝을 따라가는 중이면 곧 따라잡으므로 띄우지 않는다.
+      const catchingUp = followConversation && latestTurnAnchor() === messagesEnd;
+      // 나타나는 선과 사라지는 선을 벌려 두어 경계 근처의 작은 흔들림에 깜빡이지 않는다.
+      const overflow = latestOverflowPx();
+      const behind = latestPill.hidden ? overflow > LATEST_SHOW_PX : overflow > LATEST_HIDE_PX;
+      const show = messages.isConnected && messages.clientHeight > 0 && !catchingUp && behind;
       if (latestPill.hidden === !show) return;
       latestPill.hidden = !show;
     });
   }
 
   function scrollConversationToLatest(): void {
-    const anchor = latestTurnAnchor();
-    if (anchor) {
-      scrollConversationToMessage(anchor, { smooth: true });
-    } else {
-      followConversation = true;
-      conversationScrollPaused = false;
-      messages.scrollTo({
-        top: messages.scrollHeight,
-        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
-      });
-    }
+    followConversationEnd = true;
+    scrollConversationToMessage(messagesEnd, { smooth: true });
     latestPill.hidden = true;
   }
 
@@ -3166,8 +3182,25 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   composerUtilityActions.append(phaseBadge, permissionBtn);
   composerUtilities.append(composerUtilityActions);
   const composer = el('form', 'ag-composer');
+  let composerBottomDistance: number | null = null;
   const composerRest = createComposerRestingMotion({
     composer,
+    beforeChange: () => {
+      composerBottomDistance = messages.scrollHeight - messages.clientHeight - messages.scrollTop;
+    },
+    // 펼쳐진 입력기는 대화 영역을 아래에서 줄인다. 아래쪽을 읽던 사람의 자리는
+    // 맨 아래까지의 거리를 그대로 지켜, 마지막 줄이 입력기 뒤로 숨지 않게 한다.
+    onChange: (resting) => {
+      const distance = composerBottomDistance;
+      composerBottomDistance = null;
+      if (resting || distance === null || distance > messages.clientHeight) return;
+      const maxScroll = Math.max(0, messages.scrollHeight - messages.clientHeight);
+      lockConversationScroll(80);
+      messages.scrollTop = Math.max(0, maxScroll - distance);
+      composerRestLastScrollTop = messages.scrollTop;
+      conversationLastScrollTop = messages.scrollTop;
+      scheduleLatestPillUpdate();
+    },
     // 흐름 안에 있는 행과 입력 줄의 요소만 제자리를 지킨다. 떠 있는 overlay·
     // 메뉴·도크는 입력기 위쪽 가장자리를 따라 자연스럽게 움직인다.
     movingParts: () => [
@@ -5480,13 +5513,23 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (button.parentElement !== bubble) bubble.appendChild(button);
   });
 
-  function renderAssistantMessage(bubble: HTMLElement, text: string): void {
+  /** 복사 버튼 같은 덧붙임을 빼고, 답변 본문 블록이 하나라도 그려졌는지. */
+  function hasRenderedBlocks(bubble: HTMLElement): boolean {
+    return bubble.querySelector(':scope > [data-md-block]') !== null;
+  }
+
+  function renderAssistantMessage(bubble: HTMLElement, text: string, opts?: ChatMarkdownOptions): void {
     assistantBubbleSources.set(bubble, text);
-    renderChatMarkdown(bubble, text);
-    if (bubble.classList.contains('ag-msg-assistant') && text.trim()) {
+    const wasEmpty = !hasRenderedBlocks(bubble);
+    renderChatMarkdown(bubble, text, opts);
+    const empty = !hasRenderedBlocks(bubble);
+    // 첫 문단을 보류하는 동안에는 복사 버튼도 달지 않아 빈 답변이 감춰진 채로 남는다.
+    if (bubble.classList.contains('ag-msg-assistant') && !empty) {
       bubble.appendChild(assistantCopyButton(bubble));
     }
-    const links = Array.from(bubble.querySelectorAll<HTMLAnchorElement>('a.ag-md-link'));
+    if (bubble === streamBubble && wasEmpty !== empty) updateTurnPending();
+    // 그대로 남은 블록의 링크는 이미 문서 열기 버튼으로 바뀌어 있다.
+    const links = Array.from(bubble.querySelectorAll<HTMLAnchorElement>('a.ag-md-link:not(.ag-md-artifact-open)'));
     for (const link of links) {
       const artifact = parsePublishedDocumentLink(link.href);
       if (!artifact) continue;
@@ -5536,15 +5579,23 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
   }
 
+  /** 턴을 마친 스트리밍 답변을 다음 턴 전까지 스크롤 기준점으로 남긴다. */
+  function settleFinalAnswer(): void {
+    const bubble = streamBubble;
+    if (!bubble || bubble.parentElement !== messages || !hasRenderedBlocks(bubble)) return;
+    settledAnswer = bubble;
+  }
+
+  /** 보류하던 마지막 블록까지 모두 그려 스트리밍 답변을 확정한다. */
   function flushPendingAssistantRender(): void {
     if (assistantRenderFrame !== null) {
       window.cancelAnimationFrame(assistantRenderFrame);
       assistantRenderFrame = null;
     }
-    const bubble = pendingAssistantBubble;
+    const bubble = pendingAssistantBubble ?? streamBubble;
     pendingAssistantBubble = null;
     if (!bubble) return;
-    withAutoScroll(() => renderAssistantMessage(bubble, assistantBubbleSources.get(bubble) ?? ''));
+    withAutoScroll(() => renderAssistantMessage(bubble, assistantBubbleSources.get(bubble) ?? '', { animate: true }));
   }
 
   function scheduleAssistantRender(bubble: HTMLElement, text: string): void {
@@ -5555,7 +5606,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       assistantRenderFrame = null;
       const pending = pendingAssistantBubble;
       pendingAssistantBubble = null;
-      if (pending) withAutoScroll(() => renderAssistantMessage(pending, assistantBubbleSources.get(pending) ?? ''));
+      if (pending) {
+        withAutoScroll(() => renderAssistantMessage(pending, assistantBubbleSources.get(pending) ?? '', STREAMING_RENDER));
+      }
     });
   }
 
@@ -6808,6 +6861,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function resetConversation(): void {
     replyPending = false;
+    settledAnswer = null;
+    followConversationEnd = false;
     turnPending.hidden = true;
     // 편대 카드는 도구 행처럼 휘발성이다 — 대화를 갈아 끼우면 타이머까지 버린다.
     suppressedSpawnCalls.clear();
@@ -6818,11 +6873,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function latestTurnAnchor(): HTMLElement | null {
     const last = messagesEnd.previousElementSibling;
-    const content = last === turnPending ? turnPending.previousElementSibling : last;
+    let content = last === turnPending ? turnPending.previousElementSibling : last;
+    // 첫 문단을 보류 중인 빈 답변은 감춰져 있으므로 그 앞 메시지를 기준으로 삼는다.
+    const answerVisible = Boolean(streamBubble && hasRenderedBlocks(streamBubble));
+    if (streamBubble && content === streamBubble && !answerVisible) content = streamBubble.previousElementSibling;
     if (!(content instanceof HTMLElement)) return null;
     // Keep a newly sent prompt near the top, then follow the moving end of the
     // current agent output instead of remaining pinned to that prompt.
-    return content.classList.contains('ag-msg-user') ? content : messagesEnd;
+    if (content.classList.contains('ag-msg-user')) return content;
+    if (followConversationEnd) return messagesEnd;
+    // A long answer stops following once its first line reaches the focus line,
+    // so the reader starts at the top instead of chasing the newest paragraph.
+    if (answerVisible) return streamBubble;
+    // 끝난 답변 아래로 다른 내용이 붙으면 다시 끝을 따라간다.
+    const settledIsLast = settledAnswer !== null && content === settledAnswer;
+    return settledIsLast ? settledAnswer : messagesEnd;
   }
 
   function conversationAnchorTop(node: HTMLElement): number {
@@ -6830,18 +6895,35 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function conversationScrollTarget(node: HTMLElement): number {
+    const maxScroll = Math.max(0, messages.scrollHeight - messages.clientHeight);
     const target = Math.max(0, conversationAnchorTop(node) - conversationFocusOffset());
-    return Math.min(target, Math.max(0, messages.scrollHeight - messages.clientHeight));
+    return Math.min(target, maxScroll);
   }
+
 
   /** 새 턴이 뷰포트 위쪽에 머물고, 아래는 답변이 내려올 자리로 비운다. */
   function conversationFocusOffset(): number {
     return Math.round(messages.clientHeight * 0.14);
   }
 
+  /**
+   * 끝 여백은 마지막 질문이 초점선까지 올라갈 만큼만 둔다. 답변이 화면을 채우면
+   * 여백이 사라져, 맨 아래로 내렸을 때 마지막 내용이 입력기 바로 위에 멈춘다.
+   */
   function syncConversationSpacer(): void {
-    const viewport = messages.clientHeight;
-    messagesEnd.style.minHeight = `${Math.max(0, Math.round(viewport * 0.58))}px`;
+    const style = getComputedStyle(messages);
+    const gap = Number.parseFloat(style.rowGap) || 0;
+    const padding = Number.parseFloat(style.paddingBottom) || 0;
+    messagesEnd.style.marginTop = `${-gap}px`;
+    let question = messagesEnd.previousElementSibling;
+    while (question && !question.classList.contains('ag-msg-user')) question = question.previousElementSibling;
+    if (!(question instanceof HTMLElement)) {
+      messagesEnd.style.minHeight = '0px';
+      return;
+    }
+    const room = conversationAnchorTop(question) - conversationFocusOffset() + messages.clientHeight;
+    const spacer = room - conversationAnchorTop(messagesEnd) - padding;
+    messagesEnd.style.minHeight = `${Math.max(0, Math.round(spacer))}px`;
   }
 
   function isConversationFollowingTurn(): boolean {
@@ -6930,7 +7012,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function updateTurnPending(agent?: AgentName): void {
     const editAgent = bridge.pendingEdits.getChangeSets()
       .find((set) => set.status === 'open')?.agent ?? null;
-    const waiting = (replyPending || turnRunning) && !streamBubble;
+    // 첫 문단이 완성되기 전의 빈 답변은 아직 대기 중으로 본다.
+    const waiting = (replyPending || turnRunning) && !(streamBubble && hasRenderedBlocks(streamBubble));
     const show = waiting || editAgent !== null;
     turnPending.hidden = !show;
     if (!show) return;
@@ -7486,6 +7569,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         markChatWorking(runStatusThreadId);
         replyPending = true;
         followConversation = true;
+        // 이전 턴이 turn-end 없이 끊겼다면 보류하던 마지막 문단까지 그려 둔다.
+        flushPendingAssistantRender();
+        settledAnswer = null;
+        followConversationEnd = false;
         updateTurnPending(event.agent);
         scrollConversationToEnd();
         assistantBuffer = '';
@@ -7510,7 +7597,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         if (!streamBubble) {
           const bubble = openAssistantBubble(event.agent);
           withAutoScroll(() => {
-            renderAssistantMessage(bubble, assistantBuffer);
+            renderAssistantMessage(bubble, assistantBuffer, STREAMING_RENDER);
             bubble.classList.add('ag-msg-enter');
           });
         } else {
@@ -7573,6 +7660,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         const finalBubble =
           streamBubble?.parentElement === messages
           && Boolean((assistantBubbleSources.get(streamBubble) ?? streamBubble.textContent ?? '').trim());
+        if (finalBubble) settleFinalAnswer();
         setTurnRunning(false);
         if (runStatusThreadId !== null) {
           // 사용자가 멈춘 턴은 신호 없이 꺼진다. 계획이 승인을 기다리며 끝난
@@ -7892,6 +7980,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         setTurnRunning(false);
         dropRunStatusIfIdle();
         flushPendingAssistantRender();
+        settleFinalAnswer();
         flushAssistantBuffer();
         sweepUnresolvedToolRows();
         sweepActivityTranscripts();

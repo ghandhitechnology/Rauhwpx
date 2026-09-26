@@ -2525,6 +2525,7 @@ button.ag-skill-copy {
   pointer-events: none;
 }
 
+
 .ag-msg {
   white-space: pre-wrap;
   word-break: break-word;
@@ -4486,6 +4487,39 @@ button.ag-skill-copy {
 .ag-msg-assistant .ag-md-h1 { font-size: 1.16em; }
 .ag-msg-assistant .ag-md-h2 { font-size: 1.1em; }
 .ag-msg-assistant > .ag-md-h:first-child { margin-top: 0; }
+
+/* 채팅의 인라인 코드는 도구 이름·경로가 문장에서 한눈에 떨어지도록 캡슐로 둔다. */
+.ag-msg .ag-md-code {
+  padding: 1px 5px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-surface-subtle);
+  color: var(--ag-text);
+  font-weight: 500;
+  white-space: break-spaces;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.ag-msg .ag-md-file {
+  font-family: var(--ag-font);
+  font-size: 0.96em;
+}
+
+.ag-md-file-badge {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--ag-border-strong);
+  color: var(--ag-text);
+  font-family: var(--ag-font);
+  font-size: 0.72em;
+  font-weight: 800;
+  line-height: 1.55;
+  letter-spacing: 0.02em;
+  vertical-align: 0.1em;
+}
 
 .ag-progress-milestone {
   white-space: normal;
