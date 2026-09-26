@@ -666,7 +666,8 @@ test('delete_table: 스키마는 주소 네 값이 필수이고 document-write �
     assert.ok(key in def.shape, `delete_table missing ${key}`);
   }
   assert.ok(def.shape.sectionIdx.safeParse(0).success);
-  assert.ok(!def.shape.sectionIdx.safeParse(-1).success);
+  // 음수 주소는 스튜디오가 범위와 함께 거른다 — 스키마는 정수만 고정한다 (정의 크기 한도)
+  assert.ok(!def.shape.sectionIdx.safeParse(0.5).success);
   assert.ok(!def.shape.controlIdx.safeParse(undefined).success);
 });
 
