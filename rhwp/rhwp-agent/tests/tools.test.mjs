@@ -484,15 +484,28 @@ test('수식 문법 안내는 preview_equation 에만 있다', () => {
   assert.match(byName.get('insert_equation').description, /preview_equation/);
 });
 
-test('verify_changes 설명에 셀프체크 지시와 라이브 미리보기 안내가 있다', () => {
+test('verify_changes 는 선택적 검토 요약이고 쓰기 결과는 after 로 온다', () => {
   const desc = byName.get('verify_changes').description;
-  assert.match(desc, /self-check/i);
-  // 삭제/교체는 라이브 미리보기에 즉시 반영 — 재삽입 금지 안내
-  assert.match(desc, /live preview/);
+  assert.match(desc, /Optional review summary/);
+  assert.match(desc, /after report/);
+  // 삭제는 라이브로 이미 사라졌다 — 재삽입 금지 안내
   assert.match(desc, /do NOT re-insert/);
   assert.match(desc, /includeImage/);
-  // 모든 스테이징 편집은 이미 적용돼 있다 — 읽고 렌더한 문서가 곧 커밋 결과다
-  assert.match(desc, /already applied/);
+  assert.match(RHWP_TOOL_RULES, /returns after \{paragraphs/);
+  assert.match(RHWP_TOOL_RULES, /verify_changes is an optional review summary/);
+});
+
+test('스테이징 쓰기와 apply_edits 는 render crop|page 를 받고 raw 엔진 도구는 받지 않는다', () => {
+  const staged = TOOL_DEFINITIONS.filter((d) => d.category === 'document-write' && 'expectedRevision' in d.shape
+    && !['apply_engine_edits', 'prepare_engine_edit_session'].includes(d.name));
+  assert.ok(staged.length > 20);
+  for (const def of staged) {
+    assert.ok(def.shape.render, `${def.name} missing render`);
+    assert.ok(def.shape.render.safeParse('crop').success && def.shape.render.safeParse('page').success);
+    assert.ok(!def.shape.render.safeParse('full').success);
+  }
+  assert.ok(!byName.get('apply_engine_edits').shape.render);
+  assert.ok(!byName.get('prepare_engine_edit_session').shape.render);
 });
 
 test('apply_list 설명에 진짜 목록/리터럴 금지/가나다 기본값/bulletChar 안내가 있다', () => {
@@ -665,8 +678,8 @@ test('delete_table: 스키마는 주소 네 값이 필수이고 document-write �
   for (const key of ['expectedRevision', 'sectionIdx', 'paraIdx', 'controlIdx']) {
     assert.ok(key in def.shape, `delete_table missing ${key}`);
   }
+  // 음수 주소는 스튜디오 dispatch 입구가 거절한다 (스키마 크기 한도 — agent-write-report 테스트)
   assert.ok(def.shape.sectionIdx.safeParse(0).success);
-  assert.ok(!def.shape.sectionIdx.safeParse(-1).success);
   assert.ok(!def.shape.controlIdx.safeParse(undefined).success);
 });
 
