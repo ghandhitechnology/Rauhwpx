@@ -398,6 +398,42 @@ impl EqLayout {
         super::measure::measure_legacy_run_native(text, fs, italic, bold)
     }
 
+    /// 브라우저에서도 네이티브와 같은 원본 glyf/hmtx 잉크 경계를 사용한다.
+    #[cfg(target_arch = "wasm32")]
+    fn node_run_metrics_wasm(&self, node: &EqNode, fs: f64) -> Option<(f64, f64)> {
+        let (text, italic, bold) = match node {
+            EqNode::Text(s) => (s.as_str(), self.is_italic_text(s), self.bold),
+            EqNode::Number(s) | EqNode::Quoted(s) => (s.as_str(), false, self.bold),
+            EqNode::Symbol(s) => (s.as_str(), false, false),
+            EqNode::MathSymbol(s) => {
+                if matches!(symbol_class(s), MathClass::Rel | MathClass::Bin)
+                    || is_integral_symbol(s)
+                {
+                    (s.as_str(), false, false)
+                } else {
+                    (
+                        s.as_str(),
+                        self.italic && super::font::is_greek_variable(s),
+                        false,
+                    )
+                }
+            }
+            EqNode::Function(s) => (s.as_str(), false, false),
+            EqNode::FontStyle { style, body } => {
+                return self.styled(*style).node_run_metrics_wasm(body, fs);
+            }
+            EqNode::Color { body, .. } => return self.node_run_metrics_wasm(body, fs),
+            _ => return None,
+        };
+        let family = self.font_family.as_deref()?;
+        let value = measure_equation_text(family, text, fs, italic, self.hft, true, bold).ok()?;
+        let advance = super::measure::RunMetrics::from_js(value.clone())?.advance;
+        let ink_left = js_sys::Reflect::get(&value, &wasm_bindgen::JsValue::from_str("inkLeft"))
+            .ok()?
+            .as_f64()?;
+        (ink_left.is_finite() && advance.is_finite()).then_some((advance, ink_left))
+    }
+
     /// 글립 원자의 좌측 베어링(lsb, px). 한컴 legacy 수식은 글립을 advance가 아니라
     /// 앞 글립의 잉크 끝에 붙여 식자한다 — layout_row가 다음 원자 원점을
     /// `앞 잉크 끝 − 이 원자 lsb`로 놓는다 (eq-002 실측). 비글립 원자·측정 불가 시 0.
@@ -408,7 +444,14 @@ impl EqLayout {
             .unwrap_or(0.0)
     }
 
-    #[cfg(not(all(not(target_arch = "wasm32"), feature = "native-skia")))]
+    #[cfg(target_arch = "wasm32")]
+    fn node_ink_left(&self, node: &EqNode, fs: f64) -> f64 {
+        self.node_run_metrics_wasm(node, fs)
+            .map(|(_, left)| left)
+            .unwrap_or(0.0)
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "native-skia")))]
     fn node_ink_left(&self, _node: &EqNode, _fs: f64) -> f64 {
         0.0
     }
@@ -420,7 +463,13 @@ impl EqLayout {
         self.node_run_metrics(node, fs).map(|m| m.advance)
     }
 
-    #[cfg(not(all(not(target_arch = "wasm32"), feature = "native-skia")))]
+    #[cfg(target_arch = "wasm32")]
+    fn node_advance_right(&self, node: &EqNode, fs: f64) -> Option<f64> {
+        self.node_run_metrics_wasm(node, fs)
+            .map(|(advance, _)| advance)
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "native-skia")))]
     fn node_advance_right(&self, _node: &EqNode, _fs: f64) -> Option<f64> {
         None
     }
@@ -452,9 +501,21 @@ impl EqLayout {
             })
             .and_then(super::measure::RunMetrics::from_js)
         {
+            let legacy = self
+                .font_family
+                .as_deref()
+                .is_some_and(super::font::is_legacy_equation_font);
             return (
-                metrics.advance,
-                if italic { metrics.overhang() } else { 0.0 },
+                if legacy {
+                    metrics.ink_right
+                } else {
+                    metrics.advance
+                },
+                if italic && !legacy {
+                    metrics.overhang()
+                } else {
+                    0.0
+                },
             );
         }
         let family = super::font::equation_css_font_family(self.font_family.as_deref());
