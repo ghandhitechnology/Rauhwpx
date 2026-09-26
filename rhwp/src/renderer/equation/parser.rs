@@ -261,7 +261,11 @@ impl EqParser {
             TokenType::Command => {
                 let from_latex = self.tokens.get(self.pos).is_some_and(|t| t.from_latex);
                 self.pos += 1;
-                self.parse_command(&val, from_latex)
+                // 구조 명령어(sqrt, matrix, cases, …) 전체에도 뒤따르는 ^/_ 첨자를
+                // 결합한다. 내부에서 이미 try_parse_scripts 를 거친 노드(기호/함수/
+                // LEFT 등)는 첨자가 소비돼 있으므로 바깥 호출은 no-op 이다.
+                let node = self.parse_command(&val, from_latex);
+                self.try_parse_scripts(node)
             }
             TokenType::Number => {
                 self.pos += 1;

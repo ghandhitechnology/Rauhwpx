@@ -1791,8 +1791,12 @@ fn inline_control_metrics_hwp(ctrl: &Control) -> Option<InlineControlMetricsHwp>
                 );
             let margin = &eq.common.margin;
             let painted_width = crate::renderer::equation::fitted_width_hwp(eq);
-            let width = crate::renderer::equation::occupied_width_hwp(eq)
-                .saturating_add(painted_width.saturating_sub(eq.common.width) as i32);
+            // 한컴은 인라인 수식을 실제 paint 폭(+양쪽 여백)만큼 전진한다 — 저장된
+            // 개체 폭은 paint 를 담는 상자일 뿐 줄 advance 의 하한이 아니다.
+            // (eq-002 실측: 선언 72.98pt 개체가 68.8pt 만큼만 전진)
+            let width = (painted_width as i32)
+                .saturating_add(i32::from(margin.left))
+                .saturating_add(i32::from(margin.right));
             let height = (eq.common.height as i32).max(natural_height as i32);
             let baseline =
                 crate::renderer::equation::control_baseline_hwp(eq, natural_baseline as f64);
@@ -1909,7 +1913,12 @@ mod inline_equation_metric_tests {
             ..Default::default()
         };
         let metrics = inline_control_metrics_hwp(&para.controls[0]).unwrap();
-        assert_eq!(metrics.width, 2700);
+        // 줄 advance 는 저장 폭이 아니라 paint 폭(+여백)을 따른다 (한컴 동작).
+        let painted = crate::renderer::equation::fitted_width_hwp(match &para.controls[0] {
+            Control::Equation(e) => e,
+            _ => unreachable!(),
+        });
+        assert_eq!(metrics.width, painted as i32 + 300);
         assert_eq!(metrics.height, 2200);
         assert_eq!(metrics.baseline, 1410);
         let composed = crate::renderer::composer::compose_paragraph(&para);
@@ -2495,6 +2504,12 @@ mod inline_control_wrap_tests {
     }
 
     fn tac_equation(width_hwp: u32, height_hwp: u32) -> Control {
+        tac_equation_script(width_hwp, height_hwp, "x")
+    }
+
+    /// 줄 advance 는 paint 폭을 따르므로, 넓은 수식 시나리오는 실제로 넓게
+    /// 그려지는 스크립트가 필요하다 (font_size=1000 에서 'x' ≈ 443 HWP/자).
+    fn tac_equation_script(width_hwp: u32, height_hwp: u32, script: &str) -> Control {
         Control::Equation(Box::new(Equation {
             common: CommonObjAttr {
                 treat_as_char: true,
@@ -2502,7 +2517,7 @@ mod inline_control_wrap_tests {
                 height: height_hwp,
                 ..Default::default()
             },
-            script: "x".to_string(),
+            script: script.to_string(),
             font_size: 1000,
             ..Default::default()
         }))
@@ -2600,13 +2615,13 @@ mod inline_control_wrap_tests {
                 start_pos: 0,
                 char_shape_id: 0,
             }],
-            controls: vec![tac_equation(4000, 5000)],
+            controls: vec![tac_equation_script(4000, 5000, &"x".repeat(9))],
             line_segs: vec![LineSeg::default()],
             ..Default::default()
         };
         para.char_count = 28;
 
-        // 컬럼 100px(7500 HWP): 단어 32px(2400 HWP), 수식 4000 HWP.
+        // 컬럼 100px(7500 HWP): 단어 32px(2400 HWP), 수식 paint ≈4000 HWP.
         // 폭 예약이 없으면 2줄 [0,9),[10,19) — 2번째 줄이 수식+텍스트 8800+ HWP로
         // 컬럼을 넘는다. 예약이 있으면 3줄로 나뉘고 각 줄이 컬럼 안에 들어간다.
         reflow_line_segs(&mut para, 100.0, &styles, 96.0);
@@ -2660,13 +2675,13 @@ mod inline_control_wrap_tests {
                 start_pos: 0,
                 char_shape_id: 0,
             }],
-            controls: vec![tac_equation(4000, 5000)],
+            controls: vec![tac_equation_script(4000, 5000, &"x".repeat(9))],
             line_segs: vec![LineSeg::default()],
             ..Default::default()
         };
         para.char_count = 19;
 
-        // 3000(5글자) + 4000(수식) = 7000 ≤ 7500이라 수식은 1번째 줄에 배치.
+        // 3000(5글자) + 수식 paint ≈4000 = 7000 ≤ 7500이라 수식은 1번째 줄에 배치.
         // 뒤 5글자(3000)는 넘치므로 글자 단위 분할 — 단 첫 글자는 수식과 같은 줄에
         // 고정되어 [0,6),[6,10) 으로 나뉜다 ([0,5),[5,10) 가 아님).
         reflow_line_segs(&mut para, 100.0, &styles, 96.0);

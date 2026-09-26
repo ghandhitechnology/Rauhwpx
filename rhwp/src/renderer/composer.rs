@@ -356,7 +356,97 @@ pub fn compose_paragraph(para: &Paragraph) -> ComposedParagraph {
     // Hanyang-PUA 옛한글 / 한컴 PUA 표시 문자열 변환 (렌더링·측정용)
     convert_pua_display_text(&mut composed);
 
+    // 본문 AutoNumber(각주/미주/그림/표/수식) placeholder 를 번호 문자열로 치환
+    expand_auto_number_display(&mut composed, para);
+
     composed
+}
+
+/// 본문 `Control::AutoNumber`(Page/TotalPage 제외)의 placeholder 공백 1글자를
+/// `앞장식 + 번호 + 뒷장식` 표시 문자열로 치환한다.
+///
+/// 파서는 자동 번호 위치에 공백 1자(`\u{0012}` 마커)만 넣고 실제 번호는
+/// `AutoNumber::assigned_number` 에 보관한다. 캡션 경로는
+/// `apply_auto_numbers_to_composed` 가 "  " 패턴으로 채우지만 본문 문단은
+/// 아무 치환도 없어 번호가 빈 공백으로 출력됐다.
+///
+/// `run.text` 의 모델 글자 수는 유지하고 `display_text` 에만 표시값을 둔다 —
+/// `convert_pua_display_text` / `replace_composed_char_with_display` 와 같은
+/// 규약이라 char_offsets·히트테스트가 표시 자릿수에 끌려가지 않는다.
+/// Page/TotalPage 는 쪽번호 컨텍스트가 필요해
+/// `substitute_page_auto_numbers_in_composed` 가 별도로 처리한다.
+fn expand_auto_number_display(composed: &mut ComposedParagraph, para: &Paragraph) {
+    use crate::model::control::AutoNumberType;
+    use crate::renderer::{format_number, NumberFormat as NumFmt};
+
+    let has_body_autonum = para.controls.iter().any(|ctrl| {
+        matches!(ctrl, Control::AutoNumber(an)
+            if !matches!(an.number_type, AutoNumberType::Page | AutoNumberType::TotalPage))
+    });
+    if !has_body_autonum {
+        return;
+    }
+
+    // placeholder 의 모델 문자 위치를 컨트롤 순서대로 수집한다 (공백 1자 +
+    // char_offsets 8갭 규칙 — layout.rs 의 쪽번호 치환과 같은 탐색).
+    let positions =
+        crate::renderer::layout::LayoutEngine::auto_number_placeholder_positions(para, |t| {
+            !matches!(t, AutoNumberType::Page | AutoNumberType::TotalPage)
+        });
+    if positions.is_empty() {
+        return;
+    }
+    let mut replacements: Vec<(usize, String)> = Vec::new();
+    for (pos, ctrl_idx) in positions {
+        let Control::AutoNumber(an) = &para.controls[ctrl_idx] else {
+            continue;
+        };
+        let num = format_number(an.assigned_number, NumFmt::from_hwp_format(an.format));
+        let mut display = String::new();
+        if an.prefix_char != '\0' {
+            display.push(an.prefix_char);
+        }
+        display.push_str(&num);
+        if an.suffix_char != '\0' {
+            display.push(an.suffix_char);
+        }
+        replacements.push((pos, display));
+    }
+    if replacements.is_empty() {
+        return;
+    }
+
+    // run 별로 placeholder 위치를 묶어 display_text 를 한 번에 재구성한다.
+    for line in &mut composed.lines {
+        let mut run_start = line.char_start;
+        for run in &mut line.runs {
+            let run_len = run.text.chars().count();
+            let run_end = run_start + run_len;
+            let in_run: Vec<(usize, &String)> = replacements
+                .iter()
+                .filter(|(pos, _)| *pos >= run_start && *pos < run_end)
+                .map(|(pos, s)| (*pos, s))
+                .collect();
+            if !in_run.is_empty() {
+                let mut display = String::new();
+                let mut cursor = 0usize;
+                for (abs, value) in &in_run {
+                    let rel = abs - run_start;
+                    if rel < cursor {
+                        continue;
+                    }
+                    let seg: String = run.text.chars().skip(cursor).take(rel - cursor).collect();
+                    display.push_str(&expand_pua_display_text(&seg));
+                    display.push_str(value);
+                    cursor = rel + 1;
+                }
+                let tail: String = run.text.chars().skip(cursor).collect();
+                display.push_str(&expand_pua_display_text(&tail));
+                run.display_text = Some(display);
+            }
+            run_start = run_end;
+        }
+    }
 }
 
 /// Hanyang-PUA 옛한글 코드포인트와 한컴 PUA 표시 문자열을 렌더링용 텍스트로 변환한다.

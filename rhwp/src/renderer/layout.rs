@@ -3543,11 +3543,20 @@ impl LayoutEngine {
             return;
         }
 
-        let mut positions = self.page_auto_number_placeholder_positions(para);
+        let mut positions = Self::auto_number_placeholder_positions(para, |t| {
+            matches!(
+                t,
+                crate::model::control::AutoNumberType::Page
+                    | crate::model::control::AutoNumberType::TotalPage
+            )
+        });
         positions.sort_unstable_by_key(|(pos, _)| *pos);
         positions.dedup_by_key(|(pos, _)| *pos);
-        for (pos, number_type) in positions.into_iter().rev() {
-            let value = if number_type == crate::model::control::AutoNumberType::TotalPage {
+        for (pos, ctrl_idx) in positions.into_iter().rev() {
+            let Control::AutoNumber(an) = &para.controls[ctrl_idx] else {
+                continue;
+            };
+            let value = if an.number_type == crate::model::control::AutoNumberType::TotalPage {
                 self.total_pages.get()
             } else {
                 page_number
@@ -3556,23 +3565,24 @@ impl LayoutEngine {
         }
     }
 
-    fn page_auto_number_placeholder_positions(
-        &self,
+    /// AutoNumber 컨트롤의 placeholder 문자 위치를 컨트롤 순서대로 수집한다.
+    /// 반환은 (placeholder 문자 위치, controls 인덱스) — `filter` 에 맞는 번호
+    /// 종류만 결과에 담는다. placeholder 는 종류 무관하게 텍스트 순서대로 점유되므로
+    /// 탐색 커서는 모든 AutoNumber 컨트롤에서 진행한다 (같은 문단에 혼합 번호가
+    /// 있어도 위치가 어긋나지 않도록).
+    pub(crate) fn auto_number_placeholder_positions(
         para: &Paragraph,
-    ) -> Vec<(usize, crate::model::control::AutoNumberType)> {
+        filter: impl Fn(crate::model::control::AutoNumberType) -> bool,
+    ) -> Vec<(usize, usize)> {
         let ctrl_positions = crate::document_core::helpers::find_control_text_positions(para);
         let text_chars: Vec<char> = para.text.chars().collect();
         let mut positions = Vec::new();
         let mut search_from = 0usize;
 
         for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
-            if !matches!(
-                ctrl,
-                Control::AutoNumber(an)
-                    if matches!(an.number_type, crate::model::control::AutoNumberType::Page | crate::model::control::AutoNumberType::TotalPage)
-            ) {
+            let Control::AutoNumber(an) = ctrl else {
                 continue;
-            }
+            };
 
             let direct_pos = ctrl_positions.get(ctrl_idx).copied().filter(|&pos| {
                 Self::is_auto_number_placeholder_at(para, &text_chars, pos)
@@ -3586,11 +3596,10 @@ impl LayoutEngine {
             });
 
             if let Some(pos) = pos {
-                let Control::AutoNumber(an) = ctrl else {
-                    unreachable!()
-                };
-                positions.push((pos, an.number_type));
                 search_from = pos.saturating_add(1);
+                if filter(an.number_type) {
+                    positions.push((pos, ctrl_idx));
+                }
             }
         }
 

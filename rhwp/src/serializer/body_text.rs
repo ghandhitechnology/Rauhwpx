@@ -1358,7 +1358,11 @@ fn serialize_para_text_limited(para: &Paragraph, max_bytes: usize) -> Result<Vec
                 push_code_unit(&mut bytes, 0x0009);
                 // TAB 확장 데이터 복원 (탭 너비, 종류 등)
                 if tab_idx < para.tab_extended.len() {
-                    for &cu in &para.tab_extended[tab_idx] {
+                    let mut ext = para.tab_extended[tab_idx];
+                    // HWPX 파서가 탭 정지 간격 의미 표시로 쓰는 예약 비트 — HWP5
+                    // 스트림에는 보내지 않는다 (ext[5] 는 HWP5 원본 바이트 슬롯).
+                    ext[5] &= !0x8000;
+                    for &cu in &ext {
                         push_code_unit(&mut bytes, cu);
                     }
                 } else {

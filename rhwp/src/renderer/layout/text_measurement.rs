@@ -222,6 +222,36 @@ pub(super) fn inline_tab_type(ext: &[u16; 7]) -> u8 {
     ((ext[2] >> 8) & 0xFF) as u8
 }
 
+/// 인라인 탭 ext[0] 의 width 는 '이동 거리'가 아니라 탭 정지 간격이다.
+/// 한컴은 줄 시작 기준으로 width 의 정수배 중 현재 위치보다 큰 첫 위치로 이동한다
+/// (그리드 정렬). 같은 간격의 탭이 연속으로 나오면 두 번째 탭은 다음 배수까지 간다.
+///
+/// `abs_x`: 줄 시작 기준 절대 위치 (line_x_offset + run 내 x). 반환도 동일 기준.
+/// 한컴 eq-002.hwpx 실측: margin 85pt + tab(width=40pt) → 내용은 125.6pt 시작,
+/// width=35.86pt/40pt 연속 탭 → 다음 내용은 205.7pt 에 정렬.
+#[inline]
+pub(super) fn inline_tab_next_stop(abs_x: f64, tab_width_px: f64) -> f64 {
+    if tab_width_px <= 0.0 || !abs_x.is_finite() {
+        return abs_x;
+    }
+    (abs_x / tab_width_px).floor() * tab_width_px + tab_width_px
+}
+
+/// 왼쪽/기본 인라인 탭의 다음 x (run 상대 좌표).
+///
+/// HWPX 파서 탭(ext[5] 상위 비트 마커)은 ext[0] = 탭 정지 간격이므로
+/// `inline_tab_next_stop` 의 그리드 정렬을 적용한다. HWP5 인라인 탭은
+/// ext[0] 에 해석된 이동 거리가 이미 들어 있어(Issue #630 Stage 4)
+/// 종전 누적(`x + width`)을 유지한다.
+#[inline]
+fn inline_tab_left_x(ext: &[u16; 7], x: f64, line_x_offset: f64, tab_width_px: f64) -> f64 {
+    if ext[5] & 0x8000 != 0 {
+        (inline_tab_next_stop(line_x_offset + x, tab_width_px) - line_x_offset).max(x)
+    } else {
+        x + tab_width_px
+    }
+}
+
 /// 현재 절대 위치에서 다음 탭 정지를 찾는다.
 ///
 /// Returns (position, tab_type, fill_type).
@@ -723,7 +753,8 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                                 measure_segment_from(&chars, &cluster_len, i + 1, &char_width);
                             total = (target_rel - seg_w).max(total);
                         } else {
-                            total = tab_target.max(total);
+                            total =
+                                inline_tab_left_x(ext, total, style.line_x_offset, tab_width_px);
                         }
                     } else {
                         match tab_type {
@@ -738,7 +769,12 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                                 total = (tab_target - seg_w / 2.0).max(total);
                             }
                             _ => {
-                                total = tab_target.max(total);
+                                total = inline_tab_left_x(
+                                    ext,
+                                    total,
+                                    style.line_x_offset,
+                                    tab_width_px,
+                                );
                             }
                         }
                     }
@@ -909,7 +945,7 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                     let seg_w = measure_segment_from(&chars, &cluster_len, i + 1, &char_width);
                     x = (target_rel - seg_w).max(x);
                 } else {
-                    x = tab_target.max(x);
+                    x = inline_tab_left_x(ext, x, style.line_x_offset, tab_width_px);
                 }
             } else {
                 let high_byte = (tab_type_raw >> 8) & 0xFF;
@@ -988,7 +1024,7 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                         x = (body_right_legacy - seg_w).max(x);
                     }
                     _ => {
-                        x = tab_target.max(x);
+                        x = inline_tab_left_x(ext, x, style.line_x_offset, tab_width_px);
                     }
                 }
             }
@@ -1303,7 +1339,8 @@ impl TextMeasurer for WasmTextMeasurer {
                                 measure_segment_from(&chars, &cluster_len, i + 1, &char_width);
                             total = (target_rel - seg_w).max(total);
                         } else {
-                            total = tab_target.max(total);
+                            total =
+                                inline_tab_left_x(ext, total, style.line_x_offset, tab_width_px);
                         }
                     } else {
                         match tab_type {
@@ -1320,8 +1357,13 @@ impl TextMeasurer for WasmTextMeasurer {
                                 total = (tab_target - seg_w / 2.0).max(total);
                             }
                             _ => {
-                                // LEFT(0/1), DECIMAL(4), 기타
-                                total = tab_target.max(total);
+                                // LEFT(0/1), DECIMAL(4), 기타 — HWPX 간격 탭은 그리드 정지
+                                total = inline_tab_left_x(
+                                    ext,
+                                    total,
+                                    style.line_x_offset,
+                                    tab_width_px,
+                                );
                             }
                         }
                     }
@@ -1472,7 +1514,7 @@ impl TextMeasurer for WasmTextMeasurer {
                     let seg_w = measure_segment_from(&chars, &cluster_len, i + 1, &char_width);
                     x = (target_rel - seg_w).max(x);
                 } else {
-                    x = tab_target.max(x);
+                    x = inline_tab_left_x(ext, x, style.line_x_offset, tab_width_px);
                 }
             } else {
                 match tab_type {
@@ -1527,8 +1569,8 @@ impl TextMeasurer for WasmTextMeasurer {
                         x = (tab_target - seg_w / 2.0).max(x);
                     }
                     _ => {
-                        // LEFT(0/1), DECIMAL(4), 기타
-                        x = tab_target.max(x);
+                        // LEFT(0/1), DECIMAL(4), 기타 — HWPX 간격 탭은 그리드 정지
+                        x = inline_tab_left_x(ext, x, style.line_x_offset, tab_width_px);
                     }
                 }
             }
