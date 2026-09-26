@@ -302,3 +302,19 @@ test('rebase: stale apply_edits 가 겹치거나 앞 항목이 문단 수를 바
   }), (e: unknown) => e instanceof AgentToolError && e.code === 'REVISION_MISMATCH');
   assert.deepEqual([0, 1, 2, 3, 4].map((p) => h.text(p)), before, '배치 전체가 되돌아간다');
 });
+
+test('rebase: stale 앵커 쓰기의 within.paraRange 도 형제 편집만큼 옮겨 찾는다', async () => {
+  const h = makeHarness(['합계', '가', '나', '합계', '다']);
+  const shared = h.revision();
+  await exec(h, 'insert_text', { expectedRevision: shared, sectionIdx: 0, paraIdx: 1, charOffset: 1, text: '\n추가' });
+  // 옛 좌표 [3, 4] 의 '합계' — 형제가 앞에 문단을 더했으므로 지금은 [4, 5]
+  await exec(h, 'insert_text', {
+    expectedRevision: shared, text: '!', anchor: { text: '합계', within: { sectionIdx: 0, paraRange: [3, 4] } },
+  });
+  assert.equal(h.text(0), '합계');
+  assert.equal(h.text(4), '합계!');
+  // 형제 편집과 겹치는 범위는 엉뚱한 곳을 찾지 않고 거절된다
+  await assert.rejects(exec(h, 'insert_text', {
+    expectedRevision: shared, text: '?', anchor: { text: '가', within: { sectionIdx: 0, paraRange: [1, 2] } },
+  }), (e: unknown) => e instanceof AgentToolError && e.code === 'REVISION_MISMATCH');
+});

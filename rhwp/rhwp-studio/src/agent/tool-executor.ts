@@ -2124,7 +2124,7 @@ export class AgentToolExecutor {
     if (rawPos !== undefined && rawPos !== null && rawPos !== 'before' && rawPos !== 'after' && rawPos !== 'replace') {
       throw new AgentToolError('INVALID_ARGS', `anchor.position must be "before" | "after" | "replace" (got ${JSON.stringify(rawPos)})`);
     }
-    const scope = this.anchorScope(a['within']);
+    const scope = this.rebaseAnchorScope(args, this.anchorScope(a['within']));
     // occurrence 번째까지는 읽어야 하고, 없으면 단일/다매치 판별용 소수만 본다.
     const cap = Math.min(Math.max(occurrence ?? 0, 8), 64);
     const { matches } = this.collectTextMatches(text, false, cap, scope);
@@ -2212,6 +2212,50 @@ export class AgentToolExecutor {
     return scope;
   }
 
+  /**
+   * anchor.within 의 paraRange / cell.paraIdx 는 에이전트가 읽은 revision 의 본문 좌표다.
+   * 뒤처진 revision 이 저널로 덮이면 좌표 쓰기처럼 리베이스하고, 그 사이 편집이 범위와
+   * 겹치면 엉뚱한 범위에서 찾지 않도록 REVISION_MISMATCH 로 떨어진다. 저널 공백이면 그대로
+   * 두고 requireRevisionAnchored 가 거절한다.
+   */
+  private rebaseAnchorScope(args: Record<string, unknown>, scope: AnchorScope | undefined): AnchorScope | undefined {
+    const expected = args['expectedRevision'];
+    const current = this.revision;
+    if (!scope || (!scope.paraRange && !scope.cell) || typeof expected !== 'number' || expected >= current
+      || !this.journal.covers(expected, current)) {
+      return scope;
+    }
+    const sections = scope.sectionIdx !== undefined
+      ? [scope.sectionIdx]
+      : Array.from({ length: this.deps.wasm.getSectionCount() }, (_, i) => i);
+    const slack = this.journalBatch?.reduce((sum, entry) => sum + Math.abs(entry.paraDelta), 0) ?? 0;
+    const shiftOf = (start: number, end: number): number => {
+      let shift: number | null = null;
+      for (const sec of sections) {
+        const r = this.journal.rebase(expected, current, sec, start - slack, end + slack);
+        if (!r.ok || (shift !== null && shift !== r.shift)) {
+          throw new AgentToolError(
+            'REVISION_MISMATCH',
+            `Document is now at revision ${current}; you expected ${expected}, and a concurrent edit touched the paragraphs in anchor.within. ` +
+              'Re-read with get_structure and retry with a fresh within range.',
+          );
+        }
+        shift = r.shift;
+      }
+      return shift ?? 0;
+    };
+    const next: AnchorScope = { ...scope };
+    if (scope.paraRange) {
+      const shift = shiftOf(scope.paraRange[0], scope.paraRange[1]);
+      next.paraRange = [scope.paraRange[0] + shift, scope.paraRange[1] + shift];
+    }
+    if (scope.cell) {
+      const shift = shiftOf(scope.cell.paraIdx, scope.cell.paraIdx);
+      next.cell = { ...scope.cell, paraIdx: scope.cell.paraIdx + shift };
+    }
+    return next;
+  }
+
   /** 앵커 오류에 싣는 후보 목록 (최대 5개) — get_structure 줄 표기에 맞춘 주소 + 문맥. */
   private anchorCandidates(matches: Array<{
     sectionIdx: number; paraIdx: number; charOffset: number; context: string; cell?: CellAddr;
@@ -2283,9 +2327,13 @@ export class AgentToolExecutor {
     const current = this.revision;
     if (expected === current) return;
     if (expected < current && this.journal.covers(expected, current)) return;
+    const within = asRecord(asRecord(args['anchor'])['within'] ?? {});
+    const scoped = within['paraRange'] !== undefined || within['cell'] !== undefined;
     throw new AgentToolError(
       'REVISION_MISMATCH',
-      `Document is now at revision ${current}; you expected ${expected}. The anchor re-resolves on retry — resend the same call with expectedRevision=${current}; no re-read needed.`,
+      scoped
+        ? `Document is now at revision ${current}; you expected ${expected}. anchor.within paragraph indexes may have moved — re-read with get_structure, then resend with expectedRevision=${current} and a fresh within range.`
+        : `Document is now at revision ${current}; you expected ${expected}. The anchor re-resolves on retry — resend the same call with expectedRevision=${current}; no re-read needed.`,
     );
   }
 
