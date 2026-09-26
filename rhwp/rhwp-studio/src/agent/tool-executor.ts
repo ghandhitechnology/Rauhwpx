@@ -3993,7 +3993,9 @@ export class AgentToolExecutor {
           let itemResult: unknown;
           const journaledBefore = buffered.length;
           try {
-            itemResult = this.dispatch(edit.tool, { ...edit.args, expectedRevision: itemRevision }, agent);
+            // 배치 안에서는 revision 이 멈춰 있다 — 움직이더라도 앞 항목 몫만큼 따라간다.
+            const expectedRevision = itemRevision + (this.revision - revBeforeBatch);
+            itemResult = this.dispatch(edit.tool, { ...edit.args, expectedRevision }, agent);
           } catch (e) {
             const code = e instanceof AgentToolError ? e.code : 'RPC_ERROR';
             const message = e instanceof Error ? e.message : String(e);
