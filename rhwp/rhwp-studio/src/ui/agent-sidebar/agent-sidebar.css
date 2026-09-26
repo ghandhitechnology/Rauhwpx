@@ -3145,15 +3145,23 @@ button.ag-skill-copy {
   background: var(--ag-run);
 }
 
-.ag-tool-name {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  font-family: var(--ag-mono);
-  font-size: var(--font-size-sm, 11px);
+.ag-tool-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 62%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-base, 12px);
   font-weight: 500;
   letter-spacing: var(--ag-track);
-  line-height: 1;
+  line-height: 1.25;
+}
+
+/* rhwp 밖의 도구는 원래 이름 그대로 — 고정폭으로 구분한다. */
+.ag-tool-foreign .ag-tool-label {
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-sm, 11px);
 }
 
 .ag-tool-summary {
@@ -3163,7 +3171,70 @@ button.ag-skill-copy {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--font-size-sm, 11px);
+  line-height: 1.25;
   color: var(--ag-text-muted);
+}
+
+/* 결과 한 줄 — 머리의 동작 이름 아래에 맞춘다 (5px 여백 + 14px 상태 + 6px 간격). */
+.ag-tool-outcome {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 5px 4px 25px;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+}
+
+.ag-tool-outcome[hidden] {
+  display: none;
+}
+
+.ag-tool-outcome.ag-err {
+  color: color-mix(in srgb, var(--ag-err) 78%, var(--ag-text-secondary));
+}
+
+.ag-tool-outcome-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-tool-outcome-text:empty {
+  display: none;
+}
+
+.ag-tool-thumb {
+  flex: 0 0 auto;
+  display: block;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-chip);
+  background: #fff;
+  overflow: hidden;
+  cursor: zoom-in;
+  transition: border-color var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-tool-thumb:hover {
+  border-color: var(--ag-border-strong);
+}
+
+.ag-tool-thumb:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-tool-thumb img {
+  display: block;
+  max-width: 132px;
+  max-height: 44px;
+  object-fit: contain;
 }
 
 /* 소요 시간 readout — 자릿수가 흔들리지 않게 tabular. */
@@ -3233,6 +3304,140 @@ button.ag-skill-copy {
   }
 }
 
+.ag-tool-items {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ag-tool-items[hidden],
+.ag-tool-detail[hidden],
+.ag-tool-notices[hidden] {
+  display: none;
+}
+
+.ag-tool-item {
+  display: grid;
+  grid-template-columns: 6px auto minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 7px;
+  min-width: 0;
+  padding: 2px 0;
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.3;
+}
+
+.ag-tool-item-status {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ag-border-strong);
+}
+
+.ag-tool-item-status.ag-ok {
+  background: var(--ag-ok);
+}
+
+.ag-tool-item-status.ag-err {
+  background: var(--ag-err);
+}
+
+.ag-tool-item-label {
+  color: var(--ag-text);
+  white-space: nowrap;
+}
+
+.ag-tool-item-summary,
+.ag-tool-item-outcome {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ag-text-muted);
+}
+
+.ag-tool-item-outcome {
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-tool-item.ag-err .ag-tool-item-outcome {
+  color: color-mix(in srgb, var(--ag-err) 78%, var(--ag-text-secondary));
+}
+
+.ag-tool-detail {
+  margin: 0;
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.ag-tool-notices {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ag-tool-notice {
+  padding-left: 7px;
+  border-left: 2px solid color-mix(in srgb, var(--ag-run) 70%, transparent);
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* 원본 인자/결과 — 디버깅용이라 접어 둔다. */
+.ag-tool-raw {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ag-tool-raw-toggle {
+  width: max-content;
+  padding: 1px 0;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-xs, 10px);
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ag-tool-raw-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.ag-tool-raw-toggle::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 4px;
+  transition: transform var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-tool-raw[open] > .ag-tool-raw-toggle::before {
+  transform: rotate(90deg);
+}
+
+.ag-tool-raw-toggle:hover {
+  color: var(--ag-text-secondary);
+}
+
+.ag-tool-raw-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-tool-raw > .ag-tool-args {
+  margin-top: 2px;
+}
+
 .ag-tool-args,
 .ag-tool-result {
   margin: 0;
@@ -3252,6 +3457,54 @@ button.ag-skill-copy {
 
 .ag-tool-result:empty {
   display: none;
+}
+
+/* 결과 그림 크게 보기 — 시트처럼 사이드바 위에 겹친다. */
+.ag-image-viewer {
+  position: absolute;
+  inset: 0;
+  z-index: 400;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: color-mix(in srgb, var(--ag-bg) 86%, transparent);
+  backdrop-filter: blur(6px);
+  cursor: zoom-out;
+  animation: ag-image-viewer-in var(--ag-dur-base) var(--ag-ease-out) both;
+}
+
+.ag-image-viewer:focus {
+  outline: none;
+}
+
+.ag-image-viewer.ag-closing {
+  animation: ag-image-viewer-out var(--ag-dur-fast) var(--ag-ease-out) both;
+}
+
+.ag-image-viewer img {
+  max-width: 100%;
+  max-height: 100%;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-chip);
+  background: #fff;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+}
+
+@keyframes ag-image-viewer-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes ag-image-viewer-out {
+  to {
+    opacity: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3541,6 +3794,15 @@ button.ag-skill-copy {
   padding: 8px 12px;
   border-top: 1px solid var(--ag-border);
   color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+}
+
+/* 중단된 턴이 남긴 검토 카드의 안내줄 — diff 와 동작 버튼 사이에 고정한다. */
+.ag-review-note {
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--ag-border);
+  color: var(--ag-warning, #d99532);
   font-size: var(--font-size-sm, 11px);
 }
 

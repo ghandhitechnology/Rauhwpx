@@ -2,6 +2,7 @@
 //  - 같은 instance 로 돌아오면 호출은 살아 있고, 재연결 후 도착한 응답으로 마무리된다.
 //  - 다른 instance(새로고침·다른 탭)가 붙으면 즉시 NO_STUDIO 로 실패한다.
 //  - 인자 스키마를 캐시해도 strict/passthrough 검증 결과는 그대로다.
+//  - 참조 이미지 잘라내기/삽입은 허브가 저장소 바이트를 채워 스튜디오로 넘긴다.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -13,6 +14,7 @@ import test from 'node:test';
 import WebSocket from 'ws';
 import { registerHubSession } from '../../../desktop/agent-hub.mjs';
 import { ALIVE_PI_FIXTURE_SOURCE, writeFakeCliBin } from './fake-cli-bin.mjs';
+import { ReferenceStore } from '../reference-store.mjs';
 
 const TOKEN = 'hub-reattach-test-token';
 const LAUNCH_ID = 'hub-reattach-test-launch';
@@ -120,10 +122,12 @@ function prepareFakePi(root) {
   writeFakeCliBin(binDir, 'pi', ALIVE_PI_FIXTURE_SOURCE);
 }
 
-async function startHub(t) {
+async function startHub(t, { seed } = {}) {
   const workRoot = mkdtempSync(path.join(os.tmpdir(), 'rhwp-hub-reattach-'));
   const piRoot = path.join(workRoot, 'pi');
   prepareFakePi(piRoot);
+  const referencesRoot = path.join(workRoot, 'references');
+  const seeded = seed ? await seed(referencesRoot) : null;
   const child = spawn(process.execPath, ['server.mjs'], {
     cwd: new URL('..', import.meta.url),
     env: {
@@ -136,6 +140,7 @@ async function startHub(t) {
       RHWP_TEMPLATES_DIR: path.join(workRoot, 'templates'),
       RHWP_AGENT_INSTRUCTIONS_DIR: path.join(workRoot, 'agent-instructions'),
       RHWP_PI_DIR: piRoot,
+      RHWP_REFERENCES_DIR: referencesRoot,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -148,7 +153,7 @@ async function startHub(t) {
   });
   const readyLine = await waitForLine(child.stdout, (line) => line.startsWith('RHWP_HUB_READY '));
   const ready = JSON.parse(readyLine.slice('RHWP_HUB_READY '.length));
-  return { port: ready.port, stderr: () => stderr };
+  return { port: ready.port, stderr: () => stderr, seeded };
 }
 
 async function startRunningChat(studio, { threadId, documentId }) {
@@ -332,4 +337,55 @@ test('cached argument schemas keep strict/passthrough validation', { timeout: 40
   assert.equal(forwarded.args.imageBytesLength, 4);
   sendFrame(studio, { type: 'tool-response', id: forwarded.id, ok: true, result: { inserted: true } });
   assert.deepEqual((await image).result, { inserted: true });
+});
+
+test('reference image crops and inserts reach Studio with the stored bytes', { timeout: 40_000 }, async (t) => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  const { port, stderr, seeded } = await startHub(t, {
+    seed: async (root) => {
+      const store = await new ReferenceStore({ root }).init();
+      return store.addBuffer({ scope: 'document', scopeId: 'doc-ref', name: 'logo.png', mimeType: 'image/png', bytes: png });
+    },
+  });
+  const sessionId = 'reference-image';
+  const studio = await connectStudio(port, { sessionId, instance: 'page-1' });
+  t.after(() => closeSocket(studio));
+  const session = await startRunningChat(studio, { threadId: 'thread-ref', documentId: 'doc-ref' });
+  const mcp = await openSocket(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=pi`);
+  t.after(() => closeSocket(mcp));
+  const call = (id, tool, args) => {
+    const answer = waitForMessage(mcp, (msg) => msg.type === 'tool-result' && msg.id === id);
+    sendFrame(mcp, { type: 'tool-call', id, tool, args, workflow: 'direct', capabilityEpoch: session.capabilityEpoch });
+    return answer;
+  };
+
+  // 잘라내기 없는 읽기는 허브에서 끝난다.
+  const plain = await call(51, 'read_reference_image', { fileId: seeded.id });
+  assert.equal(plain.ok, true, stderr());
+  assert.equal(plain.result.widthPx, 1);
+
+  const cropRequest = waitForMessage(studio, (msg) => msg.type === 'tool-request' && msg.tool === 'read_reference_image');
+  const cropped = call(52, 'read_reference_image', { fileId: seeded.id, cropPx: { x: 0, y: 0, width: 1, height: 1 }, zoom: 2 });
+  const forwardedCrop = await cropRequest;
+  assert.equal(forwardedCrop.args.imageBase64, png.toString('base64'));
+  assert.equal(forwardedCrop.args.zoom, 2);
+  sendFrame(studio, { type: 'tool-response', id: forwardedCrop.id, ok: true, result: { widthPx: 2 } });
+  assert.deepEqual((await cropped).result, { widthPx: 2 });
+
+  const insertRequest = waitForMessage(studio, (msg) => msg.type === 'tool-request' && msg.tool === 'insert_image');
+  const inserted = call(53, 'insert_image', {
+    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, referenceFileId: seeded.id,
+  });
+  const forwardedInsert = await insertRequest;
+  assert.equal(forwardedInsert.args.imageBase64, png.toString('base64'));
+  assert.equal(forwardedInsert.args.extension, 'png');
+  assert.equal(forwardedInsert.args.naturalWidthPx, 1);
+  sendFrame(studio, { type: 'tool-response', id: forwardedInsert.id, ok: true, result: { inserted: true } });
+  assert.deepEqual((await inserted).result, { inserted: true });
+
+  const missing = await call(54, 'insert_image', {
+    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, referenceFileId: 'no-such-file',
+  });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.error.code, 'REFERENCE_NOT_FOUND');
 });

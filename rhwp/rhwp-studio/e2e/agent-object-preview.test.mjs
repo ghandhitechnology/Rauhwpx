@@ -114,9 +114,18 @@ try {
   });
   assert.equal(acceptedImage, true, 'the later image edit can be accepted');
   await page.waitForFunction(() => window.__agentBridge.pendingEdits.getChangeSets().length === 0);
+  // 승인된 턴은 카드가 아니라 되돌리기 버튼으로 남는다 — 활성화될 때까지 기다린다.
   await page.waitForFunction(() => {
-    const image = document.querySelector('.ag-applied-turn .ag-image-preview img');
-    return image?.complete && image.naturalWidth === 12;
+    const undo = document.querySelector('button.ag-agent-undo-btn');
+    return undo && !undo.hidden && !undo.disabled;
+  });
+  // 승인된 그림은 문서 레이아웃에 남아 있다.
+  await page.waitForFunction(() => {
+    const wasm = window.__wasm;
+    for (let p = 0; p < wasm.pageCount; p++) {
+      if (wasm.getPageControlLayout(p).controls.some((c) => c.type === 'image')) return true;
+    }
+    return false;
   });
 
   const interleavedReject = await page.evaluate(async () => {

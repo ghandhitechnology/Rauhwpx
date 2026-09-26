@@ -38,6 +38,20 @@ function makeEnv(sourcePath: string | null = null) {
     return t;
   };
 
+  // 서식 읽기가 돌려줄 가변 속성 — 테스트가 호출 전에 덮어쓴다
+  const paraProps: Record<string, unknown> = {};
+  const charProps: Record<string, unknown> = { fontFamily: '바탕' };
+
+  /** 가짜 중첩 경로 해석 — 첫 세그먼트로 표/셀을 찾고 마지막 세그먼트의 cellParaIndex 를 문단으로 쓴다 */
+  const resolveCellPath = (para: number, pathJson: string) => {
+    const path = JSON.parse(pathJson) as Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }>;
+    if (path.length === 0) throw new Error('빈 경로');
+    const head = path[0];
+    const t = findTable(para, head.controlIndex);
+    if (head.cellIndex < 0 || head.cellIndex >= t.cells.length) throw new Error('path 범위 밖');
+    return { t, cell: head.cellIndex, para: path[path.length - 1].cellParaIndex };
+  };
+
   const wasm = {
     // ─ 본문 ─
     getSectionCount: () => 1,
@@ -237,7 +251,7 @@ function makeEnv(sourcePath: string | null = null) {
       return { ok: true, cellCount: findTable(para, ctrl).cells.length + nRows * nCols - 1 };
     },
     // ─ 문단 서식/스타일 ─
-    getParaPropertiesAt: (_s: number, p: number) => ({ paraShapeId: bodyParaShapes[p], alignment: 'left' }),
+    getParaPropertiesAt: (_s: number, p: number) => ({ paraShapeId: bodyParaShapes[p], alignment: 'left', ...paraProps }),
     applyParaFormat: (_s: number, p: number, json: string) => {
       record('applyParaFormat', p, json);
       bodyParaShapes[p] = 99;
@@ -251,6 +265,35 @@ function makeEnv(sourcePath: string | null = null) {
     getCellParaPropertiesAt: () => ({ paraShapeId: 55 }),
     applyParaFormatInCell: (...a: unknown[]) => { record('applyParaFormatInCell', ...a); return okJson(); },
     setCellParaShapeId: (...a: unknown[]) => { record('setCellParaShapeId', ...a); return okJson(); },
+    // ─ 중첩 셀 경로 — head 세그먼트로 표를 찾고 마지막 세그먼트의 문단 인덱스를 쓴다
+    // (테스트 표는 1단밖에 없어 path[0] 만 실제로 해석한다)
+    getCellParagraphCountByPath: (_s: number, para: number, pathJson: string) =>
+      resolveCellPath(para, pathJson).t.cells[resolveCellPath(para, pathJson).cell].length,
+    getCellParagraphLengthByPath: (_s: number, para: number, pathJson: string) => {
+      const r = resolveCellPath(para, pathJson);
+      return r.t.cells[r.cell][r.para].length;
+    },
+    getTextInCellByPath: (_s: number, para: number, pathJson: string, off: number, cnt: number) => {
+      const r = resolveCellPath(para, pathJson);
+      return r.t.cells[r.cell][r.para].slice(off, off + cnt);
+    },
+    getCellParaPropertiesAtByPath: (_s: number, para: number, pathJson: string) => {
+      record('getCellParaPropertiesAtByPath', pathJson);
+      return { paraShapeId: 55 };
+    },
+    applyParaFormatInCellByPath: (_s: number, para: number, pathJson: string, json: string) => {
+      record('applyParaFormatInCellByPath', pathJson, json);
+      return okJson();
+    },
+    setCellParaShapeIdByPath: (...a: unknown[]) => { record('setCellParaShapeIdByPath', ...a); return okJson(); },
+    getCellCharPropertiesAtByPath: (_s: number, para: number, pathJson: string, off: number) => {
+      record('getCellCharPropertiesAtByPath', pathJson, off);
+      return charProps;
+    },
+    applyCharFormatInCellByPath: (_s: number, para: number, pathJson: string, so: number, eo: number, json: string) => {
+      record('applyCharFormatInCellByPath', pathJson, so, eo, json);
+      return okJson();
+    },
     getStyleList: () => [
       { id: 0, name: '바탕글', englishName: 'Normal', type: 0, nextStyleId: 0, paraShapeId: 1, charShapeId: 1 },
       { id: 3, name: '개요 1', englishName: 'Outline 1', type: 0, nextStyleId: 3, paraShapeId: 5, charShapeId: 5 },
@@ -263,8 +306,8 @@ function makeEnv(sourcePath: string | null = null) {
       if (i < 0) { fonts.push(name); i = fonts.length - 1; }
       return i;
     },
-    getCharPropertiesAt: () => ({ fontFamily: '바탕' }),
-    getCellCharPropertiesAt: () => ({ fontFamily: '바탕' }),
+    getCharPropertiesAt: () => charProps,
+    getCellCharPropertiesAt: () => charProps,
     applyCharFormat: (...a: unknown[]) => { record('applyCharFormat', ...a); return okJson(); },
     // ─ 셀 수식 ─
     renderEquationPreview: (script: string) =>
@@ -336,6 +379,31 @@ function makeEnv(sourcePath: string | null = null) {
     discardSnapshot: (id: number) => { snapshots.delete(id); },
   });
 
+  // 문단 보관본 — 엔진 captureParagraph 계약: 문단 하나(텍스트·모양·그 문단의 표)를 통째로 되돌린다
+  let captureId = 0;
+  const captures = new Map<number, { body: string; shape: number; tables: FakeTable[] }>();
+  const paragraphState = (p: number) => ({
+    body: body[p], shape: bodyParaShapes[p], tables: structuredClone(tables.filter((t) => t.paraIdx === p)),
+  });
+  Object.assign(wasm, {
+    captureParagraph: (_s: number, p: number) => {
+      record('captureParagraph', p);
+      captures.set(++captureId, paragraphState(p));
+      return captureId;
+    },
+    restoreCapturedParagraph: (id: number, _s: number, p: number) => {
+      record('restoreCapturedParagraph', p);
+      const saved = captures.get(id)!;
+      body[p] = saved.body;
+      bodyParaShapes[p] = saved.shape;
+      const others = tables.filter((t) => t.paraIdx !== p);
+      tables.splice(0, tables.length, ...others,
+        ...structuredClone(saved.tables).map((t) => ({ ...t, paraIdx: p })));
+    },
+    discardParagraphCapture: (id: number) => { captures.delete(id); },
+    getParagraphContentDigest: (_s: number, p: number) => JSON.stringify(paragraphState(p)),
+  });
+
   const bus = new EventBus();
   const revision = new RevisionTracker(bus);
   let externalSnapshotIds = 0;
@@ -364,8 +432,8 @@ function makeEnv(sourcePath: string | null = null) {
   });
   const call = (tool: string, args: Record<string, unknown> = {}) =>
     executor.execute(tool, { expectedRevision: revision.revision, ...args }, 'claude');
-  return { executor, pending, revision, call, body, tables, calls, bus, wasm, snapshots,
-    getExternalSnapshotCount: () => externalSnapshotIds };
+  return { executor, pending, revision, call, body, tables, calls, bus, wasm, snapshots, captures,
+    paraProps, charProps, getExternalSnapshotCount: () => externalSnapshotIds };
 }
 
 async function expectErr(p: Promise<unknown>, code: string): Promise<AgentToolError> {
@@ -448,8 +516,8 @@ test('edit_table insert_row: 즉시 적용, reject 시 원상복구', async () =
   assert.equal(tables.length, 0); // 같은 change-set 의 createTable 도 함께 reject 된다
 });
 
-test('edit_table delete_row 는 mark-only + 같은 표 후속 편집은 PENDING_DESTRUCTIVE_OP', async () => {
-  const { call, pending, tables, calls } = makeEnv();
+test('edit_table delete_row: 즉시 적용되고 새 크기를 돌려주며, reject 는 문단 보관본으로 되돌린다', async () => {
+  const { call, pending, tables, calls, captures } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a'], ['b'], ['c']],
   })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
@@ -457,77 +525,65 @@ test('edit_table delete_row 는 mark-only + 같은 표 후속 편집은 PENDING_
   const t = tables[0];
   const del = (await call('edit_table', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'delete_row', rowIdx: 1,
-  })) as { changeSetId: string };
-  assert.equal(t.rows, 3); // 아직 적용 안 됨
-  await expectErr(call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 0,
-  }), 'PENDING_DESTRUCTIVE_OP');
-  // 삭제될 행(1) 이후의 셀은 승인 시 cellIdx 가 당겨지므로 여전히 막힌다
-  const err = await expectErr(call('insert_text', {
-    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 2 },
-  }), 'PENDING_DESTRUCTIVE_OP');
-  assert.match(err.message, /delete_row at row 1/);
-  calls.length = 0;
-  pending.approve(del.changeSetId);
-  assert.equal(tables[0].rows, 2); // approve 시 실행 (snapshot restore 뒤의 현재 표)
+  })) as { changeSetId: string; rowCount: number; colCount: number; cellCount: number };
+  assert.deepEqual([del.rowCount, del.colCount, del.cellCount], [2, 1, 2]);
+  assert.equal(tables[0].rows, 2);
   assert.ok(calls.some((x) => x.m === 'deleteTableRow'));
-});
-
-test('PENDING_DESTRUCTIVE_OP 가드: 뒤쪽 행 delete_row 만 걸려 있으면 앞 행 셀은 편집된다', async () => {
-  const { call, pending, tables } = makeEnv();
-  const c = (await call('create_table', {
-    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a'], ['b'], ['c']],
-  })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
-  pending.approve(c.changeSetId);
-  const t = tables[0];
-  await call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'delete_row', rowIdx: 1,
-  });
-  // 행 0 은 삭제 대상 행보다 앞이라 flat cellIdx 가 유지된다 → 통과
+  // 표는 잠기지 않는다 — 새 좌표(행 1 = 옛 행 2)로 바로 편집한다
   await call('insert_text', {
     sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X',
-    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 },
+    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 1 },
   });
-  assert.equal(tables[0].cells[0][0], 'Xa');
+  assert.equal(tables[0].cells[1][0], 'Xc');
+  calls.length = 0;
+  pending.reject(del.changeSetId);
+  assert.equal(tables[0].rows, 3);
+  assert.deepEqual(tables[0].cells.map((cell) => cell[0]), ['a', 'b', 'c']);
+  assert.ok(calls.some((x) => x.m === 'restoreCapturedParagraph'));
+  assert.equal(captures.size, 0, '보관본은 set 이 끝나면 해제된다');
 });
 
-test('PENDING_DESTRUCTIVE_OP 가드: 열 단위 op 은 앞 행 셀도 막는다', async () => {
+test('edit_table delete_row → approve: 미리보기를 그대로 확정하고 표를 다시 만들지 않는다', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a'], ['b'], ['c']],
+  })) as { changeSetId: string };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  const del = (await call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'delete_row', rowIdx: 1,
+  })) as { changeSetId: string };
+  calls.length = 0;
+  assert.equal(pending.approve(del.changeSetId), true);
+  assert.equal(tables[0].rows, 2);
+  assert.ok(!calls.some((x) => x.m === 'deleteTableRow'), '승인은 op 을 다시 실행하지 않는다');
+  assert.equal(pending.hasPending(), false);
+});
+
+test('구조 op 뒤에도 같은 표의 셀을 바로 편집한다 (열 삭제·병합)', async () => {
   const { call, pending, tables } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
-  })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
+  })) as { changeSetId: string };
   pending.approve(c.changeSetId);
   const t = tables[0];
-  await call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'delete_col', colIdx: 1,
-  });
-  const err = await expectErr(call('insert_text', {
+  const at = { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx };
+  const col = (await call('edit_table', { ...at, op: 'delete_col', colIdx: 1 })) as { colCount: number };
+  assert.equal(col.colCount, 1);
+  await call('insert_text', {
     sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X',
+    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 1 },
+  });
+  assert.equal(tables[0].cells[1][0], 'Xc');
+  await call('edit_table', { ...at, op: 'merge_cells', startRow: 0, startCol: 0, endRow: 1, endCol: 0 });
+  await call('insert_text', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'Y',
     cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 },
-  }), 'PENDING_DESTRUCTIVE_OP');
-  assert.match(err.message, /delete_col/);
+  });
+  assert.equal(tables[0].cells[0][0], 'Ya');
 });
 
-test('PENDING_DESTRUCTIVE_OP 가드: merge_cells 는 모든 셀을 막는다', async () => {
-  const { call, pending, tables } = makeEnv();
-  const c = (await call('create_table', {
-    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
-  })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
-  pending.approve(c.changeSetId);
-  const t = tables[0];
-  await call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
-    op: 'merge_cells', startRow: 1, startCol: 0, endRow: 1, endCol: 1,
-  });
-  const err = await expectErr(call('insert_text', {
-    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X',
-    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 },
-  }), 'PENDING_DESTRUCTIVE_OP');
-  assert.match(err.message, /merge_cells/);
-});
-
-test('delete_table 는 mark-only + 같은 표 후속 편집은 PENDING_DESTRUCTIVE_OP', async () => {
+test('delete_table: 즉시 삭제되고 reject 는 표를 되살린다', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
@@ -537,34 +593,110 @@ test('delete_table 는 mark-only + 같은 표 후속 편집은 PENDING_DESTRUCTI
   const t = tables[0];
   const del = (await call('delete_table', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
-  })) as { changeSetId: string; marked: boolean; ok: boolean };
-  assert.equal(del.ok, true);
-  assert.equal(del.marked, true);
-  assert.equal(tables.length, 1); // 아직 적용 안 됨
-  assert.ok(!calls.some((x) => x.m === 'deleteTableControl'));
-  await expectErr(call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 0,
-  }), 'PENDING_DESTRUCTIVE_OP');
-  calls.length = 0;
-  pending.approve(del.changeSetId);
+  })) as { changeSetId: string; deleted: { paraIdx: number; controlIdx: number } };
+  assert.deepEqual(del.deleted, { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx });
   assert.equal(tables.length, 0);
   assert.ok(calls.some((x) => x.m === 'deleteTableControl'));
+  pending.reject(del.changeSetId);
+  assert.equal(tables.length, 1);
+  assert.deepEqual(tables[0].cells.map((cell) => cell[0]), ['a', 'b', 'c', 'd']);
 });
 
-test('delete_table → reject: 표가 남고 deleteTableControl 을 부르지 않는다', async () => {
+test('delete_table 앞에서 채운 셀 편집도 reject 하면 함께 되돌아간다 (검증 보류)', async () => {
+  const { call, pending, tables } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b']],
+  })) as { changeSetId: string };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  const fill = (await call('insert_text', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 1, text: '!',
+    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 },
+  })) as { changeSetId: string };
+  await call('delete_table', { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx });
+  assert.equal(tables.length, 0);
+  pending.reject(fill.changeSetId);
+  assert.equal(tables.length, 1);
+  assert.equal(tables[0].cells[0][0], 'a', '표 삭제를 되돌린 뒤 셀 삽입도 되돌린다');
+});
+
+test('행 삽입 앞뒤로 같은 셀 번호에 쓴 텍스트도 reject 가 모두 되돌린다 (되돌린 op 은 기대값에서 뺀다)', async () => {
+  const { call, pending, tables } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
+  })) as { changeSetId: string };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  const cell = { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 };
+  const events: string[] = [];
+  pending.onChange((e) => { if (e.type === 'invalidated') events.push(e.reason); });
+  const first = (await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'q', cell })) as { changeSetId: string };
+  await call('edit_table', { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 0, below: false });
+  await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'm', cell });
+  assert.deepEqual(tables[0].cells.map((p) => p[0]), ['m', '', 'qa', 'b', 'c', 'd']);
+  pending.reject(first.changeSetId);
+  assert.deepEqual(tables[0].cells.map((p) => p[0]), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(events, [], '아무 편집도 문서에 남지 않는다');
+});
+
+test('구조 op 이 셀 번호를 바꾸면 앞선 pending 셀 편집 주소가 따라가고 승인 뒤 거절도 옮겨 간 셀에서 되돌린다', async () => {
+  const { call, pending, tables } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b', 'c'], ['d', 'e', 'f']],
+  })) as { changeSetId: string };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  const at = { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx };
+  pending.beginTurn('claude');
+  await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X', cell: { ...at, cellIdx: 5 } });
+  await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'Y', cell: { ...at, cellIdx: 1 } });
+  pending.endTurn('review');
+  const [first] = pending.getChangeSets();
+  pending.beginTurn('claude');
+  await call('edit_table', { ...at, op: 'delete_row', rowIdx: 0 });
+  pending.endTurn('review');
+  assert.deepEqual(tables[0].cells.map((p) => p[0]), ['d', 'e', 'Xf']);
+  const [x, y] = first.ops;
+  assert.equal(x.kind === 'insert' && x.range.cell?.cellIdx, 2, '셀 5 는 행 삭제 뒤 셀 2 다');
+  assert.ok(y.kind === 'insert' && y.range.cell!.cellIdx < 0, '지워진 셀의 편집은 어떤 셀도 가리키지 않는다');
+  // 행 삭제를 승인한 뒤 앞 set 을 거절하면 X 는 옮겨 간 셀에서 되돌아간다
+  assert.equal(pending.approve(pending.getChangeSets()[1].id), true);
+  pending.reject(first.id);
+  assert.deepEqual(tables[0].cells.map((p) => p[0]), ['d', 'e', 'f']);
+});
+
+test('같은 턴에서 셀을 채운 뒤 행을 넣으면 미리보기 주소가 따라가고 reject 는 모두 되돌린다', async () => {
+  const { call, pending, tables } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
+  })) as { changeSetId: string };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  const at = { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx };
+  const fill = (await call('insert_text', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 1, text: '!', cell: { ...at, cellIdx: 3 },
+  })) as { changeSetId: string };
+  await call('edit_table', { ...at, op: 'insert_col', colIdx: 0, right: false });
+  const [insert] = pending.getChangeSets()[0].ops;
+  assert.equal(insert.kind === 'insert' && insert.range.cell?.cellIdx, 5);
+  assert.equal(tables[0].cells[5][0], 'd!');
+  pending.reject(fill.changeSetId);
+  assert.deepEqual(tables[0].cells.map((p) => p[0]), ['a', 'b', 'c', 'd']);
+});
+
+test('delete_table → approve: 삭제를 그대로 확정한다', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a']],
   })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
   pending.approve(c.changeSetId);
-  calls.length = 0;
   const t = tables[0];
   const del = (await call('delete_table', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
   })) as { changeSetId: string };
-  assert.equal(tables.length, 1);
-  pending.reject(del.changeSetId);
-  assert.equal(tables.length, 1);
+  calls.length = 0;
+  assert.equal(pending.approve(del.changeSetId), true);
+  assert.equal(tables.length, 0);
   assert.ok(!calls.some((x) => x.m === 'deleteTableControl'));
 });
 
@@ -578,7 +710,7 @@ test('delete_table: 없는 표 주소·누락 인자는 INVALID_ARGS', async () 
   }), 'INVALID_ARGS');
 });
 
-test('edit_table merge_cells: 인자 검증과 mark-only 실행', async () => {
+test('edit_table merge_cells: 인자 검증과 즉시 실행', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
@@ -592,10 +724,12 @@ test('edit_table merge_cells: 인자 검증과 mark-only 실행', async () => {
   const m = (await call('edit_table', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
     op: 'merge_cells', startRow: 0, startCol: 0, endRow: 0, endCol: 1,
-  })) as { changeSetId: string };
-  assert.ok(!calls.some((x) => x.m === 'mergeTableCells'));
-  pending.approve(m.changeSetId);
+  })) as { changeSetId: string; cellCount: number };
   assert.ok(calls.some((x) => x.m === 'mergeTableCells'));
+  assert.equal(typeof m.cellCount, 'number');
+  calls.length = 0;
+  pending.approve(m.changeSetId);
+  assert.ok(!calls.some((x) => x.m === 'mergeTableCells'), '승인은 병합을 다시 실행하지 않는다');
 });
 
 test('get_table_properties + set_table_props: 표 개체를 가로 가운데로 배치한다', async () => {
@@ -608,18 +742,23 @@ test('get_table_properties + set_table_props: 표 개체를 가로 가운데로 
 
   const before = (await call('get_table_properties', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
-  })) as { table: { positionMode: string; horizontal: { align: string }; sizeMm: { width: number } } };
+  })) as { table: { positionMode: string; horizontal?: { align: string }; sizeMm: { width: number } } };
   assert.equal(before.table.positionMode, 'inline');
-  assert.equal(before.table.horizontal.align, 'left');
+  // 기본 응답은 글자처럼 취급하는 표의 개체 배치 필드를 생략한다. full:true 는 전부 싣는다.
+  assert.equal(before.table.horizontal, undefined);
   assert.ok(Math.abs(before.table.sizeMm.width - 150) < 0.1);
+  const beforeFull = (await call('get_table_properties', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, full: true,
+  })) as { table: { horizontal: { align: string }; repeatHeader: boolean } };
+  assert.equal(beforeFull.table.horizontal.align, 'left');
+  assert.equal(beforeFull.table.repeatHeader, false);
 
-  const edit = (await call('edit_table', {
+  const edit = (await call('set_table_props', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
-    op: 'set_table_props', props: { horizontalAlign: 'center' },
+    tableProps: { horizontalAlign: 'center' },
   })) as { changeSetId: string };
-  assert.ok(!calls.some((entry) => entry.m === 'setTableProperties'));
-  pending.approve(edit.changeSetId);
   const apply = calls.find((entry) => entry.m === 'setTableProperties')!;
+  pending.approve(edit.changeSetId);
   assert.deepEqual(apply.a[2], {
     horzAlign: 'Center', treatAsChar: false, horzRelTo: 'Column', horzOffset: 0,
   });
@@ -628,10 +767,10 @@ test('get_table_properties + set_table_props: 표 개체를 가로 가운데로 
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
   })) as { table: { positionMode: string; horizontal: { align: string; relativeTo: string; offsetMm: number } } };
   assert.equal(after.table.positionMode, 'floating');
-  assert.deepEqual(after.table.horizontal, { align: 'center', relativeTo: 'column', offsetMm: 0 });
+  assert.deepEqual(after.table.horizontal, { align: 'center', relativeTo: 'column' });
 });
 
-test('set_table_props ignores a null horizontal alignment without repositioning the table', async () => {
+test('legacy edit_table set_table_props props still apply and ignore a null horizontal alignment', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const created = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a']],
@@ -655,9 +794,9 @@ test('set_table_props exposes pagination, wrapping, margins, overlap and caption
   })) as { changeSetId: string };
   pending.approve(created.changeSetId);
   const t = tables[0];
-  const edit = (await call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'set_table_props',
-    props: {
+  const edit = (await call('set_table_props', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
+    tableProps: {
       pageBreak: 'row', repeatHeader: true, cellSpacingMm: 1.5,
       cellPaddingMm: { left: 2, right: 2, top: 1, bottom: 1 },
       outerMarginMm: { left: 3, right: 3 }, textWrap: 'topAndBottom',
@@ -694,9 +833,9 @@ test('set_cell_props exposes padding, direction, protection, form field and read
   })) as { changeSetId: string };
   pending.approve(created.changeSetId);
   const t = tables[0];
-  const edit = (await call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'set_cell_props', cellIdx: 0,
-    props: {
+  const edit = (await call('set_cell_props', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0,
+    cellProps: {
       paddingMm: { left: 2, top: 1 }, textDirection: 'vertical', protected: true,
       editableInForm: true, fieldName: 'amount', verticalAlign: 'center',
     },
@@ -723,7 +862,7 @@ test('set_cell_props exposes padding, direction, protection, form field and read
   assert.equal(read.cell.fieldName, 'amount');
 });
 
-test('신규 표 op 5종은 mark-only 이고 승인 시 각 브리지 메서드로 나간다', async () => {
+test('표 op 5종은 호출 즉시 각 브리지 메서드로 나가고 승인은 다시 실행하지 않는다', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const created = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['1', '2']],
@@ -734,8 +873,8 @@ test('신규 표 op 5종은 mark-only 이고 승인 시 각 브리지 메서드�
 
   const widths = (await call('edit_table', { ...at, op: 'set_column_widths', columnWidthsMm: [60, 90] })) as { changeSetId: string };
   const fit = (await call('edit_table', { ...at, op: 'fit_to_page' })) as { changeSetId: string };
-  const zone = (await call('edit_table', {
-    ...at, op: 'set_zone_borders',
+  const zone = (await call('set_zone_borders', {
+    ...at,
     startCell: { row: 0, col: 0 }, endCell: { row: 1, col: 1 },
     borderTop: { type: 1, width: 2, color: '#112233' }, fillColor: '#EEEEEE', centerLine: 'CROSS',
   })) as { changeSetId: string };
@@ -745,12 +884,15 @@ test('신규 표 op 5종은 mark-only 이고 승인 시 각 브리지 메서드�
   })) as { changeSetId: string };
   const caption = (await call('edit_table', { ...at, op: 'set_caption', text: '분기별 매출' })) as { changeSetId: string };
 
-  // mark-only: 승인 전에는 어떤 브리지 뮤테이터도 불리지 않는다.
+  // 호출 즉시 실행된다 — 모두 같은 턴 set 이라 한 번의 승인이 그대로 채택한다.
   for (const method of ['setTableColumnWidths', 'fitTableToPage', 'setCellZoneProperties', 'evaluateTableFormulaEx', 'setTableCaptionText']) {
-    assert.ok(!calls.some((entry) => entry.m === method), `${method} 가 승인 전에 실행됐다`);
+    assert.equal(calls.filter((entry) => entry.m === method).length, 1, `${method} 가 호출 시점에 한 번 실행돼야 한다`);
   }
-
-  for (const set of [widths, fit, zone, formula, caption]) pending.approve(set.changeSetId);
+  assert.deepEqual(new Set([widths, fit, zone, formula, caption].map((set) => set.changeSetId)).size, 1);
+  pending.approve(widths.changeSetId);
+  for (const method of ['setTableColumnWidths', 'fitTableToPage', 'setCellZoneProperties', 'evaluateTableFormulaEx', 'setTableCaptionText']) {
+    assert.equal(calls.filter((entry) => entry.m === method).length, 1, `${method} 가 승인 때 다시 실행됐다`);
+  }
 
   assert.deepEqual(calls.find((entry) => entry.m === 'setTableColumnWidths')!.a[2], [mmToHu(60), mmToHu(90)]);
   assert.ok(calls.some((entry) => entry.m === 'fitTableToPage'));
@@ -808,13 +950,18 @@ test('신규 표 op 의 인자 검증: 열 수 불일치·범위 역전·빈 zon
   const at = { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx };
 
   await expectErr(call('edit_table', { ...at, op: 'set_column_widths', columnWidthsMm: [60] }), 'INVALID_ARGS');
-  await expectErr(call('edit_table', {
-    ...at, op: 'set_zone_borders', startCell: { row: 0, col: 1 }, endCell: { row: 0, col: 0 },
+  await expectErr(call('set_zone_borders', {
+    ...at, startCell: { row: 0, col: 1 }, endCell: { row: 0, col: 0 },
     fillColor: '#FFFFFF',
   }), 'INVALID_ARGS');
-  await expectErr(call('edit_table', {
-    ...at, op: 'set_zone_borders', startCell: { row: 0, col: 0 }, endCell: { row: 0, col: 1 },
+  await expectErr(call('set_zone_borders', {
+    ...at, startCell: { row: 0, col: 0 }, endCell: { row: 0, col: 1 },
   }), 'INVALID_ARGS');
+  // 모르는 속성 키는 올바른 키 목록을 담아 거절한다 (apply_edits 경로는 허브 스키마를 거치지 않는다).
+  const unknownTable = await expectErr(call('set_table_props', { ...at, tableProps: { align: 'center' } }), 'INVALID_ARGS');
+  assert.match(unknownTable.message, /Unsupported tableProps keys: align\. Valid keys: .*horizontalAlign/);
+  const unknownCell = await expectErr(call('set_cell_props', { ...at, cellIdx: 0, cellProps: { color: '#FFFFFF' } }), 'INVALID_ARGS');
+  assert.match(unknownCell.message, /Unsupported cellProps keys: color\. Valid keys: .*fillColor/);
   await expectErr(call('edit_table', { ...at, op: 'apply_formula', row: 5, col: 0, formula: '=SUM(A1)' }), 'INVALID_ARGS');
 });
 
@@ -833,7 +980,7 @@ test('edit_table split_cell rejects covered coordinates inside a merged cell', a
   assert.match(error.message, /covered coordinates/);
 });
 
-test('edit_table split_cell is mark-only and executes on approval', async () => {
+test('edit_table split_cell runs immediately and reject restores the cell', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const created = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['wide']],
@@ -844,33 +991,27 @@ test('edit_table split_cell is mark-only and executes on approval', async () => 
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
     op: 'split_cell', rowIdx: 0, colIdx: 0, splitRows: 2, splitCols: 3,
   })) as { changeSetId: string };
-  assert.ok(!calls.some((entry) => entry.m === 'splitTableCellInto'));
-  pending.approve(split.changeSetId);
   const apply = calls.find((entry) => entry.m === 'splitTableCellInto')!;
   assert.deepEqual(apply.a, [0, 0, 2, 3, true, false]);
+  calls.length = 0;
+  pending.reject(split.changeSetId);
+  assert.ok(calls.some((entry) => entry.m === 'restoreCapturedParagraph'));
 });
 
-test('edit_table split_cell approval fails when the engine rejects the split', async () => {
-  const { call, pending, tables, wasm } = makeEnv();
+test('edit_table split_cell fails on the tool call when the engine rejects the split', async () => {
+  const { call, pending, tables, wasm, captures } = makeEnv();
   const created = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['wide']],
   })) as { changeSetId: string };
   pending.approve(created.changeSetId);
   const table = tables[0];
-  const split = (await call('edit_table', {
+  wasm.splitTableCellInto = () => ({ ok: false, cellCount: 1 });
+  await expectErr(call('edit_table', {
     sectionIdx: 0, paraIdx: table.paraIdx, controlIdx: table.controlIdx,
     op: 'split_cell', rowIdx: 0, colIdx: 0, splitRows: 2, splitCols: 2,
-  })) as { changeSetId: string };
-  wasm.splitTableCellInto = () => ({ ok: false, cellCount: 1 });
-
-  const originalWarn = console.warn;
-  console.warn = () => {};
-  try {
-    assert.equal(pending.approve(split.changeSetId), false);
-    assert.equal(pending.hasPending(), true);
-  } finally {
-    console.warn = originalWarn;
-  }
+  }), 'RPC_ERROR');
+  assert.equal(pending.hasPending(), false, '실패한 op 은 등록되지 않는다');
+  assert.equal(captures.size, 0, '실패한 op 의 보관본은 바로 해제된다');
 });
 
 // ─── apply_para_format / apply_style ────────────────────────
@@ -891,14 +1032,14 @@ test('apply_para_format: pt→HWPUNIT 변환 적용, reject 는 setParaShapeId �
   assert.deepEqual(restore.a, [0, 10]); // 이전 para_shape_id 복원
 });
 
-test('apply_style: mark-only, approve 시 applyStyle 실행 + 존재하지 않는 styleId 거부', async () => {
+test('apply_style: 즉시 적용, reject 는 문단 보관본으로 복원 + 존재하지 않는 styleId 거부', async () => {
   const { call, pending, calls } = makeEnv();
   await expectErr(call('apply_style', { sectionIdx: 0, paraIdx: 0, styleId: 77 }), 'INVALID_ARGS');
   const r = (await call('apply_style', { sectionIdx: 0, paraIdx: 0, styleId: 3 })) as { changeSetId: string };
-  assert.ok(!calls.some((x) => x.m === 'applyStyle'));
-  pending.approve(r.changeSetId);
   const apply = calls.find((x) => x.m === 'applyStyle')!;
   assert.deepEqual(apply.a, [0, 0, 3]);
+  pending.reject(r.changeSetId);
+  assert.deepEqual(calls.find((x) => x.m === 'restoreCapturedParagraph')!.a, [0]);
 });
 
 test('list_styles 는 스타일 목록을 반환한다', async () => {
@@ -1165,10 +1306,14 @@ test('rejecting a later equation keeps an earlier approved marked change', async
   assert.equal(tables[0].cellProps[0].reviewMarker, 'approved');
 });
 
-test('get_document_info 에 registeredFonts 가 실린다', async () => {
+test('get_document_info 는 등록 폰트 개수만 싣고 fontQuery 로 물은 폰트만 찾아 준다', async () => {
   const { call } = makeEnv();
-  const r = (await call('get_document_info')) as { registeredFonts: string[] };
-  assert.deepEqual(r.registeredFonts, ['바탕']);
+  const plain = (await call('get_document_info')) as Record<string, unknown>;
+  assert.equal(plain['registeredFontCount'], 1);
+  assert.equal(plain['registeredFonts'], undefined);
+  assert.equal(plain['fontMatches'], undefined);
+  const r = (await call('get_document_info', { fontQuery: ['바', '탕', '맑은 고딕'] })) as { fontMatches: Record<string, string[]> };
+  assert.deepEqual(r.fontMatches, { '바': ['바탕'], '탕': ['바탕'], '맑은 고딕': [] });
 });
 
 // ─── 리뷰 확정 결함 회귀 테스트 ─────────────────────────────
@@ -1184,15 +1329,14 @@ test('같은 표에 insert_row 두 번 → reject 가 둘 다 되돌린다 (형�
   const r1 = (await call('edit_table', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 1,
   })) as { changeSetId: string };
-  // executor 가드가 같은 표의 후속 구조 편집을 PENDING_DESTRUCTIVE_OP 로 막으므로,
-  // 두 번째 insert 는 매니저에 직접 등록한다 (reject 역연산 회귀 검증이 목적)
-  pending.addObjectOp('claude', {
-    type: 'tableStructure', sectionIdx: 0, tableParaIdx: t.paraIdx, controlIdx: t.controlIdx,
-    op: 'insert_row', index: 2, after: true,
-  });
-  assert.equal(t.rows, 6);
+  // 표는 잠기지 않는다 — 같은 표의 두 번째 구조 편집이 바로 통과한다
+  const r2 = (await call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 2,
+  })) as { changeSetId: string; rowCount: number };
+  assert.equal(r2.rowCount, 6);
+  assert.equal(tables[0].rows, 6);
   pending.reject(r1.changeSetId); // 두 op 은 같은 change-set 에 있다
-  assert.equal(t.rows, 4); // 둘 다 되돌아감 — 이전에는 첫 op 이 드리프트로 오판·잔류했다
+  assert.equal(tables[0].rows, 4); // 둘 다 되돌아감 — 이전에는 첫 op 이 드리프트로 오판·잔류했다
 });
 
 test('pending 표에 사용자가 입력하면 reject 는 표를 지우지 않고 남긴다 (내용 지문)', async () => {
@@ -1220,4 +1364,240 @@ test('create_table + 같은 턴 셀 텍스트 op → reject 가 표를 정상 �
   assert.equal(t.cells[1][0], '추가');
   pending.reject(c.changeSetId);
   assert.equal(tables.length, 0); // 에이전트 자신의 셀 편집은 드리프트가 아니다
+});
+
+// ─── P4.1 타이포그래피 패스스루 ────────────────────────────
+
+test('apply_char_format: 장평/자간 스칼라는 7개 언어 슬롯으로 확장된다', async () => {
+  const { call, calls } = makeEnv();
+  await call('apply_char_format', {
+    sectionIdx: 0, paraIdx: 0, startOffset: 0, endOffset: 5,
+    widthPercent: 90, letterSpacingPercent: -5,
+  });
+  const json = JSON.parse(calls.find((x) => x.m === 'applyCharFormat')!.a[4] as string) as Record<string, unknown>;
+  assert.deepEqual(json['ratios'], [90, 90, 90, 90, 90, 90, 90]);
+  assert.deepEqual(json['spacings'], [-5, -5, -5, -5, -5, -5, -5]);
+});
+
+test('apply_char_format: 7-배열은 슬롯별 값으로 통과하고 다른 길이/범위는 거부된다', async () => {
+  const { call, calls } = makeEnv();
+  await call('apply_char_format', {
+    sectionIdx: 0, paraIdx: 0, startOffset: 0, endOffset: 5,
+    widthPercent: [80, 90, 100, 100, 100, 100, 100],
+    letterSpacingPercent: [0, 0, 0, 0, 0, 0, -10],
+  });
+  const json = JSON.parse(calls.find((x) => x.m === 'applyCharFormat')!.a[4] as string) as Record<string, unknown>;
+  assert.deepEqual(json['ratios'], [80, 90, 100, 100, 100, 100, 100]);
+  assert.deepEqual(json['spacings'], [0, 0, 0, 0, 0, 0, -10]);
+  for (const bad of [
+    { widthPercent: [90, 90] },
+    { widthPercent: 20 },
+    { widthPercent: 250 },
+    { letterSpacingPercent: 99 },
+    { letterSpacingPercent: [0, 0, 0, 0, 0, 0] },
+  ]) {
+    await expectErr(call('apply_char_format', {
+      sectionIdx: 0, paraIdx: 0, startOffset: 0, endOffset: 5, ...bad,
+    }), 'INVALID_ARGS');
+  }
+});
+
+test('apply_char_format: reject 역서식에 이전 ratios/spacings 가 실린다', async () => {
+  const { call, pending, calls, charProps } = makeEnv();
+  charProps['ratios'] = [80, 80, 80, 80, 80, 80, 80];
+  charProps['spacings'] = [5, 5, 5, 5, 5, 5, 5];
+  const r = (await call('apply_char_format', {
+    sectionIdx: 0, paraIdx: 0, startOffset: 0, endOffset: 5, widthPercent: 90,
+  })) as { changeSetId: string };
+  calls.length = 0;
+  pending.reject(r.changeSetId);
+  const inverse = calls.find((x) => x.m === 'applyCharFormat')!;
+  const invJson = JSON.parse(inverse.a[4] as string) as Record<string, unknown>;
+  assert.deepEqual(invJson['ratios'], [80, 80, 80, 80, 80, 80, 80]);
+  assert.equal(invJson['spacings'], undefined); // 자간은 바꾸지 않았으므로 역서식에 없다
+});
+
+test('get_char_format: 동일 슬롯은 스칼라, 다른 슬롯은 배열, 장평 100/자간 0 은 생략', async () => {
+  const { call, charProps } = makeEnv();
+  charProps['fontSize'] = 1100;
+  charProps['ratios'] = [90, 90, 90, 90, 90, 90, 90];
+  charProps['spacings'] = [0, 0, 0, 0, 0, 0, -5];
+  const r = (await call('get_char_format', { sectionIdx: 0, paraIdx: 0, charOffset: 1 })) as Record<string, unknown>;
+  assert.equal(r['widthPercent'], 90);
+  assert.deepEqual(r['letterSpacingPercent'], [0, 0, 0, 0, 0, 0, -5]);
+  charProps['ratios'] = [100, 100, 100, 100, 100, 100, 100];
+  charProps['spacings'] = [0, 0, 0, 0, 0, 0, 0];
+  const plain = (await call('get_char_format', { sectionIdx: 0, paraIdx: 0, charOffset: 1 })) as Record<string, unknown>;
+  assert.equal(plain['widthPercent'], undefined);
+  assert.equal(plain['letterSpacingPercent'], undefined);
+  const full = (await call('get_char_format', { sectionIdx: 0, paraIdx: 0, charOffset: 1, full: true })) as Record<string, unknown>;
+  assert.equal(full['widthPercent'], 100);
+  assert.equal(full['letterSpacingPercent'], 0);
+});
+
+test('apply_para_format: lineSpacingType+lineSpacingPt 는 enum 과 2x HWPUNIT 으로 변환된다', async () => {
+  const { call, calls } = makeEnv();
+  await call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, lineSpacingType: 'fixed', lineSpacingPt: 12,
+  });
+  let json = JSON.parse(calls.find((x) => x.m === 'applyParaFormat')!.a[1] as string) as Record<string, unknown>;
+  assert.equal(json['lineSpacingType'], 'Fixed');
+  assert.equal(json['lineSpacing'], 2400); // 12pt × 200 (비율형 2x HWPUNIT)
+
+  calls.length = 0;
+  await call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, lineSpacingType: 'atLeast', lineSpacingPt: 9,
+  });
+  json = JSON.parse(calls.find((x) => x.m === 'applyParaFormat')!.a[1] as string) as Record<string, unknown>;
+  assert.equal(json['lineSpacingType'], 'Minimum');
+  assert.equal(json['lineSpacing'], 1800);
+
+  await expectErr(call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, lineSpacingType: 'spaceOnly',
+  }), 'INVALID_ARGS'); // pt 없음
+  await expectErr(call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, lineSpacingPt: 12,
+  }), 'INVALID_ARGS'); // type 없음
+  await expectErr(call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, lineSpacingType: 'fixed', lineSpacingPt: 12, lineSpacingPercent: 160,
+  }), 'INVALID_ARGS'); // 두 형태 동시 지정
+  await expectErr(call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, lineSpacingType: 'stretch',
+  }), 'INVALID_ARGS');
+});
+
+test('apply_para_format: tabStops 는 mm→2x HWPUNIT, type 문자열→코드로 변환된다', async () => {
+  const { call, calls } = makeEnv();
+  await call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0,
+    tabStops: [{ positionMm: 50, type: 'right' }, { positionMm: 25.4, fill: 2 }],
+  });
+  const json = JSON.parse(calls.find((x) => x.m === 'applyParaFormat')!.a[1] as string) as Record<string, unknown>;
+  assert.deepEqual(json['tabStops'], [
+    { position: mmToHu(50) * 2, type: 1, fill: 0 },
+    { position: mmToHu(25.4) * 2, type: 0, fill: 2 },
+  ]);
+
+  calls.length = 0;
+  await call('apply_para_format', { sectionIdx: 0, paraIdx: 0, tabStops: [] });
+  const cleared = JSON.parse(calls.find((x) => x.m === 'applyParaFormat')!.a[1] as string) as Record<string, unknown>;
+  assert.deepEqual(cleared['tabStops'], []);
+
+  await expectErr(call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, tabStops: [{ positionMm: -5 }],
+  }), 'INVALID_ARGS');
+  await expectErr(call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, tabStops: [{ positionMm: 10, type: 'middle' }],
+  }), 'INVALID_ARGS');
+});
+
+test('apply_para_format: borders/borderSpacingMm/koreanBreakUnit — 지정하지 않은 변은 보존한다', async () => {
+  const { call, calls, paraProps } = makeEnv();
+  paraProps['borderLeft'] = { type: 1, width: 6, color: '#FF0000' }; // 기존 왼쪽 테두리 (0.7mm)
+  paraProps['borderSpacing'] = [100, 200, 300, 400];
+  await call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0,
+    borders: { top: { type: 1, widthMm: 1.0, color: '#0000FF' } },
+    borderSpacingMm: { top: 2 },
+    koreanBreakUnit: 'char',
+  });
+  const json = JSON.parse(calls.find((x) => x.m === 'applyParaFormat')!.a[1] as string) as Record<string, unknown>;
+  assert.deepEqual(json['borderTop'], { type: 1, width: 10, color: '#0000FF' }); // 1.0mm → 인덱스 10
+  assert.deepEqual(json['borderLeft'], { type: 1, width: 6, color: '#FF0000' }); // 미지정 변은 현재값 유지
+  assert.equal(json['borderRight'], undefined); // 기존에도 없음
+  assert.deepEqual(json['borderSpacing'], [100, 200, mmToHu(2), 400]);
+  assert.equal(json['koreanBreakUnit'], 1);
+
+  // widthMm 스냅 + type 0 제거
+  calls.length = 0;
+  await call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0,
+    borders: { bottom: { type: 2, widthMm: 0.9, color: '#00FF00' }, left: { type: 0 } },
+  });
+  const json2 = JSON.parse(calls.find((x) => x.m === 'applyParaFormat')!.a[1] as string) as Record<string, unknown>;
+  assert.deepEqual(json2['borderBottom'], { type: 2, width: 10, color: '#00FF00' }); // 0.9 → 1.0mm 스냅
+  assert.deepEqual(json2['borderLeft'], { type: 0, width: 0, color: '#000000' }); // type 0 은 테두리 제거
+
+  for (const bad of [
+    { borders: { top: { type: 1, color: '#000000' } } },           // widthMm 없음
+    { borders: { top: { type: 1, widthMm: 1, color: 'blue' } } },   // 잘못된 색
+    { borders: { middle: { type: 1, widthMm: 1, color: '#000000' } } },
+    { borders: { top: { type: 99, widthMm: 1, color: '#000000' } } },
+    { koreanBreakUnit: 'syllable' },
+    { borderSpacingMm: { left: 'wide' } },
+  ]) {
+    await expectErr(call('apply_para_format', { sectionIdx: 0, paraIdx: 0, ...bad }), 'INVALID_ARGS');
+  }
+});
+
+test('get_para_format: 줄간격/탭/테두리/줄나눔 읽기 — 기본값은 생략한다', async () => {
+  const { call, paraProps } = makeEnv();
+  paraProps['lineSpacingType'] = 'Fixed';
+  paraProps['lineSpacing'] = 18; // px
+  paraProps['tabStops'] = [{ position: mmToHu(40) * 2, type: 2, fill: 1 }];
+  paraProps['borderTop'] = { type: 1, width: 10, color: '#123456' };
+  paraProps['borderLeft'] = { type: 0, width: 0, color: '#000000' };
+  paraProps['borderSpacing'] = [0, 0, mmToHu(1), 0];
+  paraProps['koreanBreakUnit'] = 1;
+  const r = (await call('get_para_format', { sectionIdx: 0, paraIdx: 0 })) as Record<string, unknown>;
+  assert.equal(r['lineSpacingType'], 'fixed');
+  assert.equal(r['lineSpacingPt'], 13.5); // 18px × 72/96
+  assert.equal(r['lineSpacingPercent'], undefined);
+  assert.deepEqual(r['tabStops'], [{ positionMm: 40, type: 'center', fill: 1 }]);
+  assert.deepEqual(r['borders'], { top: { type: 1, widthMm: 1, color: '#123456' } }); // type-0 left 는 생략
+  assert.deepEqual(r['borderSpacingMm'], { top: 1 });
+  assert.equal(r['koreanBreakUnit'], 'char');
+
+  // 기본 문단 — 새 필드 전부 생략
+  const plainEnv = makeEnv();
+  const plain = (await plainEnv.call('get_para_format', { sectionIdx: 0, paraIdx: 1 })) as Record<string, unknown>;
+  assert.equal(plain['lineSpacingType'], undefined);
+  assert.equal(plain['tabStops'], undefined);
+  assert.equal(plain['borders'], undefined);
+  assert.equal(plain['borderSpacingMm'], undefined);
+  assert.equal(plain['koreanBreakUnit'], undefined);
+  // full:true 는 기본값도 싣는다
+  const full = (await plainEnv.call('get_para_format', { sectionIdx: 0, paraIdx: 1, full: true })) as Record<string, unknown>;
+  assert.equal(full['lineSpacingType'], 'percent');
+  assert.equal(full['koreanBreakUnit'], 'word');
+  assert.deepEqual(full['tabStops'], []);
+});
+
+test('apply_para_format + get_para_format: cellPath 중첩 셀은 ByPath wasm 경로를 쓴다', async () => {
+  const { call, calls, pending } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['x']],
+  })) as { table: { paraIdx: number; controlIdx: number } };
+  const cell = { paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, cellIdx: 0 };
+  const cellPath = [{ controlIndex: c.table.controlIdx, cellIndex: 0, cellParaIndex: 0 }];
+
+  const r = (await call('apply_para_format', {
+    sectionIdx: 0, paraIdx: 0, cell, cellPath, alignment: 'right',
+  })) as { changeSetId: string };
+  const apply = calls.find((x) => x.m === 'applyParaFormatInCellByPath')!;
+  const pathJson = JSON.parse(apply.a[0] as string) as Array<Record<string, number>>;
+  assert.equal(pathJson[0].controlIndex, c.table.controlIdx);
+  assert.equal(pathJson[0].cellIndex, 0);
+  assert.equal(pathJson[0].cellParaIndex, 0); // 활성 문단 인덱스로 교체됐다
+  assert.ok(!calls.some((x) => x.m === 'applyParaFormatInCell'));
+
+  // 읽기도 ByPath
+  calls.length = 0;
+  await call('get_para_format', { sectionIdx: 0, paraIdx: 0, cell, cellPath });
+  assert.ok(calls.some((x) => x.m === 'getCellParaPropertiesAtByPath'));
+
+  // cellPath 의 첫 세그먼트는 cell 주소와 일치해야 한다
+  await expectErr(call('get_para_format', {
+    sectionIdx: 0, paraIdx: 0, cell,
+    cellPath: [{ controlIndex: 99, cellIndex: 0, cellParaIndex: 0 }],
+  }), 'INVALID_ARGS');
+  // cell 없이 cellPath 만 — 거부
+  await expectErr(call('get_para_format', {
+    sectionIdx: 0, paraIdx: 0, cellPath,
+  }), 'INVALID_ARGS');
+
+  // reject 는 setCellParaShapeIdByPath 로 복원한다 (같은 change-set 이라 표까지 되돌아가므로 마지막에 둔다)
+  calls.length = 0;
+  pending.reject(r.changeSetId);
+  assert.ok(calls.some((x) => x.m === 'setCellParaShapeIdByPath'));
 });

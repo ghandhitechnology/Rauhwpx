@@ -62,3 +62,20 @@ test('apply_edits 허용 목록이 허브와 스튜디오에서 일치한다', (
   assert.ok(hub.size > 0, 'tools.mjs에서 배치 허용 목록을 찾지 못함');
   assert.deepEqual([...hub].sort(), [...studio].sort(), '허브/스튜디오 배치 허용 목록 불일치');
 });
+
+// read_batch 허용 목록도 같은 방식으로 가드한다 — 허브 enum 과 스튜디오 dispatch 게이트가
+// 어긋나면 허브 검증을 통과한 항목이 스튜디오에서 거부되거나 그 반대가 된다.
+test('read_batch 허용 목록이 허브와 스튜디오에서 일치한다', () => {
+  const studio = parseNameList(
+    executorSrc,
+    /const BATCHABLE_READ_TOOLS[^=]*=\s*new Set\(\[([\s\S]*?)\]\);/,
+    'BATCHABLE_READ_TOOLS',
+  );
+  const hub = parseNameList(
+    toolsSrc,
+    /export const BATCHABLE_READ_TOOL_NAMES\s*=\s*Object\.freeze\(\[([\s\S]*?)\]\);/,
+    'BATCHABLE_READ_TOOL_NAMES',
+  );
+  assert.ok(hub.size > 0, 'tools.mjs에서 read_batch 허용 목록을 찾지 못함');
+  assert.deepEqual([...hub].sort(), [...studio].sort(), '허브/스튜디오 read_batch 허용 목록 불일치');
+});

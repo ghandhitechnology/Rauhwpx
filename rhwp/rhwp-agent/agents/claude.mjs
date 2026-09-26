@@ -12,7 +12,7 @@ import {
   flushCredentialMirrorSync,
   prepareCredentialMirrorSync,
 } from '../credential-mirror.mjs';
-import { applyManagedCliLaunch, resolveNpmCliLaunch } from '../npm-cli-launch.mjs';
+import { applyManagedCliLaunch, resolveCommandOnPath, resolveNpmCliLaunch } from '../npm-cli-launch.mjs';
 import {
   createLineReader,
   isPlanningRestricted,
@@ -800,14 +800,22 @@ export function createClaudeSession(opts, {
       hasCompletedTurn = true;
       emitUsage(e);
       if (e.permission_denials?.length) {
-        const names = e.permission_denials
-          .map((d) => d?.tool_name ?? d?.tool ?? JSON.stringify(d))
-          .join(', ');
-        onEvent({ type: 'error', agent: 'claude', message: `permission denied for: ${names}` });
+        // 거부된 호출은 실행되지 않았지만 모델은 이미 실패 응답을 받았다 — 턴
+        // 오류가 아니라 도구 결과로 흘려 pending 행을 닫고 턴 정착에 관여하지 않는다.
+        for (const denial of e.permission_denials) {
+          const name = denial?.tool_name ?? denial?.tool ?? JSON.stringify(denial);
+          onEvent({
+            type: 'tool-result',
+            agent: 'claude',
+            callId: String(denial?.tool_use_id ?? ''),
+            ok: false,
+            resultPreview: `permission denied for: ${name}`,
+          });
+        }
       }
       lastStopReason = e.stop_reason ?? e.subtype;
-      // 어느 호출이든 한 번 실패했으면 실패한 턴이다 — studio 가 스테이징 편집을
-      // 규칙대로 되돌릴 수 있게 보존한다.
+      // result 자체의 실패는 턴 실패다 — studio 가 스테이징 편집을 커밋하지 않고
+      // 검토로 남기도록 turn-end 에 실린다.
       if (e.is_error) resultErrorMessage = String(e.result);
       // 이 result 뒤에 wake 재호출이 이어질 수 있다 — 그 텍스트는 별개 문단이다.
       needsWakeTextBreak = true;
@@ -918,6 +926,13 @@ export function createClaudeSession(opts, {
         },
       }, sessionId, resume, owner.abortController);
       options.env = { ...options.env, ...launch.env };
+      // SDK 는 pathToClaudeCodeExecutable 이 없으면 env.PATH 를 보지 않고 자체
+      // 번들 바이너리로 떨어진다 — spawn 경로와 같은 바이너리를 가리키도록 PATH
+      // 해석을 여기서 끝낸다 (PATH 스텁으로 바꿔치기하는 e2e 도 이 경로를 탄다).
+      if (!options.pathToClaudeCodeExecutable && platform !== 'win32') {
+        const resolvedBin = resolveCommandOnPath(launch.command, { env: options.env });
+        if (resolvedBin) options.pathToClaudeCodeExecutable = resolvedBin;
+      }
       query = queryAgent({
         prompt: owner.queue,
         options,

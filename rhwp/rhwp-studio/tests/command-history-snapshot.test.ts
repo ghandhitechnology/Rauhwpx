@@ -159,7 +159,7 @@ test('외부 점유 스냅샷도 예산에 합산된다(retain/release, 음수 �
   assert.match(inputHandler, /releaseExternalSnapshot\(count = 1\): void \{\s*\n\s*this\.history\.releaseExternalSnapshot\(count\);/);
 });
 
-test('투기적 pending 스냅샷은 성공·예외 뒤에 점유를 반환한다', () => {
+test('원자적 배치 스냅샷은 성공·예외 뒤에 점유를 반환한다', () => {
   let nextId = 0;
   let held = 0;
   let prepared = 0;
@@ -189,9 +189,8 @@ test('투기적 pending 스냅샷은 성공·예외 뒤에 점유를 반환한�
     overlay: { clear() {}, setOps() {} } as never,
   });
   manager.beginTurn('claude');
-  const changeSetId = manager.getChangeSets()[0].id;
 
-  assert.equal(manager.withMarkedOpsApplied(changeSetId, () => {
+  assert.equal(manager.runAtomicBatch(() => {
     assert.equal(held, 1);
     assert.equal(snapshots.size, 1);
     return 42;
@@ -200,7 +199,7 @@ test('투기적 pending 스냅샷은 성공·예외 뒤에 점유를 반환한�
   assert.equal(held, 0);
   assert.equal(snapshots.size, 0);
 
-  assert.throws(() => manager.withMarkedOpsApplied(changeSetId, () => {
+  assert.throws(() => manager.runAtomicBatch(() => {
     assert.equal(held, 1);
     assert.equal(snapshots.size, 1);
     throw new Error('verification failed');

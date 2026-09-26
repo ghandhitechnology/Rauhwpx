@@ -151,10 +151,6 @@ function makeExecutor(cursor?: Record<string, unknown>) {
         },
       };
     },
-    markDelete: (agent: string, range: unknown) => {
-      pendingCalls.push({ method: 'markDelete', args: [agent, range] });
-      return { changeSetId: 'cs-1', markedText: 'marked' };
-    },
     replaceText: (range: { sectionIdx: number; startParaIdx: number; startCharOffset: number; cell?: CellAddr }, text: string, agent: string) => {
       pendingCalls.push({ method: 'replaceText', args: [range, text, agent] });
       return {
@@ -172,10 +168,7 @@ function makeExecutor(cursor?: Record<string, unknown>) {
       return { changeSetId: 'cs-1' };
     },
     setFieldValue: () => ({ changeSetId: 'cs-1', fieldId: 1, oldValue: '', newValue: '' }),
-    hasDestructiveTableMark: () => false,
-    hasPendingStructureOp: () => false,
     hasTemplateMutation: () => false,
-    findDeleteMarkContaining: () => null as null | { range: Record<string, number>; text: string },
   };
   const inputHandler = {
     getCursorPosition: () => cursor ?? { sectionIndex: 0, paragraphIndex: 0, charOffset: 0 },
@@ -202,9 +195,39 @@ async function expectToolError(p: Promise<unknown>, code: string): Promise<void>
   assert.fail(`${code} 오류를 기대했지만 성공함`);
 }
 
-test('get_structure: 섹션에 tables[] 로 셀 주소와 셀 텍스트가 실린다', async () => {
+test('get_structure: 표는 앵커 문단 뒤에 cellIdx 그리드로 실리고 스팬·셀 문단·중첩 표를 표시한다', async () => {
+  const { executor, wasm } = makeExecutor();
+  // 셀 1 이 두 행에 걸친(rowSpan 2) 표로 바꾸고, 셀 2 의 빈 둘째 문단에 중첩 표를 둔다.
+  Object.assign(wasm, {
+    getTableDimensions: () => ({ rowCount: 2, colCount: 2, cellCount: 3 }),
+    getCellInfo: (_s: number, _p: number, _c: number, idx: number) => (
+      [{ row: 0, col: 0, rowSpan: 1, colSpan: 1 }, { row: 0, col: 1, rowSpan: 2, colSpan: 1 }, { row: 1, col: 0, rowSpan: 1, colSpan: 1 }][idx]
+    ),
+  });
+  const cells = [['Name'], ['Value'], ['foo', '']];
+  Object.assign(wasm, {
+    getCellParagraphCount: (_s: number, _p: number, _c: number, cell: number) => cells[cell].length,
+    getCellParagraphLength: (_s: number, _p: number, _c: number, cell: number, cp: number) => cells[cell][cp].length,
+    getTextInCell: (_s: number, _p: number, _c: number, cell: number, cp: number, off: number, cnt: number) =>
+      cells[cell][cp].slice(off, off + cnt),
+  });
+  wasm.nestedTableParas.add('2:1');
+  const r = (await executor.execute('get_structure', {}, 'claude')) as { mcpContent: Array<{ text: string }> };
+  const lines = r.mcpContent[0].text.split('\n').slice(2);
+  assert.deepEqual(lines, [
+    's0 · 3 paragraphs',
+    's0 p0 (5) Intro',
+    's0 p1 (0)',
+    '  table s0 p1 c0 2x2',
+    '  r0 [0] Name | [1 rs2] Value',
+    '  r1 [2] foo⏎⊞',
+    's0 p2 (5) Outro',
+  ]);
+});
+
+test('get_structure format:json: 섹션에 tables[] 로 셀 주소와 셀 텍스트가 실린다', async () => {
   const { executor } = makeExecutor();
-  const r = (await executor.execute('get_structure', {}, 'claude')) as {
+  const r = (await executor.execute('get_structure', { format: 'json' }, 'claude')) as {
     sections: Array<{ tables?: Array<Record<string, unknown>> }>;
   };
   const tables = r.sections[0].tables;
@@ -290,23 +313,6 @@ test('get_text_range: cell 인자로 셀 문단을 읽는다', async () => {
   assert.equal(r.paraLength, 3);
 });
 
-test('insert_text: pending 삭제 마크 내부 지점은 PENDING_DELETE_OVERLAP 으로 거부된다', async () => {
-  const { executor, pending, pendingCalls } = makeExecutor();
-  pending.findDeleteMarkContaining = () => ({
-    range: { startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 3 },
-    text: 'foo',
-  });
-  await expectToolError(
-    executor.execute(
-      'insert_text',
-      { expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 1, text: 'X' },
-      'claude',
-    ),
-    'PENDING_DELETE_OVERLAP',
-  );
-  assert.equal(pendingCalls.length, 0, '가드에 걸리면 pending 에 도달하지 않아야 한다');
-});
-
 test('insert_text: cell 인자가 pending 으로 전달된다', async () => {
   const { executor, pendingCalls } = makeExecutor();
   await executor.execute(
@@ -329,7 +335,7 @@ test('replace_range: 원자적 replaceText op 에 cell 이 그대로 전달된�
     },
     'claude',
   );
-  // markDelete + insertText 조합이 아니라 단일 원자적 op 이다
+  // 삭제 + 삽입 두 op 조합이 아니라 단일 원자적 op 이다
   assert.equal(pendingCalls.length, 1);
   assert.equal(pendingCalls[0].method, 'replaceText');
   const range = pendingCalls[0].args[0] as { cell?: CellAddr };
@@ -506,18 +512,6 @@ test('pending: 셀 삽입 approve 는 미리보기 텍스트를 재삽입 없이
   assert.equal(cells[2][0], 'Yfoo');
   assert.equal(calls.filter((call) => call === 'insertTextInCell').length, 1);
   assert.equal(mgr.hasPending(), false);
-});
-
-test('pending: 셀 delete 마크는 셀 텍스트를 캡처하고 approve 시 삭제한다', () => {
-  const { mgr, cells } = makeManager();
-  const r = mgr.markDelete('claude', {
-    sectionIdx: 0, cell: CELL_FOO,
-    startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 3,
-  });
-  assert.equal(r.markedText, 'foo');
-  assert.equal(cells[2][0], 'foo'); // 마크만, 아직 삭제 아님
-  mgr.approve(r.changeSetId);
-  assert.equal(cells[2][0], '');
 });
 
 test('pending: 셀 서식은 applyCharFormatInCell 로 적용된다', () => {

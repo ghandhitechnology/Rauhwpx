@@ -1086,6 +1086,13 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 쪽의 줄 상자·베이스라인·런 x 범위를 압축 JSON 으로 반환한다 (에이전트 측정용).
+    #[wasm_bindgen(js_name = getPageLineLayout)]
+    pub fn get_page_line_layout(&self, page_num: u32) -> Result<String, JsValue> {
+        self.get_page_line_layout_native(page_num)
+            .map_err(|e| e.into())
+    }
+
     /// 컨트롤(표, 이미지 등) 레이아웃 정보를 반환한다.
     #[wasm_bindgen(js_name = getPageControlLayout)]
     pub fn get_page_control_layout(&self, page_num: u32) -> Result<String, JsValue> {
@@ -7451,6 +7458,41 @@ impl HwpDocument {
     #[wasm_bindgen(js_name = discardPictureTransform)]
     pub fn discard_picture_transform(&mut self, id: u32) {
         self.discard_picture_transform_native(id);
+    }
+
+    /// 에이전트 대기 편집 전에 본문 문단 하나를 통째로 보관한다 (문단 단위 역연산).
+    #[wasm_bindgen(js_name = captureParagraph)]
+    pub fn capture_paragraph(&mut self, section_idx: u32, para_idx: u32) -> Result<u32, JsValue> {
+        self.capture_paragraph_native(section_idx as usize, para_idx as usize)
+            .map_err(|e| e.into())
+    }
+
+    /// 보관한 문단으로 지정 위치의 본문 문단을 되돌린다. 보관본은 유지된다.
+    #[wasm_bindgen(js_name = restoreCapturedParagraph)]
+    pub fn restore_captured_paragraph(
+        &mut self,
+        id: u32,
+        section_idx: u32,
+        para_idx: u32,
+    ) -> Result<(), JsValue> {
+        self.restore_captured_paragraph_native(id, section_idx as usize, para_idx as usize)
+            .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = discardParagraphCapture)]
+    pub fn discard_paragraph_capture(&mut self, id: u32) {
+        self.discard_paragraph_capture_native(id);
+    }
+
+    /// 레이아웃을 뺀 본문 문단 내용 지문 — 되돌리기 전 사용자 수정 여부 판별용.
+    #[wasm_bindgen(js_name = getParagraphContentDigest)]
+    pub fn get_paragraph_content_digest(
+        &self,
+        section_idx: u32,
+        para_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.paragraph_content_digest_native(section_idx as usize, para_idx as usize)
+            .map_err(|e| e.into())
     }
 
     /// Document 스냅샷을 저장하고 ID를 반환한다.

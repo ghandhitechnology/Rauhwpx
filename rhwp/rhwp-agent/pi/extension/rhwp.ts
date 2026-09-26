@@ -231,7 +231,10 @@ function normalizeContentBlock(block: any): ToolContentBlock {
 export function toToolContent(result: unknown): ToolContentBlock[] {
   const value = result as any;
   if (value && typeof value === 'object' && Array.isArray(value.mcpContent)) {
-    return value.mcpContent.map(normalizeContentBlock);
+    const blocks = value.mcpContent.map(normalizeContentBlock);
+    // 브리지가 붙인 editReport 는 mcpContent 밖에 있다 — 버리면 거절 보고가 사라진다.
+    if (value.editReport !== undefined) blocks.push({ type: 'text', text: JSON.stringify({ editReport: value.editReport }) });
+    return blocks;
   }
   const image = value && typeof value === 'object' ? value.image : null;
   if (image && typeof image === 'object' && typeof image.data === 'string'
@@ -334,6 +337,13 @@ export async function prepareInsertImageArgs(
   pathPolicy: Pick<PiExtensionConfig, 'permissionProfile' | 'rootDir' | 'readOnlyRoots'>,
 ): Promise<Record<string, unknown>> {
   const { imagePath, imageBase64, extension, ...rest } = args ?? {};
+  // 참조 이미지는 허브가 참조 저장소에서 직접 읽는다.
+  if (typeof rest.referenceFileId === 'string' && rest.referenceFileId.length > 0) {
+    if (imagePath || imageBase64) {
+      throw hubError('INVALID_ARGS', 'pass only one of imagePath, imageBase64 or referenceFileId');
+    }
+    return rest;
+  }
   let buf: Buffer;
   let ext: string;
   if (typeof imagePath === 'string' && imagePath.length > 0) {

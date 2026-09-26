@@ -545,6 +545,28 @@ export interface TableProperties {
   patternType?: number;
 }
 
+/** WASM getPageLineLayout() 반환 요소 — 쪽 기준 px, 문자 범위는 텍스트 오프셋 */
+export interface LineLayoutItem {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** 그려지는 베이스라인의 쪽 기준 y */
+  bl: number;
+  sec?: number;
+  para?: number;
+  cs?: number;
+  ce?: number;
+  /** 잉크 x 범위 (빈 줄이면 없음) */
+  tx0?: number;
+  tx1?: number;
+  area?: 'header' | 'footer' | 'note' | 'master';
+  /** 셀 안 줄: pp=최외곽 표 문단, path=[controlIndex, cellIndex, cellParaIndex][] */
+  cell?: { pp: number; path: Array<[number, number, number]> };
+  /** [x, w, charStart, charEnd] */
+  runs: Array<[number, number, number, number]>;
+}
+
 /** WASM getPageControlLayout() 반환 요소 */
 export interface NoteControlRef {
   kind: 'footnote' | 'endnote';

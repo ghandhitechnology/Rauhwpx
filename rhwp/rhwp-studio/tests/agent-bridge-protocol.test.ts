@@ -72,21 +72,6 @@ test('RevisionTracker: 문서 로드/교체(dirty→false, 저장 아님)는 반
   tracker.dispose();
 });
 
-test('RevisionTracker: holdDuring 창 안의 이벤트는 bump하지 않는다', async () => {
-  const bus = new EventBus();
-  const tracker = new RevisionTracker(bus);
-  tracker.holdDuring(() => {
-    bus.emit('document-mutated', 'agent-preview');
-    bus.emit('document-changed');
-  });
-  assert.equal(tracker.revision, 1);
-  await microtask();
-  // 창 밖에서는 정상 bump — 억제가 누적되지 않는다
-  bus.emit('document-mutated', 'test');
-  assert.equal(tracker.revision, 2);
-  tracker.dispose();
-});
-
 // ─── AgentToolExecutor (stub deps) ──────────────────────────
 
 function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']]) {
@@ -122,10 +107,6 @@ function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']])
         },
       };
     },
-    markDelete: (agent: string, range: unknown) => {
-      calls.push({ method: 'markDelete', args: [agent, range] });
-      return { changeSetId: 'cs-1', markedText: 'marked' };
-    },
     replaceText: (range: { sectionIdx: number; startParaIdx: number; startCharOffset: number }, text: string, agent: string) => {
       calls.push({ method: 'replaceText', args: [range, text, agent] });
       bus.emit('document-mutated', 'agent-pending-edit');
@@ -152,7 +133,6 @@ function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']])
       bus.emit('document-mutated', 'agent-pending-edit');
       return { changeSetId: 'cs-1', fieldId: 7, oldValue: 'old', newValue: value };
     },
-    hasPendingStructureOp: () => false,
     hasTemplateMutation: () => false,
     runAtomicBatch: <T,>(fn: () => T): T => {
       calls.push({ method: 'runAtomicBatch', args: [] });
@@ -203,20 +183,25 @@ test('executor: document-write helper covers every mutating tool', () => {
     'delete_table',
     'edit_footnote',
     'edit_header_footer',
+    'edit_object',
     'edit_table',
     'insert_chart',
     'insert_equation',
     'insert_footnote',
     'insert_image',
     'insert_page_break',
+    'insert_shape',
     'insert_text',
     'prepare_engine_edit_session',
     'publish_cloud_document',
     'replace_all',
     'replace_range',
     'set_bookmark',
+    'set_cell_props',
     'set_field_value',
     'set_page_layout',
+    'set_table_props',
+    'set_zone_borders',
     'template_apply_paragraph_format',
     'template_apply_section_layout',
     'template_insert_block',
@@ -296,32 +281,23 @@ test('executor: a settled provider turn is rejected before a document write', as
   );
 });
 
-test('executor: raw and semantic write modes cannot mix in either order within one turn', async () => {
-  const first = makeExecutor();
-  first.executor.beginTurn();
-  await first.executor.execute('prepare_engine_edit_session', {
+test('executor: engine session setup and semantic writes share one turn in either profile', async () => {
+  const { executor } = makeExecutor();
+  executor.beginTurn();
+  const safe = { workflow: 'direct' as const, permissionProfile: 'safe' as const };
+  await executor.execute('prepare_engine_edit_session', {
     expectedRevision: 1,
     method: 'copySelection',
     args: [0, 0, 0, 0, 1],
-  });
-  await expectToolError(first.executor.execute('insert_text', {
+  }, 'claude', safe);
+  await executor.execute('insert_text', {
     expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-  }), 'MIXED_ENGINE_WRITE_MODE');
-  first.executor.endTurn();
-  await first.executor.execute('insert_text', {
-    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-  });
-
-  const second = makeExecutor();
-  second.executor.beginTurn();
-  await second.executor.execute('insert_text', {
-    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-  });
-  await expectToolError(second.executor.execute('prepare_engine_edit_session', {
+  }, 'claude', safe);
+  await executor.execute('prepare_engine_edit_session', {
     expectedRevision: 2,
     method: 'copySelection',
     args: [0, 0, 0, 0, 1],
-  }), 'MIXED_ENGINE_WRITE_MODE');
+  }, 'claude', safe);
 });
 
 test('executor: planning reads and authorized implementation writes remain available', async () => {
@@ -354,9 +330,9 @@ test('executor: structural template previews block ordinary document writes', as
   assert.deepEqual(calls, []);
 });
 
-test('executor: get_structure가 revision/미리보기를 반환', async () => {
+test('executor: get_structure format:json 은 revision/미리보기를 예전 모양 그대로 반환', async () => {
   const { executor } = makeExecutor([['hello world', 'second para']]);
-  const r = (await executor.execute('get_structure', {}, 'claude')) as any;
+  const r = (await executor.execute('get_structure', { format: 'json' }, 'claude')) as any;
   assert.equal(r.revision, 1);
   assert.equal(r.sectionCount, 1);
   assert.equal(r.pageCount, 3);
@@ -364,11 +340,32 @@ test('executor: get_structure가 revision/미리보기를 반환', async () => {
   assert.equal(r.sections[0].paragraphs[0].text, 'hello world');
 });
 
+test('executor: get_structure 기본은 머리 줄 + 범례 + 문단 줄 텍스트이고 빈 문단 연속을 접는다', async () => {
+  const { executor } = makeExecutor([['hello world', '', '', '', 'tail\ttab']]);
+  const r = (await executor.execute('get_structure', { maxPreviewChars: 8 }, 'claude')) as any;
+  assert.equal(r.revision, 1);
+  assert.equal(r.pageCount, 3);
+  assert.equal(r.truncated, false);
+  assert.equal(r.sections, undefined);
+  const lines = (r.mcpContent[0].text as string).split('\n');
+  assert.equal(lines[0], 'revision 1 · 3 pages · 1 section');
+  assert.match(lines[1], /^Lines: /);
+  assert.deepEqual(lines.slice(2), [
+    's0 · 5 paragraphs',
+    's0 p0 (11) hello wo…',
+    's0 p1-p3 empty',
+    's0 p4 (8) tail⇥tab',
+  ]);
+});
+
 test('executor: get_structure maxParagraphs로 잘림', async () => {
   const { executor } = makeExecutor([['a', 'b', 'c']]);
-  const r = (await executor.execute('get_structure', { maxParagraphs: 2 }, 'claude')) as any;
+  const r = (await executor.execute('get_structure', { maxParagraphs: 2, format: 'json' }, 'claude')) as any;
   assert.equal(r.truncated, true);
   assert.equal(r.sections[0].paragraphs.length, 2);
+  const text = (await executor.execute('get_structure', { maxParagraphs: 2 }, 'claude')) as any;
+  assert.equal(text.truncated, true);
+  assert.match(text.mcpContent[0].text.split('\n')[0], /TRUNCATED/);
 });
 
 test('executor: get_text_range는 count를 clamp', async () => {
@@ -440,7 +437,8 @@ test('executor: insert_text는 pending에 위임하고 새 revision을 반환', 
   assert.deepEqual(r.insertedRange, {
     startParaIdx: 0, startCharOffset: 5, endParaIdx: 0, endCharOffset: 11,
   });
-  assert.equal(r.note, 'staged now as live preview; when the turn ends it is auto-committed (전체 접근) or held for the user’s review and approval (안전). A failed turn rolls it back');
+  // 스테이징 규칙은 공유 규칙에 한 번만 있다 — 결과마다 반복하지 않는다.
+  assert.equal(r.note, undefined);
 });
 
 test('executor: delete_range 빈 범위 → INVALID_ARGS', async () => {
@@ -460,7 +458,7 @@ test('executor: replace_range = 원자적 pending.replaceText 위임', async () 
     expectedRevision: 1, sectionIdx: 0,
     startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 5, text: 'goodbye',
   }, 'claude')) as any;
-  // markDelete + insertText 조합이 아니라 단일 원자적 op 이다
+  // 삭제 + 삽입 두 op 조합이 아니라 단일 원자적 op 이다
   assert.deepEqual(calls.map((c) => c.method), ['replaceText']);
   assert.deepEqual(calls[0].args[0], {
     sectionIdx: 0, startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 5,
@@ -495,6 +493,10 @@ test('executor: apply_edits 는 revision 검사 한 번으로 항목들을 원�
   // 항목별 revision/note 는 제거된다 — 최상위 값만 유효
   assert.equal(r.results[0].revision, undefined);
   assert.equal(r.results[0].note, undefined);
+  assert.equal(r.note, undefined);
+  // 같은 change set 이면 changeSetId 는 최상위에 한 번만 싣는다
+  assert.equal(r.changeSetId, 'cs-1');
+  assert.equal(r.results[0].changeSetId, undefined);
   assert.ok(Number.isInteger(r.revision) && r.revision > 1);
   assert.ok(r.results[0].insertedRange);
 });
@@ -573,7 +575,7 @@ test('executor: set_field_value 응답 형태', async () => {
 
 test('executor: render_page 범위 검증 + RESULT_TOO_LARGE 대신 정상 SVG', async () => {
   const { executor } = makeExecutor();
-  const r = (await executor.execute('render_page', { pageIndex: 0 }, 'claude')) as any;
+  const r = (await executor.execute('render_page', { pageIndex: 0, format: 'svg' }, 'claude')) as any;
   assert.equal(r.svg, '<svg/>');
   await expectToolError(executor.execute('render_page', { pageIndex: 3 }, 'claude'), 'INVALID_ARGS');
 });

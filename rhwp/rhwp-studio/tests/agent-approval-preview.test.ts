@@ -21,11 +21,11 @@ test('agent approval records the rendered preview instead of replaying applied e
   const approve = between(pendingSrc, '  approve(changeSetId: string): boolean {', '\n  /** reject');
 
   assert.match(approve, /previewId = wasm\.saveSnapshot\(\)/, 'capture the exact rendered preview');
-  assert.match(approve, /this\.revertAppliedOps\(kept, keepPreviewsOf, userEditSeqNow\)[\s\S]*beforeId = wasm\.saveSnapshot\(\)/,
+  assert.match(approve, /this\.revertAppliedOps\(kept, keepPreviewsOf, userEditSeqNow[^)]*\)[\s\S]*beforeId = wasm\.saveSnapshot\(\)/,
     'capture undo state after reverting applied pending ops');
   // 전부 드리프트된 경우엔 되돌리지 않는다 — 드리프트 미리보기는 사용자 소유라
   // 지워서 before 를 만들면 undo 가 사용자 글자를 잘라낸다.
-  assert.match(approve, /if \(kept\.length > 0\) \{\s*\n\s*this\.revertAppliedOps\(/,
+  assert.match(approve, /if \(kept\.length > 0\) \{\s*\n\s*failed = this\.revertAppliedOps\(/,
     'only revert when something survived drift detection');
   assert.match(approve, /wasm\.restoreSnapshot\(previewId\)[\s\S]*this\.restorePendingState\(previewState\)/,
     'restore both the document and pending ranges before approval');
@@ -33,8 +33,10 @@ test('agent approval records the rendered preview instead of replaying applied e
     'reserve the three transient snapshot slots before capturing approval');
   assert.match(approve, /new PreparedSnapshotCommand\(/, 'adopt the prepared before snapshot');
   assert.match(approve, /kind: 'record'/, 'record the already-applied result without a second mutation pass');
-  assert.doesNotMatch(approve, /performInsert|replayOps|reapplyOps/,
+  assert.doesNotMatch(approve, /performInsert|replayOps|reapplyOps|applyApprovalOnlyOps|applyObjectOp/,
     'approval must not reconstruct text or formatting from lossy operation metadata');
+  assert.match(approve, /new PreparedSnapshotCommand\('agentApplyChangeSet', cursor, cursor, beforeId, \(\) => cursor\)/,
+    'every staged op is already live, so approval only adopts the preview');
 });
 
 test('prepared snapshot command restores exact before and after documents for undo/redo', () => {
@@ -76,7 +78,7 @@ test('prepared snapshot command adopts current preview and round-trips snapshots
 });
 
 test('template transfers capture a lossless baseline, lock direct edits, and join normal approval undo', () => {
-  const addTemplate = between(pendingSrc, '  addTemplateMutation(', '\n  /**\n   * executor 가드');
+  const addTemplate = between(pendingSrc, '  addTemplateMutation(', '\n  /**\n   * 원자적 벌크 교체');
   assert.match(addTemplate, /const snapshotId = wasm\.saveSnapshot\(\)[\s\S]*rawReport = operation\(\)/,
     'the baseline must be captured before structural transfer');
   assert.match(addTemplate, /kind: 'template'[\s\S]*snapshotId/);

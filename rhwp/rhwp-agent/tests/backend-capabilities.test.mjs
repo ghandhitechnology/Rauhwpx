@@ -44,6 +44,7 @@ import {
   systemBriefFor,
   validateExecutionMode,
 } from '../agents/backend.mjs';
+import { RHWP_TOOL_RULES } from '../tools.mjs';
 
 const testHome = mkdtempSync(path.join(os.tmpdir(), 'rhwp-backend-test-'));
 test.after(() => rmSync(testHome, { recursive: true, force: true }));
@@ -499,9 +500,10 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(implementing, /run every validation listed/);
   assert.match(implementing, /completed, blocked, and deferred plan items/);
   assert.match(implementing, /Never call partial work complete/);
-  assert.match(implementing, /Higher-level document writes commit only after an explicitly successful turn/);
-  assert.match(implementing, /failed, interrupted, and unknown outcomes roll back staged changes/);
-  assert.match(implementing, /apply_engine_edits commits one atomic undoable batch/);
+  assert.match(implementing, /unsuccessful turn leaves them in review/);
+  assert.doesNotMatch(implementing, /roll back staged changes|roll them back/);
+  assert.match(implementing, /Document writes, including apply_engine_edits batches, commit only after an explicitly successful turn/);
+  assert.match(implementing, /can mix with semantic writes in the same turn/);
   assert.doesNotMatch(implementing, /present_implementation_plan/);
 });
 
@@ -513,7 +515,8 @@ test('permission profiles split approval-gated staging from free editing', () =>
     systemBriefFor({ workflow: 'plan', phase: 'implementing', permissionProfile: 'safe' }),
   ]) {
     assert.match(safeBrief, /review and approve the staged changes/);
-    assert.match(safeBrief, /unavailable in this perm/);
+    assert.match(safeBrief, /apply_engine_edits batches/);
+    assert.doesNotMatch(safeBrief, /unavailable in this perm/);
     assert.doesNotMatch(safeBrief, /commit only after an explicitly successful turn/);
   }
   for (const freeBrief of [
@@ -521,7 +524,7 @@ test('permission profiles split approval-gated staging from free editing', () =>
     systemBriefFor({ workflow: 'plan', phase: 'implementing', permissionProfile: 'unrestricted' }),
   ]) {
     assert.doesNotMatch(freeBrief, /review and approve the staged changes/);
-    assert.match(freeBrief, /apply_engine_edits commits/);
+    assert.match(freeBrief, /including apply_engine_edits batches, (is staged|commit)/);
   }
 });
 
@@ -565,10 +568,32 @@ test('every write-capable brief directs batched writes through apply_edits', () 
   ]) {
     assert.match(writeBrief, /apply_edits/);
     assert.match(writeBrief, /up to 32 items/);
-    assert.match(writeBrief, /bottom-of-document first/);
+    // 앵커 해석이 실행 시점 문서 기준으로 일어나므로 bottom-first 규칙은 사라졌다.
+    assert.match(writeBrief, /evolving document/);
+    assert.match(writeBrief, /anchor \{text/);
+    assert.doesNotMatch(writeBrief, /bottom-of-document first/);
     assert.match(writeBrief, /recovery guidance in the error message/);
     assert.doesNotMatch(writeBrief, /ONE AT A TIME/);
+    // 편집 루프: 한 번 읽고, apply_edits 한 번, after 로 끝내며 배치는 측정 도구로 한다.
+    assert.match(writeBrief, /read_batch/);
+    assert.match(writeBrief, /render:"crop"/);
+    assert.match(writeBrief, /verify_changes is only for warnings/);
+    for (const tool of ['get_page_geometry', 'edit_object', 'insert_shape']) assert.match(writeBrief, new RegExp(tool));
   }
+});
+
+test('every workflow brief and rhwp subagent carries the shared tool rules once', () => {
+  for (const opts of [
+    { workflow: 'direct', permissionProfile: 'safe' },
+    { workflow: 'direct', permissionProfile: 'unrestricted' },
+    { workflow: 'question', phase: 'questioning' },
+    { workflow: 'plan', phase: 'planning' },
+    { workflow: 'plan', phase: 'implementing', permissionProfile: 'safe' },
+  ]) {
+    const brief = systemBriefFor(opts);
+    assert.equal(brief.split(RHWP_TOOL_RULES).length - 1, 1, JSON.stringify(opts));
+  }
+  for (const agent of Object.values(RHWP_SUBAGENTS)) assert.ok(agent.prompt.endsWith(RHWP_TOOL_RULES));
 });
 
 test('doc-editor subagent prompt batches independent writes through apply_edits', () => {
@@ -1335,6 +1360,24 @@ test('Claude turns result usage into a usage event before the turn ends', async 
     events.indexOf(usage[0]) < events.findIndex((event) => event.type === 'turn-end'),
     'usage must precede turn-end',
   );
+});
+
+test('Claude permission denials surface as failed tool results, not a turn error', async () => {
+  const events = await runClaudeResult({
+    permission_denials: [
+      { tool_name: 'mcp__rhwp__replace_range', tool_use_id: 'toolu-denied-1' },
+      { tool_name: 'mcp__rhwp__insert_text', tool_use_id: 'toolu-denied-2' },
+    ],
+  });
+  // 도구 거부는 모델이 이미 본 실패 결과다 — 턴을 더럽히지 않고 행만 닫는다.
+  assert.equal(events.some((event) => event.type === 'error'), false);
+  const denied = events.filter((event) => event.type === 'tool-result');
+  assert.deepEqual(denied.map((event) => event.callId), ['toolu-denied-1', 'toolu-denied-2']);
+  assert.equal(denied.every((event) => event.ok === false), true);
+  assert.match(denied[0].resultPreview, /permission denied for: mcp__rhwp__replace_range/);
+  const end = events.find((event) => event.type === 'turn-end');
+  assert.equal(end?.stopReason, 'end_turn');
+  assert.equal(end?.errorMessage, undefined);
 });
 
 test('Claude usage adopts the model reported by the CLI', async () => {

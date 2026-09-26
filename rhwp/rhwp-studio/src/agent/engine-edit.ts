@@ -3,7 +3,6 @@ import {
   AGENT_EDIT_SESSION_METHODS,
   MUTATING_METHODS,
 } from '../core/mutation-method-registry.ts';
-import type { InputHandler } from '../engine/input-handler.ts';
 import {
   ENGINE_EDIT_CAPABILITIES,
   ENGINE_EDIT_TYPE_DEFINITIONS,
@@ -175,24 +174,56 @@ export function getEngineEditCapabilities(query = '') {
     .filter((capability) => !normalized
       || capability.method.toLowerCase().includes(normalized)
       || capability.signature.toLowerCase().includes(normalized))
-    .map((capability) => ({
-      ...capability,
-      argumentGuide: argumentGuide(capability.method, capability.signature),
-    }));
+    .map((capability) => {
+      const guide = argumentGuide(capability.method, capability.signature);
+      // parameters 는 signature 와 중복이라 싣지 않는다. 빈 argumentGuide 도 생략한다.
+      return {
+        method: capability.method,
+        kind: capability.kind,
+        signature: capability.signature,
+        ...(Object.keys(guide).length > 0 ? { argumentGuide: guide } : {}),
+      };
+    });
+}
+
+/** 쿼리 없는 기본 응답 — kind 별 메서드 이름만. 시그니처는 query 나 detail:true 로 받는다. */
+export function getEngineEditMethodNamesByKind(): Record<string, string[]> {
+  const byKind: Record<string, string[]> = {};
+  for (const capability of ENGINE_EDIT_CAPABILITIES) {
+    (byKind[capability.kind] ??= []).push(capability.method);
+  }
+  return byKind;
 }
 
 export function getEngineEditCapabilityCount() {
   return ENGINE_EDIT_CAPABILITIES.length;
 }
 
-export function getEngineEditTypeDefinitions() {
-  return ENGINE_EDIT_TYPE_DEFINITIONS;
+/**
+ * 주어진 capability 들이 시그니처·argumentGuide 에서 참조하는 타입 정의만 모은다.
+ * 정의 본문이 다른 타입을 참조하면(CellPathLike → CellPathEntry 등) 그것도 따라간다.
+ */
+export function getReferencedTypeDefinitions(
+  capabilities: ReadonlyArray<{ signature: string; argumentGuide?: Record<string, string> }>,
+): Record<string, string> {
+  const definitions = ENGINE_EDIT_TYPE_DEFINITIONS as Readonly<Record<string, string>>;
+  const names = Object.keys(definitions);
+  const referencedIn = (text: string): string[] =>
+    names.filter((name) => new RegExp(`\\b${name}\\b`).test(text));
+  const out: Record<string, string> = {};
+  const queue = capabilities.flatMap((capability) =>
+    referencedIn(`${capability.signature} ${Object.values(capability.argumentGuide ?? {}).join(' ')}`));
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    if (name in out) continue;
+    out[name] = definitions[name];
+    queue.push(...referencedIn(definitions[name]).filter((ref) => ref !== name));
+  }
+  return out;
 }
 
-export function applyEngineEdits(
-  inputHandler: InputHandler,
-  operations: EngineEditOperation[],
-): unknown[] {
+/** 배치 크기·형태 검증 — 문서를 건드리기 전에 끝낸다. */
+export function validateEngineEdits(operations: EngineEditOperation[]): void {
   if (operations.length === 0 || operations.length > MAX_ENGINE_EDIT_OPERATIONS) {
     throw new AgentToolError(
       'INVALID_ARGS',
@@ -211,9 +242,14 @@ export function applyEngineEdits(
       `serialized operations exceed ${MAX_ENGINE_EDIT_ARGUMENT_BYTES} bytes; split the batch`,
     );
   }
+}
 
-  return inputHandler.executeAppliedSnapshot('agent:apply_engine_edits', (wasm) =>
-    operations.map((operation) => invokeEngineMethod(wasm, operation, DOCUMENT_EDIT_METHODS)));
+/**
+ * 검증된 배치를 순서대로 엔진에 직접 적용한다. 원자성(실패 시 배치 전 상태 복원)과
+ * 되돌림은 호출자(PendingEditManager.addEngineBatch)의 스냅샷이 맡는다.
+ */
+export function runEngineEdits(wasm: WasmBridge, operations: EngineEditOperation[]): unknown[] {
+  return operations.map((operation) => invokeEngineMethod(wasm, operation, DOCUMENT_EDIT_METHODS));
 }
 
 export function applyEngineEditSession(wasm: WasmBridge, operation: EngineEditOperation) {

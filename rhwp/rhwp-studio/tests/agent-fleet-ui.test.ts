@@ -548,7 +548,8 @@ test('사이드바가 편대 이벤트를 카드로 넘기고 스폰 도구 행�
   assert.match(source, /case 'task-start':\s*\n\s*fleetView\.taskStart\(event\);/);
   assert.match(source, /case 'task-progress':\s*\n\s*fleetView\.taskProgress\(event\);/);
   assert.match(source, /case 'task-end':\s*\n\s*fleetView\.taskEnd\(event\);/);
-  assert.match(source, /if \(event\.parentTaskId && fleetView\.routeToolCall\(event\)\) break;/);
+  // 편대로 간 도구 호출은 기억해 두어 그 실행 결과가 루트 행에 붙지 않게 한다
+  assert.match(source, /if \(event\.parentTaskId && fleetView\.routeToolCall\(event\)\) \{\s*\n\s*trackSubagentToolCall\(event\);\s*\n\s*break;/);
   assert.match(source, /if \(event\.parentTaskId && fleetView\.routeToolResult\(event\)\) break;/);
   assert.match(source, /if \(event\.parentTaskId && fleetView\.routeTextDelta\(event\)\) break;/);
   assert.match(source, /if \(!event\.parentTaskId && isSpawnToolName\(event\.tool\)\) \{\s*\n\s*suppressedSpawnCalls\.add\(event\.callId\);\s*\n\s*turnToolCount \+= 1;/);

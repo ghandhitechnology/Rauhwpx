@@ -86,6 +86,7 @@ impl DocumentCore {
             self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
         }
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_header_footer_host_changed(section_idx, is_header, apply_to);
         self.rebuild_section(section_idx);
         self.event_log.push(DocumentEvent::CharFormatChanged {
             section: section_idx,
@@ -114,6 +115,7 @@ impl DocumentCore {
             .apply_char_shape_range(start_offset, end_offset, char_shape_id);
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_header_footer_host_changed(section_idx, is_header, apply_to);
         self.rebuild_section(section_idx);
         self.event_log.push(DocumentEvent::CharFormatChanged {
             section: section_idx,
@@ -140,12 +142,28 @@ impl DocumentCore {
             .para_shape_id = para_shape_id;
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_header_footer_host_changed(section_idx, is_header, apply_to);
         self.rebuild_section(section_idx);
         self.event_log.push(DocumentEvent::ParaFormatChanged {
             section: section_idx,
             para: hf_para_idx,
         });
         Ok("{\"ok\":true}".to_string())
+    }
+
+    /// HF 내용 변경을 HF 컨트롤을 품은 본문 문단의 revision 으로 남긴다. HF 편집
+    /// 이벤트의 문단 번호는 HF 내부 문단이라, 이것이 없으면 이후 스냅샷이 옛 본문
+    /// 문단(과 그 안의 HF)을 공유해 승인·undo 복원에서 편집이 사라질 수 있다.
+    pub(crate) fn mark_header_footer_host_changed(
+        &mut self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+    ) {
+        let apply = header_footer_apply_from_u8(apply_to);
+        if let Some((host, _)) = self.find_header_footer_control(section_idx, is_header, apply) {
+            self.event_log.mark_paragraph_changed(section_idx, host);
+        }
     }
 
     /// 머리말/꼬리말 조회 — JSON 반환
@@ -254,6 +272,8 @@ impl DocumentCore {
         // 컨트롤 1개 = UTF-16 8 code units → char_count 갱신
         section.paragraphs[0].char_count += 8;
         section.raw_stream = None;
+        // 이후 스냅샷이 HF 없는 옛 문단을 공유하지 않도록 문단 revision 을 올린다.
+        self.event_log.mark_paragraph_changed(section_idx, 0);
 
         // 재페이지네이션 (머리말/꼬리말이 추가되면 페이지 레이아웃에 영향)
         self.mark_section_dirty(section_idx);
@@ -409,6 +429,7 @@ impl DocumentCore {
 
         // raw 스트림 무효화, 재페이지네이션
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_header_footer_host_changed(section_idx, is_header, apply_to);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -467,6 +488,7 @@ impl DocumentCore {
 
         // raw 스트림 무효화, 재페이지네이션
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_header_footer_host_changed(section_idx, is_header, apply_to);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -553,6 +575,8 @@ impl DocumentCore {
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, new_para_idx);
 
         self.document.sections[section_idx].raw_stream = None;
+
+        self.mark_header_footer_host_changed(section_idx, is_header, apply_to);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -621,6 +645,8 @@ impl DocumentCore {
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, prev_idx);
 
         self.document.sections[section_idx].raw_stream = None;
+
+        self.mark_header_footer_host_changed(section_idx, is_header, apply_to);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -773,6 +799,7 @@ impl DocumentCore {
             self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
         }
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_header_footer_host_changed(section_idx, is_header, apply_to);
         self.rebuild_section(section_idx);
         self.event_log
             .push(DocumentEvent::HeaderFooterTextReplaced {
@@ -976,6 +1003,7 @@ impl DocumentCore {
             }
         }
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_header_footer_host_changed(section_idx, is_header, apply_to);
         self.rebuild_section(section_idx);
         for (hf_para_idx, range_start, range_end) in changed_paragraphs {
             self.event_log.push(DocumentEvent::CharFormatChanged {
@@ -1023,6 +1051,7 @@ impl DocumentCore {
                 .char_count
                 .saturating_sub(8);
         self.document.sections[section_idx].raw_stream = None;
+        self.event_log.mark_paragraph_changed(section_idx, pi);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -1314,6 +1343,8 @@ impl DocumentCore {
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
 
         self.document.sections[section_idx].raw_stream = None;
+
+        self.mark_header_footer_host_changed(section_idx, is_header, apply_to);
         self.rebuild_section(section_idx);
         self.event_log.push(DocumentEvent::ParaFormatChanged {
             section: section_idx,
@@ -1352,6 +1383,8 @@ impl DocumentCore {
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
 
         self.document.sections[section_idx].raw_stream = None;
+
+        self.mark_header_footer_host_changed(section_idx, is_header, apply_to);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -1535,6 +1568,7 @@ impl DocumentCore {
         // 10) 리플로우 + 스타일 재해소 + 재페이지네이션
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, 0);
         self.document.sections[section_idx].raw_stream = None;
+        self.mark_header_footer_host_changed(section_idx, is_header, apply_to);
         self.rebuild_section(section_idx);
 
         Ok("{\"ok\":true}".to_string())
@@ -1591,6 +1625,38 @@ mod tests {
         let result = core.get_header_footer_native(0, true, 0).unwrap();
         assert!(result.contains("\"exists\":true"));
         assert!(result.contains("\"paraCount\":1"));
+    }
+
+    /// 스냅샷은 revision 이 같은 문단을 앞 스냅샷과 공유한다 — HF 생성·삭제·편집이
+    /// 본문 문단 revision 을 올리지 않으면 승인/undo 복원에서 HF 가 사라진다.
+    #[test]
+    fn header_footer_edits_survive_snapshot_round_trips() {
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().expect("blank document");
+        let empty = core.save_snapshot_native();
+        core.create_header_footer_native(0, true, 0).unwrap();
+        core.insert_text_in_header_footer_native(0, true, 0, 0, 0, "머리말")
+            .unwrap();
+        let with_header = core.save_snapshot_native();
+        core.restore_snapshot_native(empty).unwrap();
+        assert!(core
+            .get_header_footer_native(0, true, 0)
+            .unwrap()
+            .contains("\"exists\":false"));
+        core.restore_snapshot_native(with_header).unwrap();
+        assert!(core
+            .get_header_footer_native(0, true, 0)
+            .unwrap()
+            .contains("\"text\":\"머리말\""));
+
+        core.delete_header_footer_native(0, true, 0).unwrap();
+        let deleted = core.save_snapshot_native();
+        core.restore_snapshot_native(with_header).unwrap();
+        core.restore_snapshot_native(deleted).unwrap();
+        assert!(core
+            .get_header_footer_native(0, true, 0)
+            .unwrap()
+            .contains("\"exists\":false"));
     }
 
     #[test]

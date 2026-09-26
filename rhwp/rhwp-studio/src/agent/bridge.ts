@@ -19,7 +19,7 @@ import {
 } from '../desktop-integration.ts';
 import { RevisionTracker } from './revision.ts';
 import { AgentToolExecutor } from './tool-executor.ts';
-import { PendingEditManager } from './pending-edits.ts';
+import { PendingEditManager, editReportNote } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
 import { readProviderQuota, readRemoteBalance } from './provider-quota-protocol.ts';
 import { PendingRequestRegistry } from './pending-requests.ts';
@@ -211,6 +211,28 @@ export function providerTurnEndMatches(
   // identified turn is active, only its exact ID may settle it; a legacy
   // no-ID event fails closed in that state.
   return activeTurnId === null || eventTurnId === activeTurnId;
+}
+
+/**
+ * turn-end 한 건의 스테이징 처리를 가른다.
+ * 성공은 명시적 종료 이유에만 인정하고, 그 외 모든 종료(오류·중단·max_tokens·
+ * 재연결·알 수 없는 이유)는 어떤 권한 모드에서도 편집을 버리지 않고 검토로
+ * 보낸다. 자동 커밋은 성공한 unrestricted 턴뿐이다.
+ */
+export function turnEndDisposition(
+  event: { stopReason?: unknown; errorMessage?: unknown },
+  permissionProfile: PermissionProfile,
+  turnHadError: boolean,
+): { succeeded: boolean; outcome: 'review' | 'commit' } {
+  const succeeded = !turnHadError
+    && !event.errorMessage
+    && (event.stopReason === 'end_turn'
+      || event.stopReason === 'completed'
+      || event.stopReason === 'success');
+  return {
+    succeeded,
+    outcome: succeeded && permissionProfile === 'unrestricted' ? 'commit' : 'review',
+  };
 }
 
 export interface ChatHistoryEntry {
@@ -1305,6 +1327,8 @@ export class AgentBridgeImpl implements AgentBridge {
   private workflowSwitchPending = false;
   private workflowBeforeSwitch: { workflow: AgentWorkflow; phase: AgentPhase } | null = null;
   private turnHadError = false;
+  /** 에이전트에게 알릴 대기 편집 보고 — 턴 중이면 다음 도구 결과에, 아니면 다음 턴 맥락으로 보낸다 */
+  private editReport: string[] = [];
   private pendingTurnOpen = false;
   private chatStartSent = false;
   private pendingChatStart: {
@@ -1364,6 +1388,8 @@ export class AgentBridgeImpl implements AgentBridge {
       if (e.type === 'set-finalized' || e.type === 'approved' || e.type === 'rejected' || e.type === 'invalidated') {
         this.editFollow.cancel();
       }
+      const note = editReportNote(e);
+      if (note) this.queueEditReport(note);
       this.handlePlanEditChange(e);
     });
     this.executor = new AgentToolExecutor({
@@ -1868,24 +1894,16 @@ export class AgentBridgeImpl implements AgentBridge {
   }
 
   /**
-   * 성공한 턴의 편집 처리는 권한 프로필이 가른다:
-   * 안전(safe) → 'review' (사용자 승인 대기), 전체(unrestricted) → 'commit' (자동 반영).
-   */
-  private successfulTurnOutcome(): 'review' | 'commit' {
-    return this.permissionProfile === 'safe' ? 'review' : 'commit';
-  }
-
-  /**
-   * 결과를 모르는 턴 종료(재연결 등)의 기본값: 안전 모드는 편집을 검토 대기로
-   * 남겨 사용자가 결정하고, 전체 모드는 기존대로 롤백한다.
+   * 결과를 모르는 턴 종료(재연결·시작 실패 등)의 기본값. 어떤 비성공 종료도
+   * 편집을 되돌리지 않는다 — 기본값은 어느 모드에서나 'review' + 중단 표시다.
    */
   private endPendingTurn(
-    outcome: 'commit' | 'reject' | 'review' =
-      this.permissionProfile === 'safe' ? 'review' : 'reject',
+    outcome: 'commit' | 'review' = 'review',
+    turnStopped = true,
   ) {
     if (!this.pendingTurnOpen) return;
     try {
-      this.pendingEdits.endTurn(outcome);
+      this.pendingEdits.endTurn(outcome, { turnStopped });
     } finally {
       this.executor.endTurn();
       this.pendingTurnOpen = false;
@@ -2755,20 +2773,18 @@ export class AgentBridgeImpl implements AgentBridge {
         this.turnRunning = false;
         this.activeProviderTurnId = null;
         this.abortProviderToolRequests(eventTurnId ?? undefined);
-        let succeeded = !this.turnHadError
-          && !event.errorMessage
-          && (event.stopReason === 'end_turn'
-            || event.stopReason === 'completed'
-            || event.stopReason === 'success');
+        const disposition = turnEndDisposition(event, this.permissionProfile, this.turnHadError);
+        let succeeded = disposition.succeeded;
         this.turnHadError = false;
         if (this.pendingTurnOpen) {
           try {
-            this.endPendingTurn(succeeded ? this.successfulTurnOutcome() : 'reject');
+            this.endPendingTurn(disposition.outcome, !succeeded);
           } catch (e) {
             succeeded = false;
             console.warn('[AgentBridge] endTurn 실패:', e);
           }
         }
+        this.flushEditReport();
         const planTurn = this.planExecutionTurn;
         this.planExecutionTurn = null;
         if (planTurn?.turnId === eventTurnId && this.latestPlan?.planId === planTurn.planId) {
@@ -2839,6 +2855,7 @@ export class AgentBridgeImpl implements AgentBridge {
     const requestIsActive = () => !controller.signal.aborted && belongsToActiveTurn();
     const tool = typeof msg.tool === 'string' ? msg.tool : '';
     const args = msg.args;
+    const parentTask = typeof msg.parentTaskId === 'string' && msg.parentTaskId ? { parentTaskId: msg.parentTaskId } : {};
     const agent: AgentName = isAgentName(msg.agent) ? msg.agent : (this.activeAgent ?? 'claude');
     this.editingAgent = agent;
     // 허브가 이미 구상 중이면 로컬 전환이 늦어도 도구 호출로 문서를 잠그지 않는다.
@@ -2865,7 +2882,11 @@ export class AgentBridgeImpl implements AgentBridge {
       })
       .then((result) => {
         if (!requestIsActive()) return;
-        this.sendToolResponse({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: true, result });
+        const reported = this.withEditReport(result);
+        this.sendToolResponse({
+          v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: true, result: reported,
+        });
+        this.notifyToolExecuted({ type: 'tool-executed', tool, args, ok: true, result: reported, ...parentTask });
       })
       .catch((e: unknown) => {
         if (!requestIsActive()) return;
@@ -2874,6 +2895,7 @@ export class AgentBridgeImpl implements AgentBridge {
             ? { code: e.code, message: e.message }
             : { code: 'RPC_ERROR', message: e instanceof Error ? e.message : String(e) };
         this.sendToolResponse({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: false, error });
+        this.notifyToolExecuted({ type: 'tool-executed', tool, args, ok: false, error, ...parentTask });
       })
       .finally(() => {
         if (this.activeToolRequestControllers.get(id) === request) {
@@ -2881,6 +2903,37 @@ export class AgentBridgeImpl implements AgentBridge {
         }
         releaseEditingLease();
       });
+  }
+
+  /**
+   * 버려지거나 되돌리지 못한 대기 편집을 에이전트에게 알린다. 턴 중에는 다음 도구 결과에
+   * 싣고, 턴 밖(승인/거절/턴 종료)에서는 허브가 다음 사용자 메시지 맥락에 붙이도록 보낸다.
+   */
+  private queueEditReport(note: string): void {
+    (this.editReport ??= []).push(note);
+    if (!this.turnRunning) this.flushEditReport();
+  }
+
+  private flushEditReport(): void {
+    if (!this.editReport?.length) return;
+    const notes = this.editReport.splice(0);
+    if (!this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-edit-report', notes })) {
+      this.editReport.unshift(...notes.slice(-8));
+    }
+  }
+
+  /** 사이드바 도구 행용 알림 — 표시가 실패해도 이미 보낸 도구 응답에는 영향이 없어야 한다. */
+  private notifyToolExecuted(e: Extract<SidebarEvent, { type: 'tool-executed' }>): void {
+    try {
+      this.emit(e);
+    } catch (err) {
+      console.warn('[AgentBridge] 도구 실행 알림 실패:', err);
+    }
+  }
+
+  private withEditReport(result: unknown): unknown {
+    if (!this.editReport?.length || result === null || typeof result !== 'object' || Array.isArray(result)) return result;
+    return { ...(result as Record<string, unknown>), editReport: this.editReport.splice(0) };
   }
 
   /** 소켓이 닫혀 있으면 결과를 버리지 않고 재연결 때까지 붙잡아 둔다. */

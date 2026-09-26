@@ -359,11 +359,36 @@ try {
     assert.equal(await page.$eval('.ag-activity-label', node => node.textContent), 'read_document');
     await open('scenario=tools');
     await page.click('#play');
-    await page.waitForFunction(() => !window.sidebarPreview.bridge.isTurnRunning()
-      && document.querySelector('.ag-activity-label')?.textContent === '3개의 도구를 호출함');
+    const turnLabel = '편집 2번 · 읽기 1번 · 도구 1번 · 오류 1';
+    await page.waitForFunction((label) => !window.sidebarPreview.bridge.isTurnRunning()
+      && document.querySelector('.ag-activity-label')?.textContent === label, {}, turnLabel);
     await page.click('.ag-activity-toggle');
-    assert.equal(await page.$$eval('.ag-tool-name', nodes => nodes.map(node => node.textContent).join(',')),
-      'read_document,search_document,edit_document');
+    const toolRows = async () => page.$$eval('.ag-tool-row', rows => rows.map(row => ({
+      label: row.querySelector('.ag-tool-label')?.textContent,
+      summary: row.querySelector('.ag-tool-summary')?.textContent,
+      outcome: row.querySelector('.ag-tool-outcome')?.hidden ? '' : row.querySelector('.ag-tool-outcome-text')?.textContent,
+      thumb: Boolean(row.querySelector('.ag-tool-thumb img')),
+      items: [...row.querySelectorAll('.ag-tool-item')].map(item => item.textContent),
+    })));
+    const assertToolRows = (rows) => {
+      assert.deepEqual(rows.map(row => row.label), ['read_document', '2개 읽기', '3곳 편집', '표 속성 변경']);
+      assert.equal(rows[1].outcome, '2개 읽음');
+      assert.equal(rows[2].summary, '텍스트 바꾸기 · 텍스트 삽입 · 글자 서식');
+      assert.equal(rows[2].outcome, '3개 편집 적용 · 2쪽');
+      assert.equal(rows[2].items.length, 3);
+      assert.equal(rows[3].outcome, '문서 버전 불일치');
+    };
+    const live = await toolRows();
+    assertToolRows(live);
+    assert.equal(live[2].thumb, true, '편집 결과 그림이 작은 그림으로 붙는다');
+    await page.$$eval('.ag-tool-head', heads => heads[2].click());
+    await page.click('.ag-tool-thumb');
+    await page.waitForSelector('.ag-image-viewer img');
+    await screenshot('tool-activity-live');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('.ag-image-viewer'));
+    // 줄인 그림이 기록에 들어간 뒤 다시 연다.
+    await new Promise((resolve) => setTimeout(resolve, 300));
     await page.click('.ag-header .ag-threads-btn');
     const threadId = await page.$eval('.ag-threads-item.ag-active', node => node.dataset.threadId);
     await page.reload({ waitUntil: 'networkidle0' });
@@ -371,7 +396,11 @@ try {
     await page.$eval('.ag-threads-list', (list, id) =>
       [...list.querySelectorAll('.ag-threads-item')].find(node => node.dataset.threadId === id)?.click(), threadId);
     await page.waitForSelector('.ag-activity-label');
-    assert.equal(await page.$eval('.ag-activity-label', node => node.textContent), '3개의 도구를 호출함');
+    assert.equal(await page.$eval('.ag-activity-label', node => node.textContent), turnLabel);
+    await page.click('.ag-activity-toggle');
+    const stored = await toolRows();
+    assertToolRows(stored);
+    assert.equal(stored[2].thumb, true, '저장된 대화도 결과 그림을 보인다');
     await screenshot('tool-activity');
   });
   await step('Chat follows a send and yields to manual scrolling', async () => {

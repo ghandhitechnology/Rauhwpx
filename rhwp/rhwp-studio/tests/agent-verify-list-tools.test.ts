@@ -5,7 +5,7 @@
  * - list_numberings / get_para_format / get_char_format
  * - verify_changes: change-set 요약 + postEditText 다이제스트 + warnings + includeImage
  * - find_text: Unicode scalar 오프셋 (emoji)
- * - insert_text \r\n 정규화, PENDING_DESTRUCTIVE_OP 확장 가드, zero-length 서식 거부
+ * - insert_text \r\n 정규화, 구조 op 뒤 같은 표 편집, zero-length 서식 거부
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -280,7 +280,7 @@ function makeEnv() {
   });
   const call = (tool: string, args: Record<string, unknown> = {}) =>
     executor.execute(tool, { expectedRevision: revision.revision, ...args }, 'claude');
-  return { call, pending, revision, body, tables, numberings, bullets, calls, executor };
+  return { call, pending, revision, body, tables, numberings, bullets, calls, executor, wasm };
 }
 
 async function expectErr(p: Promise<unknown>, code: string): Promise<AgentToolError> {
@@ -435,9 +435,16 @@ test('get_para_format: 목록 속성 + 정렬/간격을 pt 로 환산해 반환�
   assert.equal(r['lineSpacingPercent'], 160);
   assert.equal(r['spaceBeforePt'], 6);   // 8px × 72/96
   assert.equal(r['marginLeftPt'], 15);   // 20px × 72/96
+  // 기본 응답은 기본값(목록 아님, 0pt, false)을 생략한다 — full:true 는 전부 싣는다.
   const plain = (await call('get_para_format', { sectionIdx: 0, paraIdx: 0 })) as Record<string, unknown>;
-  assert.equal(plain['headType'], 'none');
-  assert.equal(plain['numberingId'], 0);
+  assert.equal(plain['headType'], undefined);
+  assert.equal(plain['numberingId'], undefined);
+  assert.equal(plain['pageBreakBefore'], undefined);
+  assert.ok(plain['alignment']);
+  const full = (await call('get_para_format', { sectionIdx: 0, paraIdx: 0, full: true })) as Record<string, unknown>;
+  assert.equal(full['headType'], 'none');
+  assert.equal(full['numberingId'], 0);
+  assert.equal(full['pageBreakBefore'], false);
 });
 
 test('get_para_format: cell 주소로 셀 문단을 읽는다', async () => {
@@ -462,6 +469,9 @@ test('get_char_format: 글자 속성을 pt 환산과 함께 반환한다 (본문
   assert.equal(r['underline'], true);
   assert.equal(r['textColor'], '#FF0000');
   assert.equal(r['charShapeId'], 4);
+  assert.equal(r['italic'], undefined); // false 는 생략 — full:true 에만 실린다
+  const full = (await call('get_char_format', { sectionIdx: 0, paraIdx: 0, charOffset: 1, full: true })) as Record<string, unknown>;
+  assert.equal(full['italic'], false);
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 3, charOffset: 0, cells: [['x']],
   })) as { table: { paraIdx: number; controlIdx: number } };
@@ -485,15 +495,14 @@ test('verify_changes: change-set 요약 + postEditText + 즉시 적용 삭제', 
   assert.deepEqual(d.collapsedAt, { paraIdx: 1, charOffset: 0 });
   const r = (await call('verify_changes', {})) as {
     changeSetId: string; status: string;
-    ops: Array<{ kind: string; applied: boolean }>;
+    ops: Array<{ kind: string; summary: string }>;
     postEditText: Array<{ sectionIdx: number; paraIdx: number; text: string }>;
     warnings: string[]; revision: number;
   };
   assert.equal(r.changeSetId, d.changeSetId);
   assert.equal(r.ops.length, 2);
   assert.deepEqual(r.ops.map((o) => o.kind), ['insert', 'delete']);
-  assert.equal(r.ops[0].applied, true);  // insert — 즉시 적용
-  assert.equal(r.ops[1].applied, true);  // delete — 빈 교체로 즉시 적용 (미리보기 = 승인 후 상태)
+  assert.ok(r.ops.every((o) => !('applied' in o)), '모든 op 이 적용돼 있어 applied 플래그가 없다');
   // 삭제가 라이브 미리보기에 이미 반영되어 있다
   const p0 = r.postEditText.find((p) => p.paraIdx === 0)!;
   const p1 = r.postEditText.find((p) => p.paraIdx === 1)!;
@@ -504,7 +513,30 @@ test('verify_changes: change-set 요약 + postEditText + 즉시 적용 삭제', 
   assert.equal(typeof r.revision, 'number');
 });
 
-test('verify_changes: 표 구조 op 경고 + 영향 페이지', async () => {
+test('verify_changes: 같은 턴의 다음 호출은 그 뒤 새 op 만 싣고 full:true 는 전체를 싣는다', async () => {
+  const { call } = makeEnv();
+  await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X' });
+  const first = (await call('verify_changes', {})) as { ops: Array<{ kind: string }>; counts: { total: number } };
+  assert.equal(first.ops.length, 1);
+  assert.equal(first.counts.total, 1);
+  const idle = (await call('verify_changes', {})) as { ops: unknown[]; postEditText: unknown[]; note: string };
+  assert.equal(idle.ops.length, 0);
+  assert.equal(idle.postEditText.length, 0);
+  assert.match(idle.note, /full:true/);
+  await call('insert_text', { sectionIdx: 0, paraIdx: 1, charOffset: 0, text: 'Y' });
+  const second = (await call('verify_changes', {})) as {
+    ops: Array<{ kind: string }>; counts: { total: number };
+    postEditText: Array<{ paraIdx: number }>;
+  };
+  assert.equal(second.ops.length, 1);
+  assert.equal(second.counts.total, 2);
+  assert.deepEqual(second.postEditText.map((p) => p.paraIdx), [1]);
+  const all = (await call('verify_changes', { full: true })) as { ops: unknown[]; note?: string };
+  assert.equal(all.ops.length, 2);
+  assert.equal(all.note, undefined);
+});
+
+test('verify_changes: 표 구조 op 은 영향 페이지에 잡히고 잠금 경고가 없다', async () => {
   const { call, tables } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 3, charOffset: 0, cells: [['a'], ['b']],
@@ -517,7 +549,7 @@ test('verify_changes: 표 구조 op 경고 + 영향 페이지', async () => {
     ops: Array<{ kind: string }>; warnings: string[]; affectedPages: number[];
   };
   assert.ok(r.ops.some((o) => o.kind === 'object:tableStructure'));
-  assert.ok(r.warnings.some((w) => w.includes('cellIdx')));
+  assert.ok(!r.warnings.some((w) => w.includes('PENDING_DESTRUCTIVE_OP')));
   assert.deepEqual(r.affectedPages, [0]);
 });
 
@@ -536,16 +568,12 @@ test('verify_changes includeImage: 캔버스가 없으면 이미지 없이 경�
   assert.ok((r['warnings'] as string[]).some((w) => w.includes('image skipped')));
 });
 
-test('verify_changes includeImage: withMarkedOpsApplied 로 승인 후 상태를 렌더한다', async () => {
-  const { call, pending, body, calls } = makeEnv();
+test('verify_changes includeImage: 적용된 현재 문서를 그대로 렌더하고 revision 을 바꾸지 않는다', async () => {
+  const { call, body, calls, revision } = makeEnv();
   // 삭제는 즉시 적용된다 — 미리보기가 곧 승인 후 상태
   await call('delete_range', {
     sectionIdx: 0, startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 5,
   });
-  let speculative = 0;
-  const orig = pending.withMarkedOpsApplied.bind(pending);
-  (pending as { withMarkedOpsApplied: unknown }).withMarkedOpsApplied =
-    (id: string, fn: () => unknown) => { speculative++; return orig(id, fn); };
   class FakeOffscreenCanvas {
     width: number;
     height: number;
@@ -556,17 +584,18 @@ test('verify_changes includeImage: withMarkedOpsApplied 로 승인 후 상태를
   }
   (globalThis as Record<string, unknown>)['OffscreenCanvas'] = FakeOffscreenCanvas;
   try {
+    const before = revision.revision;
     const r = (await call('verify_changes', { includeImage: true })) as {
-      image: { data: string; mimeType: string }; imagePageIndex: number;
+      image: { data: string; mimeType: string }; imagePageIndex: number; revision: number;
     };
-    assert.equal(speculative, 1); // 승인 후 상태 래퍼를 거쳤다
     assert.equal(r.image.mimeType, 'image/png');
     assert.equal(r.image.data, 'AQIDBA=='); // [1,2,3,4] base64
     assert.equal(r.imagePageIndex, 0);
+    assert.equal(r.revision, before, '렌더는 문서를 바꾸지 않는다');
     // 렌더 시점의 본문은 삭제가 적용된('First' 제거) 상태 — 라이브 미리보기와 동일
     const render = calls.find((c) => c.m === 'renderPageToCanvas')!;
     assert.equal(render.a[1], ' item');
-    assert.equal(body[0], ' item'); // 삭제는 즉시 적용 — 렌더 전후 동일
+    assert.equal(body[0], ' item');
   } finally {
     delete (globalThis as Record<string, unknown>)['OffscreenCanvas'];
   }
@@ -606,31 +635,25 @@ test('insert_text: 10000자 초과 오류는 분할 호출을 안내한다', asy
   assert.match(err.message, /multiple insert_text calls/);
 });
 
-test('PENDING_DESTRUCTIVE_OP: insert_row pending 중 같은 표의 셀 편집도 차단된다', async () => {
+test('insert_row 뒤에도 같은 표를 새 셀 번호로 바로 편집한다', async () => {
   const { call, tables } = makeEnv();
   const c = (await call('create_table', {
     sectionIdx: 0, paraIdx: 3, charOffset: 0, cells: [['a'], ['b']],
   })) as { table: { paraIdx: number; controlIdx: number } };
-  await call('edit_table', {
+  const ins = (await call('edit_table', {
     sectionIdx: 0, paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, op: 'insert_row', rowIdx: 0,
-  });
-  assert.equal(tables[0].rows, 3); // insert_row 는 즉시 적용됐다
-  // applied-now 구조 op 도 삽입 행부터 아래로 cellIdx 를 밀므로 그 행의 셀 편집은 차단된다
-  const err = await expectErr(call('insert_text', {
-    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-    cell: { paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, cellIdx: 1 },
-  }), 'PENDING_DESTRUCTIVE_OP');
-  assert.match(err.message, /next turn/);
-  assert.match(err.message, /insert_row at row 1/);
-  // 삽입 행보다 앞선 행 0 의 셀은 번호가 그대로라 통과한다
+  })) as { rowCount: number; cellCount: number };
+  assert.deepEqual([ins.rowCount, ins.cellCount], [3, 3]);
+  assert.equal(tables[0].rows, 3);
+  // 새 행(1) 과 밀려난 행(2) 모두 결과 좌표로 곧바로 편집된다
   await call('insert_text', {
     sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-    cell: { paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, cellIdx: 0 },
+    cell: { paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, cellIdx: 2 },
   });
-  // 구조 op 이 있는 동안은 후속 구조 op 도 차단된다
-  await expectErr(call('edit_table', {
+  await call('edit_table', {
     sectionIdx: 0, paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, op: 'insert_col', colIdx: 0,
-  }), 'PENDING_DESTRUCTIVE_OP');
+  });
+  assert.equal(tables[0].cols, 2);
 });
 
 test('apply_char_format: startOffset === endOffset (zero-length) → INVALID_ARGS', async () => {
@@ -654,14 +677,62 @@ test('apply_para_format: 목록 키(headType/numberingId/paraLevel/bulletChar) �
   await expectErr(call('apply_para_format', { sectionIdx: 0, paraIdx: 0, headType: 'weird' }), 'INVALID_ARGS');
 });
 
-test('render_page: format png 는 캔버스 없는 환경에서 RENDER_UNAVAILABLE', async () => {
+test('render_page: 기본 png 는 캔버스 없는 환경에서 RENDER_UNAVAILABLE', async () => {
   const { executor, revision } = makeEnv();
-  await expectErr(
-    executor.execute('render_page', { pageIndex: 0, format: 'png' }, 'claude'),
-    'RENDER_UNAVAILABLE',
-  );
-  // svg 는 여전히 동작한다
-  const r = (await executor.execute('render_page', { pageIndex: 0 }, 'claude')) as { svg: string; revision: number };
+  await expectErr(executor.execute('render_page', { pageIndex: 0 }, 'claude'), 'RENDER_UNAVAILABLE');
+  // svg 는 명시하면 여전히 동작하고, 자르기·저장은 png 전용이다
+  const r = (await executor.execute('render_page', { pageIndex: 0, format: 'svg' }, 'claude')) as { svg: string; revision: number };
   assert.equal(r.svg, '<svg/>');
   assert.equal(r.revision, revision.revision);
+  await expectErr(executor.execute('render_page', {
+    pageIndex: 0, format: 'svg', regionMm: { x: 0, y: 0, width: 10, height: 10 },
+  }, 'claude'), 'INVALID_ARGS');
+});
+
+test('get_page_geometry: 줄·런·개체를 mm 배열로 압축하고 regionMm 으로 거른다', async () => {
+  const { executor, wasm } = makeEnv();
+  const mmPx = 96 / 25.4;
+  Object.assign(wasm, {
+    getPageInfo: () => ({
+      pageIndex: 0, width: 210 * mmPx, height: 297 * mmPx, sectionIndex: 0,
+      marginLeft: 30 * mmPx, marginRight: 30 * mmPx, marginTop: 20 * mmPx, marginBottom: 15 * mmPx,
+      marginHeader: 15 * mmPx, marginFooter: 15 * mmPx,
+    }),
+    getPageLineLayout: () => ({
+      lines: [
+        { x: 30 * mmPx, y: 35 * mmPx, w: 150 * mmPx, h: 5 * mmPx, bl: 39 * mmPx, sec: 0, para: 2, cs: 0, ce: 12,
+          tx0: 30 * mmPx, tx1: 80 * mmPx, runs: [[30 * mmPx, 50 * mmPx, 0, 12]] },
+        { x: 40 * mmPx, y: 100 * mmPx, w: 40 * mmPx, h: 5 * mmPx, bl: 104 * mmPx, sec: 0, para: 5, cs: 0, ce: 3,
+          cell: { pp: 4, path: [[0, 3, 1], [1, 0, 2]] }, runs: [] },
+      ],
+    }),
+    getPageControlLayout: () => ({
+      controls: [
+        { type: 'image', x: 30 * mmPx, y: 200 * mmPx, w: 40 * mmPx, h: 30 * mmPx, secIdx: 0, paraIdx: 7, controlIdx: 0,
+          wrap: 'Square', zOrder: 3 },
+      ],
+    }),
+  });
+
+  const all = (await executor.execute('get_page_geometry', { pageIndex: 0, include: ['runs', 'objects'] }, 'claude')) as any;
+  assert.deepEqual(all.pageMm, [210, 297]);
+  assert.deepEqual(all.bodyMm, [30, 35, 150, 232]);
+  assert.deepEqual(all.lines[0], [30, 35, 150, 5, 39, 30, 80, 0, 2, 0, 12]);
+  // 셀 줄: paraIdx 는 최내곽 셀 문단, cell 은 최외곽 셀 주소, 중첩이면 cellPath
+  assert.deepEqual(all.lines[1].slice(7, 9), [0, 2]);
+  assert.deepEqual(all.lines[1][11].cell, { paraIdx: 4, controlIdx: 0, cellIdx: 3 });
+  assert.equal(all.lines[1][11].cellPath.length, 2);
+  assert.deepEqual(all.runs, [[0, 30, 80, 0, 12]]);
+  assert.deepEqual(all.objects, [{ type: 'image', box: [30, 200, 40, 30], secIdx: 0, paraIdx: 7, controlIdx: 0, wrap: 'Square', z: 3 }]);
+
+  const cropped = (await executor.execute('get_page_geometry', {
+    pageIndex: 0, regionMm: { x: 0, y: 90, width: 210, height: 20 },
+  }, 'claude')) as any;
+  assert.equal(cropped.lines.length, 1);
+  assert.equal(cropped.lines[0][8], 2);
+  assert.deepEqual(cropped.objects, []);
+  assert.equal(cropped.runs, undefined);
+
+  await expectErr(executor.execute('get_page_geometry', { pageIndex: 5 }, 'claude'), 'INVALID_ARGS');
+  await expectErr(executor.execute('get_page_geometry', { pageIndex: 0, include: ['cells'] }, 'claude'), 'INVALID_ARGS');
 });

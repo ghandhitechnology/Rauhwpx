@@ -30,6 +30,8 @@ import type {
 } from '../../agent/types.ts';
 import { createChevron } from '../chevron.ts';
 import { createIcon } from './icons.ts';
+import { createToolRow, type ToolRowHandle } from './tool-row.ts';
+import { presentToolResult } from './tool-presentation.ts';
 import { formatTokens } from './usage-format.ts';
 
 /** 편대를 띄우는 도구 — 카드가 그 스폰을 대신 나타내므로 도구 행은 접는다. */
@@ -94,14 +96,6 @@ function truncate(text: string, max: number): string {
   return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 }
 
-function prettyJson(text: string): string {
-  try {
-    return JSON.stringify(JSON.parse(text), null, 2);
-  } catch {
-    return text;
-  }
-}
-
 /** 스트리밍 텍스트의 꼬리에서 한 줄짜리 근황을 뽑는다. */
 function tailSnippet(buffer: string): string {
   const lines = buffer.split('\n');
@@ -129,9 +123,9 @@ interface RowRefs {
 }
 
 interface DetailToolRow {
-  status: HTMLElement;
-  result: HTMLElement;
-  elapsed: HTMLElement;
+  row: ToolRowHandle;
+  tool: string;
+  argsJson: string;
   startedAt: number;
 }
 
@@ -863,37 +857,12 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
   ): void {
     const detail = task.row.detail;
     if (!detail) return;
-
-    const row = el('div', `ag-tool-row ag-${evt.agent}`);
-    const head = el('button', 'ag-tool-head');
-    head.type = 'button';
-    head.setAttribute('aria-expanded', 'false');
-    const status = el('span', 'ag-tool-status ag-pending');
-    status.setAttribute('role', 'img');
-    status.setAttribute('aria-label', '실행 중');
-    const name = el('span', 'ag-tool-name', evt.tool);
-    const summary = el('span', 'ag-tool-summary', truncate(evt.argsJson, 56));
-    const elapsed = el('span', 'ag-tool-elapsed');
-    const chevron = createChevron('ag-tool-chevron');
-    head.append(status, name, summary, elapsed, chevron);
-
-    const body = el('div', 'ag-tool-body');
-    body.hidden = true;
-    const args = el('pre', 'ag-tool-args', prettyJson(evt.argsJson));
-    const result = el('pre', 'ag-tool-result');
-    body.append(args, result);
-    head.addEventListener('click', () => {
-      body.hidden = !body.hidden;
-      row.classList.toggle('ag-tool-open', !body.hidden);
-      head.setAttribute('aria-expanded', body.hidden ? 'false' : 'true');
-    });
-
-    row.append(head, body);
-    followDetail(task.row, () => detail.appendChild(row));
+    const row = createToolRow({ agent: evt.agent, tool: evt.tool, argsJson: evt.argsJson, doc });
+    followDetail(task.row, () => detail.appendChild(row.root));
     task.detailToolRows.set(evt.callId, {
-      status,
-      result,
-      elapsed,
+      row,
+      tool: evt.tool,
+      argsJson: evt.argsJson,
       startedAt: nowMs(),
     });
   }
@@ -905,23 +874,25 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     const entry = task.detailToolRows.get(evt.callId);
     if (!entry) return;
     task.detailToolRows.delete(evt.callId);
-    entry.status.classList.remove('ag-pending');
-    entry.status.classList.add(evt.ok ? 'ag-ok' : 'ag-err');
-    entry.status.setAttribute('aria-label', evt.ok ? '완료' : '오류');
-    entry.status.replaceChildren(createIcon(evt.ok ? 'check' : 'close'));
+    entry.row.setState(evt.ok ? 'completed' : 'failed');
     const ms = nowMs() - entry.startedAt;
-    entry.elapsed.textContent = ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
-    followDetail(task.row, () => { entry.result.textContent = evt.resultPreview; });
+    entry.row.elapsed.textContent = ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+    followDetail(task.row, () => {
+      entry.row.setRawResult(evt.resultPreview);
+      entry.row.setOutcome(presentToolResult({
+        tool: entry.tool,
+        argsJson: entry.argsJson,
+        ok: evt.ok,
+        preview: evt.resultPreview,
+      }));
+    });
   }
 
   function sweepDetailToolRows(task: TaskEntry): void {
     for (const [, entry] of task.detailToolRows) {
-      entry.status.classList.remove('ag-pending');
-      entry.status.classList.add('ag-err');
-      entry.status.setAttribute('aria-label', '중단');
-      entry.status.replaceChildren(createIcon('close'));
-      if (!entry.elapsed.textContent) entry.elapsed.textContent = '중단';
-      if (!entry.result.textContent) entry.result.textContent = '(결과 없이 종료됨)';
+      entry.row.setState('stopped');
+      if (!entry.row.elapsed.textContent) entry.row.elapsed.textContent = '중단';
+      if (!entry.row.result.textContent) entry.row.setRawResult('(결과 없이 종료됨)');
     }
     task.detailToolRows.clear();
   }

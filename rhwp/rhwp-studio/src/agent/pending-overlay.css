@@ -37,19 +37,10 @@
   box-shadow: inset 0 -1px 0 rgba(var(--ag-pending-ink), 0.58);
 }
 
-.ag-pending-marker.ag-delete {
-  background: none;
-}
-
-.ag-pending-marker.ag-delete::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: calc(50% - 1px);
-  height: 2px;
-  border-radius: 1px;
-  background: rgba(var(--ag-pending-ink), 0.88);
+/* modify — 내용이 바뀐 자리를 옅게 채색한다. 취소선은 remove 전용이다. */
+.ag-pending-marker.ag-modify {
+  background: rgba(var(--ag-pending-ink), 0.09);
+  box-shadow: inset 0 -1px 0 rgba(var(--ag-pending-ink), 0.3);
 }
 
 .ag-pending-marker.ag-format {
@@ -86,13 +77,24 @@
   outline-offset: -2px;
 }
 
-.ag-pending-structure.ag-delete {
-  outline-style: dashed;
-  background: none;
+.ag-pending-structure.ag-modify {
+  outline-color: rgba(var(--ag-pending-ink), 0.5);
+  background: rgba(var(--ag-pending-ink), 0.05);
 }
 
-.ag-pending-structure.ag-delete::after {
-  display: none;
+/* 머리말/꼬리말 영역과 쪽 단위 변경 — 텍스트 밑줄이 아니라 영역 자체를 표시한다. */
+.ag-pending-marker.ag-pending-band {
+  background: rgba(var(--ag-pending-ink), 0.07);
+  outline: 1px dashed rgba(var(--ag-pending-ink), 0.55);
+  outline-offset: -1px;
+  box-shadow: none;
+}
+
+.ag-pending-marker.ag-pending-page {
+  background: rgba(var(--ag-pending-ink), 0.04);
+  outline: 2px dashed rgba(var(--ag-pending-ink), 0.4);
+  outline-offset: -2px;
+  box-shadow: none;
 }
 
 /* 교체는 삽입 밑줄 + 위쪽 실선으로 구분한다 (원본이 대체된 자리) */

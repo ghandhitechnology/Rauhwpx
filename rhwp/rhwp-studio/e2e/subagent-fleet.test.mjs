@@ -204,18 +204,19 @@ try {
 
     setTestCase('c. 서브에이전트 도구 호출 귀속');
     // 행 안에 해당 서브에이전트의 도구 호출이 나타난다 (루트 활동 그룹이 아니라)
+    // 도구 행은 한국어 라벨로 그려지므로 data-tool 속성으로 찾는다
     await page.waitForFunction(
-      () => (document.querySelector('.ag-fleet')?.textContent ?? '').includes('replace_range'),
+      () => Boolean(document.querySelector('.ag-fleet [data-tool="replace_range"]')
+        && document.querySelector('.ag-fleet [data-tool="insert_text"]')),
       { timeout: 15000 },
     );
     const routing = await page.evaluate(() => {
-      const fleetText = document.querySelector('.ag-fleet')?.textContent ?? '';
-      const rootActivityText = [...document.querySelectorAll('.ag-activity')]
-        .map((el) => el.textContent ?? '').join('\n');
+      const has = (scope, tool) => [...document.querySelectorAll(scope)]
+        .some((el) => el.querySelector(`[data-tool="${tool}"]`));
       return {
-        fleetHasA: fleetText.includes('replace_range'),
-        fleetHasB: fleetText.includes('insert_text'),
-        rootHasChild: rootActivityText.includes('replace_range') || rootActivityText.includes('insert_text'),
+        fleetHasA: has('.ag-fleet', 'replace_range'),
+        fleetHasB: has('.ag-fleet', 'insert_text'),
+        rootHasChild: has('.ag-activity', 'replace_range') || has('.ag-activity', 'insert_text'),
       };
     });
     assert(routing.fleetHasA && routing.fleetHasB, 'fleet 행에 서브에이전트 도구 호출 표시');
