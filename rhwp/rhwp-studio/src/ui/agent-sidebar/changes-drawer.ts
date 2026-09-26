@@ -167,7 +167,8 @@ function pendingAddress(op: PendingOp): string {
   if (op.kind === 'template') return op.label;
   if (op.kind === 'object') {
     const obj = op.obj;
-    const para = 'tableParaIdx' in obj ? obj.tableParaIdx : 'paraIdx' in obj ? obj.paraIdx : null;
+    const para = 'tableParaIdx' in obj ? obj.tableParaIdx : 'paraIdx' in obj ? obj.paraIdx
+      : obj.type === 'engineBatch' ? obj.touched[0]?.paraStart ?? null : null;
     const cell = 'cellIdx' in obj && typeof obj.cellIdx === 'number' ? ` · ${obj.cellIdx + 1}셀` : '';
     return `${para === null ? '문서' : `${para + 1}문단`}${cell}`;
   }
@@ -191,6 +192,8 @@ function needsSectionHeadings(sections: readonly (number | null)[]): boolean {
   return sections.length > 1 || (sections.length === 1 && sections[0] !== 0);
 }
 
+const SHAPE_LABELS = { line: '선', rectangle: '사각형', ellipse: '타원', textBox: '글상자' } as const;
+
 function pendingObjectDetail(op: PendingOp): string {
   if (op.kind === 'template') return `템플릿 ${op.label}`;
   if (op.kind === 'format') {
@@ -208,6 +211,9 @@ function pendingObjectDetail(op: PendingOp): string {
     case 'createTable': return `표 삽입 · ${obj.rows}행 × ${obj.cols}열`;
     case 'insertImage': return `그림 삽입${obj.description ? ` · ${obj.description}` : ''}`;
     case 'insertEquation': return `수식 삽입 · ${obj.script}`;
+    case 'insertShape': return `도형 삽입 · ${SHAPE_LABELS[obj.shape]}`;
+    case 'editObject': return `${obj.kind === 'picture' ? '그림' : '도형'} 배치 변경`;
+    case 'deleteObject': return `${obj.kind === 'picture' ? '그림' : '도형'} 삭제`;
     case 'tableStructure': return `표 ${({
       insert_row: '행 삽입', insert_col: '열 삽입', delete_row: '행 삭제',
       delete_col: '열 삭제', merge_cells: '셀 병합', split_cell: '셀 나누기',
@@ -223,6 +229,7 @@ function pendingObjectDetail(op: PendingOp): string {
     case 'paraFormat': return '문단 서식 변경';
     case 'applyStyle': return '문단 스타일 적용';
     case 'pageLayout': return '쪽 설정 변경';
+    case 'engineBatch': return `엔진 편집 ${obj.methods.length}개 · ${[...new Set(obj.methods)].slice(0, 3).join(', ')}`;
     case 'headerFooter': {
       const kind = obj.isHeader ? '머리말' : '꼬리말';
       const preview = obj.lines.filter((line) => line.length > 0).join(' / ');

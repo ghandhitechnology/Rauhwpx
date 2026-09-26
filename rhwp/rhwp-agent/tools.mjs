@@ -7,7 +7,7 @@ import { MCP_USER_QUESTION_SHAPE } from './user-question.mjs';
 export { RHWP_TOOL_RULES } from './tool-rules.mjs';
 
 // 쓰기 도구 설명 끝에 붙는 한 줄 포인터. 규칙 본문은 RHWP_TOOL_RULES 에만 둔다.
-const WRITE_POINTER = 'Staged write (rhwp tool rules).';
+const WRITE_POINTER = 'Staged (rhwp tool rules).';
 
 /**
  * apply_edits 배치에 넣을 수 있는 semantic write — 스튜디오 executor 의
@@ -36,6 +36,8 @@ export const BATCHABLE_EDIT_TOOL_NAMES = Object.freeze([
   'set_zone_borders',
   'delete_table',
   'insert_equation',
+  'edit_object',
+  'insert_shape',
 ]);
 
 /**
@@ -72,14 +74,14 @@ export function cellParam() {
     paraIdx: z.number().int(),
     controlIdx: z.number().int(),
     cellIdx: z.number().int(),
-  }).optional().describe('Cell (rhwp tool rules)');
+  }).optional().describe('rhwp tool rules');
 }
 
-// 경로 항목의 키/음수 검사는 스튜디오 optCell 이 한다 (도구 9개에 반복되는 스키마라
-// 항목 모양은 레코드로 두고 키 이름은 RHWP_TOOL_RULES 에 적는다 — 직접 프로필 크기 한도).
+// 경로 항목의 키/음수·최대 깊이(8) 검사는 스튜디오 optCell 이 한다 (여러 도구에 반복되는
+// 스키마라 항목 모양은 레코드로 두고 키 이름은 RHWP_TOOL_RULES 에 적는다 — 직접 프로필 크기 한도).
 export function cellPathParam() {
-  return z.array(z.record(z.string(), z.unknown())).min(1).max(8).optional()
-    .describe('Nested cell (rhwp tool rules)');
+  return z.array(z.record(z.string(), z.unknown())).min(1).optional()
+    .describe('Nested (rhwp tool rules)');
 }
 
 /**
@@ -134,7 +136,7 @@ function zoneCorner(description) {
  */
 function anchorParam() {
   return z.record(z.string(), z.unknown()).optional()
-    .describe('Text anchor {text,occurrence?,within?,position?} (rhwp tool rules)');
+    .describe('{text,occurrence?,within?,position?} (rhwp tool rules)');
 }
 
 const ANCHOR_KEYS = ['text', 'occurrence', 'within', 'position'];
@@ -365,7 +367,7 @@ function validateEditTable(args) {
   }
 }
 
-const EQUATION_SYNTAX = 'Syntax is HWP equation script (한컴 수식), NOT LaTeX: {a} over {b} · sqrt {x}, root n of x · x^{2}, y_{i} · int _{0} ^{inf}, sum _{k=1} ^{n}, prod, lim _{x -> 0} · PMATRIX{a & b # c & d} (& column, # row; also MATRIX/BMATRIX/DMATRIX) · cases{...} · greek names (alpha, pi, GAMMA) · ->, <-, <-> · bar/vec/hat/dot x · rm/it · ~ thin space, # line break. Example: "x = {-b +- sqrt {b^2 - 4ac}} over {2a}". INVALID_SCRIPT on syntax errors.';
+const EQUATION_SYNTAX = 'Syntax: 한컴 수식, NOT LaTeX: {a} over {b} · sqrt {x}, root n of x · x^{2}, y_{i} · int _{0} ^{inf}, sum _{k=1} ^{n}, prod, lim _{x -> 0} · PMATRIX{a & b # c & d} (& column, # row; also MATRIX/BMATRIX/DMATRIX) · cases{...} · greek names (alpha, pi, GAMMA) · ->, <-, <-> · bar/vec/hat/dot x · rm/it · ~ thin space, # line break. Example: "x = {-b +- sqrt {b^2 - 4ac}} over {2a}". INVALID_SCRIPT on syntax errors.';
 
 export const TOOL_CATEGORIES = Object.freeze([
   'instruction-read',
@@ -445,12 +447,12 @@ const BROWSER_ID_ARG = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/, 'bro
 const BASE_TOOL_DEFINITIONS = [
   {
     name: 'read_agent_instructions',
-    description: 'Read the app-only AGENTS.md (durable user preferences for Rauhwpx chats): content, revision, updatedAt. Read before update_agent_instructions so stale writes are rejected. Not a project AGENTS.md and never shared with harnesses outside this app.',
+    description: 'Read the app-only AGENTS.md (durable user preferences for Rauhwpx chats): content, revision, updatedAt. Read before update_agent_instructions. Not a project AGENTS.md; never shared outside this app.',
     shape: {},
   },
   {
     name: 'update_agent_instructions',
-    description: 'Propose a complete replacement for the app-only AGENTS.md. The draft is not persisted until the user explicitly confirms it in Rauhwpx Settings > 지시. For durable instructions or repeated preferences/corrections — never one-off task details, secrets, credentials or sensitive inferred facts. Pass the read revision as expectedRevision, then tell the user what to confirm and where.',
+    description: 'Propose a full replacement for the app-only AGENTS.md; not persisted until the user explicitly confirms it in Settings > 지시. Durable instructions or repeated preferences only — never one-off task details, secrets or sensitive inferred facts. Tell the user what to confirm.',
     shape: {
       content: z.string().max(30_000).describe('Replacement AGENTS.md content'),
       expectedRevision: z.number().int().min(1).describe('From read_agent_instructions'),
@@ -459,7 +461,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'read_product_skill',
-    description: 'Read an enabled rhwp product skill (start with SKILL.md) or one of its text resources; returns the directory digest and file list. Read only the referenced files you need. Never reads provider-global skills or arbitrary paths.',
+    description: 'Read an enabled rhwp product skill (start with SKILL.md) or one of its text resources; returns the directory digest and file list. Read only the referenced files you need.',
     shape: {
       name: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/),
       resourcePath: z.string().min(1).max(500).default('SKILL.md').optional(),
@@ -467,7 +469,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'commit_product_skill',
-    description: 'Change the rhwp product skill library: create, write one file, replace the body, import a harness skill, or delete a user skill. Send only the fields for that action and pass the current digest as base for write/body/delete/replace (identical bytes need no base). Never write provider-global skill directories.',
+    description: 'Change the rhwp product skill library: create, write one file, replace the body, import a harness skill or delete a user skill. Send only the fields for that action; pass the current digest as base for write/body/delete/replace. Never write provider-global skill directories.',
     shape: {
       action: z.enum(['create', 'write', 'body', 'import', 'delete']),
       name: z.string().optional(),
@@ -626,15 +628,15 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_structure',
-    description: `Entry point: the document outline as compact lines (legend on line 2) — one line per paragraph with address, length and text preview, empty runs collapsed, each top-level table as a cellIdx grid after its anchor paragraph. Call first for addresses and the revision. format:"json" gives the same data as JSON. Nested cell text: find_text/get_selection.`,
+    description: `Entry point: the outline as compact lines (legend on line 2): per paragraph address, length and text preview each top-level table as a cellIdx grid after its anchor paragraph. Call first for addresses and the revision. format:"json" for JSON. Nested cell text: find_text/get_selection.`,
     shape: {
       maxPreviewChars: z.number().int().min(0).default(120).optional(),
       maxParagraphs: z.number().int().min(1).default(500).optional(),
       format: z.enum(['text', 'json']).default('text').optional(),
       sinceRevision: z.number().int().min(0).optional()
-        .describe('Only paragraphs changed since this revision (rhwp tool rules)'),
+        .describe('Changed paragraphs only (rhwp tool rules)'),
       range: z.object({
-        sectionIdx: z.number().int().min(0),
+        sectionIdx: z.number().int(),
         fromPara: z.number().int().min(0),
         toPara: z.number().int().min(0),
       }).strict().optional().describe('Only this body paragraph range (inclusive).'),
@@ -664,19 +666,19 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_document_info',
-    description: `Active document identity and metadata: documentId, documentName, sourcePath (file or null), sectionCount, pageCount, sourceFormat, digest, dirty, fontsUsed, fallbackFont and registeredFontCount. fontQuery returns registered names (prefix/substring match) usable as fontFamily. Identify documents by documentId/digest/sourcePath, never filename or title.`,
+    description: `Active document identity (documentId, name, sourcePath or null, digest, dirty), section/page counts, format and fonts. fontQuery lists registered names usable as fontFamily. Identify documents by documentId/digest/sourcePath, never by filename or title.`,
     shape: {
       fontQuery: z.array(z.string().min(1)).min(1).optional(),
     },
   },
   {
     name: 'materialize_document_snapshot',
-    description: `Write the open document to this chat's hub-owned read-only input storage; returns absolute path, format, size, checksum, revision, digest and dirty state. For workflows needing a local path when sourcePath is null or dirty. Does not require the user to save; never modifies the document or its source.`,
+    description: `Write the open document to this chat's hub-owned read-only storage for workflows needing a local path (sourcePath null or dirty); returns path, format, size, checksum, revision, digest. Does not require the user to save; never modifies the document or its source.`,
     shape: {},
   },
   {
     name: 'publish_cloud_document',
-    description: 'Cloud workers only: announce the finished Cloud document so the user can merge it into their local branch after this turn. The client archives the checkpoint and offers a merge button without overwriting the original file.',
+    description: 'Cloud workers only: announce the finished Cloud document so the user can merge it into their local branch after this turn; the original file is not overwritten.',
     shape: {},
   },
   {
@@ -690,7 +692,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'render_page',
-    description: `Render one page (0-based pageIndex) as a PNG block (scale 0.5-3, default 1.25). regionMm crops it; savePath writes the PNG under the session workspace and returns its imagePath. format "svg" returns raw markup (~800KB cap). Use get_page_geometry for positions; RESULT_TOO_LARGE on very complex pages.`,
+    description: `Render one page (0-based pageIndex) as a PNG block. regionMm crops it; savePath writes the PNG under the session workspace and returns imagePath. format "svg" returns raw markup (~800KB cap). Measure positions with get_page_geometry.`,
     shape: {
       pageIndex: z.number().int(),
       format: z.enum(['png', 'svg']).default('png').optional(),
@@ -701,7 +703,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_page_geometry',
-    description: `Measure one page (0-based pageIndex) in mm from its top-left. lines: box, baseline, text x-extent, sectionIdx/paraIdx/charStart/charEnd, cell/cellPath in tables or text boxes. objects: box, control address, wrap, z-order. include "runs" adds per-run x ranges; regionMm filters by overlap. Prefer over estimating from render_page.`,
+    description: `Measure one page (0-based pageIndex) in mm from its top-left. lines: box, baseline, text x-extent, sectionIdx/paraIdx/charStart/charEnd, cell/cellPath in tables or text boxes. objects: box, control address (edit_object), wrap, z-order. include "runs" adds per-run x ranges; regionMm filters by overlap.`,
     shape: {
       pageIndex: z.number().int(),
       include: z.array(z.enum(['lines', 'runs', 'objects'])).min(1).optional()
@@ -711,7 +713,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_para_format',
-    description: `One paragraph's formatting: alignment, spacing, line spacing, indent, margins, tabStops (mm), borders, koreanBreakUnit and list state (headType number|bullet|outline, numberingId, paraLevel; none = not a list). full:true adds zero/false fields. List numbers/bullets are generated, never text — get_structure omits them.`,
+    description: `One paragraph's format: alignment, spacing, line spacing, indent, margins, tabStops (mm), borders, koreanBreakUnit, list state (headType, numberingId, paraLevel). full:true adds zero/false fields. List numbers/bullets are generated, not text; get_structure omits them.`,
     shape: {
       full: z.boolean().optional(),
       sectionIdx: z.number().int(),
@@ -722,7 +724,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_char_format',
-    description: `Character formatting at one position: fontFamily, fontSizePt, fontId/charShapeId, widthPercent/letterSpacingPercent (scalar, or 7 script slots), bold/italic/underline/strikethrough/super/subscript/colors when set (full:true adds the rest). INHERITANCE RULE: inserted text inherits the character BEFORE the insertion point (replace_range: the range's first character).`,
+    description: `Character format at one position: fontFamily, fontSizePt, fontId/charShapeId, widthPercent/letterSpacingPercent (scalar or 7 script slots), set flags and colors (full:true adds the rest). INHERITANCE RULE: inserted text inherits the character BEFORE the insertion point (replace_range: the range's first character).`,
     shape: {
       full: z.boolean().optional(),
       sectionIdx: z.number().int(),
@@ -734,7 +736,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_table_properties',
-    description: `One table's editable state in mm/enums: size, cell spacing/padding, page splitting, object placement (inline/floating, wrap, reference, alignment, offsets), overlap, outer margins, caption. cellIdx adds that cell's size, padding, direction, protection, field, fill. full:true adds default/off values. Read before set_table_props/set_cell_props.`,
+    description: `A table's editable state (mm/enums): size, cell spacing/padding, page splitting, object placement (inline/floating, wrap, reference, alignment, offsets), overlap, outer margins, caption. cellIdx adds that cell's props; full:true adds defaults.`,
     shape: {
       full: z.boolean().optional(),
       sectionIdx: z.number().int(),
@@ -745,7 +747,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_table_layout',
-    description: `Where a table lands: fragments[] {pageIndex, xMm, yMm, widthMm, heightMm} per page (two or more = split), bodyAreaMm, overflowsBody/overflowsBodyWidth, pageBreak (0 none, 1 cell, 2 row), repeatHeader. FIX: overflowsBody with pageBreak 0 → set_table_props {pageBreak:"row"} (+repeatHeader:true); too wide → edit_table fit_to_page or set_column_widths.`,
+    description: `Where a table lands: fragments[] {pageIndex, xMm, yMm, widthMm, heightMm} per page, bodyAreaMm, overflowsBody/overflowsBodyWidth, pageBreak (0 none, 1 cell, 2 row), repeatHeader. Fix overflowsBody with pageBreak 0 via set_table_props {pageBreak:"row", repeatHeader:true}; too wide: edit_table fit_to_page or set_column_widths.`,
     shape: {
       sectionIdx: z.number().int().default(0).optional(),
       paraIdx: z.number().int(),
@@ -754,7 +756,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_engine_edit_capabilities',
-    description: `Agent-editable engine methods (document mutations plus paste-session setup). Without query: method names by kind. query or detail:true adds TypeScript signatures, argumentGuide for opaque params and referenced typeDefinitions. Call before apply_engine_edits.`,
+    description: `Agent-editable engine methods (document mutations plus paste-session setup). Without query: names by kind. query or detail:true adds TypeScript signatures, argumentGuide and referenced typeDefinitions. Call before apply_engine_edits.`,
     shape: {
       query: z.string().optional(),
       detail: z.boolean().optional(),
@@ -762,7 +764,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'apply_engine_edits',
-    description: `Apply 1-32 engine mutations in order as one atomic, immediately committed transaction and one undo entry — the escape hatch for semantic-tool gaps: every other method returned by get_engine_edit_capabilities. Each op is {method, args} with positional args; Uint8Array as {$base64:"..."}; string results return as {value, parsedJson}. Any failure restores the pre-batch snapshot. Needs expectedRevision (rhwp tool rules).`,
+    description: `Apply 1-32 engine mutations in order as one atomic staged edit (rhwp tool rules): the escape hatch for every other method returned by get_engine_edit_capabilities. op = {method, args} (positional; Uint8Array as {$base64}). Any failure restores the pre-batch state; mixes with semantic writes. Needs expectedRevision.`,
     shape: {
       expectedRevision: z.number().int(),
       operations: z.array(z.object({
@@ -782,7 +784,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'apply_edits',
-    description: `Apply 1-32 staged semantic edits in ONE call under one expectedRevision. Each item is {tool, args} with that tool's arguments minus expectedRevision and render; items run in order (rhwp tool rules). Any failure rolls back the whole batch and names the index. ${WRITE_POINTER}`,
+    description: `Apply 1-32 staged edits in ONE call under one expectedRevision: items are {tool, args} (args minus expectedRevision and render), run in order. Any failure rolls back the batch and names the index. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -794,7 +796,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'read_batch',
-    description: 'Run 1-16 read-only document tools in ONE call ({tool, args} each) — items run in order, each returns its own result or error; one failure never aborts the batch. One top-level revision.',
+    description: 'Run 1-16 read-only document tools ({tool, args} each) in ONE call; each item returns its own result or error. One top-level revision.',
     shape: {
       reads: z.array(z.object({
         tool: z.enum(BATCHABLE_READ_TOOL_NAMES),
@@ -804,7 +806,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'insert_text',
-    description: `Insert text at charOffset or at an anchor. "\\n" splits paragraphs ("\\r\\n"/"\\r" become "\\n"). At most 10000 chars per call; split longer text across calls. ${WRITE_POINTER}`,
+    description: `Insert text at charOffset or at an anchor. "\\n" splits paragraphs ("\\r\\n"/"\\r" become "\\n"). Max 10000 chars per call. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -839,8 +841,8 @@ const BASE_TOOL_DEFINITIONS = [
       expectedRevision: z.number().int(),
       render: renderParam(),
       templateRevision: z.number().int().min(1),
-      source: z.object({ sectionIdx: z.number().int().min(0), paraIdx: z.number().int().min(0) }),
-      targets: z.array(z.object({ sectionIdx: z.number().int().min(0), paraIdx: z.number().int().min(0) })).min(1).max(500),
+      source: z.object({ sectionIdx: z.number().int(), paraIdx: z.number().int() }),
+      targets: z.array(z.object({ sectionIdx: z.number().int(), paraIdx: z.number().int() })).min(1).max(500),
     },
   },
   {
@@ -851,14 +853,14 @@ const BASE_TOOL_DEFINITIONS = [
       render: renderParam(),
       templateRevision: z.number().int().min(1),
       source: z.object({
-        sectionIdx: z.number().int().min(0),
+        sectionIdx: z.number().int(),
         startParaIdx: z.number().int().min(0),
         endParaIdx: z.number().int().min(0),
       }),
       target: z.object({
-        sectionIdx: z.number().int().min(0),
-        paraIdx: z.number().int().min(0),
-        charOffset: z.number().int().min(0),
+        sectionIdx: z.number().int(),
+        paraIdx: z.number().int(),
+        charOffset: z.number().int(),
       }),
     },
     validate: (args) => {
@@ -867,7 +869,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'delete_range',
-    description: `Delete a text range (coordinates or an anchor). The text disappears immediately and later coordinates shift; collapsedAt gives the collapse point. Ranges crossing a table are rejected (edit inside with cell/cellPath). To rewrite text prefer replace_range. ${WRITE_POINTER}`,
+    description: `Delete a text range (coordinates or an anchor). Later coordinates shift at once; collapsedAt gives the collapse point. Ranges crossing a table are rejected (edit inside with cell/cellPath). To rewrite text use replace_range. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -884,7 +886,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'replace_range',
-    description: `Replace a text range with new text in one atomic op that keeps formatting; prefer it over delete_range + insert_text. Coordinates or an anchor. Ranges crossing a table are rejected (edit inside with cell/cellPath). ${WRITE_POINTER}`,
+    description: `Replace a text range (coordinates or an anchor) with new text in one atomic op that keeps formatting; prefer it over delete_range + insert_text. Ranges crossing a table are rejected (edit inside with cell/cellPath). ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -902,7 +904,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'apply_char_format',
-    description: `Apply character formatting to startOffset..endOffset of one paragraph, or to an anchor's match. widthPercent/letterSpacingPercent take a percent or a 7-slot array (per-script override). At least one format key is required. ${WRITE_POINTER}`,
+    description: `Apply character formatting to startOffset..endOffset of one paragraph, or to an anchor's match. widthPercent/letterSpacingPercent take a percent or a 7-slot array (per-script override). ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -929,7 +931,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'create_table',
-    description: `Create a table at charOffset, optionally filled in the same call. cells is a row-major grid (rows/cols inferred; short rows leave cells empty; "\\n" splits a cell into paragraphs). headerRow repeats row 0 as a header (bold by default, optional headerFill). To merge afterwards call edit_table op:merge_cells — it applies immediately and renumbers cellIdx. Returns {paraIdx, controlIdx}. ${WRITE_POINTER}`,
+    description: `Create a table at charOffset, optionally filled: cells is a row-major grid (rows/cols inferred, short rows stay empty, "\\n" splits a cell into paragraphs). headerRow repeats row 0 as a header (bold by default, optional headerFill). Returns {paraIdx, controlIdx}. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -948,7 +950,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'edit_table',
-    description: `Change an existing table's structure (address from its get_structure table line). op + required args: insert_row(rowIdx,below=true) · insert_col(colIdx,right=true) · delete_row(rowIdx) · delete_col(colIdx) · merge_cells(startRow,startCol,endRow,endCol) · split_cell(rowIdx,colIdx,splitRows,splitCols) · set_column_widths(columnWidthsMm, one per column; table width becomes their sum) · fit_to_page() shrinks to body width, never widens · apply_formula(row,col,formula,format?) writes into that cell · set_caption(text, withNumber=true keeps "표 N"). To append, target the last index. Ops return new rowCount/colCount/cellCount and renumber cellIdx — address later cells from those or a fresh get_structure. Properties/cells/borders: set_table_props, set_cell_props, set_zone_borders. ${WRITE_POINTER}`,
+    description: `Change a table's structure (address: get_structure table line). op(args): insert_row(rowIdx,below=true) · insert_col(colIdx,right=true) · delete_row(rowIdx) · delete_col(colIdx) · merge_cells(startRow,startCol,endRow,endCol) · split_cell(rowIdx,colIdx,splitRows,splitCols) · set_column_widths(columnWidthsMm per column) · fit_to_page() shrinks to body width · apply_formula(row,col,formula,format?) · set_caption(text, withNumber=true keeps "표 N"). Append by targeting the last index. Returns the new rowCount/colCount/cellCount; cellIdx renumbers. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -986,7 +988,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'set_table_props',
-    description: `Set table-level properties (address from its get_structure table line; read get_table_properties first). EASY CENTERING: {horizontalAlign:"center"} → floating, column-relative, zero-offset. Any floating-placement key implies positionMode floating. pageBreak "row" continues a long table on the next page. ${WRITE_POINTER}`,
+    description: `Set table-level properties (address from its get_structure table line). EASY CENTERING: {horizontalAlign:"center"} → floating, column-relative, zero offset. Any floating-placement key implies positionMode floating. pageBreak "row" splits a long table across pages. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -1013,7 +1015,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'set_zone_borders',
-    description: `Treat the cell rectangle startCell..endCell {row,col} as one zone; sets outline borders, fill, diagonals, center line (zone outline, not inner edges). borderXxx = {type,width,color}: type 0 none, 1 solid, 2 dashed, 3 dotted, 4 dash-dot, 8 double; width 0-6 (0 = 0.1mm). ${WRITE_POINTER}`,
+    description: `Style the cell rectangle startCell..endCell {row,col} as one zone: outline borders (not inner edges), fill, diagonals, center line. borderXxx = {type,width,color}: type 0 none, 1 solid, 2 dashed, 3 dotted, 4 dash-dot, 8 double; width 0-6 (0 = 0.1mm). ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -1037,7 +1039,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'delete_table',
-    description: `Delete a whole table (address from its get_structure table line). The table is removed immediately; later tables in the same paragraph move down one controlIdx. Rejecting the staged change restores it. ${WRITE_POINTER}`,
+    description: `Delete a whole table (address from its get_structure table line). The table is removed immediately; later tables in the same paragraph move down one controlIdx. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -1048,7 +1050,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'apply_para_format',
-    description: `Format one paragraph by address or anchor (the match's paragraph): alignment, spacing/indent/margins (pt), line spacing (lineSpacingPercent, or lineSpacingType + lineSpacingPt), pageBreakBefore, tabStops, borders + borderSpacingMm, koreanBreakUnit, list fields (headType "none" clears; create lists with apply_list). ${WRITE_POINTER}`,
+    description: `Format one paragraph by address or anchor (its paragraph): alignment, spacing/indent/margins (pt), lineSpacingPercent or lineSpacingType + lineSpacingPt, pageBreakBefore, tabStops, borders + borderSpacingMm, koreanBreakUnit, list fields (headType "none" clears; new lists: apply_list). ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -1121,7 +1123,7 @@ const BASE_TOOL_DEFINITIONS = [
     // mcp-stdio.mjs 가 이 정의의 description/shape 로 커스텀 핸들러를 등록한다.
     // referenceFileId 는 허브가 참조 저장소에서 직접 읽고, cropPx 는 스튜디오 캔버스가 자른다.
     name: 'insert_image',
-    description: `Insert an image at charOffset, inline by default. Source: imagePath (PNG/JPEG/GIF/BMP ≤5MB in an approved root; copy generated images into the session workspace) or referenceFileId (list_reference_files). cropPx crops the source. Natural size at 96dpi capped to body width; widthMm/heightMm force size (one keeps the ratio). afterObjects appends after objects at charOffset. positionMode "floating" → xMm/yMm from relativeTo (default paragraph) with wrap (default square). ${WRITE_POINTER}`,
+    description: `Insert an image at charOffset, inline by default. Source: imagePath (PNG/JPEG/GIF/BMP ≤5MB under an approved root such as the session workspace) or referenceFileId. cropPx crops the source. Natural 96dpi size capped to body width; widthMm/heightMm override (one keeps the ratio). afterObjects goes after objects at charOffset. positionMode "floating": xMm/yMm from relativeTo (default paragraph), wrap (default square). ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -1149,7 +1151,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'environment_screenshot',
-    description: 'Capture the cloud session\'s virtual desktop (Xvfb) to a PNG in the session work directory; returns imagePath (usable with insert_image) + image block. ENVIRONMENT_DISPLAY_UNAVAILABLE without a ready DISPLAY.',
+    description: 'Capture the cloud session\'s virtual desktop (Xvfb) to a PNG in the session work directory; returns imagePath (for insert_image) + image block. ENVIRONMENT_DISPLAY_UNAVAILABLE without DISPLAY.',
     shape: {},
   },
   {
@@ -1168,8 +1170,52 @@ const BASE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'edit_object',
+    description: `Move, resize, wrap, crop, reorder or delete a picture/shape (address from get_page_geometry objects; in a cell: cell/cellPath plus the cell paraIdx). xMm/yMm/relativeTo/wrap float an inline object (defaults paragraph, square). One of widthMm/heightMm keeps the ratio unless keepAspect:false. cropMm trims mm off each side of the shown picture (negative restores). zOrder: floating body objects. delete:true alone. ${WRITE_POINTER}`,
+    shape: {
+      expectedRevision: z.number().int(),
+      render: renderParam(),
+      sectionIdx: z.number().int(),
+      paraIdx: z.number().int(),
+      controlIdx: z.number().int(),
+      cell: cellParam(),
+      cellPath: cellPathParam(),
+      positionMode: z.enum(['inline', 'floating']).optional(),
+      xMm: z.number().optional(),
+      yMm: z.number().optional(),
+      relativeTo: z.enum(['paper', 'page', 'column', 'paragraph']).optional(),
+      wrap: z.enum(['square', 'topAndBottom', 'behindText', 'inFrontOfText']).optional(),
+      widthMm: z.number().optional(),
+      heightMm: z.number().optional(),
+      keepAspect: z.boolean().optional(),
+      cropMm: sidesMm(),
+      zOrder: z.enum(['front', 'back', 'forward', 'backward']).optional(),
+      delete: z.boolean().optional(),
+    },
+  },
+  {
+    name: 'insert_shape',
+    description: `Insert a floating line, rectangle, ellipse or textBox anchored at paraIdx/charOffset, xMm/yMm from relativeTo (default paragraph); defaults: wrap inFrontOfText, black stroke, no fill. A line runs corner to corner of its widthMm x heightMm box (0 = straight). textBox returns cell/cellPath for the text tools (inner paraIdx 0). ${WRITE_POINTER}`,
+    shape: {
+      expectedRevision: z.number().int(),
+      render: renderParam(),
+      sectionIdx: z.number().int(),
+      paraIdx: z.number().int(),
+      charOffset: z.number().int().optional(),
+      shape: z.enum(['line', 'rectangle', 'ellipse', 'textBox']),
+      widthMm: z.number(),
+      heightMm: z.number(),
+      xMm: z.number().optional(),
+      yMm: z.number().optional(),
+      relativeTo: z.enum(['paper', 'page', 'column', 'paragraph']).optional(),
+      wrap: z.enum(['square', 'topAndBottom', 'behindText', 'inFrontOfText']).optional(),
+      strokeColor: z.string().optional(),
+      fillColor: z.string().optional(),
+    },
+  },
+  {
     name: 'preview_equation',
-    description: `Render an HWP equation script WITHOUT inserting it. Returns SVG, widthMm/heightMm/baselineMm and warnings; any warning means fix and retry until empty, then insert_equation the final script. ${EQUATION_SYNTAX}`,
+    description: `Render an HWP equation script without inserting it (SVG, size in mm, warnings); fix until warnings is empty, then insert_equation it. ${EQUATION_SYNTAX}`,
     shape: {
       script: z.string().min(1),
       fontSizePt: z.number().positive().optional(),
@@ -1177,7 +1223,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'insert_chart',
-    description: `Render a chart and insert it as a picture at charOffset. Types: bar, line, pie (one series), scatter (x,y pairs). categories label the x-axis or pie slices and must match the value count. Not editable as a chart afterwards. ${WRITE_POINTER}`,
+    description: `Insert a rendered chart as a picture at charOffset: bar, line, pie (one series), scatter (x,y pairs); categories label the x-axis or slices and match the value count. Not editable as a chart later. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -1201,7 +1247,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'set_page_layout',
-    description: `Set a section's paper (named or custom mm), orientation, margins and columns. The document re-paginates immediately. ${WRITE_POINTER}`,
+    description: `Set a section's paper (named or custom mm), orientation, margins and columns. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -1227,7 +1273,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'edit_header_footer',
-    description: `Create or replace a section's header or footer: lines = its paragraphs; pageNumber appends a numbered line {template: "{n}" = page, "{total}" = page count; align: left|center|right|outside — outside writes an odd-right/even-left pair}; applyTo both|odd|even; startPageNumber restarts numbering there (0 = continue). Replacing discards existing content. ${WRITE_POINTER}`,
+    description: `Create or replace a section header/footer: lines = its paragraphs; pageNumber appends a numbered line {template: "{n}" page, "{total}" page count; align left|center|right|outside (an odd-right/even-left pair)}; applyTo both|odd|even; startPageNumber restarts numbering (0 = continue). Replaces existing content. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -1254,7 +1300,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'replace_all',
-    description: `Replace every occurrence across body and table cells in one call (back-to-front) — better than looping find_text + replace_range. Up to maxMatches (default 100, max 200); if truncated, call again. ${WRITE_POINTER}`,
+    description: `Replace every occurrence in body and table cells — better than looping find_text + replace_range. Up to maxMatches (max 200); call again if truncated. ${WRITE_POINTER}`,
     shape: {
       expectedRevision: z.number().int(),
       render: renderParam(),
@@ -1266,7 +1312,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_outline',
-    description: `Heading tree from outline numbering or Korean clause markers (조/항/호/목). mode auto (default)|outline|clause; nodes carry level, kind, marker, text, sectionIdx/paraIdx.`,
+    description: `Heading tree from outline numbering or Korean clause markers (조/항/호/목); nodes carry level, kind, marker, text, sectionIdx/paraIdx.`,
     shape: {
       mode: z.enum(['auto', 'outline', 'clause']).default('auto').optional(),
     },
@@ -1342,7 +1388,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'verify_changes',
-    description: `Optional review summary — every write already returns its after report. Ops staged since your last call this turn (full:true = whole change set): kind/summary, post-edit text, affected pages, warnings; includeImage:true adds a PNG of the first affected page. Deleted text is already gone; do NOT re-insert it.`,
+    description: `Optional review summary (writes already return an after report) of ops staged since your last call this turn (full:true = whole set): kind/summary, text, pages, warnings; includeImage:true adds a PNG of the first page. Deleted text is gone; do NOT re-insert it.`,
     shape: {
       changeSetId: z.string().min(1).optional(),
       includeImage: z.boolean().default(false).optional(),
@@ -1351,7 +1397,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'ask_user_question',
-    description: 'Ask the user 1-4 focused questions as multiple-choice cards; waits for one atomic response. Each question needs 2-4 concise options; multiSelect only when several may apply. Custom “Other” answers are on by default. Root conversation only — subagents report uncertainty to the root agent.',
+    description: 'Ask the user 1-4 focused multiple-choice questions (2-4 concise options each; multiSelect only when several may apply; “Other” is on by default) and wait for one response. Root conversation only — subagents report uncertainty to the root agent.',
     shape: MCP_USER_QUESTION_SHAPE,
   },
   {
@@ -1379,7 +1425,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'publish_artifact',
-    description: 'Publish a generated HWP/HWPX from this chat\'s workspace as an immutable downloadable artifact; give the returned downloadUrl to the user as a Markdown link. Rejects non-workspace paths, links, malformed or format-mismatched packages and files over 64 MiB.',
+    description: 'Publish a generated HWP/HWPX from this chat\'s workspace as an immutable download; give the user downloadUrl as a Markdown link. Rejects paths outside the workspace, links, malformed packages and files over 64 MiB.',
     shape: {
       filePath: z.string().min(1).describe('Absolute path inside this chat workspace'),
       fileName: z.string().min(1).optional().describe('Download name; directory parts are discarded'),
@@ -1387,7 +1433,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'delegate_copy_layout',
-    description: 'Delegate the copy-layout workflow to an autonomous background process: it never asks the user, appears in the agent fleet, and returns its verified result here. Pass get_document_info identity fields. Do not inspect, sanitize, publish or open the template here; do not call wait_agent/list_agents or poll — end the turn and the hub will start a new owning-chat turn with the result.',
+    description: 'Delegate the copy-layout workflow to a background process (shown in the agent fleet, never asks the user) that returns its verified result. Pass get_document_info identity fields. Do not open or inspect the template here; do not call wait_agent/list_agents or poll — end the turn and the hub will start a new owning-chat turn with the result.',
     shape: {
       documentId: z.string().min(1),
       digest: z.string().min(1),
@@ -1589,6 +1635,8 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   insert_image: 'document-write',
   environment_screenshot: 'environment',
   insert_equation: 'document-write',
+  edit_object: 'document-write',
+  insert_shape: 'document-write',
   preview_equation: 'document-read',
   insert_chart: 'document-write',
   set_page_layout: 'document-write',

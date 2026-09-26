@@ -17,9 +17,11 @@ import { AgentToolError } from './types.ts';
 import { EditJournal, type EditJournalEntry } from './edit-journal.ts';
 import { renderChartPng, validateChartSpec } from './chart-render.ts';
 import { cropImageOnCanvas, REFERENCE_READ_MAX_PIXELS, type ImageCropper, type PixelBox } from './image-crop.ts';
+import { describeObject, EDIT_OBJECT_ARG_KEYS, planInsertShape, planObjectEdit, type ObjectKind } from './object-edit-args.ts';
 import type { ChartSpec } from './chart-render.ts';
 import {
-  applyEngineEdits,
+  runEngineEdits,
+  validateEngineEdits,
   applyEngineEditSession,
   getEngineEditCapabilities,
   getEngineEditCapabilityCount,
@@ -167,6 +169,8 @@ export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'apply_style',
   'insert_image',
   'insert_equation',
+  'edit_object',
+  'insert_shape',
   'set_page_layout',
   'edit_header_footer',
   'insert_page_break',
@@ -186,7 +190,8 @@ export function isDocumentWriteTool(tool: string) {
   return DOCUMENT_WRITE_TOOLS.has(tool);
 }
 
-const RAW_ENGINE_WRITE_TOOLS = new Set(['apply_engine_edits', 'prepare_engine_edit_session']);
+/** 엔진 배치 도구 — 스테이징되지만 after 보고/render 는 semantic 쓰기에만 붙는다. */
+const ENGINE_WRITE_TOOLS: ReadonlySet<string> = new Set(['apply_engine_edits', 'prepare_engine_edit_session']);
 
 /**
  * apply_edits 배치에 넣을 수 있는 staged semantic write — 전부 동기 dispatch 여야
@@ -215,6 +220,8 @@ const BATCHABLE_EDIT_TOOLS: ReadonlySet<string> = new Set([
   'set_zone_borders',
   'delete_table',
   'insert_equation',
+  'edit_object',
+  'insert_shape',
 ]);
 
 /**
@@ -245,7 +252,6 @@ const BATCHABLE_READ_TOOLS: ReadonlySet<string> = new Set([
   'preview_equation',
   'verify_changes',
 ]);
-type TurnWriteMode = 'none' | 'semantic' | 'raw';
 
 export interface ToolCapabilityContext {
   workflow: AgentWorkflow;
@@ -255,7 +261,7 @@ export interface ToolCapabilityContext {
   /** Server state last synchronized by the Studio bridge. */
   activePhase?: AgentPhase;
   activeCapabilityEpoch?: number | null;
-  /** 현재 채팅의 권한 프로필 — 안전 모드에서는 즉시 커밋되는 raw 엔진 쓰기를 막는다. */
+  /** 현재 채팅의 권한 프로필 — 안전 모드에서는 클라우드 게시를 막는다. */
   permissionProfile?: PermissionProfile;
   template?: DocumentTemplate;
   /** Exact hub turn/cancellation fence captured for this request. */
@@ -273,13 +279,6 @@ export function assertToolRequestActive(capability?: ToolCapabilityContext): voi
 
 /** Enforce plan-mode write authority before dispatch can touch document state. */
 export function assertToolCapability(tool: string, capability?: ToolCapabilityContext) {
-  // 안전 프로필: raw 엔진 쓰기는 승인 게이트를 우회해 즉시 커밋되므로 차단한다.
-  if (capability?.permissionProfile === 'safe' && RAW_ENGINE_WRITE_TOOLS.has(tool)) {
-    throw new AgentToolError(
-      'SAFE_MODE_RAW_ENGINE',
-      'Raw engine edits commit immediately and bypass the user’s review gate, so they are unavailable in the 안전 permission profile. Use the staged semantic write tools instead, or ask the user to switch the chat to 전체 접근.',
-    );
-  }
   if (!isDocumentWriteTool(tool)) return;
   if (capability?.workflow === 'question') {
     throw new AgentToolError(
@@ -632,6 +631,14 @@ function optCell(args: Record<string, unknown>): CellAddr | undefined {
   return cell;
 }
 
+/** 셀 안 개체의 엔진 경로 — 한 칸 셀 주소도 경로로 바꾸고 마지막 cellParaIndex 는 개체 문단이다 */
+function objectCellPath(cell: CellAddr, paraIdx: number): CellPathEntry[] {
+  const path = cell.path?.map((entry) => ({ ...entry }))
+    ?? [{ controlIndex: cell.controlIdx, cellIndex: cell.cellIdx, cellParaIndex: 0 }];
+  path[path.length - 1].cellParaIndex = paraIdx;
+  return path;
+}
+
 function cellPathAt(cell: CellAddr, paraIdx: number): string {
   const path = cell.path?.map((entry) => ({ ...entry }));
   if (!path?.length) throw new AgentToolError('INVALID_ARGS', 'cellPath is required for nested cell access');
@@ -767,7 +774,6 @@ function borderSpecOut(b: ParaBorderSpec | undefined): { type: number; widthMm: 
 
 export class AgentToolExecutor {
   private deps: AgentToolExecutorDeps;
-  private turnWriteMode: TurnWriteMode = 'none';
   private templateWasm: WasmBridge | null = null;
   private templateBytes: Uint8Array | null = null;
   private templateKey: string | null = null;
@@ -788,12 +794,10 @@ export class AgentToolExecutor {
   }
 
   beginTurn(): void {
-    this.turnWriteMode = 'none';
     this.verifiedOpIds.clear();
   }
 
   endTurn(): void {
-    this.turnWriteMode = 'none';
     this.verifiedOpIds.clear();
   }
 
@@ -803,7 +807,6 @@ export class AgentToolExecutor {
     agent: AgentName = 'claude',
     capability?: ToolCapabilityContext,
   ): Promise<unknown> {
-    let claimedMode = false;
     try {
       assertToolRequestActive(capability);
       assertToolCapability(tool, capability);
@@ -812,21 +815,6 @@ export class AgentToolExecutor {
           'READ_ONLY_TEMPLATE_PREVIEW',
           'This published template preview is read-only and cannot accept document-write tools.',
         );
-      }
-      const requestedMode: TurnWriteMode = !isDocumentWriteTool(tool) || tool === 'publish_cloud_document'
-        ? 'none'
-        : RAW_ENGINE_WRITE_TOOLS.has(tool) ? 'raw' : 'semantic';
-      if (requestedMode !== 'none'
-        && this.turnWriteMode !== 'none'
-        && this.turnWriteMode !== requestedMode) {
-        throw new AgentToolError(
-          'MIXED_ENGINE_WRITE_MODE',
-          'Raw engine batches and staged semantic writes cannot run in the same turn. Use one mode for the whole mutation batch.',
-        );
-      }
-      if (requestedMode !== 'none' && this.turnWriteMode === 'none') {
-        this.turnWriteMode = requestedMode;
-        claimedMode = true;
       }
       if (isDocumentWriteTool(tool)
         && !tool.startsWith('template_')
@@ -838,7 +826,9 @@ export class AgentToolExecutor {
       }
       // 스테이징 쓰기는 결과에 after 보고(와 요청 시 변경 영역 PNG)를 붙인다 —
       // render 인자는 쓰기를 적용하기 전에 검사하고, 쓰기 직전 상태를 떠 둔다.
-      const staged = requestedMode === 'semantic';
+      const staged = isDocumentWriteTool(tool)
+        && tool !== 'publish_cloud_document'
+        && !ENGINE_WRITE_TOOLS.has(tool);
       const render = staged ? optRenderMode(args) : undefined;
       const baseline = staged ? this.captureWriteBaseline() : null;
       // await 필수 — 비동기 툴(insert_chart)의 rejection 도 여기서 에러 코드로 매핑된다
@@ -846,7 +836,6 @@ export class AgentToolExecutor {
       assertToolRequestActive(capability);
       return baseline ? await this.attachWriteReport(result, baseline, render) : result;
     } catch (e) {
-      if (claimedMode) this.turnWriteMode = 'none';
       if (e instanceof AgentToolError) throw e;
       const message = e instanceof Error ? e.message : String(e);
       if (message.includes(DOC_NOT_LOADED_MESSAGE)) {
@@ -917,6 +906,8 @@ export class AgentToolExecutor {
       case 'insert_image': return this.insertImage(args, agent, capability);
       case 'read_reference_image': return this.readReferenceImage(args);
       case 'insert_equation': return this.insertEquation(args, agent);
+      case 'edit_object': return this.editObject(args, agent);
+      case 'insert_shape': return this.insertShape(args, agent);
       case 'preview_equation': return this.previewEquation(args);
       case 'set_page_layout': return this.setPageLayout(args, agent);
       case 'edit_header_footer': return this.editHeaderFooter(args, agent);
@@ -929,7 +920,7 @@ export class AgentToolExecutor {
       case 'edit_footnote': return this.editFootnote(args, agent);
       case 'list_bookmarks': return this.listBookmarks();
       case 'set_bookmark': return this.setBookmark(args, agent);
-      case 'apply_engine_edits': return this.applyEngineEdits(args);
+      case 'apply_engine_edits': return this.applyEngineEdits(args, agent);
       case 'prepare_engine_edit_session': return this.prepareEngineEditSession(args);
       default:
         throw new AgentToolError('UNKNOWN_TOOL', `Unknown tool: ${tool}`);
@@ -970,7 +961,11 @@ export class AgentToolExecutor {
     };
   }
 
-  private applyEngineEdits(args: Record<string, unknown>) {
+  /**
+   * 엔진 배치는 하나의 스테이징 op 으로 들어간다 — 호출 시점에 적용되고(미리보기 = 승인
+   * 결과), 같은 턴의 semantic 쓰기와 섞여 한 change set 으로 검토·확정·거절된다.
+   */
+  private applyEngineEdits(args: Record<string, unknown>, agent: AgentName) {
     this.requireDocLoaded();
     this.requireRevision(args);
     const rawOperations = args['operations'];
@@ -986,22 +981,19 @@ export class AgentToolExecutor {
       }
       return { method, args: methodArgs };
     });
-
-    if (this.deps.pending.hasPending()) {
-      throw new AgentToolError(
-        'PENDING_SEMANTIC_EDITS',
-        'apply_engine_edits cannot mix with staged semantic writes in one turn. Use apply_engine_edits for the whole task, or finish the current turn first.',
-      );
-    }
+    validateEngineEdits(operations);
     const previousRevision = this.revision;
-    const results = applyEngineEdits(this.deps.inputHandler, operations);
+    const staged = this.deps.pending.addEngineBatch(
+      agent, operations.map((operation) => operation.method),
+      () => runEngineEdits(this.deps.wasm, operations),
+    );
     return {
       previousRevision,
       revision: this.revision,
+      changeSetId: staged.changeSetId,
       applied: operations.length,
-      results,
-      undo: 'one editor undo entry',
-      status: 'committed',
+      results: staged.result,
+      ...(staged.touched.length > 0 ? { changedParagraphs: staged.touched } : {}),
     };
   }
 
@@ -1146,6 +1138,8 @@ export class AgentToolExecutor {
     try {
       cellCount = wasm.getTableDimensions(sectionIdx, cell.paraIdx, cell.controlIdx).cellCount;
     } catch {
+      // 글상자는 한 칸짜리 셀처럼 경로(cellIndex 0)로만 짚는다 (insert_shape textBox 주소)
+      if (cell.path && cell.cellIdx === 0 && this.isTextBoxPath(sectionIdx, cell)) return;
       throw new AgentToolError(
         'INVALID_ARGS',
         `No table control at section ${sectionIdx}, paragraph ${cell.paraIdx}, controlIdx ${cell.controlIdx} — use get_structure to list tables`,
@@ -1160,6 +1154,15 @@ export class AgentToolExecutor {
       } catch {
         throw new AgentToolError('INVALID_ARGS', 'cellPath does not resolve to a table cell');
       }
+    }
+  }
+
+  private isTextBoxPath(sectionIdx: number, cell: CellAddr): boolean {
+    try {
+      this.deps.wasm.getCellParagraphCountByPath(sectionIdx, cell.paraIdx, JSON.stringify(cell.path));
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -3152,7 +3155,12 @@ export class AgentToolExecutor {
           case 'createTable':
           case 'insertImage':
           case 'insertNote':
+          case 'insertShape':
             if (o.anchor) pushPara(o.sectionIdx, o.anchor.paraIdx);
+            break;
+          case 'editObject':
+          case 'deleteObject':
+            pushPara(o.sectionIdx, o.cell ? o.cell.paraIdx : o.paraIdx);
             break;
           case 'insertEquation':
             if (o.cell) pushPara(o.sectionIdx, o.paraIdx, o.cell);
@@ -3168,6 +3176,11 @@ export class AgentToolExecutor {
           case 'applyFormula':
           case 'setCaption':
             pushPara(o.sectionIdx, o.tableParaIdx);
+            break;
+          case 'engineBatch':
+            for (const span of o.touched) {
+              for (let p = span.paraStart; p <= Math.min(span.paraEnd, span.paraStart + 2); p++) pushPara(span.sectionIdx, p);
+            }
             break;
           default:
             break; // pageLayout/headerFooter — 문단 좌표 없음
@@ -3458,6 +3471,19 @@ export class AgentToolExecutor {
           break;
         case 'deleteTable':
           touchBody(o.sectionIdx, o.tableParaIdx);
+          break;
+        case 'editObject':
+        case 'deleteObject':
+          // 그림·도형은 문단 텍스트를 바꾸지 않는다 — 품은 문단(셀이면 표)만 편집 범위로 둔다
+          if (o.cell) {
+            pushTable(o.sectionIdx, o.cell.paraIdx, o.cell.controlIdx);
+            touchBody(o.sectionIdx, o.cell.paraIdx);
+          } else {
+            touchBody(o.sectionIdx, o.paraIdx);
+          }
+          break;
+        case 'insertShape':
+          touchBody(o.sectionIdx, o.anchor?.paraIdx ?? o.paraIdx);
           break;
         case 'pageLayout':
           targets.wholeSections.add(o.sectionIdx);
@@ -5517,6 +5543,113 @@ export class AgentToolExecutor {
       ...(preview.baselinePx !== undefined ? { baselineMm: pxToMm(preview.baselinePx) } : {}),
       warnings: preview.warnings,
       diagnostics: preview.diagnostics,
+    };
+  }
+
+  /**
+   * 그림/도형의 종류와 현재 속성. 셀 안 개체는 셀 문단 좌표(paraIdx)와 그 문단 안
+   * 인덱스(controlIdx)로 가리키고 경로 API 로 읽는다.
+   */
+  private readEditableObject(
+    sectionIdx: number, paraIdx: number, controlIdx: number, cell?: CellAddr,
+  ): { kind: ObjectKind; props: Record<string, unknown> } {
+    const { wasm } = this.deps;
+    const path = cell ? objectCellPath(cell, paraIdx) : null;
+    const read = (kind: ObjectKind): Record<string, unknown> => (path
+      ? kind === 'picture'
+        ? wasm.getCellPicturePropertiesByPath(sectionIdx, cell!.paraIdx, path, controlIdx)
+        : wasm.getCellShapePropertiesByPath(sectionIdx, cell!.paraIdx, path, controlIdx)
+      : kind === 'picture'
+        ? wasm.getPictureProperties(sectionIdx, paraIdx, controlIdx)
+        : wasm.getShapeProperties(sectionIdx, paraIdx, controlIdx)) as unknown as Record<string, unknown>;
+    for (const kind of ['picture', 'shape'] as const) {
+      try {
+        return { kind, props: read(kind) };
+      } catch { /* 다음 종류로 */ }
+    }
+    throw new AgentToolError(
+      'INVALID_ARGS',
+      `No picture or shape at section ${sectionIdx}, paragraph ${paraIdx}, controlIdx ${controlIdx}${cell ? ' in that cell' : ''} — get_page_geometry objects carry their addresses`,
+    );
+  }
+
+  private editObject(args: Record<string, unknown>, agent: AgentName): unknown {
+    this.requireRevision(args);
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    const paraIdx = reqInt(args, 'paraIdx');
+    const controlIdx = reqInt(args, 'controlIdx');
+    const cell = optCell(args);
+    this.validateAddress(sectionIdx, paraIdx, undefined, cell);
+    const { kind, props: current } = this.readEditableObject(sectionIdx, paraIdx, controlIdx, cell);
+    const at = { sectionIdx, paraIdx, controlIdx, ...(cell ? { cell } : {}) };
+    const hostPara = cell ? cell.paraIdx : paraIdx;
+    if (args['delete'] !== undefined && args['delete'] !== null) {
+      if (args['delete'] !== true) throw new AgentToolError('INVALID_ARGS', 'delete must be true');
+      const extra = EDIT_OBJECT_ARG_KEYS.filter((key) => args[key] !== undefined && args[key] !== null);
+      if (extra.length > 0) throw new AgentToolError('INVALID_ARGS', `delete cannot be combined with ${extra.join('/')}`);
+      if (cell && kind === 'shape') throw new AgentToolError('INVALID_ARGS', 'shapes inside table cells cannot be deleted');
+      const description = typeof current['description'] === 'string' ? current['description'] : '';
+      const obj: ObjectOp = {
+        type: 'deleteObject', kind, ...at,
+        removedText: description || (kind === 'picture' ? '그림' : '도형'),
+      };
+      const r = this.stageObjectOp(agent, obj, sectionIdx, hostPara);
+      return {
+        revision: this.revision,
+        changeSetId: r.changeSetId,
+        deleted: { kind, sectionIdx, paraIdx, controlIdx },
+        note: 'later objects in the same paragraph moved down one controlIdx.',
+      };
+    }
+    const plan = planObjectEdit(args, kind, current);
+    if (plan.zOrder && (cell || (plan.props['treatAsChar'] ?? current['treatAsChar']) === true)) {
+      throw new AgentToolError('INVALID_ARGS', 'zOrder applies to floating objects in the body — make it floating first');
+    }
+    const obj: ObjectOp = {
+      type: 'editObject', kind, ...at,
+      props: plan.props, prevProps: plan.prevProps,
+      ...(plan.zOrder ? { zOrder: plan.zOrder } : {}),
+    };
+    const r = this.stageObjectOp(agent, obj, sectionIdx, hostPara);
+    const staged = r.obj as Extract<ObjectOp, { type: 'editObject' }>;
+    let after = current;
+    try {
+      after = this.readEditableObject(sectionIdx, staged.paraIdx, staged.controlIdx, staged.cell).props;
+    } catch { /* 적용 전 값으로 보고한다 */ }
+    return {
+      revision: this.revision,
+      changeSetId: r.changeSetId,
+      object: { sectionIdx, paraIdx: staged.paraIdx, controlIdx: staged.controlIdx, ...describeObject(kind, after) },
+    };
+  }
+
+  private insertShape(args: Record<string, unknown>, agent: AgentName): unknown {
+    this.requireRevision(args);
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    const paraIdx = reqInt(args, 'paraIdx');
+    const charOffset = optInt(args, 'charOffset', 0);
+    if (args['cell'] !== undefined || args['cellPath'] !== undefined) {
+      throw new AgentToolError('INVALID_ARGS', 'insert_shape places shapes in body paragraphs only');
+    }
+    this.validateAddress(sectionIdx, paraIdx, charOffset);
+    const plan = planInsertShape(args, { sectionIdx, paraIdx, charOffset });
+    const obj: ObjectOp = {
+      type: 'insertShape', shape: plan.shape, sectionIdx, paraIdx, charOffset,
+      create: plan.create, props: plan.props,
+    };
+    const r = this.stageObjectOp(agent, obj, sectionIdx, paraIdx);
+    const anchor = (r.obj as Extract<ObjectOp, { type: 'insertShape' }>).anchor!;
+    return {
+      revision: this.revision,
+      changeSetId: r.changeSetId,
+      shape: { sectionIdx, paraIdx: anchor.paraIdx, controlIdx: anchor.controlIdx },
+      // 글상자 글은 셀 주소로 쓴다 — 안쪽 문단은 paraIdx 0 부터
+      ...(plan.shape === 'textBox' ? {
+        textBox: {
+          cell: { paraIdx: anchor.paraIdx, controlIdx: anchor.controlIdx, cellIdx: 0 },
+          cellPath: [{ controlIndex: anchor.controlIdx, cellIndex: 0, cellParaIndex: 0 }],
+        },
+      } : {}),
     };
   }
 

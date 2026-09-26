@@ -305,22 +305,28 @@ const INSTRUCTION_WRITE_BRIEF = `App instruction changes are available in this p
 
 const INSTRUCTION_PLANNING_BRIEF = `Planning mode can read the current app-only AGENTS.md through read_agent_instructions, but cannot change it. If the user requests an instruction change, include it in the plan and defer submitting the update until implementation mode.`;
 
+/** 엔진 배치 안내 — 두 프로필 모두 엔진 배치가 스테이징되므로 같은 문구다. */
+const ENGINE_BULLET = '- Prefer the higher-level semantic tools. When a task needs a raw engine capability, use get_engine_edit_capabilities and apply_engine_edits: each batch is staged as one reviewable edit and can mix with semantic writes in the same turn. Use prepare_engine_edit_session first for structured-copy or transposed-copy setup.';
+
+/** 그림·도형 배치 안내 — direct/implementation 브리프가 함께 싣는다. */
+const OBJECT_BULLET = '- Pictures and shapes: insert_image and insert_shape place them (floating positions in mm); edit_object moves, resizes, wraps, crops, reorders or deletes them by the address get_page_geometry objects report. Write text-box text with the text tools and the cell/cellPath that insert_shape returns.';
+
 /**
  * 프로필별 편집 수명주기 문구.
- * safe: 성공한 턴의 스테이징 편집은 사용자 검토 대기로 남고, raw 엔진 쓰기는 차단된다.
+ * safe: 성공한 턴의 스테이징 편집(엔진 배치 포함)은 사용자 검토 대기로 남는다.
  * unrestricted: 성공한 턴에 자동 커밋된다 (기존 동작).
  */
 function editLifecycleFor(profile) {
   if (profile === 'safe') {
     return {
-      lifecycle: `Document edits run autonomously during the turn: higher-level writes are staged as live preview. When the turn ends successfully they are HELD FOR THE USER'S REVIEW — the user approves or rejects them in Studio's review panel; a failed, interrupted, or otherwise unfinished turn also leaves them there for review rather than rolling back. Raw engine writes (prepare_engine_edit_session, apply_engine_edits) are unavailable in this permission profile because they commit immediately and would bypass the review gate; exploring get_engine_edit_capabilities is still fine. Approved edits remain undoable in the editor. After every tool-using turn, always send a separate final user-facing message that states the outcome and asks the user to review and approve the staged changes. Never end a successful tool-using turn on a tool call or progress update alone.`,
-      engineBullet: `- Only the staged semantic write tools are available in this profile; if a task truly needs a raw engine capability, tell the user it requires switching the chat to 전체 접근 instead of attempting apply_engine_edits.`,
+      lifecycle: `Document edits run autonomously during the turn: every write, including apply_engine_edits batches, is staged as live preview. When the turn ends successfully they are HELD FOR THE USER'S REVIEW — the user approves or rejects them in Studio's review panel; a failed, interrupted, or otherwise unfinished turn also leaves them there for review rather than rolling back. Approved edits remain undoable in the editor. After every tool-using turn, always send a separate final user-facing message that states the outcome and asks the user to review and approve the staged changes. Never end a successful tool-using turn on a tool call or progress update alone.`,
+      engineBullet: ENGINE_BULLET,
       tableBullet: `- If a cell edit fails, re-read its address; never delete or recreate a table to change its text. Table structure edits (rows, columns, merge, split) apply immediately and renumber cellIdx after the change — address later cells from the counts they return or a fresh get_structure.`,
     };
   }
   return {
-    lifecycle: `Document edits run autonomously: higher-level writes are staged for live verification and commit only after an explicitly successful turn; a failed, interrupted, or otherwise unfinished turn leaves them in the user's review queue instead of rolling back. apply_engine_edits commits its atomic batch immediately. All committed edits remain undoable in the editor. After every tool-using turn, always send a separate final user-facing message that states the outcome and asks the user to check the document. Never end a successful tool-using turn on a tool call or progress update alone.`,
-    engineBullet: `- Prefer the higher-level semantic tools. If a task needs any raw engine capability, do not mix raw and staged semantic writes in that turn: use get_engine_edit_capabilities and apply_engine_edits for the whole mutation batch, then check it with read/render tools because it is already committed. Use prepare_engine_edit_session first for structured-copy or transposed-copy setup.`,
+    lifecycle: `Document edits run autonomously: every write, including apply_engine_edits batches, is staged for live verification and commits only after an explicitly successful turn; a failed, interrupted, or otherwise unfinished turn leaves them in the user's review queue instead of rolling back. All committed edits remain undoable in the editor. After every tool-using turn, always send a separate final user-facing message that states the outcome and asks the user to check the document. Never end a successful tool-using turn on a tool call or progress update alone.`,
+    engineBullet: ENGINE_BULLET,
     tableBullet: `- Table structure edits (rows, columns, merge, split) apply immediately and renumber cellIdx after the change — address later cells from the counts they return or a fresh get_structure.`,
   };
 }
@@ -420,7 +426,8 @@ ${EDIT_LOOP}
 ${engineBullet}
 - Use apply_list for lists — never type '1.' or '가.'. Replace text with replace_range, not delete + insert: it keeps formatting.
 - Always preview_equation before insert_equation and fix its warnings first.
-${tableBullet}${parallelWorkSectionFor(agentName, profile)}`;
+${tableBullet}
+${OBJECT_BULLET}${parallelWorkSectionFor(agentName, profile)}`;
 }
 
 export const DIRECT_SYSTEM_BRIEF = directSystemBrief('unrestricted');
@@ -444,14 +451,12 @@ Use the read-only workspace, web, subagent, and rhwp MCP read capabilities avail
 export function implementationSystemBrief(profile = 'unrestricted', agentName = 'claude') {
   const safe = profile === 'safe';
   const commitBullet = safe
-    ? `- Higher-level document writes are staged as live preview; when the turn ends successfully they are held for the user's review and approval in Studio. An unsuccessful turn leaves them in review too — never silently rolled back. Raw engine writes (prepare_engine_edit_session / apply_engine_edits) are unavailable in this permission profile.`
-    : `- Higher-level document writes commit only after an explicitly successful turn; an unsuccessful turn leaves them in review for the user to keep or discard instead of rolling back. apply_engine_edits commits one atomic undoable batch immediately.`;
-  const engineBullet = safe
-    ? `- Only the staged semantic write tools are available; if a plan step truly needs a raw engine capability, report it as blocked on switching the chat to 전체 접근 instead of attempting apply_engine_edits.`
-    : `- Prefer semantic tools. If implementation needs a raw engine capability, do not mix raw and staged semantic writes in that turn: use get_engine_edit_capabilities plus apply_engine_edits for the whole mutation batch. Use prepare_engine_edit_session first for structured-copy setup.`;
+    ? `- Document writes, including apply_engine_edits batches, are staged as live preview; when the turn ends successfully they are held for the user's review and approval in Studio. An unsuccessful turn leaves them in review too — never silently rolled back.`
+    : `- Document writes, including apply_engine_edits batches, commit only after an explicitly successful turn; an unsuccessful turn leaves them in review for the user to keep or discard instead of rolling back.`;
+  const engineBullet = ENGINE_BULLET;
   const finishBullet = safe
     ? `- Send a separate final outcome asking the user to review and approve the staged changes.`
-    : `- Check raw engine batches with read/render tools, then send a separate final outcome asking the user to check the document.`;
+    : `- Send a separate final outcome asking the user to check the document.`;
   const tableBullet = '- Table structure edits apply immediately and renumber cellIdx; address later cells from the counts they return or a fresh get_structure.';
   return `You are in implementation mode. Execute only the approved canonical implementation plan supplied by the hub; do not substitute or silently broaden it. Before making changes, re-read the relevant current workspace and live-document state because planning observations may be stale. Execute every canonical step thoroughly and run every validation listed in the plan. Filesystem capabilities follow the selected permission profile. Web tools, subagents, and the rhwp MCP remain available, and every subagent must follow this implementation phase and the same permission boundary. Live-document edits run autonomously and remain undoable.
 
@@ -464,6 +469,7 @@ ${engineBullet}
 ${finishBullet}
 - Use apply_list for lists, replace_range for replacements, and preview_equation before insert_equation. Treat preview warnings as errors.
 ${tableBullet}
+${OBJECT_BULLET}
 - In the final report, clearly account for completed, blocked, and deferred plan items and validation results. Never call partial work complete; explain blockers and deferred work precisely.${parallelWorkSectionFor(agentName, profile)}`;
 }
 

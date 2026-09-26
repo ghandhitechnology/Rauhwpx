@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod/v3';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
+  BATCHABLE_EDIT_TOOL_NAMES,
   TOOL_CATEGORIES,
   TOOL_CLASSIFICATIONS,
   TOOL_DEFINITIONS,
@@ -22,8 +23,8 @@ import { toolDefinitionChars } from '../tool-telemetry.mjs';
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 87개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 87);
+test('도구는 정확히 89개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 89);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -127,7 +128,7 @@ test('anchor 내부 필드는 validate 훅이 모양을 고정한다', () => {
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 75);
+  assert.equal(direct.size, 77);
   assert.equal(byName.get('commit_product_skill')?.category, 'instruction-write');
   assert.equal(byName.get('list_harness_skills')?.category, 'instruction-read');
   assert.ok(direct.has('commit_product_skill'));
@@ -292,7 +293,7 @@ test('full engine edit tools expose a bounded autonomous batch contract', () => 
   assert.ok(apply.shape.operations.safeParse([{ method: 'setPageDef', args: [0, {}] }]).success);
   assert.ok(!apply.shape.operations.safeParse([]).success);
   assert.ok(!apply.shape.operations.safeParse(Array.from({ length: 33 }, () => ({ method: 'x', args: [] }))).success);
-  assert.match(apply.description, /one atomic/i);
+  assert.match(apply.description, /one atomic staged edit/i);
   assert.match(apply.description, /every other method returned by get_engine_edit_capabilities/i);
   assert.match(prepare.description, /capability kind is "session"/i);
 });
@@ -680,6 +681,7 @@ test('delete_table: 스키마는 주소 네 값이 필수이고 document-write �
   }
   // 음수 주소는 스튜디오 dispatch 입구가 거절한다 (스키마 크기 한도 — agent-write-report 테스트)
   assert.ok(def.shape.sectionIdx.safeParse(0).success);
+  assert.ok(!def.shape.sectionIdx.safeParse(0.5).success);
   assert.ok(!def.shape.controlIdx.safeParse(undefined).success);
 });
 
@@ -806,6 +808,18 @@ test('도구 스키마는 $ref 없이 펼쳐진다 (Codex/Pi 가 $ref 를 못 �
     const schema = JSON.stringify(zodToJsonSchema(z.object(definition.shape), { strictUnions: true, pipeStrategy: 'input' }));
     assert.doesNotMatch(schema, /"\$ref"/, `${definition.name} has a $ref`);
   }
+});
+
+test('edit_object 편집 인자는 스튜디오 계획 함수가 읽는 키와 같다', () => {
+  // 허브 스키마에만 있는 키는 스튜디오가 조용히 무시한다 — 두 목록을 함께 고친다.
+  const src = readFileSync(fileURLToPath(new URL('../../rhwp-studio/src/agent/object-edit-args.ts', import.meta.url)), 'utf8');
+  const list = /export const EDIT_OBJECT_ARG_KEYS = \[([^\]]*)\]/.exec(src)?.[1] ?? '';
+  const studio = [...list.matchAll(/'([A-Za-z]+)'/g)].map((m) => m[1]).sort();
+  const address = ['expectedRevision', 'render', 'sectionIdx', 'paraIdx', 'controlIdx', 'cell', 'cellPath', 'delete'];
+  const hub = Object.keys(byName.get('edit_object').shape).filter((key) => !address.includes(key)).sort();
+  assert.deepEqual(hub, studio);
+  assert.deepEqual(byName.get('insert_shape').shape.shape._def.values, ['line', 'rectangle', 'ellipse', 'textBox']);
+  assert.ok(BATCHABLE_EDIT_TOOL_NAMES.includes('edit_object') && BATCHABLE_EDIT_TOOL_NAMES.includes('insert_shape'));
 });
 
 test('insert_image takes one source and floating fields only with positionMode floating', () => {

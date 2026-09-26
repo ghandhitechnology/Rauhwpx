@@ -6,7 +6,7 @@ import type { DocumentPosition, CharProperties, CharShapeRun, SelectionRect } fr
 import { replacementCharShapes } from './replacement-format.ts';
 import { PreparedSnapshotCommand } from '../engine/prepared-snapshot-command.ts';
 import type {
-  AgentName, CellAddr, CharFormatProps, DocPoint, DocRange,
+  AgentName, CellAddr, CharFormatProps, DocPoint, DocRange, EngineBatchSpan,
   ObjectAnchor, ObjectOp, ParagraphCaptureRef, PendingAppliedAt, PendingChangeSet,
   PendingDrop, PendingDropCause, PendingEditsChangeEvent, PendingOp,
 } from './types.ts';
@@ -20,6 +20,31 @@ export interface PendingEditDeps {
   inputHandler: InputHandler;
   canvasView: CanvasView;
   overlay: PendingOverlayRenderer;
+}
+
+/**
+ * 엔진 배치 전후 한 구역의 문단 지문 목록을 비교해 바뀐 구간을 찾는다. 앞뒤로 같은
+ * 문단을 걷어 내고 남은 가운데를 바뀐 구간으로 본다 — 적용 후 좌표 span, 그리고 그
+ * 뒤 문단이 움직인 양(from 은 적용 전 좌표). 바뀐 문단이 없으면 둘 다 null.
+ */
+export function diffParagraphDigests(
+  before: ReadonlyArray<string | null>, after: ReadonlyArray<string | null>,
+): { span: { paraStart: number; paraEnd: number } | null; shift: { from: number; delta: number } | null } {
+  let head = 0;
+  while (head < before.length && head < after.length && before[head] === after[head]) head++;
+  let tail = 0;
+  while (tail < before.length - head && tail < after.length - head
+    && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
+  const beforeEnd = before.length - tail - 1;
+  const afterEnd = after.length - tail - 1;
+  if (beforeEnd < head && afterEnd < head) return { span: null, shift: null };
+  const delta = after.length - before.length;
+  // 문단만 지운 배치는 바뀐 구간이 비므로 지워진 자리의 문단 하나를 표시한다
+  const last = Math.max(after.length - 1, 0);
+  const span = afterEnd >= head
+    ? { paraStart: head, paraEnd: afterEnd }
+    : { paraStart: Math.min(head, last), paraEnd: Math.min(head, last) };
+  return { span, shift: delta === 0 ? null : { from: beforeEnd + 1, delta } };
 }
 
 /** shiftPointAfterInsert 의 삽입 서술자 */
@@ -589,7 +614,9 @@ export class PendingEditManager {
     // Deleting an inserted object cannot recover the host's saved line metrics.
     // Keep its original layout for reject and the approved change's undo entry.
     // 문단 보관을 못 잡은 보관 대상(구버전 WASM, HF 위치 조회 실패)도 스냅샷으로 되돌린다.
+    // 앞뒤 순서는 다른 문단의 이웃 개체와 순번을 맞바꿀 수 있어 한 문단 보관으로는 부족하다.
     if (obj.type === 'insertImage' || obj.type === 'insertEquation'
+      || (obj.type === 'editObject' && obj.zOrder !== undefined)
       || (paraCapture === null && this.revertsByParagraph(obj))) {
       this.deps.inputHandler.prepareSnapshotCapacity?.(1);
       snapshotId = wasm.saveSnapshot();
@@ -609,6 +636,11 @@ export class PendingEditManager {
           obj.removedOffset = positions?.[obj.controlIdx] ?? 0;
         }
       } catch { /* 보관 실패 시 앵커만 놓는다 */ }
+    }
+    if (obj.type === 'deleteObject' && !obj.cell && typeof wasm.getControlTextPositions === 'function') {
+      try {
+        obj.removedOffset = wasm.getControlTextPositions(obj.sectionIdx, obj.paraIdx)[obj.controlIdx] ?? 0;
+      } catch { /* 문단 앞에 앵커를 놓는다 */ }
     }
     try {
       this.applyObjectOp(obj);
@@ -692,6 +724,71 @@ export class PendingEditManager {
     this.syncOverlay();
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, report };
+  }
+
+  /**
+   * apply_engine_edits 배치를 하나의 스냅샷 기반 객체 op 으로 등록한다. 배치 직전에 문서
+   * 스냅샷을 잡고 run 으로 엔진 메서드를 바로 적용한다 (미리보기 = 승인 결과). 실패하면
+   * 문서를 배치 전으로 되돌리고 던진다. 되돌림(reject)은 이 스냅샷 복원뿐이라, 그 뒤에
+   * 사용자 편집이나 다른 set 의 확정이 있으면 되돌리지 않고 문서에 남겨 보고한다.
+   * 배치 전후 문단 지문을 비교해 바뀐 구간을 표시하고, 그 뒤 문단을 가리키는 다른
+   * pending op 좌표를 민다.
+   */
+  addEngineBatch<T>(agent: AgentName, methods: string[], run: () => T): { changeSetId: string; result: T; touched: EngineBatchSpan[] } {
+    const wasm = this.deps.wasm;
+    const digestsBefore = this.bodyDigests();
+    this.deps.inputHandler.prepareSnapshotCapacity?.(1);
+    const snapshotId = wasm.saveSnapshot();
+    this.deps.inputHandler.retainExternalSnapshot?.();
+    let result: T;
+    try {
+      result = run();
+      if (wasm.getSectionCount() === 0) throw new AgentToolError('ENGINE_EDIT_FAILED', 'The batch removed every document section');
+    } catch (error) {
+      try { wasm.restoreSnapshot(snapshotId); } catch { /* best effort */ }
+      wasm.discardSnapshot(snapshotId);
+      this.deps.inputHandler.releaseExternalSnapshot?.();
+      this.reconcilePreviewLayout();
+      throw error;
+    }
+    const digestsAfter = this.bodyDigests();
+    const touched: EngineBatchSpan[] = [];
+    const shifts: Array<{ sectionIdx: number; from: number; delta: number }> = [];
+    if (digestsBefore && digestsAfter) {
+      for (let sectionIdx = 0; sectionIdx < digestsAfter.length; sectionIdx++) {
+        const diff = diffParagraphDigests(digestsBefore[sectionIdx] ?? [], digestsAfter[sectionIdx]);
+        if (diff.span) touched.push({ sectionIdx, ...diff.span });
+        if (diff.shift) shifts.push({ sectionIdx, ...diff.shift });
+      }
+    }
+    const obj: ObjectOp = {
+      type: 'engineBatch', sectionIdx: touched[0]?.sectionIdx ?? 0, methods, touched, shifts,
+    };
+    const set = this.ensureOpenSet(agent);
+    const op: PendingOp = { kind: 'object', id: this.nextId('op'), agent: set.agent, obj,
+      snapshotId, paraCapture: null, userEditSeqAtSnapshot: this.userEditSeq,
+      settledSetSeqAtSnapshot: this.settledSetSeq };
+    for (const shift of shifts) this.shiftAllParagraphs(shift.sectionIdx, shift.from, shift.delta, op);
+    this.pushOp(set, op);
+    this.reconcilePreviewLayout();
+    this.emitDocEvents('agent-pending-edit');
+    this.syncOverlay();
+    this.emitChange({ type: 'ops-changed' });
+    return { changeSetId: set.id, result, touched: structuredClone(touched) };
+  }
+
+  /** 구역별 본문 문단 지문 — 지문을 지원하지 않는 WASM 이면 null */
+  private bodyDigests(): Array<Array<string | null>> | null {
+    const wasm = this.deps.wasm;
+    if (typeof wasm.getParagraphContentDigest !== 'function') return null;
+    const sections: Array<Array<string | null>> = [];
+    for (let sectionIdx = 0; sectionIdx < wasm.getSectionCount(); sectionIdx++) {
+      const digests: Array<string | null> = [];
+      const count = wasm.getParagraphCount(sectionIdx);
+      for (let paraIdx = 0; paraIdx < count; paraIdx++) digests.push(this.paragraphDigest(sectionIdx, paraIdx));
+      sections.push(digests);
+    }
+    return sections;
   }
 
   /**
@@ -1211,6 +1308,16 @@ export class PendingEditManager {
     for (const set of this.sets) {
       for (const op of set.ops) {
         if (op.kind === 'field' || op.kind === 'template') continue;
+        if (op.kind === 'object' && op.obj.type === 'engineBatch') {
+          // 바뀐 문단 구간마다 수정 표시 — 문단 밖만 바꾼 배치는 대표 구역의 쪽 전체
+          const refs: import('./pending-overlay.ts').ObjectOverlayRef[] = op.obj.touched.length > 0
+            ? op.obj.touched.map((span) => ({
+              sort: 'para' as const, sectionIdx: span.sectionIdx, paraIdx: span.paraStart, endParaIdx: span.paraEnd,
+            }))
+            : [{ sort: 'page', sectionIdx: op.obj.sectionIdx }];
+          for (const objRef of refs) ops.push({ kind: 'modify', agent: op.agent, objRef });
+          continue;
+        }
         if (op.kind === 'object') {
           const ref = this.objectOverlayRef(op.obj);
           if (ref) {
@@ -1269,6 +1376,28 @@ export class PendingEditManager {
           sort: 'removed', what: 'table', sectionIdx: obj.sectionIdx,
           paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx, offset: obj.removedOffset,
         };
+      case 'deleteObject':
+        return {
+          sort: 'removed', what: 'object', sectionIdx: obj.sectionIdx,
+          paraIdx: obj.cell ? obj.cell.paraIdx : obj.paraIdx,
+          controlIdx: obj.cell ? obj.cell.controlIdx : obj.controlIdx, offset: obj.removedOffset,
+        };
+      case 'editObject': {
+        const kind = obj.kind === 'picture' ? 'image' : 'shape';
+        if (obj.cell) {
+          return {
+            sort: 'object', kind, sectionIdx: obj.sectionIdx,
+            paraIdx: obj.cell.paraIdx, controlIdx: obj.cell.controlIdx,
+            cellIdx: obj.cell.cellIdx, cellParaIdx: obj.paraIdx, innerControlIdx: obj.controlIdx,
+            cellPath: obj.cell.path ? this.cellPathEntriesAt(obj.cell, obj.paraIdx) : undefined,
+          };
+        }
+        return { sort: 'object', kind, sectionIdx: obj.sectionIdx, paraIdx: obj.paraIdx, controlIdx: obj.controlIdx };
+      }
+      case 'insertShape':
+        return obj.anchor
+          ? { sort: 'object', kind: 'shape', sectionIdx: obj.sectionIdx, paraIdx: obj.anchor.paraIdx, controlIdx: obj.anchor.controlIdx }
+          : null;
       case 'setTableProps':
       case 'setColumnWidths':
       case 'fitToPage':
@@ -1355,6 +1484,7 @@ export class PendingEditManager {
         const detail = o.type === 'tableStructure' ? `(${o.op})`
           : o.type === 'headerFooter' ? `(${o.isHeader ? 'header' : 'footer'})`
           : o.type === 'bookmark' ? `(${o.op})`
+          : o.type === 'engineBatch' ? `(${digest(o.methods.join(','))})`
           : '';
         return `${o.type}${detail} @${at}`;
       }
@@ -1400,10 +1530,55 @@ export class PendingEditManager {
 
   /** 셀 그림의 엔진 cellPath — 단일 셀 주소도 한 칸짜리 경로로 바꾼다 (마지막 cellParaIndex = 셀 문단) */
   private imageCellPath(obj: Extract<ObjectOp, { type: 'insertImage' }>): NonNullable<CellAddr['path']> {
-    const cell = obj.cell!;
+    return this.objectCellPath(obj.cell!, obj.paraIdx);
+  }
+
+  private objectCellPath(cell: CellAddr, cellPara: number): NonNullable<CellAddr['path']> {
     return cell.path
-      ? this.cellPathEntriesAt(cell, obj.paraIdx)
-      : [{ controlIndex: cell.controlIdx, cellIndex: cell.cellIdx, cellParaIndex: obj.paraIdx }];
+      ? this.cellPathEntriesAt(cell, cellPara)
+      : [{ controlIndex: cell.controlIdx, cellIndex: cell.cellIdx, cellParaIndex: cellPara }];
+  }
+
+  /** edit_object 대상 속성 읽기 — 셀 개체는 경로 API 로 읽는다 */
+  private readObjectProps(
+    obj: Extract<ObjectOp, { type: 'editObject' | 'deleteObject' }>,
+  ): Record<string, unknown> {
+    const wasm = this.deps.wasm;
+    if (obj.cell) {
+      const path = this.objectCellPath(obj.cell, obj.paraIdx);
+      return (obj.kind === 'picture'
+        ? wasm.getCellPicturePropertiesByPath(obj.sectionIdx, obj.cell.paraIdx, path, obj.controlIdx)
+        : wasm.getCellShapePropertiesByPath(obj.sectionIdx, obj.cell.paraIdx, path, obj.controlIdx)) as unknown as Record<string, unknown>;
+    }
+    return (obj.kind === 'picture'
+      ? wasm.getPictureProperties(obj.sectionIdx, obj.paraIdx, obj.controlIdx)
+      : wasm.getShapeProperties(obj.sectionIdx, obj.paraIdx, obj.controlIdx)) as unknown as Record<string, unknown>;
+  }
+
+  /** edit_object 속성 쓰기 (적용·역연산 공용) */
+  private writeObjectProps(
+    obj: Extract<ObjectOp, { type: 'editObject' }>, props: Record<string, unknown>,
+  ): void {
+    const wasm = this.deps.wasm;
+    let res: { ok: boolean } | undefined;
+    if (obj.cell) {
+      const path = this.objectCellPath(obj.cell, obj.paraIdx);
+      res = obj.kind === 'picture'
+        ? wasm.setCellPicturePropertiesByPath(obj.sectionIdx, obj.cell.paraIdx, path, obj.controlIdx, props)
+        : wasm.setCellShapePropertiesByPath(obj.sectionIdx, obj.cell.paraIdx, path, obj.controlIdx, props);
+    } else {
+      res = obj.kind === 'picture'
+        ? wasm.setPictureProperties(obj.sectionIdx, obj.paraIdx, obj.controlIdx, props)
+        : wasm.setShapeProperties(obj.sectionIdx, obj.paraIdx, obj.controlIdx, props);
+    }
+    if (res?.ok === false) throw new AgentToolError('RPC_ERROR', `set ${obj.kind} properties failed`);
+  }
+
+  /** 적용 직후 크기 — editObject/insertShape 드리프트 판별자 */
+  private objectSize(props: Record<string, unknown>): { width: number; height: number } | undefined {
+    const width = props['width'];
+    const height = props['height'];
+    return typeof width === 'number' && typeof height === 'number' ? { width, height } : undefined;
   }
 
   /**
@@ -1604,6 +1779,59 @@ export class PendingEditManager {
         );
         if (!res.ok) throw new AgentToolError('RPC_ERROR', 'insertEquation failed');
         obj.anchor = { paraIdx: res.paraIdx, controlIdx: res.controlIdx, charOffset: obj.charOffset };
+        this.shiftControlIdxRefs(obj.sectionIdx, res.paraIdx, res.controlIdx, 1, obj);
+        return;
+      }
+      case 'editObject': {
+        if (Object.keys(obj.props).length > 0) this.writeObjectProps(obj, obj.props);
+        if (obj.zOrder) {
+          const res = wasm.changeObjectZOrder(obj.sectionIdx, obj.paraIdx, obj.controlIdx, obj.zOrder);
+          if (res?.ok !== true) throw new AgentToolError('RPC_ERROR', 'changeObjectZOrder failed');
+        }
+        try {
+          obj.applied = this.objectSize(this.readObjectProps(obj));
+        } catch { /* 판별자 없이 존재만 확인한다 */ }
+        return;
+      }
+      case 'deleteObject': {
+        let res: { ok: boolean } | undefined;
+        if (obj.cell) {
+          if (obj.kind !== 'picture') throw new AgentToolError('INVALID_ARGS', 'shapes inside cells cannot be deleted');
+          res = wasm.deleteCellPictureControlByPath(
+            obj.sectionIdx, obj.cell.paraIdx, this.objectCellPath(obj.cell, obj.paraIdx), obj.controlIdx,
+          );
+        } else if (obj.kind === 'picture') {
+          try {
+            res = wasm.deletePictureControl(obj.sectionIdx, obj.paraIdx, obj.controlIdx);
+          } catch {
+            // 도형 컨트롤로 감싼 그림은 그림 삭제 API 가 거부한다 — 도형으로 지운다
+            res = wasm.deleteShapeControl(obj.sectionIdx, obj.paraIdx, obj.controlIdx);
+          }
+        } else {
+          res = wasm.deleteShapeControl(obj.sectionIdx, obj.paraIdx, obj.controlIdx);
+        }
+        if (res?.ok !== true) throw new AgentToolError('RPC_ERROR', `delete ${obj.kind} failed`);
+        if (obj.cell) this.shiftCellObjectRefsAt(obj.cell, obj.paraIdx, obj.controlIdx, -1, obj);
+        else this.shiftControlIdxRefs(obj.sectionIdx, obj.paraIdx, obj.controlIdx, -1, obj);
+        return;
+      }
+      case 'insertShape': {
+        const res = wasm.createShapeControl(obj.create);
+        if (res?.ok !== true) throw new AgentToolError('RPC_ERROR', 'createShapeControl failed');
+        let placed = false;
+        try {
+          placed = wasm.setShapeProperties(obj.sectionIdx, res.paraIdx, res.controlIdx, obj.props)?.ok === true;
+        } finally {
+          // 배치 실패 시 기본 배치의 도형을 남기지 않는다
+          if (!placed) wasm.deleteShapeControl(obj.sectionIdx, res.paraIdx, res.controlIdx);
+        }
+        if (!placed) throw new AgentToolError('RPC_ERROR', 'setShapeProperties failed');
+        obj.anchor = { paraIdx: res.paraIdx, controlIdx: res.controlIdx, charOffset: obj.charOffset };
+        try {
+          obj.applied = this.objectSize(
+            wasm.getShapeProperties(obj.sectionIdx, res.paraIdx, res.controlIdx) as unknown as Record<string, unknown>,
+          );
+        } catch { /* 판별자 없이 존재만 확인한다 */ }
         this.shiftControlIdxRefs(obj.sectionIdx, res.paraIdx, res.controlIdx, 1, obj);
         return;
       }
@@ -1832,6 +2060,8 @@ export class PendingEditManager {
         }
         return;
       }
+      case 'engineBatch':
+        throw new AgentToolError('INVALID_ARGS', 'engine batches are staged through addEngineBatch');
     }
   }
 
@@ -1875,6 +2105,22 @@ export class PendingEditManager {
             return ok;
           }
           const ok = wasm.deleteEquationControl(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx)?.ok === true;
+          if (ok) this.shiftControlIdxRefs(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx, -1, obj);
+          return ok;
+        }
+        case 'editObject': {
+          // 한 칸 앞/뒤는 반대 방향으로 되돌릴 수 있다 — 맨 앞/뒤는 스냅샷으로만 되돌린다
+          if (obj.zOrder === 'front' || obj.zOrder === 'back') return false;
+          if (obj.zOrder) {
+            const back = obj.zOrder === 'forward' ? 'backward' : 'forward';
+            if (wasm.changeObjectZOrder(obj.sectionIdx, obj.paraIdx, obj.controlIdx, back)?.ok !== true) return false;
+          }
+          if (Object.keys(obj.prevProps).length > 0) this.writeObjectProps(obj, obj.prevProps);
+          return true;
+        }
+        case 'insertShape': {
+          if (!obj.anchor) return false;
+          const ok = wasm.deleteShapeControl(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx)?.ok === true;
           if (ok) this.shiftControlIdxRefs(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx, -1, obj);
           return ok;
         }
@@ -1983,8 +2229,11 @@ export class PendingEditManager {
    */
   private captureHost(obj: ObjectOp): number | null {
     switch (obj.type) {
-      case 'createTable': return obj.anchor ? obj.anchor.paraIdx : obj.paraIdx;
-      case 'applyStyle': return obj.cell ? obj.cell.paraIdx : obj.paraIdx;
+      case 'createTable':
+      case 'insertShape': return obj.anchor ? obj.anchor.paraIdx : obj.paraIdx;
+      case 'applyStyle':
+      case 'deleteObject': return obj.cell ? obj.cell.paraIdx : obj.paraIdx;
+      case 'editObject': return obj.zOrder ? null : obj.cell ? obj.cell.paraIdx : obj.paraIdx;
       case 'headerFooter': return obj.existedBefore ? obj.hostParaIdx ?? null : null;
       default: return isTableTargetOp(obj) ? obj.tableParaIdx : null;
     }
@@ -1993,6 +2242,8 @@ export class PendingEditManager {
   /** 문단 보관본(없으면 스냅샷)으로 되돌리는 op 인가 — createTable 외에는 역연산이 없다 */
   private revertsByParagraph(obj: ObjectOp): boolean {
     return obj.type === 'createTable' || obj.type === 'applyStyle'
+      || obj.type === 'insertShape' || obj.type === 'deleteObject'
+      || (obj.type === 'editObject' && !obj.zOrder)
       || (obj.type === 'headerFooter' && obj.existedBefore)
       || isTableTargetOp(obj);
   }
@@ -2051,6 +2302,11 @@ export class PendingEditManager {
       case 'object': {
         const o = op.obj;
         if (o.type === 'pageLayout') return o.sectionIdx === sectionIdx; // 구역 전체를 다시 흘린다
+        if (o.type === 'engineBatch') {
+          // 문단 밖(스타일·쪽 설정 등)만 바꾼 배치는 위치를 모른다 — 보수적으로 겹친다고 본다
+          return o.touched.length === 0 || o.touched.some((span) =>
+            span.sectionIdx === sectionIdx && span.paraStart <= paraIdx && paraIdx <= span.paraEnd);
+        }
         if (o.sectionIdx !== sectionIdx) return false;
         const host = this.captureHost(o) ?? this.objectBodyParaIdx(o);
         return host === paraIdx;
@@ -2091,16 +2347,27 @@ export class PendingEditManager {
   private shiftCellObjectRefs(
     acting: Extract<ObjectOp, { type: 'insertEquation' | 'insertImage' }>, atIdx: number, delta: 1 | -1,
   ): void {
-    if (!acting.cell) return;
-    const hit = (idx: number): boolean => (delta === 1 ? idx >= atIdx : idx > atIdx);
+    if (acting.cell) this.shiftCellObjectRefsAt(acting.cell, acting.paraIdx, atIdx, delta, acting);
+  }
+
+  /** 셀 문단 하나의 컨트롤 목록이 바뀌면 그 문단의 다른 pending 개체 인덱스를 민다 */
+  private shiftCellObjectRefsAt(
+    cell: CellAddr, cellPara: number, atIdx: number, delta: 1 | -1, exclude: ObjectOp, reinsertedAfterSeq?: number,
+  ): void {
+    const hit = (idx: number, op: PendingOp): boolean => {
+      if (delta === -1) return idx > atIdx;
+      if (idx !== atIdx) return idx > atIdx;
+      return reinsertedAfterSeq === undefined || (op.seq ?? 0) > reinsertedAfterSeq;
+    };
     for (const set of this.sets) {
       for (const op of set.ops) {
-        if (op.kind !== 'object' || op.obj === acting) continue;
-        if (op.obj.type !== 'insertEquation' && op.obj.type !== 'insertImage') continue;
+        if (op.kind !== 'object' || op.obj === exclude) continue;
         const o = op.obj;
-        if (o.cell && sameCell(o.cell, acting.cell) && o.paraIdx === acting.paraIdx
-          && o.anchor && hit(o.anchor.controlIdx)) {
+        if (!('cell' in o) || !o.cell || !sameCell(o.cell, cell) || !('paraIdx' in o) || o.paraIdx !== cellPara) continue;
+        if ((o.type === 'insertEquation' || o.type === 'insertImage') && o.anchor && hit(o.anchor.controlIdx, op)) {
           o.anchor = { ...o.anchor, controlIdx: o.anchor.controlIdx + delta };
+        } else if ((o.type === 'editObject' || o.type === 'deleteObject') && hit(o.controlIdx, op)) {
+          o.controlIdx += delta;
         }
       }
     }
@@ -2273,6 +2540,24 @@ export class PendingEditManager {
           }
           return script === obj.script ? null : 'object-changed';
         }
+        case 'editObject': {
+          // 같은 자리에 같은 종류의 개체가 적용 직후 크기로 남아 있어야 한다 (사용자가 옮긴 크기·다른 개체 판별)
+          const size = this.objectSize(this.readObjectProps(obj));
+          return !obj.applied || (size && size.width === obj.applied.width && size.height === obj.applied.height)
+            ? null : 'object-changed';
+        }
+        case 'deleteObject':
+          // 개체는 이미 없다 — 되돌림 직전의 문단 지문이 사용자 수정을 가린다
+          return (obj.cell ? obj.cell.paraIdx : obj.paraIdx) < wasm.getParagraphCount(obj.sectionIdx)
+            ? null : 'paragraph-changed';
+        case 'insertShape': {
+          if (!obj.anchor) return 'object-changed';
+          const size = this.objectSize(
+            wasm.getShapeProperties(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx) as unknown as Record<string, unknown>,
+          );
+          return !obj.applied || (size && size.width === obj.applied.width && size.height === obj.applied.height)
+            ? null : 'object-changed';
+        }
         case 'tableStructure':
         case 'setCellProps':
         case 'setTableProps':
@@ -2315,6 +2600,9 @@ export class PendingEditManager {
           if (info?.ok !== true || info.paraCount !== 1) return 'object-changed';
           return (info.texts[0] ?? '') === obj.text ? null : 'text-changed';
         }
+        case 'engineBatch':
+          // 스냅샷 되돌림의 사용자 편집·확정 가드가 대신 판정한다
+          return null;
         case 'bookmark': {
           if (obj.op === 'add' || obj.op === 'rename') {
             return wasm.getBookmarks().some(
@@ -2397,7 +2685,7 @@ export class PendingEditManager {
         if (op.kind === 'object') {
           const o = op.obj;
           if (o === exclude) continue;
-          if ((o.type === 'createTable' || (o.type === 'insertImage' && !o.cell))
+          if ((o.type === 'createTable' || o.type === 'insertShape' || (o.type === 'insertImage' && !o.cell))
             && o.sectionIdx === sectionIdx && o.anchor
             && o.anchor.paraIdx === paraIdx && hit(o.anchor.controlIdx, op)) {
             o.anchor = { ...o.anchor, controlIdx: o.anchor.controlIdx + delta };
@@ -2408,8 +2696,11 @@ export class PendingEditManager {
           } else if (isTableTargetOp(o)
             && o.sectionIdx === sectionIdx && o.tableParaIdx === paraIdx && hit(o.controlIdx, op)) {
             o.controlIdx += delta;
+          } else if ((o.type === 'editObject' || o.type === 'deleteObject') && !o.cell
+            && o.sectionIdx === sectionIdx && o.paraIdx === paraIdx && hit(o.controlIdx, op)) {
+            o.controlIdx += delta;
           } else if ((o.type === 'paraFormat' || o.type === 'applyStyle' || o.type === 'insertEquation'
-            || o.type === 'insertImage')
+            || o.type === 'insertImage' || o.type === 'editObject' || o.type === 'deleteObject')
             && o.cell && o.sectionIdx === sectionIdx
             && o.cell.paraIdx === paraIdx && hit(o.cell.controlIdx, op)) {
             o.cell = this.shiftCellControl(o.cell, delta);
@@ -2759,8 +3050,13 @@ export class PendingEditManager {
     // 겹쳐 덮어쓴 것이다. 나중 op 이 모두 함께 되돌려지면 적용 직후 범위로 정확히
     // 되돌릴 수 있으므로 드리프트로 남기지 않는다.
     const overwritten = new Set<PendingOp>();
+    // 같은 set 의 나중 엔진 배치는 문서 스냅샷으로 되돌아간다 — 그 앞 op 은 배치가
+    // 바꿨을 수 있으므로 배치가 되돌아간 뒤에 판정한다.
+    const lastBatchSeq = Math.max(0, ...set.ops.flatMap((op) =>
+      op.kind === 'object' && op.obj.type === 'engineBatch' ? [op.seq ?? 0] : []));
     for (const op of set.ops) {
-      if (captures.some((c) => c.seq > (op.seq ?? 0) && this.opTouchesBodyPara(op, c.sectionIdx, c.host))) {
+      if ((op.seq ?? 0) < lastBatchSeq
+        || captures.some((c) => c.seq > (op.seq ?? 0) && this.opTouchesBodyPara(op, c.sectionIdx, c.host))) {
         deferred.add(op);
         kept.push(op);
         continue;
@@ -2971,7 +3267,18 @@ export class PendingEditManager {
     const obj = op.obj;
     switch (obj.type) {
       case 'createTable':
+      case 'insertShape':
         if (obj.anchor) this.shiftControlIdxRefs(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx, -1, obj);
+        return;
+      case 'deleteObject':
+        if (obj.cell) this.shiftCellObjectRefsAt(obj.cell, obj.paraIdx, obj.controlIdx, 1, obj, op.seq ?? 0);
+        else this.shiftControlIdxRefs(obj.sectionIdx, obj.paraIdx, obj.controlIdx, 1, obj, op.seq ?? 0);
+        return;
+      case 'editObject':
+        return;
+      case 'engineBatch':
+        // 스냅샷이 배치 전 문서로 돌아갔다 — 등록 때 민 다른 op 좌표를 거꾸로 되민다
+        for (const s of [...obj.shifts].reverse()) this.shiftAllParagraphs(s.sectionIdx, s.from + s.delta, -s.delta, op);
         return;
       case 'insertImage':
       case 'insertEquation':
@@ -3183,10 +3490,12 @@ export class PendingEditManager {
   /** 객체 op 의 본문 기준 문단 인덱스 (요약/보관 대상 판별용 — 문단 좌표가 없으면 null) */
   private objectBodyParaIdx(obj: ObjectOp): number | null {
     switch (obj.type) {
-      case 'createTable': case 'insertImage': case 'insertNote':
+      case 'createTable': case 'insertImage': case 'insertNote': case 'insertShape':
         return obj.anchor ? obj.anchor.paraIdx : obj.paraIdx;
       case 'insertEquation':
         return obj.cell ? obj.cell.paraIdx : (obj.anchor ? obj.anchor.paraIdx : obj.paraIdx);
+      case 'editObject': case 'deleteObject':
+        return obj.cell ? obj.cell.paraIdx : obj.paraIdx;
       case 'tableStructure': case 'deleteTable': case 'setCellProps': case 'setTableProps':
       case 'setColumnWidths': case 'fitToPage': case 'setZoneProps': case 'applyFormula': case 'setCaption':
         return obj.tableParaIdx;
@@ -3196,6 +3505,8 @@ export class PendingEditManager {
         return obj.paraIdx;
       case 'headerFooter':
         return obj.hostParaIdx ?? null;
+      case 'engineBatch':
+        return obj.touched[0]?.paraStart ?? null;
       default:
         return null;
     }
@@ -3207,11 +3518,21 @@ export class PendingEditManager {
    * trackControls 가 엔진 기준으로 다시 잡는다.
    */
   private shiftObjectOp(obj: ObjectOp, sectionIdx: number, shift: (p: DocPoint) => DocPoint, insCell?: CellAddr): void {
+    if (obj.type === 'engineBatch') {
+      // 표시용 구간만 민다 — 되돌림은 스냅샷이라 좌표가 필요 없다
+      if (insCell) return;
+      for (const span of obj.touched) {
+        if (span.sectionIdx !== sectionIdx) continue;
+        span.paraStart = shift({ paraIdx: span.paraStart, charOffset: 0 }).paraIdx;
+        span.paraEnd = Math.max(span.paraStart, shift({ paraIdx: span.paraEnd, charOffset: 0 }).paraIdx);
+      }
+      return;
+    }
     if (obj.sectionIdx !== sectionIdx) return;
     const shiftBody = (paraIdx: number, charOffset: number): DocPoint => shift({ paraIdx, charOffset });
     switch (obj.type) {
-      case 'createTable': case 'insertImage': case 'insertEquation': case 'insertNote': {
-        if (obj.type !== 'createTable' && obj.type !== 'insertNote' && obj.cell) {
+      case 'createTable': case 'insertImage': case 'insertEquation': case 'insertNote': case 'insertShape': {
+        if (obj.type !== 'createTable' && obj.type !== 'insertNote' && obj.type !== 'insertShape' && obj.cell) {
           if (insCell) {
             // 같은 셀 내부 텍스트 변화만 셀 문단 좌표를 움직인다
             if (sameCell(obj.cell, insCell)) {
@@ -3257,6 +3578,20 @@ export class PendingEditManager {
       case 'setNoteText':
         if (!insCell) obj.paraIdx = shiftBody(obj.paraIdx, 0).paraIdx;
         return;
+      case 'editObject': case 'deleteObject': {
+        // 개체의 글자 위치는 모른다 — 문단만 민다 (분할/병합은 trackControls 가 엔진 기준으로 다시 잡는다)
+        if (obj.cell) {
+          if (!insCell) obj.cell = { ...obj.cell, paraIdx: shiftBody(obj.cell.paraIdx, 0).paraIdx };
+          else if (sameCell(obj.cell, insCell)) obj.paraIdx = shift({ paraIdx: obj.paraIdx, charOffset: 0 }).paraIdx;
+          return;
+        }
+        if (insCell) return;
+        const offset = obj.type === 'deleteObject' ? obj.removedOffset ?? 0 : 0;
+        const p = shiftBody(obj.paraIdx, offset);
+        obj.paraIdx = p.paraIdx;
+        if (obj.type === 'deleteObject' && obj.removedOffset !== undefined) obj.removedOffset = p.charOffset;
+        return;
+      }
       case 'bookmark': {
         if (insCell) return;
         const p = shiftBody(obj.paraIdx, obj.charOffset ?? 0);
@@ -3301,6 +3636,30 @@ export class PendingEditManager {
         } else if (!cell && op.range.cell && ins.addedParas > 0 && ins.paraIdx < op.range.cell.paraIdx) {
           // 본문 문단 추가가 표 앞에서 일어나면 셀 op 의 부모 문단 인덱스만 이동한다.
           op.range.cell = { ...op.range.cell, paraIdx: op.range.cell.paraIdx + ins.addedParas };
+        }
+      }
+    }
+  }
+
+  /**
+   * 엔진 배치가 바꾼 구간 뒤의 본문 문단(from 이상)을 가리키는 좌표를 delta 만큼 민다.
+   * 적용 시점 범위(applied)는 배치 전 좌표 그대로 둔다 — 역순 되돌림에서 배치가 먼저
+   * 스냅샷으로 되돌아간 뒤에 쓰인다.
+   */
+  private shiftAllParagraphs(sectionIdx: number, from: number, delta: number, exclude?: PendingOp): void {
+    const shift = (p: DocPoint): DocPoint => (p.paraIdx >= from ? { paraIdx: p.paraIdx + delta, charOffset: p.charOffset } : p);
+    for (const set of this.sets) {
+      for (const op of set.ops) {
+        if (op === exclude || op.kind === 'field' || op.kind === 'template') continue;
+        if (op.kind === 'object') {
+          this.shiftObjectOp(op.obj, sectionIdx, shift);
+          continue;
+        }
+        if (op.range.sectionIdx !== sectionIdx) continue;
+        if (op.range.cell) {
+          if (op.range.cell.paraIdx >= from) op.range.cell = { ...op.range.cell, paraIdx: op.range.cell.paraIdx + delta };
+        } else {
+          this.shiftRange(op.range, shift);
         }
       }
     }
@@ -3397,7 +3756,7 @@ export class PendingEditManager {
         const o = op.obj;
         if (o.sectionIdx !== sectionIdx) continue;
         switch (o.type) {
-          case 'createTable': case 'insertImage': case 'insertNote': case 'insertEquation':
+          case 'createTable': case 'insertImage': case 'insertNote': case 'insertEquation': case 'insertShape':
             if (o.type === 'insertEquation' && o.cell) {
               cellRef(() => o.cell, (cell) => {
                 o.cell = cell;
@@ -3432,7 +3791,20 @@ export class PendingEditManager {
               });
             }
             break;
-          case 'pageLayout': case 'headerFooter':
+          case 'editObject': case 'deleteObject':
+            if (o.cell) {
+              cellRef(() => o.cell, (cell) => { o.cell = cell; });
+            } else if (inRange(o.paraIdx)) {
+              refs.push({
+                paraIdx: o.paraIdx, controlIdx: o.controlIdx,
+                set: (paraIdx, controlIdx, textPos) => {
+                  o.paraIdx = paraIdx; o.controlIdx = controlIdx;
+                  if (o.type === 'deleteObject' && o.removedOffset !== undefined) o.removedOffset = textPos;
+                },
+              });
+            }
+            break;
+          case 'pageLayout': case 'headerFooter': case 'engineBatch':
             break;
           default:
             if (inRange(o.tableParaIdx)) {

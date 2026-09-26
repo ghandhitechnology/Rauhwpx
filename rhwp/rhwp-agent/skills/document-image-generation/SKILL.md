@@ -12,6 +12,6 @@ For a request to illustrate the open document, complete the insertion in the sam
 
 1. Generate the image, then copy the final PNG or JPEG into the session working directory. Codex may save its output under `CODEX_HOME/generated_images`, which `insert_image` cannot read directly. `insert_image` accepts an absolute local path under the working directory and files up to 5 MB; convert or compress the image there if needed.
 2. Call `get_structure` for the current revision and insertion address. Use `insert_image` with `imagePath`, `expectedRevision`, `sectionIdx`, `paraIdx`, `charOffset` and `render: "crop"`. Set a useful `description` and an explicit width when the surrounding layout calls for one.
-3. Check the crop and `after` warnings. Fix placement or size with `edit_object`, measuring with `get_page_geometry`, instead of inserting again.
+3. Check the crop and `after` warnings. Fix placement or size with `edit_object` (resize, float and position in mm, or change the wrap), measuring with `get_page_geometry`, instead of inserting again.
 
 If the user asks only for an image asset, provide the generated asset without editing the document. Do not modify the source HWP/HWPX file through filesystem tools.

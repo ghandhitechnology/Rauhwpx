@@ -20,18 +20,7 @@ test('successful turns route by permission profile and stopped turns hold edits 
   assert.match(bridge, /turnStopped = true,/);
 });
 
-test('raw engine edits reject mixed staged writes before mutation', () => {
-  const executor = readFileSync(new URL('../src/agent/tool-executor.ts', import.meta.url), 'utf8');
-  assert.match(executor, /if \(this\.deps\.pending\.hasPending\(\)\)/);
-  assert.match(executor, /PENDING_SEMANTIC_EDITS/);
-  assert.match(executor, /MIXED_ENGINE_WRITE_MODE/);
-  assert.match(executor, /applyEngineEdits\(this\.deps\.inputHandler, operations\)/);
-});
-
-test('safe profile blocks raw engine writes and gates saving on pending review', () => {
-  const executor = readFileSync(new URL('../src/agent/tool-executor.ts', import.meta.url), 'utf8');
-  assert.match(executor, /SAFE_MODE_RAW_ENGINE/);
-  assert.match(executor, /permissionProfile === 'safe' && RAW_ENGINE_WRITE_TOOLS\.has\(tool\)/);
+test('safe profile gates saving on pending review', () => {
   assert.match(bridge, /permissionProfile: this\.permissionProfile,\n\s+template: readDocumentTemplate/);
   const file = readFileSync(new URL('../src/command/commands/file.ts', import.meta.url), 'utf8');
   assert.match(file, /resolvePendingAgentEditsBeforeSave/);

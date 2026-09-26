@@ -1026,9 +1026,9 @@ export interface ObjectAnchor {
  *
  * 모든 객체 연산은 도구 호출 시점에 엔진에 적용된다 (미리보기 = 승인 결과).
  * 되돌림 수단은 연산마다 정해진다:
- * - 문단 보관본(captureParagraph): 표 생성·구조·속성, 표 삭제, 스타일, 기존 머리말/꼬리말
- *   — 한 본문 문단 안에서 끝나는 변경을 그 문단째로 되돌린다.
- * - 문서 스냅샷: 그림/수식 (문단 보관을 지원하지 않는 WASM 에서는 위 연산도)
+ * - 문단 보관본(captureParagraph): 표 생성·구조·속성, 표 삭제, 스타일, 기존 머리말/꼬리말,
+ *   그림/도형 편집·삭제, 도형 삽입 — 한 본문 문단 안에서 끝나는 변경을 그 문단째로 되돌린다.
+ * - 문서 스냅샷: 그림/수식 삽입, 개체 앞뒤 순서, 엔진 배치(apply_engine_edits) (문단 보관을 지원하지 않는 WASM 에서는 위 연산도)
  * - 역연산: 문단 서식, 쪽 설정, 새 머리말/꼬리말, 각주, 책갈피 (보관본이 거부될 때의 폴백 포함)
  */
 export type ObjectOp =
@@ -1215,6 +1215,52 @@ export type ObjectOp =
       prevText?: string;
     }
   | {
+      /**
+       * 그림/도형의 배치·크기·자르기·앞뒤 순서 변경 (edit_object). 문단 보관본으로 되돌리고,
+       * 앞뒤 순서는 다른 문단의 개체와 맞바꿀 수 있어 문서 스냅샷으로 되돌린다.
+       */
+      type: 'editObject';
+      kind: 'picture' | 'shape';
+      sectionIdx: number;
+      /** 개체를 품은 문단 — cell 이 있으면 셀 문단, controlIdx 는 셀 문단 안 인덱스 */
+      paraIdx: number;
+      controlIdx: number;
+      cell?: CellAddr;
+      /** set{Picture,Shape}Properties 에 넘기는 엔진 속성 (HWPUNIT) */
+      props: Record<string, unknown>;
+      /** 역연산용 적용 전 값 (props 와 같은 키) */
+      prevProps: Record<string, unknown>;
+      zOrder?: 'front' | 'back' | 'forward' | 'backward';
+      /** 적용 직후 크기 — 드리프트 판별자 */
+      applied?: { width: number; height: number };
+    }
+  | {
+      /** 그림/도형 삭제 — 문단 보관본으로 되돌린다 */
+      type: 'deleteObject';
+      kind: 'picture' | 'shape';
+      sectionIdx: number;
+      paraIdx: number;
+      controlIdx: number;
+      cell?: CellAddr;
+      /** 삭제된 컨트롤의 문단 내 텍스트 오프셋 — 오버레이 앵커 위치 */
+      removedOffset?: number;
+      /** 개체 설명 (오버레이 팝오버·diff) */
+      removedText?: string;
+    }
+  | {
+      /** 도형 삽입 (insert_shape) — 본문 문단에만 놓는다 */
+      type: 'insertShape';
+      shape: 'line' | 'rectangle' | 'ellipse' | 'textBox';
+      sectionIdx: number; paraIdx: number; charOffset: number;
+      /** createShapeControl 인자 */
+      create: Record<string, unknown>;
+      /** 생성 직후 setShapeProperties 로 적용하는 배치·선·채우기 */
+      props: Record<string, unknown>;
+      anchor?: ObjectAnchor;
+      /** 적용 직후 크기 — 드리프트 판별자 */
+      applied?: { width: number; height: number };
+    }
+  | {
       type: 'bookmark';
       op: 'add' | 'delete' | 'rename';
       sectionIdx: number; paraIdx: number;
@@ -1226,7 +1272,29 @@ export type ObjectOp =
       name?: string;
       /** delete/rename 역연산용 이전 상태 (적용 시 캡처) */
       prev?: { name: string; para: number; charPos: number; ctrlIdx: number };
+    }
+  | {
+      /**
+       * apply_engine_edits 한 배치 — 역연산이 없어 배치 직전 문서 스냅샷으로만 되돌린다.
+       * sectionIdx 는 요약·쪽 표시용 대표 구역이다.
+       */
+      type: 'engineBatch';
+      sectionIdx: number;
+      methods: string[];
+      /** 배치가 바꾼 본문 문단 구간 (적용 후 좌표, 포함) — 비면 구역 전체 쪽을 표시한다 */
+      touched: EngineBatchSpan[];
+      /**
+       * 바뀐 구간 뒤 문단의 이동 — 등록 시 다른 op 좌표를 from(적용 전 좌표) 이상부터
+       * delta 만큼 밀었고, 스냅샷 복원 뒤 거꾸로 되민다.
+       */
+      shifts: Array<{ sectionIdx: number; from: number; delta: number }>;
     };
+
+export interface EngineBatchSpan {
+  sectionIdx: number;
+  paraStart: number;
+  paraEnd: number;
+}
 
 export type TableStructureOpName =
   | 'insert_row' | 'insert_col' | 'delete_row' | 'delete_col' | 'merge_cells' | 'split_cell';
@@ -1240,6 +1308,7 @@ export type TableStructureOpName =
 export function objectOverlayKind(obj: ObjectOp): 'insert' | 'modify' | 'remove' {
   switch (obj.type) {
     case 'deleteTable':
+    case 'deleteObject':
       return 'remove';
     case 'tableStructure':
       return obj.op === 'delete_row' || obj.op === 'delete_col' ? 'remove'
@@ -1249,6 +1318,7 @@ export function objectOverlayKind(obj: ObjectOp): 'insert' | 'modify' | 'remove'
     case 'insertImage':
     case 'insertEquation':
     case 'insertNote':
+    case 'insertShape':
       return 'insert';
     case 'headerFooter':
       return obj.existedBefore ? 'modify' : 'insert';
