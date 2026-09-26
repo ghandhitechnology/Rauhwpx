@@ -2,7 +2,7 @@ import type { WasmBridge } from '../core/wasm-bridge.ts';
 import type { EventBus } from '../core/event-bus.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
-import type { DocumentPosition, CharProperties, CharShapeRun } from '../core/types.ts';
+import type { DocumentPosition, CharProperties, CharShapeRun, SelectionRect } from '../core/types.ts';
 import { replacementCharShapes } from './replacement-format.ts';
 import { PreparedSnapshotCommand } from '../engine/prepared-snapshot-command.ts';
 import type {
@@ -826,6 +826,23 @@ export class PendingEditManager {
 
   getChangeSets(): ReadonlyArray<PendingChangeSet> {
     return this.sets;
+  }
+
+  /**
+   * op 이 지금 문서에서 차지하는 쪽 rect (쪽 px) — 오버레이 하이라이트와 같은 해석.
+   * 쓰기 결과 보고(after/render)용이며, 위치를 모르는 op(필드·템플릿·책갈피)은 빈 배열이다.
+   */
+  opPageRects(op: PendingOp): SelectionRect[] {
+    const overlay = this.deps.overlay as Partial<Pick<PendingOverlayRenderer, 'pageRectsFor'>>;
+    if (typeof overlay.pageRectsFor !== 'function') return [];
+    if (op.kind === 'object') {
+      const objRef = this.objectOverlayRef(op.obj);
+      return objRef ? overlay.pageRectsFor({ objRef }) : [];
+    }
+    if (op.kind === 'insert' || op.kind === 'replace' || op.kind === 'format') {
+      return overlay.pageRectsFor({ range: op.range });
+    }
+    return [];
   }
 
   hasPending(): boolean {

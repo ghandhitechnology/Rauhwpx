@@ -9,7 +9,7 @@
 import type { WasmBridge } from '../core/wasm-bridge.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
-import type { CellPathEntry, ControlLayoutItem, DocumentPosition, LineLayoutItem, ParaProperties } from '../core/types.ts';
+import type { CellPathEntry, ControlLayoutItem, DocumentPosition, LineLayoutItem, ParaProperties, SelectionRect } from '../core/types.ts';
 import type { RevisionTracker } from './revision.ts';
 import type { PendingEditManager } from './pending-edits.ts';
 import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, DocumentTemplate, ObjectOp, PendingOp, PermissionProfile } from './types.ts';
@@ -29,6 +29,23 @@ import {
 } from './engine-edit.ts';
 import { inferExportFormat } from '../command/save-target.ts';
 import { fatalEquationDiagnostics, parseEquationPreview, type EquationPreview } from '../core/equation-preview.ts';
+import {
+  AFTER_MAX_PAGES,
+  AFTER_MAX_PARAGRAPHS,
+  AFTER_TEXT_CHARS,
+  AFTER_WINDOW_LEAD,
+  PAGE_START_SCAN_LIMIT,
+  RENDER_MAX_PAGES,
+  RENDER_STACK_GAP_PX,
+  movedParagraphRuns,
+  movedRunWarnings,
+  planCropRegions,
+  planStack,
+  type CropRegion,
+  type PageFrame,
+  type PageStart,
+  type SectionEdit,
+} from './write-report.ts';
 
 export interface AgentToolExecutorDeps {
   wasm: WasmBridge;
@@ -494,6 +511,53 @@ function asRecord(args: unknown): Record<string, unknown> {
   throw new AgentToolError('INVALID_ARGS', 'Tool arguments must be an object');
 }
 
+/**
+ * 0 이상이어야 하는 최상위 주소 인자. 스키마는 크기 한도 때문에 범위를 싣지 않으므로
+ * dispatch 입구에서 한 번에 검사한다 — apply_edits/read_batch 항목도 같은 길을 지난다.
+ */
+const NON_NEGATIVE_ADDRESS_KEYS = [
+  'sectionIdx', 'paraIdx', 'charOffset', 'controlIdx', 'cellIdx',
+  'startParaIdx', 'endParaIdx', 'startCharOffset', 'endCharOffset', 'startOffset', 'endOffset',
+  'pageIndex', 'styleId',
+] as const;
+
+function assertNonNegativeAddress(args: Record<string, unknown>): void {
+  for (const key of NON_NEGATIVE_ADDRESS_KEYS) {
+    const v = args[key];
+    if (typeof v === 'number' && v < 0) {
+      throw new AgentToolError('INVALID_ARGS', `${key} must be >= 0 (got ${v})`);
+    }
+  }
+}
+
+type WriteRenderMode = 'crop' | 'page';
+
+/** 스테이징 쓰기의 render 인자 — 쓰기를 적용하기 전에 검사한다. */
+function optRenderMode(rawArgs: unknown): WriteRenderMode | undefined {
+  if (!rawArgs || typeof rawArgs !== 'object' || Array.isArray(rawArgs)) return undefined;
+  const v = (rawArgs as Record<string, unknown>)['render'];
+  if (v === undefined || v === null) return undefined;
+  if (v === 'crop' || v === 'page') return v;
+  throw new AgentToolError('INVALID_ARGS', `render must be "crop" or "page" (got ${JSON.stringify(v)})`);
+}
+
+/** 쓰기 직전 상태 — after 보고가 새 op 과 쪽 변화를 가려내는 기준. */
+interface WriteBaseline {
+  opIds: Set<string>;
+  pageCount: number;
+  paraCounts: number[];
+  pageStarts: PageStart[] | null;
+}
+
+/** 쓰기 결과 보고에 모은 대상 — 문단 텍스트, 표, 구역별 편집 범위, 경고. */
+interface WriteTargets {
+  paras: Array<{ sectionIdx: number; paraIdx: number; cell?: CellAddr; from: number }>;
+  tables: Array<{ sectionIdx: number; paraIdx: number; controlIdx: number }>;
+  bodyRanges: Map<number, { lo: number; hi: number }>;
+  wholeSections: Set<number>;
+  warnings: string[];
+}
+
 function reqInt(args: Record<string, unknown>, key: string): number {
   const v = args[key];
   if (typeof v !== 'number' || !Number.isSafeInteger(v)) {
@@ -772,10 +836,15 @@ export class AgentToolExecutor {
           'Review the pending template transfer before making other document edits.',
         );
       }
+      // 스테이징 쓰기는 결과에 after 보고(와 요청 시 변경 영역 PNG)를 붙인다 —
+      // render 인자는 쓰기를 적용하기 전에 검사하고, 쓰기 직전 상태를 떠 둔다.
+      const staged = requestedMode === 'semantic';
+      const render = staged ? optRenderMode(args) : undefined;
+      const baseline = staged ? this.captureWriteBaseline() : null;
       // await 필수 — 비동기 툴(insert_chart)의 rejection 도 여기서 에러 코드로 매핑된다
       const result = await this.dispatch(tool, args, agent, capability);
       assertToolRequestActive(capability);
-      return result;
+      return baseline ? await this.attachWriteReport(result, baseline, render) : result;
     } catch (e) {
       if (claimedMode) this.turnWriteMode = 'none';
       if (e instanceof AgentToolError) throw e;
@@ -789,6 +858,7 @@ export class AgentToolExecutor {
 
   private dispatch(tool: string, rawArgs: unknown, agent: AgentName, capability?: ToolCapabilityContext): unknown {
     const args = rawArgs === undefined ? {} : asRecord(rawArgs);
+    assertNonNegativeAddress(args);
     switch (tool) {
       case 'get_structure': return this.getStructure(args);
       case 'get_text_range': return this.getTextRange(args);
@@ -2830,6 +2900,11 @@ export class AgentToolExecutor {
     const sectionIdx = optInt(args, 'sectionIdx', 0);
     const paraIdx = reqInt(args, 'paraIdx');
     const controlIdx = reqInt(args, 'controlIdx');
+    return { revision: this.revision, ...this.measureTableLayout(sectionIdx, paraIdx, controlIdx) };
+  }
+
+  /** 표의 쪽별 조각과 본문 넘침 판정 — get_table_layout 과 쓰기 결과 보고가 함께 쓴다. */
+  private measureTableLayout(sectionIdx: number, paraIdx: number, controlIdx: number) {
     const { wasm } = this.deps;
     let dims: { rowCount: number; colCount: number; cellCount: number };
     let props: Record<string, unknown>;
@@ -2895,7 +2970,6 @@ export class AgentToolExecutor {
 
     const pageBreak = Number(props['pageBreak'] ?? 0);
     return {
-      revision: this.revision,
       sectionIdx,
       paraIdx,
       controlIdx,
@@ -2926,14 +3000,20 @@ export class AgentToolExecutor {
 
   /** 문단이 표시되는 페이지 인덱스 (best-effort — 실패 시 null) */
   private pageOfParagraph(sectionIdx: number, paraIdx: number, cell?: CellAddr): number | null {
+    return this.caretRect(sectionIdx, paraIdx, 0, cell)?.pageIndex ?? null;
+  }
+
+  /** 한 지점의 캐럿 rect (쪽 px, 폭 0) — best-effort, 실패 시 null */
+  private caretRect(sectionIdx: number, paraIdx: number, charOffset: number, cell?: CellAddr): SelectionRect | null {
     const { wasm } = this.deps;
     try {
       const rect = cell?.path
-        ? wasm.getCursorRectByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), 0)
+        ? wasm.getCursorRectByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), charOffset)
         : cell
-          ? wasm.getCursorRectInCell(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, 0)
-          : wasm.getCursorRect(sectionIdx, paraIdx, 0);
-      return rect && typeof rect.pageIndex === 'number' ? rect.pageIndex : null;
+          ? wasm.getCursorRectInCell(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset)
+          : wasm.getCursorRect(sectionIdx, paraIdx, charOffset);
+      if (!rect || typeof rect.pageIndex !== 'number') return null;
+      return { pageIndex: rect.pageIndex, x: rect.x, y: rect.y, width: 0, height: rect.height };
     } catch {
       return null;
     }
@@ -3108,6 +3188,394 @@ export class AgentToolExecutor {
       if (page !== null && !pages.includes(page)) pages.push(page);
     }
     return pages;
+  }
+
+  // ─── 쓰기 결과 보고 (after / render) ─────────────────────────
+
+  /** 쓰기 직전 상태를 뜬다 — 실패한 항목은 비워 두고 보고에서 그 판정만 건너뛴다. */
+  private captureWriteBaseline(): WriteBaseline {
+    const { wasm, pending } = this.deps;
+    const opIds = new Set<string>();
+    try {
+      for (const set of pending.getChangeSets()) for (const op of set.ops) opIds.add(op.id);
+    } catch { /* 테스트 더블 — 보고가 새 op 을 못 찾을 뿐이다 */ }
+    let pageCount = 0;
+    try { pageCount = wasm.pageCount; } catch { /* 문서 없음 — dispatch 가 오류를 낸다 */ }
+    return {
+      opIds,
+      pageCount,
+      paraCounts: this.paragraphCounts(),
+      pageStarts: this.capturePageStarts(pageCount),
+    };
+  }
+
+  private paragraphCounts(): number[] {
+    const { wasm } = this.deps;
+    try {
+      const counts: number[] = [];
+      const sections = wasm.getSectionCount();
+      for (let s = 0; s < sections; s++) counts.push(wasm.getParagraphCount(s));
+      return counts;
+    } catch {
+      return [];
+    }
+  }
+
+  /** 쪽마다 첫 본문 문단 — 쪽을 옮겨 간 문단 판정의 기준. 긴 문서나 옛 WASM 은 null. */
+  private capturePageStarts(pageCount: number): PageStart[] | null {
+    if (pageCount < 1 || pageCount > PAGE_START_SCAN_LIMIT) return null;
+    const { wasm } = this.deps;
+    if (typeof wasm.getPositionOfPage !== 'function') return null;
+    try {
+      const starts: PageStart[] = [];
+      for (let p = 0; p < pageCount; p++) {
+        const pos = wasm.getPositionOfPage(p);
+        if (!pos.ok || typeof pos.sec !== 'number' || typeof pos.para !== 'number') return null;
+        starts.push({ sec: pos.sec, para: pos.para });
+      }
+      return starts;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 스테이징 쓰기 결과에 after 보고를 붙인다 — 보고는 best-effort 라 실패해도 이미 적용된
+   * 쓰기 결과는 그대로 돌려준다. render 는 PNG 를 image 로 싣고, 그릴 수 없으면 renderError.
+   */
+  private async attachWriteReport(
+    result: unknown,
+    baseline: WriteBaseline,
+    render: WriteRenderMode | undefined,
+  ): Promise<unknown> {
+    if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+    let report: ReturnType<AgentToolExecutor['buildWriteReport']>;
+    try {
+      report = this.buildWriteReport(baseline);
+    } catch {
+      return result;
+    }
+    const out: Record<string, unknown> = { ...(result as Record<string, unknown>), after: report.after };
+    // after.paragraphs 가 같은 문단을 더 넓게 보여 준다 — 중복 다이제스트는 뺀다.
+    if (report.after.paragraphs.length > 0) delete out['postEdit'];
+    if (render) {
+      try {
+        Object.assign(out, await this.renderWriteImage(report.rects, report.pages, render));
+      } catch (e) {
+        if (e instanceof AgentToolError && e.code !== 'RENDER_UNAVAILABLE') throw e;
+        const msg = e instanceof Error ? e.message : String(e);
+        out['renderError'] = `render unavailable here — image skipped (${msg.slice(0, 120)})`;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 이번 호출이 만든 op 들로 after 보고를 만든다: 바뀐 문단 텍스트(8개 × 200자), 쪽 수
+   * 전후, 바뀐 쪽, 레이아웃 경고(표 본문 넘침, 편집 밖 문단의 쪽 이동, 템플릿 경고).
+   */
+  private buildWriteReport(baseline: WriteBaseline) {
+    const { wasm, pending } = this.deps;
+    const newOps = pending.getChangeSets().flatMap((set) => set.ops).filter((op) => !baseline.opIds.has(op.id));
+    const targets = this.collectWriteTargets(newOps);
+
+    const paragraphs = targets.paras.map((p) => ({
+      sectionIdx: p.sectionIdx,
+      paraIdx: p.paraIdx,
+      ...(p.cell ? { cell: p.cell } : {}),
+      ...(p.from > 0 ? { from: p.from } : {}),
+      text: this.readPostEditDigest(p.sectionIdx, p.paraIdx, p.from, p.cell),
+    }));
+
+    // 변경 영역 rect — 오버레이와 같은 해석, 못 구하면 op 의 캐럿 줄로 대신한다.
+    const rects: SelectionRect[] = [];
+    for (const op of newOps) {
+      let opRects: SelectionRect[] = [];
+      try { opRects = pending.opPageRects(op); } catch { /* 아래 캐럿 폴백 */ }
+      if (opRects.length === 0) {
+        const caret = this.opCaretRect(op);
+        if (caret) opRects = [caret];
+      }
+      rects.push(...opRects);
+    }
+    const pageSet = new Set<number>();
+    for (const r of rects) if (Number.isInteger(r.pageIndex) && r.pageIndex >= 0) pageSet.add(r.pageIndex);
+
+    const warnings = [...targets.warnings];
+    for (const t of targets.tables.slice(0, 4)) {
+      let layout: ReturnType<AgentToolExecutor['measureTableLayout']>;
+      try {
+        layout = this.measureTableLayout(t.sectionIdx, t.paraIdx, t.controlIdx);
+      } catch {
+        continue; // 표가 지워졌거나 주소가 바뀌었다
+      }
+      for (const f of layout.fragments) pageSet.add(f.pageIndex);
+      const label = `table s${t.sectionIdx} p${t.paraIdx} c${t.controlIdx}`;
+      const over = layout.fragments.find((f) => f.overflowsBodyBottom);
+      if (layout.overflowsBody) {
+        warnings.push(layout.pageBreak === 0
+          ? `${label} runs past the body bottom on page ${over?.pageIndex ?? '?'} and cannot split — set_table_props {pageBreak:"row"}`
+          : `${label} runs past the body bottom on page ${over?.pageIndex ?? '?'}`);
+      }
+      if (layout.overflowsBodyWidth) {
+        warnings.push(`${label} is wider than the body — edit_table fit_to_page or set_column_widths`);
+      }
+    }
+    for (const p of targets.paras) {
+      const page = this.pageOfParagraph(p.sectionIdx, p.paraIdx, p.cell);
+      if (page !== null) pageSet.add(page);
+    }
+
+    let pageCount = baseline.pageCount;
+    try { pageCount = wasm.pageCount; } catch { /* 이전 값 유지 */ }
+    if (baseline.pageStarts) {
+      const after = this.capturePageStarts(pageCount);
+      const paraCounts = this.paragraphCounts();
+      if (after && paraCounts.length === baseline.paraCounts.length) {
+        const edits = new Map<number, SectionEdit>();
+        for (let s = 0; s < paraCounts.length; s++) {
+          const delta = paraCounts[s] - baseline.paraCounts[s];
+          const range = targets.bodyRanges.get(s);
+          if (targets.wholeSections.has(s) || (!range && delta !== 0)) {
+            // 편집 위치를 모르는 문단 수 변화 — 이 구역의 문단 대응을 믿을 수 없다
+            edits.set(s, 'all');
+          } else if (range) {
+            edits.set(s, { lo: range.lo, hi: Math.max(range.hi, range.lo + delta), delta });
+          }
+        }
+        warnings.push(...movedRunWarnings(movedParagraphRuns(baseline.pageStarts, after, paraCounts, edits)));
+      }
+    }
+
+    const pages = [...pageSet].sort((a, b) => a - b);
+    return {
+      after: {
+        paragraphs,
+        pageCountBefore: baseline.pageCount,
+        pageCount,
+        pages: pages.slice(0, AFTER_MAX_PAGES),
+        ...(pages.length > AFTER_MAX_PAGES ? { morePages: pages.length - AFTER_MAX_PAGES } : {}),
+        ...(warnings.length > 0 ? { warnings } : {}),
+      },
+      rects,
+      pages,
+    };
+  }
+
+  /** 새 op 들 → 보고 대상. 좌표는 모두 편집 후(라이브 shift 반영) 값이다. */
+  private collectWriteTargets(ops: readonly PendingOp[]): WriteTargets {
+    const targets: WriteTargets = { paras: [], tables: [], bodyRanges: new Map(), wholeSections: new Set(), warnings: [] };
+    const seenPara = new Set<string>();
+    const seenTable = new Set<string>();
+    const pushPara = (sectionIdx: number, paraIdx: number, cell?: CellAddr, from = 0): void => {
+      const key = cell
+        ? `${sectionIdx}:c${cell.paraIdx}/${cell.controlIdx}/${cell.cellIdx}/${JSON.stringify(cell.path ?? [])}:${paraIdx}`
+        : `${sectionIdx}:b:${paraIdx}`;
+      if (seenPara.has(key) || targets.paras.length >= AFTER_MAX_PARAGRAPHS) return;
+      seenPara.add(key);
+      targets.paras.push(cell ? { sectionIdx, paraIdx, cell, from } : { sectionIdx, paraIdx, from });
+    };
+    const pushTable = (sectionIdx: number, paraIdx: number, controlIdx: number): void => {
+      const key = `${sectionIdx}:${paraIdx}:${controlIdx}`;
+      if (seenTable.has(key)) return;
+      seenTable.add(key);
+      targets.tables.push({ sectionIdx, paraIdx, controlIdx });
+    };
+    const touchBody = (sectionIdx: number, lo: number, hi = lo): void => {
+      const cur = targets.bodyRanges.get(sectionIdx);
+      targets.bodyRanges.set(sectionIdx, cur
+        ? { lo: Math.min(cur.lo, lo), hi: Math.max(cur.hi, hi) }
+        : { lo, hi });
+    };
+    for (const op of ops) {
+      if (op.kind === 'template') {
+        targets.warnings.push(...op.report.warnings);
+        for (const s of op.report.affectedSections) targets.wholeSections.add(s);
+        continue;
+      }
+      if (op.kind === 'insert' || op.kind === 'replace' || op.kind === 'format') {
+        const r = op.range;
+        // 긴 문단의 뒤쪽 편집은 문단 앞 대신 편집 지점 조금 앞부터 보여 준다
+        const from = r.startCharOffset > AFTER_TEXT_CHARS - AFTER_WINDOW_LEAD
+          ? r.startCharOffset - AFTER_WINDOW_LEAD
+          : 0;
+        for (let p = r.startParaIdx; p <= Math.min(r.endParaIdx, r.startParaIdx + 2); p++) {
+          pushPara(r.sectionIdx, p, r.cell, p === r.startParaIdx ? from : 0);
+        }
+        if (r.cell) {
+          pushTable(r.sectionIdx, r.cell.paraIdx, r.cell.controlIdx);
+          touchBody(r.sectionIdx, r.cell.paraIdx);
+        } else {
+          touchBody(r.sectionIdx, r.startParaIdx, r.endParaIdx);
+        }
+        continue;
+      }
+      if (op.kind !== 'object') continue;
+      const o = op.obj;
+      switch (o.type) {
+        case 'paraFormat':
+        case 'applyStyle':
+          pushPara(o.sectionIdx, o.paraIdx, o.cell);
+          touchBody(o.sectionIdx, o.cell ? o.cell.paraIdx : o.paraIdx);
+          break;
+        case 'createTable':
+          if (o.anchor) {
+            pushTable(o.sectionIdx, o.anchor.paraIdx, o.anchor.controlIdx);
+            touchBody(o.sectionIdx, o.anchor.paraIdx);
+          }
+          break;
+        case 'insertImage':
+        case 'insertEquation':
+          if (o.cell) {
+            pushPara(o.sectionIdx, o.paraIdx, o.cell);
+            pushTable(o.sectionIdx, o.cell.paraIdx, o.cell.controlIdx);
+            touchBody(o.sectionIdx, o.cell.paraIdx);
+          } else if (o.anchor) {
+            pushPara(o.sectionIdx, o.anchor.paraIdx);
+            touchBody(o.sectionIdx, o.anchor.paraIdx);
+          }
+          break;
+        case 'insertNote':
+          if (o.anchor) {
+            pushPara(o.sectionIdx, o.anchor.paraIdx);
+            touchBody(o.sectionIdx, o.anchor.paraIdx);
+          }
+          break;
+        case 'setNoteText':
+        case 'bookmark':
+          touchBody(o.sectionIdx, o.paraIdx);
+          break;
+        case 'tableStructure':
+        case 'setCellProps':
+        case 'setTableProps':
+        case 'setColumnWidths':
+        case 'fitToPage':
+        case 'setZoneProps':
+        case 'applyFormula':
+        case 'setCaption':
+          pushTable(o.sectionIdx, o.tableParaIdx, o.controlIdx);
+          touchBody(o.sectionIdx, o.tableParaIdx);
+          break;
+        case 'deleteTable':
+          touchBody(o.sectionIdx, o.tableParaIdx);
+          break;
+        case 'pageLayout':
+          targets.wholeSections.add(o.sectionIdx);
+          break;
+        default:
+          break; // headerFooter — 본문 문단 좌표 없음
+      }
+    }
+    return targets;
+  }
+
+  /** 오버레이 rect 를 못 구한 op 의 위치 — 범위 시작 또는 앵커 문단 앞의 캐럿 줄. */
+  private opCaretRect(op: PendingOp): SelectionRect | null {
+    if (op.kind === 'insert' || op.kind === 'replace' || op.kind === 'format') {
+      const r = op.range;
+      return this.caretRect(r.sectionIdx, r.startParaIdx, r.startCharOffset, r.cell);
+    }
+    if (op.kind !== 'object') return null;
+    const o = op.obj;
+    switch (o.type) {
+      case 'paraFormat':
+      case 'applyStyle':
+        return this.caretRect(o.sectionIdx, o.paraIdx, 0, o.cell);
+      case 'setNoteText':
+      case 'bookmark':
+        return this.caretRect(o.sectionIdx, o.paraIdx, 0);
+      case 'insertNote':
+      case 'createTable':
+        return o.anchor ? this.caretRect(o.sectionIdx, o.anchor.paraIdx, 0) : null;
+      case 'insertImage':
+      case 'insertEquation':
+        return o.cell
+          ? this.caretRect(o.sectionIdx, o.paraIdx, 0, o.cell)
+          : o.anchor ? this.caretRect(o.sectionIdx, o.anchor.paraIdx, 0) : null;
+      case 'deleteTable':
+        return this.caretRect(o.sectionIdx, o.tableParaIdx, 0);
+      default:
+        return null;
+    }
+  }
+
+  /** 쪽 크기와 본문 좌우 (쪽 px) — 자르기 영역을 본문 폭으로 넓히는 기준. */
+  private pageFrame(pageIndex: number): PageFrame | null {
+    try {
+      const info = this.deps.wasm.getPageInfo(pageIndex);
+      return {
+        width: info.width,
+        height: info.height,
+        bodyLeft: info.bodyLeft ?? info.marginLeft,
+        bodyRight: info.bodyRight ?? info.width - info.marginRight,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 변경 영역(crop) 또는 바뀐 쪽(page)을 위에서 아래로 쌓은 PNG 한 장 — 1.25배에서
+   * 시작해 ~1.15MP 안에 들도록 줄인다. 영역마다 쪽과 세로 위치(mm)를 함께 알린다.
+   */
+  private async renderWriteImage(
+    rects: readonly SelectionRect[],
+    pages: readonly number[],
+    mode: WriteRenderMode,
+  ): Promise<Record<string, unknown>> {
+    const frames = new Map<number, PageFrame | null>();
+    const frameOf = (p: number): PageFrame | null => {
+      if (!frames.has(p)) frames.set(p, this.pageFrame(p));
+      return frames.get(p)!;
+    };
+    const fullPage = (p: number): CropRegion | null => {
+      const f = frameOf(p);
+      return f ? { pageIndex: p, x: 0, y: 0, width: f.width, height: f.height } : null;
+    };
+    let regions: CropRegion[] = mode === 'crop' ? planCropRegions(rects, frameOf) : [];
+    if (regions.length === 0) {
+      // page 모드, 또는 영역을 못 구한 crop — 바뀐 쪽 전체로 대신한다
+      regions = pages.slice(0, RENDER_MAX_PAGES)
+        .map(fullPage)
+        .filter((r): r is CropRegion => r !== null);
+    }
+    if (regions.length === 0) {
+      return { renderError: 'no changed area to render' };
+    }
+    const plan = planStack(regions);
+    const s = plan.scale;
+    const rendered = new Map<number, HTMLCanvasElement | OffscreenCanvas>();
+    const pieces = plan.regions.map((r) => {
+      let src = rendered.get(r.pageIndex);
+      if (!src) {
+        src = this.renderPageToCanvasElement(r.pageIndex, s);
+        rendered.set(r.pageIndex, src);
+      }
+      const sx = Math.max(0, Math.floor(r.x * s));
+      const sy = Math.max(0, Math.floor(r.y * s));
+      const sw = Math.max(1, Math.min(src.width - sx, Math.ceil(r.width * s)));
+      const sh = Math.max(1, Math.min(src.height - sy, Math.ceil(r.height * s)));
+      return { r, src, sx, sy, sw, sh };
+    });
+    const out = this.createRenderCanvas();
+    out.width = Math.max(...pieces.map((p) => p.sw));
+    out.height = pieces.reduce((sum, p) => sum + p.sh, 0) + RENDER_STACK_GAP_PX * (pieces.length - 1);
+    const ctx = out.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    if (!ctx) throw new AgentToolError('RENDER_UNAVAILABLE', 'Canvas 2D context is unavailable');
+    ctx.fillStyle = '#9e9e9e'; // 영역 사이 구분 띠
+    ctx.fillRect(0, 0, out.width, out.height);
+    let y = 0;
+    for (const p of pieces) {
+      ctx.drawImage(p.src as CanvasImageSource, p.sx, p.sy, p.sw, p.sh, 0, y, p.sw, p.sh);
+      y += p.sh + RENDER_STACK_GAP_PX;
+    }
+    const png = await canvasToPngBase64(out);
+    return {
+      image: { data: png.data, mimeType: 'image/png' },
+      renderRegions: plan.regions.map((r) => ({ pageIndex: r.pageIndex, yMm: pxToMm1(r.y), heightMm: pxToMm1(r.height) })),
+      ...(plan.omitted > 0 ? { renderOmitted: plan.omitted } : {}),
+      ...(plan.clipped ? { renderClipped: true } : {}),
+    };
   }
 
   // ─── template context + structural transfer ─────────────────

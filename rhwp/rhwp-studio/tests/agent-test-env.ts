@@ -18,7 +18,11 @@ export interface FakeTable {
   cells: string[][];
 }
 
-export function makeEnv(initialBody: string[]) {
+/** extend 는 가짜 wasm 에 조판·표 프로브를 덧붙인다 (쓰기 결과 보고 테스트). */
+export function makeEnv(
+  initialBody: string[],
+  extend?: (wasm: Record<string, unknown>, body: string[], tables: FakeTable[]) => void,
+) {
   const body = [...initialBody];
   const bodyParaShapes = body.map((_, i) => 10 + i);
   const tables: FakeTable[] = [];
@@ -153,6 +157,8 @@ export function makeEnv(initialBody: string[]) {
     discardParagraphCapture: (_id: number) => {},
     getParagraphContentDigest: (_s: number, p: number) => JSON.stringify(body[p]),
   });
+
+  extend?.(wasm as unknown as Record<string, unknown>, body, tables);
 
   const bus = new EventBus();
   const revision = new RevisionTracker(bus);
