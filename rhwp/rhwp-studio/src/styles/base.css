@@ -50,6 +50,12 @@
   --ui-hover-strong: var(--n-fill-active);
   --ui-active: var(--n-fill-active);
   --ui-selected: var(--n-fill-selected);
+  --ui-pressed: var(--n-fill-pressed);
+  --ui-hover-quiet: var(--n-fill-hover-quiet);
+  /* 목록에서 선택된 행. 창이 비활성이면 아래 body.window-inactive 가
+     중성 회색 쌍으로 바꾼다. */
+  --ui-row-selected-bg: var(--accent-primary);
+  --ui-row-selected-fg: var(--n-on-accent);
   --ui-menu-open: var(--accent-strong);
   --ui-menu-open-border: var(--accent-primary);
   /* 그라디언트 폐기: 도구 모음도 하나의 평평한 면이다 */
@@ -156,7 +162,8 @@
 
   /* 타이포그래피 */
   --font-family-ui: -apple-system, BlinkMacSystemFont, '맑은 고딕', 'Malgun Gothic', 'Segoe UI', sans-serif;
-  --font-family-mono: 'Consolas', 'Courier New', monospace;
+  --font-family-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Courier New', monospace;
+  --font-mono: var(--font-family-mono);
   --font-size-xs: 10px;
   --font-size-sm: 11px;
   --font-size-base: 12px;
@@ -211,6 +218,14 @@
   --n-fill-active: rgba(0, 0, 0, 0.10);
   --n-fill-selected: rgba(97, 130, 214, 0.14);
   --n-fill-selected-soft: rgba(97, 130, 214, 0.07);
+  /* 누름: 어떤 채움 위에도 얹히는 덧칠. 채움을 약 8% 어둡게 누른다. */
+  --n-fill-pressed: rgba(0, 0, 0, 0.08);
+  /* 아이콘만 있는 버튼의 호버. 일반 호버보다 한 단계 옅다. */
+  --n-fill-hover-quiet: rgba(0, 0, 0, 0.04);
+  /* 창이 비활성일 때 액센트 채움과 선택 영역이 물러나는 중성 회색 */
+  --n-inactive-fill: #dcdcdf;
+  --n-inactive-ink: #3a3a3c;
+  --n-inactive-selection: #dcdcdc;
 
   /* 밝은 테마의 액센트는 짙은 파랑이라 흰 글자가 맞는다. */
   --n-on-accent: #ffffff;
@@ -277,6 +292,10 @@
   --ui-hover-strong: var(--n-fill-active);
   --ui-active: var(--n-fill-active);
   --ui-selected: var(--n-fill-selected);
+  --ui-pressed: var(--n-fill-pressed);
+  --ui-hover-quiet: var(--n-fill-hover-quiet);
+  --ui-row-selected-bg: var(--accent-primary);
+  --ui-row-selected-fg: var(--n-on-accent);
   --ui-menu-open: var(--accent-primary);
   --ui-menu-open-border: var(--accent-light);
   --ui-toolbar-bg-start: var(--n-surface-raised);
@@ -361,6 +380,11 @@
   --n-fill-hover: rgba(255, 255, 255, 0.06);
   --n-fill-active: rgba(255, 255, 255, 0.10);
   --n-fill-selected: rgba(127, 168, 255, 0.18);
+  --n-fill-pressed: rgba(0, 0, 0, 0.2);
+  --n-fill-hover-quiet: rgba(255, 255, 255, 0.045);
+  --n-inactive-fill: #4a4a4e;
+  --n-inactive-ink: #e5e5ea;
+  --n-inactive-selection: #464649;
 
   --n-elev-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 1px 1px rgba(0, 0, 0, 0.25);
   --n-elev-2: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
@@ -428,6 +452,221 @@ body {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* ─── 크롬은 문서가 아니다 ─────────────────────────────
+   메뉴·도구 모음·상태 표시줄·사이드바·대화상자는 끌어도 글자가 잡히지
+   않고, 아이콘이 이미지처럼 끌려 나오지 않는다. 대화 본문, 입력,
+   diff, 코드·결과 블록, 계획 본문처럼 읽고 복사할 내용만 다시 연다. */
+:is(#studio-header, #status-bar, #ruler-corner, .ag-root, .ag-sheet-layer, .dialog-wrap,
+  .modal-overlay, .cp-overlay, .context-menu, .rhwp-setup-overlay, .ag-cloud-setup-overlay) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+:is(#studio-header, #status-bar, .ag-root, .ag-sheet-layer, .dialog-wrap, .context-menu)
+  :is(img, svg) {
+  -webkit-user-drag: none;
+}
+
+:is(input:not([type='button'], [type='submit'], [type='checkbox'], [type='radio'], [type='range']),
+  textarea, [contenteditable]:not([contenteditable='false']),
+  .ag-msg-assistant, .ag-msg-user-text, .ag-msg-selection-excerpt, .ag-md-pre, .ag-md-code,
+  .ag-tool-args, .ag-tool-result, .ag-diff-text, .ag-changes-lines, .ag-changes-line-content,
+  .ag-plan-goal, .ag-plan-summary, .ag-plan-note, .ag-plan-step-title, .ag-plan-step-note,
+  .ag-plan-step-preview, .ag-reference-search-snippet, .ag-changes-message,
+  .ag-msg-system, .ag-sheet-message, .dialog-sheet-message) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* 다시 연 본문 안에 놓인 버튼(복사 등)은 여전히 크롬이다. */
+:is(.ag-msg-assistant, .ag-msg-system, .ag-changes-lines) :is(button, [role='button']) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* ─── 누름 ──────────────────────────────────────────
+   모든 버튼은 누르는 동안 채움 위에 --ui-pressed 를 한 겹 덧칠한다.
+   background-color 를 바꾸지 않으므로 액센트·고스트·위험 버튼이 같은
+   규칙으로 어두워진다. 자기 누름 상태를 가진 버튼은 같은 specificity
+   의 뒤 규칙이 이긴다. 크기 변형은 쓰지 않는다. */
+:where(button, [role='button'], input[type='button'], input[type='submit']):active:not(:disabled, [aria-disabled='true']) {
+  background-image: linear-gradient(var(--ui-pressed), var(--ui-pressed));
+}
+
+/* ─── 비활성 창 ─────────────────────────────────────
+   창이 포커스를 잃으면(body.window-inactive) 액센트가 물러난다.
+   선택 영역, 채워진 기본 버튼, 선택된 세그먼트·칩이 중성 회색으로
+   바뀌고, 포커스가 돌아오면 그대로 복귀한다. */
+body.window-inactive {
+  --ui-row-selected-bg: var(--n-inactive-fill);
+  --ui-row-selected-fg: var(--n-inactive-ink);
+}
+
+body.window-inactive ::selection {
+  background: var(--n-inactive-selection);
+}
+
+body.window-inactive :is(
+  .ag-send:not(.ag-stop), .ag-inline-send, .ag-approve, .ag-hub-retry-btn,
+  .ag-settings-primary, .ag-agent-setup-primary, .ag-calibration-primary,
+  .ag-cloud-action.ag-primary, .ag-cloud-setup-button.ag-primary,
+  .ag-question-option[data-selected='true'] .ag-question-option-number,
+  .ag-skill-toggle[aria-pressed='true'], .ag-settings-toggle-input:checked + .ag-settings-toggle-track,
+  .dialog-btn-primary, .dialog-btn-group button.active, .goto-bookmark-item.selected,
+  .form-combo-dropdown .form-combo-item.selected, .rhwp-setup-primary, #document-open-action
+) {
+  border-color: transparent;
+  background-color: var(--n-inactive-fill);
+  color: var(--n-inactive-ink);
+}
+
+/* ─── 진행 표시 ─────────────────────────────────────
+   끝을 모르는 로딩은 이 하나만 쓴다. 시스템 스피너처럼 여덟 살이
+   한 칸씩 건너뛰며 돌고, 뒤로 갈수록 옅어진다. 크기는 width/height,
+   색은 color 로 바꾼다. 동작 줄이기에서는 멈춘 살만 남는다. */
+.ui-spinner {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  color: var(--n-text-muted);
+  background: conic-gradient(from 22.5deg, transparent 10%, currentColor);
+  -webkit-mask:
+    repeating-conic-gradient(from -9deg, #000 0 18deg, transparent 18deg 45deg),
+    radial-gradient(circle closest-side, transparent 44%, #000 46%);
+  -webkit-mask-composite: source-in;
+  mask:
+    repeating-conic-gradient(from -9deg, #000 0 18deg, transparent 18deg 45deg),
+    radial-gradient(circle closest-side, transparent 44%, #000 46%);
+  mask-composite: intersect;
+  animation: ui-spinner-step 0.8s steps(8, end) infinite;
+}
+
+@keyframes ui-spinner-step {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-spinner {
+    animation: none;
+  }
+}
+
+/* ─── 토스트 ────────────────────────────────────────
+   크롬 판 바로 아래 오른쪽에 쌓인다. top 은 toast.ts 가 #studio-header
+   아래 끝에 맞춰 넣는다. 면·글자·헤어라인·높이 모두 테마 토큰이다. */
+.rhwp-toast-stack {
+  position: fixed;
+  top: 8px;
+  right: 16px;
+  z-index: 21000; /* 모달(10000~20000)보다 위 */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.rhwp-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 280px;
+  max-width: 400px;
+  padding: 11px 12px 11px 14px;
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: 8px;
+  background: var(--n-surface-raised);
+  box-shadow: var(--n-elev-2);
+  color: var(--n-text);
+  font: 13px/1.5 var(--font-family-ui);
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateX(16px);
+  transition:
+    opacity 200ms var(--ag-ease-out, ease-out),
+    transform 200ms var(--ag-ease-out, ease-out);
+}
+
+.rhwp-toast.rhwp-toast-in {
+  opacity: 1;
+  transform: none;
+}
+
+.rhwp-toast-message {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.rhwp-toast :is(.rhwp-toast-action, .rhwp-toast-confirm, .rhwp-toast-close) {
+  flex-shrink: 0;
+  border: 0;
+  font: inherit;
+  cursor: default;
+}
+
+.rhwp-toast-action {
+  padding: 0;
+  background: transparent;
+  color: var(--ui-link);
+}
+
+.rhwp-toast-confirm {
+  padding: 3px 12px;
+  border-radius: var(--radius-md);
+  background: var(--accent-primary);
+  color: var(--n-on-accent);
+}
+
+.rhwp-toast-close {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin: 1px -2px 0 0;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--n-text-muted);
+}
+
+.rhwp-toast-close:hover {
+  background: var(--ui-hover-quiet);
+  color: var(--n-text);
+}
+
+.rhwp-toast-close svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+}
+
+.rhwp-toast :is(button):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rhwp-toast {
+    transform: none;
+    transition: opacity 120ms linear;
+  }
+}
+
+/* 테마를 바꾸는 한 프레임 동안 전환을 끈다. 면마다 다른 시간으로
+   번지지 않고 한 번에 바뀐다. theme.ts 가 붙였다 뗀다. */
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition: none !important;
 }
 
 /* 얇은 stroke 쉐브론 — 기본은 아래, 회전으로 방향 전환 */

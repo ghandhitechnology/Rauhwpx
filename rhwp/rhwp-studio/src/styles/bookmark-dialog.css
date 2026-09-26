@@ -75,7 +75,7 @@
 .bm-item {
   display: flex;
   padding: 3px 6px;
-  cursor: pointer;
+  cursor: default;
 }
 
 .bm-item:hover {
@@ -138,7 +138,7 @@
   height: 28px;
   border: 1px solid var(--ui-border-strong);
   background: var(--color-surface-raised);
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-lg);
   display: flex;
   align-items: center;
@@ -161,7 +161,7 @@
 
 .bm-radio {
   font-size: var(--font-size-base);
-  cursor: pointer;
+  cursor: default;
 }
 
 .modal-overlay .bm-dialog { width: min(440px, calc(100vw - 24px)); }

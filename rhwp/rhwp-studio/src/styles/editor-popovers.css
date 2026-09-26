@@ -51,7 +51,7 @@
   background: transparent;
   color: inherit;
   font: 18px/1 var(--font-family-ui);
-  cursor: pointer;
+  cursor: default;
 }
 .bullet-popup button:hover { background: var(--popover-hover); }
 .bullet-popup button:active { background: var(--popover-selected); }
@@ -81,7 +81,7 @@
   background: transparent;
   color: var(--popover-muted);
   font: 22px/1 var(--font-family-ui);
-  cursor: pointer;
+  cursor: default;
 }
 .table-create-header button:hover { background: var(--popover-hover); color: var(--popover-text); }
 .table-create-grid-wrap { padding: 13px 12px 10px; }
@@ -116,7 +116,7 @@
   color: var(--popover-text);
   text-align: left;
   font: inherit;
-  cursor: pointer;
+  cursor: default;
 }
 .table-create-more:hover { background: var(--popover-hover); }
 
@@ -151,7 +151,7 @@
   border-radius: 6px;
   background: var(--ui-surface-raised);
   color: var(--ui-text);
-  cursor: pointer;
+  cursor: default;
   color-scheme: inherit;
 }
 .endnote-shape-preview-button:hover { background: var(--ui-hover); }
@@ -184,7 +184,7 @@
   background: transparent;
   color: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 .endnote-shape-popup-option:hover { background: var(--ui-hover); }
 .endnote-shape-swatch {
@@ -196,7 +196,7 @@
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
-  cursor: pointer;
+  cursor: default;
 }
 .endnote-shape-swatch:hover { background: var(--ui-hover); border-color: var(--ui-border-light); }
 .endnote-shape-custom-color {
@@ -208,6 +208,6 @@
   background: transparent;
   color: var(--ui-text);
   font: 12px var(--font-family-ui);
-  cursor: pointer;
+  cursor: default;
 }
 .endnote-shape-custom-color:hover { background: var(--ui-hover); }

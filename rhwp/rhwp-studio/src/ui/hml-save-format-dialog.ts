@@ -9,6 +9,7 @@ class HmlSaveFormatDialog extends ModalDialog {
   private resolve!: (value: HmlSaveFormatChoice) => void;
   private readonly hmlEnabled: boolean;
   private readonly message: string;
+  protected override sheet = true;
 
   constructor(
     metadata: HmlOpenMetadata | null,
@@ -22,10 +23,7 @@ class HmlSaveFormatDialog extends ModalDialog {
 
   protected createBody(): HTMLElement {
     const body = document.createElement('div');
-    body.style.padding = '16px 20px';
-    body.style.lineHeight = '1.6';
-    body.style.whiteSpace = 'pre-line';
-
+    body.className = 'dialog-sheet-message';
     body.textContent = this.message;
     return body;
   }

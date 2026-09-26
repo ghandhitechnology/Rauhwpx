@@ -193,7 +193,7 @@ test('한 턴의 서브에이전트는 도크 팝업에 모이고 턴이 끝나�
   assert.ok(one(card, 'ag-fleet-dot').className.includes('ag-run'));
   // 알약은 남은 작업 수를 말하고 픽셀 휠을 싣는다.
   assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2');
-  assert.equal(all(pill(view), 'ag-pixel-bit').length, 8);
+  assert.equal(all(pill(view), 'ui-spinner').length, 1);
   assert.ok(pill(view).className.includes('ag-live'));
   assert.equal((view.root as unknown as FakeNode).hidden, false);
   assert.equal(popup(view).hidden, true, '새 편대는 접힌 상태로 시작한다');
@@ -570,14 +570,14 @@ test('살아 있는 기록은 한 번에 하나만 펼친다 — 팝업과 도�
   assert.match(source, /if \(!collapsed\) \{\s*\n[^\n]*\n\s*fleetView\.closePopup\(\);/);
 });
 
-test('행 높이는 고정 그리드로 못 박혀 있고 진행 표시는 픽셀 휠 하나다', () => {
+test('행 높이는 고정 그리드로 못 박혀 있고 진행 표시는 공용 스피너 하나다', () => {
   assert.match(css, /\.ag-fleet-head\s*\{[^}]*grid-template-rows:\s*16px 14px;/s);
   assert.match(css, /\.ag-fleet-head\s*\{[^}]*grid-template-columns:\s*12px minmax\(0, 1fr\) auto 11px;/s);
   assert.match(css, /\.ag-fleet-dot\.ag-run\s*\{\s*background:\s*var\(--ag-run\);/);
   assert.match(css, /\.ag-fleet-dot\.ag-ok\s*\{\s*background:\s*var\(--ag-ok\);/);
   assert.match(css, /\.ag-fleet-dot\.ag-err\s*\{\s*background:\s*var\(--ag-err\);/);
-  // 진행 표시는 step 타이밍으로 칸을 건너뛰는 픽셀 휠이다 — 부드러운 회전이 아니다.
-  assert.match(css, /\.ag-pixel-bit\s*\{[^}]*animation:\s*ag-pixel-chase [^;]*steps\(1/s);
+  // 진행 표시는 앱 공용 스피너 하나다.
+  assert.match(readFileSync(new URL('../src/ui/agent-sidebar/subagent-fleet.ts', import.meta.url), 'utf8'), /ag-pixel-wheel ui-spinner/);
   assert.match(css, /\.ag-fleet-row\.ag-live \.ag-fleet-spin \{\s*\n\s*display: block;/);
   assert.match(css, /\.ag-fleet\.ag-codex \{ --ag-accent: var\(--ag-codex\); \}/);
   assert.doesNotMatch(css, /ag-fleet-card-spin/);

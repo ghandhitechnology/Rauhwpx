@@ -93,7 +93,7 @@
   background: rgba(255, 255, 255, 0.045);
   font: inherit;
   font-size: 11px;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-versions-secondary,
@@ -306,7 +306,7 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  cursor: pointer;
+  cursor: default;
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -368,7 +368,7 @@
   color: var(--ag-muted, #a5a5af);
   background: transparent;
   font: inherit;
-  cursor: pointer;
+  cursor: default;
   min-height: 33px;
   padding: 5px 0;
   font-size: 11px;
@@ -609,7 +609,6 @@
   box-sizing: border-box;
   padding: 0 2px;
   overflow-x: auto;
-  scrollbar-width: thin;
 }
 
 .ag-versions-chip-name {
@@ -744,7 +743,7 @@
   color: inherit;
   background: transparent;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   padding: 0 6px;
   border: 0;
   align-items: center;
@@ -842,7 +841,7 @@
   border: 1px solid var(--version-rule);
   background: transparent;
   color: var(--ag-text);
-  cursor: pointer;
+  cursor: default;
   text-align: left;
   border-radius: 2px;
 }

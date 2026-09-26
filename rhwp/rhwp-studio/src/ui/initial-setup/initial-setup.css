@@ -136,7 +136,7 @@
   background: var(--n-surface-raised, #f7f7f8);
   color: inherit;
   font: inherit;
-  cursor: pointer;
+  cursor: default;
   transition:
     background-color var(--ag-dur-fast) var(--ag-ease-out),
     border-color var(--ag-dur-fast) var(--ag-ease-out),
@@ -147,9 +147,6 @@
   background: var(--n-surface-sunken, #f1f1f4);
 }
 
-.rhwp-setup-card-action:active {
-  transform: scale(0.98);
-}
 
 .rhwp-setup-card-action:focus-visible {
   outline: 2px solid var(--accent-primary, #6182d6);
@@ -279,7 +276,7 @@
   font: inherit;
   font-size: 14px;
   font-weight: 600;
-  cursor: pointer;
+  cursor: default;
   transition:
     background-color var(--ag-dur-base) var(--ag-ease-out),
     color var(--ag-dur-base) var(--ag-ease-out),
@@ -290,9 +287,6 @@
   background: var(--n-fill-active, rgba(0, 0, 0, 0.1));
 }
 
-.rhwp-setup-primary:active {
-  transform: scale(0.99);
-}
 
 .rhwp-setup-primary:focus-visible {
   outline: 2px solid var(--accent-primary, #6182d6);

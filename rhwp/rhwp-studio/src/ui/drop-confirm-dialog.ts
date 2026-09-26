@@ -12,6 +12,7 @@ import { ModalDialog } from './dialog';
 
 class DropConfirmDialog extends ModalDialog {
   private resolve!: (value: boolean) => void;
+  protected override sheet = true;
 
   constructor(private readonly fileName: string) {
     super('로컬 파일 열기 확인', 420);
@@ -19,7 +20,7 @@ class DropConfirmDialog extends ModalDialog {
 
   protected createBody(): HTMLElement {
     const body = document.createElement('div');
-    body.style.cssText = 'padding:16px 20px;line-height:1.6;white-space:pre-line;';
+    body.className = 'dialog-sheet-message';
     const name = this.fileName || '선택한 파일';
     body.textContent =
       `드래그한 로컬 파일을 엽니다.\n\n"${name}"\n\n` +

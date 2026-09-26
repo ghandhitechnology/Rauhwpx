@@ -122,7 +122,7 @@
   border-radius: 4px;
   padding: 6px 8px;
   margin-bottom: 6px;
-  cursor: pointer;
+  cursor: default;
   font-size: 12px;
 }
 
@@ -211,7 +211,7 @@
 .history-entry {
   padding: 8px 10px;
   border-bottom: 1px solid var(--ui-border-subtle);
-  cursor: pointer;
+  cursor: default;
 }
 
 .history-entry:last-child {

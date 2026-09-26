@@ -387,9 +387,9 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
   }
 
   function createPixelWheel(className = ''): HTMLElement {
-    const wheel = el('span', className ? `ag-pixel-wheel ${className}` : 'ag-pixel-wheel');
+    // 앱 공용 스피너(.ui-spinner, base.css)를 쓴다. 자리 규칙은 ag-pixel-wheel 이 갖는다.
+    const wheel = el('span', className ? `ag-pixel-wheel ui-spinner ${className}` : 'ag-pixel-wheel ui-spinner');
     wheel.setAttribute('aria-hidden', 'true');
-    for (let i = 0; i < 8; i += 1) wheel.appendChild(el('i', 'ag-pixel-bit'));
     return wheel;
   }
 

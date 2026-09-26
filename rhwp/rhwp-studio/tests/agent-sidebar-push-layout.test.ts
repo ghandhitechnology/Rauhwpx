@@ -62,7 +62,7 @@ test('rau icon toggle hides the sidebar completely from the toolbar', () => {
   assert.match(source, /getElementById\('icon-toolbar'\)\?\.appendChild\(collapseTab\)/);
   assert.match(source, /setCollapsed\(!root\.classList\.contains\('ag-collapsed'\)\)/);
   assert.match(source, /collapseTab\.remove\(\)/);
-  assert.match(css, /\.ag-collapse-tab\s*\{[^}]*cursor:\s*pointer;/s);
+  assert.match(css, /\.ag-collapse-tab\s*\{[^}]*cursor:\s*default;/s);
   assert.doesNotMatch(css, /\.ag-collapse-tab\s*\{[^}]*cursor:\s*col-resize;/s);
   assert.match(css, /\.ag-root\.ag-collapsed\s*\{[^}]*pointer-events:\s*none;/s);
 });

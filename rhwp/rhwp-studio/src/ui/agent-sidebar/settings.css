@@ -198,7 +198,7 @@
 .ag-settings-toggle-row {
   position: relative;
   justify-content: space-between;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-settings-toggle-input {
@@ -290,7 +290,7 @@
   color: var(--ag-text-secondary);
   font: inherit;
   font-size: var(--font-size-sm, 11px);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-settings-btn:hover:not(:disabled) {
@@ -318,11 +318,11 @@
   color: var(--n-on-accent);
   font: inherit;
   font-weight: 600;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-settings-primary:hover:not(:disabled) {
-  filter: var(--ag-sketch-line) brightness(0.94);
+  filter: brightness(0.94);
 }
 
 .ag-settings-primary:disabled {
@@ -379,7 +379,7 @@
 }
 
 .ag-settings-select {
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-settings-cliproxy-error {
@@ -696,7 +696,7 @@
   border-radius: 8px;
   background: transparent;
   color: var(--ag-text-secondary);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-agent-setup-close:hover {
@@ -1007,7 +1007,7 @@
   font: inherit;
   font-size: 13px;
   font-weight: 600;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-agent-setup-primary:disabled {
@@ -1037,7 +1037,7 @@
   color: var(--ag-text);
   font: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -1081,7 +1081,7 @@
   background: var(--ag-bg-2);
   color: var(--ag-text);
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-agent-auth-card span,
@@ -1337,7 +1337,7 @@
   color: var(--ag-text);
   font: inherit;
   font-size: var(--font-size-sm, 11px);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-pi-chip-name {
@@ -1642,7 +1642,7 @@
   font-size: var(--font-size-base, 12px);
   font-weight: 650;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-settings-nav-button:hover {
@@ -1814,7 +1814,7 @@
   color: var(--ag-text-secondary);
   font: inherit;
   font-size: var(--font-size-sm, 11px);
-  cursor: pointer;
+  cursor: default;
   transition:
     background-color var(--ag-dur-fast) var(--ag-ease-out),
     color var(--ag-dur-fast) var(--ag-ease-out),
@@ -1891,7 +1891,7 @@
   color: inherit;
   font: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-settings-disclosure-toggle:focus-visible {
@@ -2156,7 +2156,7 @@
   padding: 12px 0;
   color: var(--ag-text-secondary);
   font-weight: 600;
-  cursor: pointer;
+  cursor: default;
 }
 .ag-settings-usage-table {
   width: 100%;
@@ -2198,7 +2198,7 @@
   color: var(--ag-text);
   font: inherit;
   font-weight: 600;
-  cursor: pointer;
+  cursor: default;
 }
 .ag-settings-usage-toggle::after { content: '›'; color: var(--ag-text-secondary); }
 .ag-settings-usage-toggle[aria-expanded='true']::after { transform: rotate(90deg); }
@@ -2228,7 +2228,7 @@
   border-radius: 50%;
   background: transparent;
   color: var(--ag-text-secondary);
-  cursor: pointer;
+  cursor: default;
 }
 .ag-settings-quota-refresh:hover { background: var(--ag-bg-2); color: var(--ag-text); }
 .ag-settings-quota-refresh:disabled { opacity: .45; cursor: wait; }
@@ -2252,7 +2252,7 @@
   gap: 8px;
   min-height: 38px;
   padding: 10px;
-  cursor: pointer;
+  cursor: default;
   list-style: none;
 }
 .ag-settings-provider-summary::-webkit-details-marker { display: none; }
@@ -2806,7 +2806,7 @@
   gap: 8px;
   padding: 0 calc(var(--ag-set-inset) + 16px) 0 var(--ag-set-inset);
   background-color: transparent;
-  cursor: pointer;
+  cursor: default;
   transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -2854,7 +2854,7 @@
   font-weight: 600;
   text-overflow: ellipsis;
   outline: none;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-settings-page .ag-settings-defaults .ag-settings-select option {
@@ -2892,7 +2892,7 @@
   font-size: 12px;
   font-weight: 700;
   list-style: none;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-settings-advanced > summary::-webkit-details-marker { display: none; }
@@ -3000,7 +3000,7 @@
   font: inherit;
   font-size: 12px;
   font-weight: 500;
-  cursor: pointer;
+  cursor: default;
   transition: border-color 150ms ease-out, color 150ms ease-out;
 }
 
@@ -3050,7 +3050,7 @@
   font-size: 12px;
 }
 .ag-settings-model-search-input::placeholder { color: var(--ag-text-muted); }
-.ag-settings-model-search-input::-webkit-search-cancel-button { cursor: pointer; }
+.ag-settings-model-search-input::-webkit-search-cancel-button { cursor: default; }
 
 .ag-settings-model-refresh {
   display: grid;
@@ -3063,11 +3063,10 @@
   border-radius: 7px;
   background: transparent;
   color: var(--ag-text-muted);
-  cursor: pointer;
+  cursor: default;
   transition: background 150ms ease-out, color 150ms ease-out;
 }
 .ag-settings-model-refresh:hover:not(:disabled) { background: var(--ag-hover); color: var(--ag-text); }
-.ag-settings-model-refresh:active:not(:disabled) { transform: scale(0.94); }
 .ag-settings-model-refresh:disabled { opacity: 0.45; cursor: default; }
 
 .ag-settings-model-list {
@@ -3093,7 +3092,7 @@
   color: var(--ag-text);
   font: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   transition: background 150ms ease-out;
 }
 .ag-settings-model-row + .ag-settings-model-row { border-top: 1px solid var(--ag-set-sep); }

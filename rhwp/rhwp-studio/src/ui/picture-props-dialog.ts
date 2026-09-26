@@ -623,14 +623,14 @@ export class PicturePropsDialog {
     this.horzFlipCheck.type = 'checkbox';
     this.horzFlipCheck.disabled = true;
     const horzLabel = this.label('좌우 대칭');
-    horzLabel.style.cursor = 'pointer';
+    horzLabel.style.cursor = 'default';
     horzLabel.prepend(this.horzFlipCheck);
     flipRow.appendChild(horzLabel);
     this.vertFlipCheck = document.createElement('input');
     this.vertFlipCheck.type = 'checkbox';
     this.vertFlipCheck.disabled = true;
     const vertLabel = this.label('상하 대칭');
-    vertLabel.style.cursor = 'pointer';
+    vertLabel.style.cursor = 'default';
     vertLabel.style.marginLeft = '12px';
     vertLabel.prepend(this.vertFlipCheck);
     flipRow.appendChild(vertLabel);

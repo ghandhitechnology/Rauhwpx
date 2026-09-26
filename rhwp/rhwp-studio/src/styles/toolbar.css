@@ -73,7 +73,7 @@
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
-  cursor: pointer;
+  cursor: default;
   color: var(--color-text);
 }
 
@@ -247,7 +247,7 @@
 
 .tb-split-item {
   padding: 5px 12px;
-  cursor: pointer;
+  cursor: default;
   display: flex;
   justify-content: space-between;
   align-items: center;

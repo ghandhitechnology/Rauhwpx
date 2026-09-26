@@ -149,7 +149,7 @@ test('상단 메뉴 단축키는 하드코딩 값보다 CommandRegistry 정의�
       registryWith({ id: 'file:save-as', shortcutLabel: 'Ctrl+Shift+S' }),
     );
 
-    assert.equal(item.shortcut?.textContent, '⌘⇧S');
+    assert.equal(item.shortcut?.textContent, '⇧⌘S');
   });
 });
 

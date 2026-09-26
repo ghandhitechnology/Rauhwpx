@@ -48,7 +48,7 @@
   font-size: 12px;
   font-weight: 650;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-compact-changes-toggle:hover,
@@ -68,7 +68,7 @@
 
 .ag-compact-changes-content .ag-changes-section { padding: 8px 0 0; }
 .ag-compact-changes-content .ag-changes-section-head { display: none; }
-.ag-compact-changes button { font-family: inherit; cursor: pointer; }
+.ag-compact-changes button { font-family: inherit; cursor: default; }
 
 .ag-changes-drawer {
   display: flex;
@@ -83,7 +83,7 @@
 .ag-changes-review-slot button,
 .ag-changes-item button {
   font: inherit;
-  cursor: pointer;
+  cursor: default;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -417,10 +417,6 @@
     transform var(--chg-fast) var(--chg-ease);
 }
 
-.ag-changes-primary:active:not(:disabled),
-.ag-changes-danger:active:not(:disabled),
-.ag-changes-danger-solid:active:not(:disabled),
-.ag-changes-secondary:active:not(:disabled) { transform: scale(.96); }
 
 .ag-changes-primary {
   height: 30px;

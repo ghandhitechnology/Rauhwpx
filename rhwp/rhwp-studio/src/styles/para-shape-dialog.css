@@ -106,7 +106,7 @@
   border: 1px solid var(--ui-border);
   border-radius: 6px;
   background: var(--ui-surface);
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-base);
   display: flex;
   align-items: center;
@@ -164,7 +164,7 @@
   position: sticky;
   top: 0;
 }
-.ps-tab-table td { padding: 4px 8px; cursor: pointer; }
+.ps-tab-table td { padding: 4px 8px; cursor: default; }
 .ps-tab-table tr:hover { background: var(--ui-hover); }
 .ps-tab-table tr.selected { background: var(--ui-selected); }
 .ps-tab-list-btns {
@@ -194,7 +194,7 @@
 .ps-preset-btn {
   width: 32px; height: 30px;
   border: 1px solid var(--ui-border); border-radius: 5px;
-  background: var(--ui-surface); cursor: pointer;
+  background: var(--ui-surface); cursor: default;
   font-size: var(--font-size-base);
   display: inline-flex; align-items: center; justify-content: center;
 }

@@ -78,7 +78,7 @@
   border-radius: var(--n-radius-chip);
   background: transparent;
   color: var(--n-text-muted);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-calibration-close {
@@ -185,7 +185,7 @@
   color: var(--n-text);
   font: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   transition: background var(--ag-dur-fast) var(--ag-ease-out), border-color var(--ag-dur-fast) var(--ag-ease-out), box-shadow var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -256,7 +256,7 @@
   font: inherit;
   font-size: 13px;
   font-weight: 650;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-calibration-primary {
@@ -337,7 +337,6 @@
   padding: 0;
   overflow: auto;
   list-style: none;
-  scrollbar-width: thin;
 }
 
 .ag-calibration-corpus-item,
@@ -386,7 +385,7 @@
   color: var(--n-text-secondary);
   font: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-calibration-mode:hover {
@@ -427,7 +426,7 @@
   align-items: center;
   gap: 12px;
   min-height: 38px;
-  cursor: pointer;
+  cursor: default;
   list-style: none;
 }
 
@@ -467,7 +466,6 @@
   gap: 6px;
   overflow-x: auto;
   padding: 4px 0 8px;
-  scrollbar-width: thin;
 }
 
 .ag-calibration-provider {
@@ -481,7 +479,7 @@
   background: var(--n-surface);
   color: var(--n-text);
   font: inherit;
-  cursor: pointer;
+  cursor: default;
 }
 .ag-calibration-provider:hover:not(:disabled) { background: var(--n-fill-hover); }
 .ag-calibration-provider.ag-selected {
@@ -556,7 +554,7 @@
   background: var(--n-surface-sunken);
   color: var(--n-text);
   text-align: center;
-  cursor: pointer;
+  cursor: default;
   transition: background var(--ag-dur-fast) var(--ag-ease-out), border-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -817,7 +815,6 @@
   padding: 0;
   overflow: auto;
   list-style: none;
-  scrollbar-width: thin;
 }
 
 .ag-calibration-activity-item {
@@ -897,7 +894,7 @@
   text-decoration: underline;
   text-decoration-color: var(--n-hairline-strong);
   text-underline-offset: 3px;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-calibration-text-action:hover:not(:disabled) {

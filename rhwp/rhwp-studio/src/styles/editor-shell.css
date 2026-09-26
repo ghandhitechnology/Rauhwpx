@@ -175,7 +175,7 @@
   color: var(--ui-text-secondary);
   font: inherit;
   white-space: nowrap;
-  cursor: pointer;
+  cursor: default;
 }
 .editor-command-search kbd { margin-left: 24px; font: 11px var(--font-family-ui); color: var(--ui-text-muted); }
 .editor-command-search:hover { background: var(--ui-hover); border-color: var(--ui-border-strong); }
@@ -194,16 +194,11 @@
 #style-bar .sb-font { width: 138px; }
 #style-bar .sb-font-lang { width: 56px; }
 #studio-header :is(button, select, input):focus-visible,
-.menu-title:focus-visible, .md-item:focus-visible, .md-sub:focus-visible {
+.menu-title:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 #studio-header button:active:not(:disabled) { background: var(--ui-active); }
-.menu-dropdown, .md-sub-panel { border-radius: 8px; padding: 5px; border-color: var(--ui-border-strong); }
-.menu-dropdown { min-width: 248px; }
-.md-item, .md-sub { min-height: 32px; padding-top: 7px; padding-bottom: 7px; border-radius: 4px; }
-.md-shortcut { font-size: 11px; }
-.md-item.disabled .md-shortcut { color: var(--ui-text-disabled); }
 .md-icon { filter: grayscale(1); }
 #editor-area { background: var(--doc-workspace); }
 #scroll-container { background: var(--doc-workspace); box-shadow: none; }
@@ -220,16 +215,16 @@
 .cp-item--disabled { opacity: .5; cursor: default; }
 .cp-item--disabled:hover { background: transparent; }
 /* Glass belongs to floating surfaces. Opaque first, with no blur animation. */
-.menu-dropdown, .md-sub-panel, .cp-panel { background: var(--ui-surface); }
+.menu-dropdown, .md-sub-panel, .context-menu, .cp-panel { background: var(--ui-surface); }
 @supports (backdrop-filter: blur(16px)) {
-  .menu-dropdown, .md-sub-panel, .cp-panel {
+  .menu-dropdown, .md-sub-panel, .context-menu, .cp-panel {
     background: var(--editor-glass);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
   }
 }
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
-  .menu-dropdown, .md-sub-panel, .cp-panel { background: var(--ui-surface); backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .menu-dropdown, .md-sub-panel, .context-menu, .cp-panel { background: var(--ui-surface); backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 /* Do not animate layout or theme colors: controls stay in place as state changes. */
 #studio-header, #studio-header button, #style-bar, #icon-toolbar, .cp-panel { transition: none; }
@@ -253,6 +248,7 @@ html.desktop-mac #editor-command-search { -webkit-app-region: no-drag; }
   #style-bar .sb-collapse-btn { margin-left: auto; min-height: 32px; align-self: center; }
   .menu-dropdown { position: fixed; top: auto; left: 8px; max-width: calc(100vw - 16px); max-height: 60dvh; overflow-y: auto; }
   .menu-dropdown .md-sub { flex-wrap: wrap; }
+  .menu-dropdown .md-sub:not(.disabled):is(:hover, :focus-within) { background: transparent; color: var(--ui-text); }
   .menu-dropdown .md-sub-panel { position: static; flex-basis: 100%; min-width: 0; margin-top: 6px; box-shadow: none; }
   .menu-dropdown .md-sub-panel .md-label { white-space: normal; }
 }
@@ -291,7 +287,7 @@ html.desktop-mac #editor-command-search { -webkit-app-region: no-drag; }
   background: transparent;
   color: var(--ui-text);
   font: 12px var(--font-family-ui);
-  cursor: pointer;
+  cursor: default;
 }
 #style-bar-more[hidden], #style-bar-overflow[hidden] { display: none; }
 #style-bar[data-style-condensed] #style-bar-more .sb-more-label { display: none; }

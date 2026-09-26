@@ -31,6 +31,7 @@ import { resolveStudioAsset, STUDIO_URL } from '../../../desktop/studio-protocol
 import { LAUNCH_CLEANUP_RETENTION_FILE } from '../../rhwp-agent/credential-mirror.mjs';
 
 const desktopMain = readFileSync(new URL('../../../desktop/main.mjs', import.meta.url), 'utf8');
+const desktopAppMenu = readFileSync(new URL('../../../desktop/app-menu.mjs', import.meta.url), 'utf8');
 const rootPackage = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'));
 
 function fakeWindow(id: number) {
@@ -206,8 +207,8 @@ test('launch routing accepts only supported document paths', () => {
   });
   assert.match(desktopMain, /app\.on\('open-file'/);
   assert.match(desktopMain, /source: 'second-instance'/);
-  assert.match(desktopMain, /label: 'New Window'/);
-  assert.match(desktopMain, /CmdOrCtrl\+Shift\+N/);
+  assert.match(desktopAppMenu, /label: 'New Window'/);
+  assert.match(desktopAppMenu, /CmdOrCtrl\+Shift\+N/);
   assert.match(desktopMain, /x: bounds\.x \+ 28, y: bounds\.y \+ 28/);
 });
 
@@ -225,10 +226,10 @@ test('desktop owns Cmd/Ctrl+Shift+V in its native Edit menu', () => {
   assert.equal(deliverPlainTextPaste(window, () => ''), false);
   assert.equal(deliverPlainTextPaste(null, () => 'ignored'), false);
 
-  assert.match(desktopMain, /id: 'edit-paste-without-formatting'/);
-  assert.match(desktopMain, /accelerator: 'CmdOrCtrl\+Shift\+V'/);
-  assert.match(desktopMain, /deliverPlainTextPaste\(/);
-  assert.match(desktopMain, /clipboard\.readText\(\)/);
+  assert.match(desktopAppMenu, /id: 'edit-paste-without-formatting'/);
+  assert.match(desktopAppMenu, /accelerator: 'CmdOrCtrl\+Shift\+V'/);
+  assert.match(desktopAppMenu, /deliverPlainTextPaste\(/);
+  assert.match(desktopAppMenu, /clipboard\.readText\(\)/);
 });
 
 test('desktop packages register as an HWPX editor with the operating system', () => {

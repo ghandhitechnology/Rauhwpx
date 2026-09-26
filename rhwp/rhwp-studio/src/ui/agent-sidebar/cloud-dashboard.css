@@ -4,7 +4,7 @@
 .ag-cd-content * { box-sizing: border-box; }
 .ag-cd-content [hidden] { display: none; }
 
-.ag-cd-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 28px; min-width: 28px; padding: 4px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--n-text-secondary, var(--ag-text-secondary)); font: inherit; cursor: pointer; }
+.ag-cd-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 28px; min-width: 28px; padding: 4px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--n-text-secondary, var(--ag-text-secondary)); font: inherit; cursor: default; }
 .ag-cd-button:hover:not(:disabled) { background: var(--n-fill-hover, var(--ag-hover)); color: var(--ag-text); }
 .ag-cd-button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .ag-cd-button:disabled { opacity: .45; cursor: default; }

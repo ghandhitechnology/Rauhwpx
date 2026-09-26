@@ -149,7 +149,7 @@ ${pageSizeRules}
     border-radius: 5px;
     background: #475569;
     color: #fff;
-    cursor: pointer;
+    cursor: default;
     font: inherit;
   }
   .print-preview-bar button:hover { background: #64748b; }

@@ -34,7 +34,7 @@
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-md);
   border-bottom: 1px solid var(--ui-border-subtle);
 }
@@ -81,7 +81,7 @@
   border: 1px solid var(--ui-border-light);
   border-radius: var(--radius-md);
   background: var(--color-surface-raised);
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-xl);
   display: flex;
   align-items: center;
@@ -206,7 +206,7 @@
   align-items: center;
   gap: 4px;
   font-size: var(--font-size-md);
-  cursor: pointer;
+  cursor: default;
 }
 
 .se-next-group {
@@ -225,7 +225,7 @@
   border: 1px solid var(--ui-border-light);
   border-radius: var(--radius-md);
   background: var(--color-surface-raised);
-  cursor: pointer;
+  cursor: default;
   font-size: var(--font-size-md);
 }
 

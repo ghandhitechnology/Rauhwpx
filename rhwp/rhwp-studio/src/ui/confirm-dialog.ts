@@ -9,6 +9,7 @@ import { ModalDialog } from './dialog';
 class ConfirmDialog extends ModalDialog {
   private message: string;
   private resolve!: (value: boolean) => void;
+  protected override sheet = true;
 
   constructor(title: string, message: string) {
     super(title, 360);
@@ -17,9 +18,7 @@ class ConfirmDialog extends ModalDialog {
 
   protected createBody(): HTMLElement {
     const body = document.createElement('div');
-    body.style.padding = '16px 20px';
-    body.style.lineHeight = '1.6';
-    body.style.whiteSpace = 'pre-line';
+    body.className = 'dialog-sheet-message';
     body.textContent = this.message;
     return body;
   }

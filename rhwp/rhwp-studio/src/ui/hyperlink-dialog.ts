@@ -135,18 +135,17 @@ export class HyperlinkDialog extends ModalDialog {
 
 class ExistingHyperlinkDialog extends ModalDialog {
   private accepted = false;
+  protected override sheet = true;
   constructor(private edit: () => void, private cancel: () => void) { super('하이퍼링크', 390); }
   protected createBody(): HTMLElement {
     const body = document.createElement('div');
-    body.className = 'dialog-hyperlink-confirm-body';
+    body.className = 'dialog-sheet-message';
     body.textContent = '하이퍼링크가 이미 입력되어 있습니다.\n하이퍼링크를 고칠까요?';
     return body;
   }
   protected onConfirm(): void { this.accepted = true; }
   override show(): void {
     super.show();
-    this.dialog.setAttribute('role', 'alertdialog');
-    this.dialog.setAttribute('aria-label', '하이퍼링크');
     this.dialog.querySelector('.dialog-btn-primary')!.textContent = '고침';
   }
   override hide(): void {

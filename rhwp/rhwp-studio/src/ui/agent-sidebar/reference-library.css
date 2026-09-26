@@ -65,7 +65,7 @@
   border-radius: var(--ag-r-chip);
   background: transparent;
   color: var(--ag-text-muted);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-references-close { width: 28px; height: 28px; }
@@ -92,7 +92,7 @@
   color: var(--ag-text-muted);
   font: inherit;
   font-size: var(--font-size-sm, 11px);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-references-btn:hover,
@@ -140,7 +140,7 @@
   color: var(--ag-text-muted);
   font: inherit;
   font-size: var(--font-size-sm, 11px);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-reference-tab.ag-active {
@@ -387,8 +387,6 @@
   background: color-mix(in srgb, #000 88%, transparent);
 }
 
-.ag-reference-upload-chip.ag-image .ag-reference-upload-remove:active { transform: scale(0.94); }
-
 .ag-reference-upload-chip.ag-image .ag-reference-upload-retry {
   position: absolute;
   left: 3px;
@@ -415,7 +413,7 @@
   padding: 1px 6px;
   background: var(--ag-surface);
   color: var(--ag-text);
-  cursor: pointer;
+  cursor: default;
   font: inherit;
 }
 
@@ -430,7 +428,7 @@
   border-radius: var(--ag-r-chip);
   background: transparent;
   color: var(--ag-text-muted);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-reference-upload-retry[hidden],

@@ -47,7 +47,7 @@ class AutosaveRecoveryDialog extends ModalDialog {
       label.style.alignItems = 'start';
       label.style.padding = '10px';
       label.style.border = '1px solid var(--dialog-border, #4b5563)';
-      label.style.cursor = 'pointer';
+      label.style.cursor = 'default';
 
       const radio = document.createElement('input');
       radio.type = 'radio';

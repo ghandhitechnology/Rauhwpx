@@ -107,7 +107,7 @@
   border-radius: var(--ag-r-chip);
   background: transparent;
   color: var(--ag-text-muted);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-cloud-setup-close:hover {
@@ -261,7 +261,7 @@
   color: inherit;
   font: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -329,7 +329,7 @@
   background: transparent;
   color: var(--ag-text-muted);
   font: italic 600 11px/1 Georgia, 'Times New Roman', serif;
-  cursor: pointer;
+  cursor: default;
   transition:
     border-color var(--ag-dur-fast) var(--ag-ease-out),
     color var(--ag-dur-fast) var(--ag-ease-out),
@@ -453,7 +453,7 @@
   width: max-content;
   color: var(--ag-text-muted);
   font-size: var(--font-size-sm, 11px);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-cloud-setup-advanced-grid {
@@ -537,7 +537,7 @@
   font: inherit;
   font-size: var(--font-size-sm, 11px);
   font-weight: 650;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-cloud-setup-button:hover:not(:disabled) {

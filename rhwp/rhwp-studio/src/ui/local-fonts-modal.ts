@@ -128,7 +128,7 @@ export class LocalFontsModal {
     details.style.marginTop = '8px';
     const summaryEl = document.createElement('summary');
     summaryEl.textContent = '문서 글꼴 상태 보기';
-    summaryEl.style.cursor = 'pointer';
+    summaryEl.style.cursor = 'default';
     summaryEl.style.fontSize = '13px';
     summaryEl.style.color = 'var(--ui-link)';
     details.appendChild(summaryEl);

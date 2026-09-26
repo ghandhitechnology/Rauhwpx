@@ -30,6 +30,7 @@ import { setupStatusZoomSlider } from '@/ui/status-zoom';
 import { describePaperSize } from '@/ui/status-paper-size';
 import { StatusCharacterCounter } from '@/ui/status-character-count';
 import { MenuBar } from '@/ui/menu-bar';
+import { installDesktopNativeMenu } from '@/desktop-native-menu';
 import { loadWebFonts, resolveCanvasKitFontPlan } from '@/core/font-loader';
 import { withCanvasKitSurfaceBlockers } from '@/core/canvaskit-document-preflight';
 import { loadExtensionViewerSettings, type ExtensionViewerSettings } from '@/core/extension-settings';
@@ -84,6 +85,7 @@ import {
   setThemeMode,
   syncThemeMenu,
 } from '@/core/theme';
+import { initWindowActivity } from '@/core/window-activity';
 import { analyzeDocumentFonts } from '@/core/document-font-status';
 import {
   detectLocalFonts, getLocalFontState, getLocalFonts, importLocalFontFiles, localFontImportMessage, loadStoredLocalFonts,
@@ -124,8 +126,10 @@ import {
   commitDesktopDocument,
   getNativeFileHandleVerifiedDocumentId,
   getRendererSessionContext,
+  installDesktopAgentAttention,
   installDesktopCloseHandling,
   installDesktopCloudEditDraftSaveHandling,
+  installDesktopDocumentState,
   installDesktopFileHandling,
   installDesktopGeneratedDocumentHandling,
   installDesktopPlainTextPasteHandling,
@@ -248,6 +252,7 @@ initThemeSync((effective, mode) => {
   eventBus.emit('theme-changed', { mode, effective });
   eventBus.emit('command-state-changed');
 });
+initWindowActivity();
 
 /**
  * 호스트 저장 완료 통지 (#2660).
@@ -1059,6 +1064,15 @@ function prepareCanvasKitLocalFonts(fontNames: readonly string[] | undefined): v
 async function initialize(): Promise<void> {
   installWebAppShell();
   installDesktopWindowChrome();
+  installDesktopDocumentState({
+    subscribe: (update) => {
+      for (const name of ['document-context-changed', 'document-dirty-changed', 'document-saved']) {
+        eventBus.on(name, update);
+      }
+    },
+    hasDocument: () => wasm.hasLoadedDocument(),
+    isDirty: () => documentState.isDirty(),
+  });
   editorStyleOverflow = new EditorStyleOverflow(document.getElementById('style-bar')!);
   const msg = sbMessage();
   try {
@@ -1209,6 +1223,7 @@ async function initialize(): Promise<void> {
         if (menuName === 'file') void renderRecentSubmenu();
       },
     });
+    installDesktopNativeMenu({ menuBar: document.getElementById('menu-bar')!, dispatcher, registry, eventBus });
 
     // 툴바 내 data-cmd 버튼 클릭 → 커맨드 디스패치
     // (.tb-btn + 서식바 접기 버튼 .sb-collapse-btn)
@@ -1359,6 +1374,13 @@ async function initialize(): Promise<void> {
       });
       agentBridgeRef = agentBridge;
       agentBridge.onEditingLeaseChange(setAgentEditingLease);
+      installDesktopAgentAttention({
+        onEvent: (cb) => agentBridge.onEvent(cb),
+        onPendingChange: (cb) => agentBridge.pendingEdits.onChange(cb),
+        pendingReviewCount: () => agentBridge.pendingEdits.getChangeSets()
+          .filter((set) => set.ops.length > 0).length,
+        documentTitle: () => (wasm.hasLoadedDocument() ? wasm.fileName : ''),
+      });
       const cloudRuntime = installCloudDocumentRuntimeApi(agentBridge);
       const versionController = new DocumentVersionController({
         wasm,

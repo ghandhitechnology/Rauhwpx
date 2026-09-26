@@ -57,7 +57,7 @@
   color: var(--ui-text-secondary);
   font: inherit;
   font-size: 11px;
-  cursor: pointer;
+  cursor: default;
 }
 
 .cloud-workspace-zoom button:last-child { border-right: 0; }

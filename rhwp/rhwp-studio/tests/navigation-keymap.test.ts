@@ -106,15 +106,17 @@ test('IME pending nav처럼 key가 Process여도 code로 navigation을 판별한
   assert.equal(action({ key: 'Process', code: 'ArrowRight', altKey: true }, 'mac'), 'wordForward');
 });
 
-test('formatShortcutLabel은 macOS에서 modifier를 Apple 기호로 치환한다', () => {
+test('formatShortcutLabel은 macOS에서 modifier를 Apple 기호와 ⌃⌥⇧⌘ 순서로 표시한다', () => {
   assert.equal(formatShortcutLabel('Ctrl+S', 'mac'), '⌘S');
-  assert.equal(formatShortcutLabel('Ctrl+Shift+Z', 'mac'), '⌘⇧Z');
-  assert.equal(formatShortcutLabel('Ctrl+Alt+C', 'mac'), '⌘⌥C');
+  assert.equal(formatShortcutLabel('Ctrl+Shift+Z', 'mac'), '⇧⌘Z');
+  assert.equal(formatShortcutLabel('Ctrl+Alt+C', 'mac'), '⌥⌘C');
+  assert.equal(formatShortcutLabel('Ctrl+Shift+S', 'mac'), '⇧⌘S');
+  assert.equal(formatShortcutLabel('Ctrl+Alt+A', 'mac'), '⌥⌘A');
   assert.equal(formatShortcutLabel('Ctrl+M,K', 'mac'), '⌘M,K');
   assert.equal(formatShortcutLabel('Ctrl+Enter', 'mac'), '⌘Enter');
   assert.equal(formatShortcutLabel('Alt+N', 'mac'), '⌥N');
   assert.equal(formatShortcutLabel('Alt+Shift+V', 'mac'), '⌥⇧V');
-  assert.equal(formatShortcutLabel('Shift+Alt+J', 'mac'), '⇧⌥J');
+  assert.equal(formatShortcutLabel('Shift+Alt+J', 'mac'), '⌥⇧J');
   assert.equal(formatShortcutLabel('Shift+Num +', 'mac'), '⇧Num +');
 });
 

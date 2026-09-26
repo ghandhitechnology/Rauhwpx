@@ -8,12 +8,11 @@
   --ag-button-height-compact: 26px;
 }
 
-/* The previous button layer intentionally distorted outlines. Keep every hit
-   target and state, but render the controls with precise modern geometry. */
+/* Every hit target keeps its state rules; this layer only sets geometry.
+   Pressed feedback comes from the shared --ui-pressed overlay in base.css. */
 .ag-root button,
 .ag-root [role='button'] {
   border-radius: var(--ag-button-radius);
-  filter: none !important;
 }
 
 .ag-root :is(
@@ -93,7 +92,6 @@
 ) {
   border-radius: var(--ag-button-radius);
   box-shadow: none;
-  filter: none !important;
 }
 
 @media (prefers-reduced-motion: no-preference) {

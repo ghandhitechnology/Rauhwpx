@@ -34,13 +34,6 @@ body.ag-sidebar-resizing {
   user-select: none;
 }
 
-/* 움직이는 동안 손그림 displacement 필터를 끈다. 매 프레임 재래스터가
-   용지 정렬보다 비싸다. */
-body.ag-sidebar-resizing .ag-root,
-body.ag-sidebar-animating .ag-root {
-  --ag-sketch-line: none;
-}
-
 @media (prefers-reduced-motion: reduce) {
   #editor-area {
     transition: none;
@@ -91,6 +84,7 @@ body.ag-sidebar-animating .ag-root {
   --ag-hover: var(--n-fill-hover);
   --ag-active: var(--n-fill-active);
   --ag-selected: var(--n-fill-selected);
+  --ag-focus: var(--focus-ring);
   --ui-surface: var(--n-surface);
   --ui-surface-raised: var(--n-surface-raised);
   --ui-text: var(--n-text);
@@ -135,11 +129,8 @@ body.ag-sidebar-animating .ag-root {
   --ag-r-field: 10px;
   --ag-r-panel: 14px;
 
-  /* 손그림 버튼 윤곽 — index.ts 가 문서에 심는 #ag-sketch-line 필터 참조. */
-  --ag-sketch-line: url(#ag-sketch-line);
-
   /* Monospace is reserved for raw tool details and exact coordinates. */
-  --ag-font: 'NanumSquare', '나눔스퀘어', var(--font-family-ui, sans-serif);
+  --ag-font: var(--font-family-ui, system-ui, sans-serif);
   --ag-mono: var(--font-family-mono, monospace);
   --ag-micro: 11px;
   --ag-track: 0;
@@ -320,7 +311,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   border-radius: var(--radius-sm);
   background: var(--ui-toolbar-bg-start);
   color: var(--color-text);
-  cursor: pointer;
+  cursor: default;
   touch-action: manipulation;
   user-select: none;
   transition:
@@ -339,13 +330,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-collapse-tab:hover {
-  background: var(--ui-hover-strong);
+  background: var(--ui-hover-quiet, var(--ui-hover));
   color: var(--color-text);
-  transform: scale(1.04);
 }
 
 .ag-collapse-tab:active {
-  transform: scale(0.94);
   background: var(--ui-active);
   box-shadow: var(--ui-pressed-inset);
 }
@@ -459,7 +448,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   border-radius: var(--ag-r-field);
   background: transparent;
   color: var(--ag-text-muted);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-header-icon-btn[hidden] {
@@ -471,7 +460,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   height: 14px;
 }
 
-.ag-header-icon-btn:hover,
+.ag-header-icon-btn:hover {
+  background: var(--ui-hover-quiet, var(--ag-hover));
+  color: var(--ag-text);
+}
+
 .ag-header-icon-btn.ag-active,
 .ag-header-icon-btn[aria-expanded='true'] {
   background: var(--ag-hover);
@@ -556,7 +549,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font: inherit;
   font-size: var(--font-size-sm, 11px);
   font-weight: 600;
-  cursor: pointer;
+  cursor: default;
   white-space: nowrap;
 }
 
@@ -587,7 +580,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   border: 0;
   border-radius: var(--ag-r-field);
   background: transparent;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-conn-dot[hidden] {
@@ -706,7 +699,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   border-radius: 6px;
   background: transparent;
   color: var(--ag-text-muted);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-conn-command-copy:hover {
@@ -723,7 +716,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font: inherit;
   font-size: var(--font-size-sm, 12px);
   font-weight: 600;
-  cursor: pointer;
+  cursor: default;
   transition: opacity var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -755,11 +748,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font: inherit;
   font-size: var(--font-size-sm, 11px);
   font-weight: 600;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-hub-retry-btn:hover {
-  filter: var(--ag-sketch-line) brightness(0.94);
+  filter: brightness(0.94);
 }
 
 /* 사이드바 폭이 좁아져도 요약은 한 줄을 유지한다. 각 flex item 이
@@ -790,7 +783,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: var(--ag-text-secondary);
   font: inherit;
   font-size: var(--font-size-sm, 11px);
-  cursor: pointer;
+  cursor: default;
   transition: background var(--ag-dur-fast) var(--ag-ease-out), color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -986,7 +979,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   background: color-mix(in srgb, var(--ag-accent) 7%, transparent);
   color: var(--ag-text-secondary);
   font: 600 12px/1.2 var(--font-family, sans-serif);
-  cursor: pointer;
+  cursor: default;
   transition:
     border-color var(--ag-dur-fast) var(--ag-skills-motion),
     background-color var(--ag-dur-fast) var(--ag-skills-motion),
@@ -1016,14 +1009,12 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: var(--ag-text);
 }
 
-.ag-skill-new:active { transform: scale(0.985); }
-
 .ag-skill-icon-button {
   position: relative;
   z-index: 1;
   border-radius: 7px;
   outline: none;
-  cursor: pointer;
+  cursor: default;
   transition: background-color var(--ag-dur-fast) var(--ag-skills-motion), color var(--ag-dur-fast) var(--ag-skills-motion), transform var(--ag-dur-fast) var(--ag-skills-motion);
 }
 
@@ -1031,7 +1022,6 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-skill-icon-button:focus-visible {
   background: color-mix(in srgb, var(--ag-accent) 12%, transparent);
   color: var(--ag-accent);
-  transform: scale(1.08);
 }
 
 .ag-skill-icon-picker {
@@ -1074,7 +1064,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   border-radius: 8px;
   background: transparent;
   color: var(--ag-text-secondary);
-  cursor: pointer;
+  cursor: default;
   transition: background-color var(--ag-dur-fast) var(--ag-skills-motion), border-color var(--ag-dur-fast) var(--ag-skills-motion), color var(--ag-dur-fast) var(--ag-skills-motion), transform var(--ag-dur-fast) var(--ag-skills-motion);
 }
 
@@ -1271,10 +1261,6 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: var(--ag-text);
 }
 
-.ag-skills-toolbar .ag-skill-text:active {
-  transform: scale(0.97);
-}
-
 .ag-skills-search {
   flex: 1 1 auto;
   min-width: 0;
@@ -1347,7 +1333,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: var(--ag-text);
   font: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   transition:
     background-color var(--ag-dur-fast) var(--ag-skills-motion),
     border-color var(--ag-dur-fast) var(--ag-skills-motion);
@@ -1356,10 +1342,6 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-skill-import-row:hover {
   border-color: var(--ag-border);
   background: var(--ag-hover);
-}
-
-.ag-skill-import-row:active {
-  transform: scale(0.99);
 }
 
 .ag-skill-import-row:focus-visible,
@@ -1471,12 +1453,11 @@ button.ag-skill-copy {
   grid-template-columns: 20px minmax(0, 1fr);
   width: 100%;
   min-height: 30px;
-  cursor: pointer;
+  cursor: default;
   font: inherit;
 }
 
 .ag-skill-copy:hover { color: var(--ag-text); }
-.ag-skill-copy:active { transform: scale(0.995); }
 
 .ag-skill-copy-text {
   display: block;
@@ -1542,7 +1523,7 @@ button.ag-skill-copy {
   color: var(--ag-text-muted);
   font: inherit;
   font-size: var(--font-size-sm, 11px);
-  cursor: pointer;
+  cursor: default;
   transition:
     background-color var(--ag-dur-fast) var(--ag-skills-motion),
     color var(--ag-dur-fast) var(--ag-skills-motion),
@@ -1552,10 +1533,6 @@ button.ag-skill-copy {
 .ag-skill-text:hover {
   background: var(--ag-hover);
   color: var(--ag-text);
-}
-
-.ag-skill-text:active {
-  transform: scale(0.97);
 }
 
 .ag-skill-drag-handle {
@@ -1605,7 +1582,7 @@ button.ag-skill-copy {
   border: 0;
   border-radius: 999px;
   background: var(--ag-border);
-  cursor: pointer;
+  cursor: default;
   filter: none;
   transition:
     background-color var(--ag-dur-fast) var(--ag-skills-motion),
@@ -1627,8 +1604,6 @@ button.ag-skill-copy {
 
 .ag-skill-toggle[aria-pressed='true'] { background: var(--ag-accent); }
 .ag-skill-toggle[aria-pressed='true']::after { transform: translateX(14px); }
-
-.ag-skill-toggle:active { transform: scale(0.94); }
 
 .ag-skills-empty { padding: 28px 8px; color: var(--ag-text-muted); text-align: center; }
 
@@ -1667,7 +1642,7 @@ button.ag-skill-copy {
   font-size: var(--font-size-md, 13px);
   font-weight: 600;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-threads-new::before {
@@ -1697,7 +1672,7 @@ button.ag-skill-copy {
   overflow: auto;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 1px;
   margin: 0 -3px;
   padding: 2px 3px 8px;
   list-style: none;
@@ -1718,24 +1693,28 @@ button.ag-skill-copy {
   gap: 6px;
   width: 100%;
   min-width: 0;
+  min-height: 28px;
   margin: 0;
-  padding: 7px 12px 7px 8px;
+  padding: 0 12px 0 8px;
   border: none;
   border-radius: 0;
   background: var(--ag-bg-2);
-  color: var(--ag-text);
+  color: var(--ag-text-secondary);
   font: inherit;
-  font-size: var(--font-size-base, 12px);
+  font-size: 11px;
   font-weight: 600;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
-.ag-threads-group-btn:hover,
-.ag-threads-group-btn:focus-visible {
+.ag-threads-group-btn:hover {
   background: var(--ag-hover);
-  outline: none;
+}
+
+.ag-threads-group-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
 }
 
 .ag-threads-group-icon {
@@ -1744,7 +1723,8 @@ button.ag-skill-copy {
 }
 
 .ag-threads-group-name {
-  flex: 0 1 auto;
+  /* 폭을 칸에 맡겨야 가운데 줄임이 남은 자리를 잰다. */
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1780,7 +1760,7 @@ button.ag-skill-copy {
   border: none;
   background: transparent;
   color: var(--ag-text-muted);
-  cursor: pointer;
+  cursor: default;
   opacity: 0;
   transform: translateY(-50%);
   transition: opacity var(--ag-dur-fast) var(--ag-ease-out), color var(--ag-dur-fast) var(--ag-ease-out);
@@ -1823,8 +1803,9 @@ button.ag-skill-copy {
   min-width: 0;
 }
 
-/* 행은 제목 한 줄뿐이다 — 그룹 이름 텍스트와 같은 26px 들여쓰기로
-   문서 아래 계층임을 보여준다. */
+/* macOS 소스 목록 문법 — 28px 한 줄, 13px 보통 굵기 제목. 그룹 이름 텍스트와
+   같은 26px 들여쓰기로 문서 아래 계층임을 보여준다. hover 에서도 행 폭·여백은
+   그대로이고, 오른쪽 동작 버튼은 제목 위에 겹쳐 페이드 마스크로 비켜 준다. */
 .ag-threads-item {
   display: flex;
   flex: 1 1 auto;
@@ -1832,54 +1813,58 @@ button.ag-skill-copy {
   gap: 0;
   width: 100%;
   min-width: 0;
+  height: 28px;
   margin: 0;
-  padding: 7px 8px 7px 26px;
+  padding: 0 8px 0 26px;
   border: none;
-  border-radius: var(--ag-r-field);
+  border-radius: 5px;
   background: transparent;
   color: var(--ag-text);
   font: inherit;
   text-align: left;
-  cursor: pointer;
-  transition: background-color var(--ag-dur-fast) var(--ag-ease-out), padding-right var(--ag-dur-base) var(--ag-ease-out);
+  cursor: default;
+  transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
-.ag-threads-item:hover {
+.ag-threads-item:hover:not(.ag-active) {
   background: var(--ag-hover);
 }
 
 .ag-threads-item:focus-visible {
-  background: var(--ag-hover);
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
 
+/* 선택 행은 채운 강조색 — 창이 비활성이면 토큰이 회색 쌍으로 바뀐다. */
 .ag-threads-item.ag-active {
-  background: color-mix(in srgb, var(--ag-active) 52%, transparent);
-  border-radius: 8px;
+  background: var(--ui-row-selected-bg, var(--accent-primary));
+  color: var(--ui-row-selected-fg, var(--n-on-accent));
 }
 
-.ag-threads-row:hover .ag-threads-item,
-.ag-threads-item:focus-visible {
-  padding-right: 64px;
+.ag-threads-item.ag-active:focus-visible {
+  outline-color: color-mix(in srgb, var(--ui-row-selected-fg, var(--n-on-accent)) 70%, transparent);
+}
+
+/* 행 안의 보조 표시(실행 위치·연필)도 선택 행 글자색을 따른다. */
+.ag-threads-row.ag-current .ag-thread-mode,
+.ag-threads-row.ag-current .ag-thread-rename,
+.ag-threads-row.ag-current .ag-thread-rename:hover {
+  color: color-mix(in srgb, var(--ui-row-selected-fg, var(--n-on-accent)) 82%, transparent);
+}
+
+.ag-threads-row.ag-foreign.ag-current .ag-threads-item {
+  opacity: 1;
 }
 
 .ag-threads-item-title {
   flex: 1 1 auto;
   min-width: 0;
-  position: relative;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--font-size-md, 13px);
-  font-weight: 500;
-}
-
-.ag-threads-item-title.ag-scrolling { text-overflow: clip; }
-.ag-threads-item-title.ag-scrolling .ag-threads-item-title-text { display: inline-block; }
-
-.ag-threads-item.ag-active .ag-threads-item-title {
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 28px;
 }
 
 .ag-thread-mode {
@@ -1911,8 +1896,8 @@ button.ag-skill-copy {
 
 .ag-threads-row:hover .ag-threads-item-title,
 .ag-threads-item:focus-visible .ag-threads-item-title {
-  -webkit-mask-image: linear-gradient(90deg, #000 0%, #000 calc(100% - 24px), transparent 100%);
-  mask-image: linear-gradient(90deg, #000 0%, #000 calc(100% - 24px), transparent 100%);
+  -webkit-mask-image: linear-gradient(90deg, #000 0%, #000 calc(100% - 72px), transparent calc(100% - 52px));
+  mask-image: linear-gradient(90deg, #000 0%, #000 calc(100% - 72px), transparent calc(100% - 52px));
 }
 
 /* ── 채팅 실행 상태 점 ─────────────────────────────────
@@ -2003,7 +1988,7 @@ button.ag-skill-copy {
   border: none;
   background: transparent;
   color: var(--ag-text-muted);
-  cursor: pointer;
+  cursor: default;
   opacity: 0;
   pointer-events: none;
   transform: translate(4px, -50%);
@@ -2013,32 +1998,6 @@ button.ag-skill-copy {
 /* 칩 상자 없이 아이콘만 밝아진다. */
 .ag-thread-rename:hover {
   color: var(--ag-text);
-}
-
-.ag-thread-rename-tooltip {
-  position: fixed;
-  left: 0;
-  top: 0;
-  z-index: 3;
-  padding: 6px 10px;
-  border: 1px solid var(--ag-border-strong);
-  border-radius: 8px;
-  background: var(--ag-raised);
-  box-shadow: var(--shadow-dropdown, 2px 2px 8px rgb(0 0 0 / 15%));
-  color: var(--ag-text);
-  font-size: 11px;
-  line-height: 1.2;
-  white-space: nowrap;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-50%, calc(-100% + 4px));
-  transition: opacity var(--ag-dur-fast) var(--ag-ease-out), transform var(--ag-dur-base) var(--ag-ease-out);
-}
-
-.ag-thread-rename:hover + .ag-thread-rename-tooltip,
-.ag-thread-rename:focus-visible + .ag-thread-rename-tooltip {
-  opacity: 1;
-  transform: translate(-50%, -100%);
 }
 
 .ag-thread-rename:focus-visible {
@@ -2054,8 +2013,7 @@ button.ag-skill-copy {
 @media (prefers-reduced-motion: reduce) {
   .ag-thread-rename,
   .ag-thread-mode,
-  .ag-doc-jump,
-  .ag-thread-rename-tooltip { transition: none; }
+  .ag-doc-jump { transition: none; }
 }
 
 /* 편집 중인 행은 행 전체를 입력 필드로 바꾼다 — 자리가 튀지 않게
@@ -2064,7 +2022,7 @@ button.ag-skill-copy {
   display: flex;
   width: 100%;
   min-width: 0;
-  padding: 6px 8px;
+  padding: 0;
 }
 
 .ag-thread-rename-input {
@@ -2073,7 +2031,7 @@ button.ag-skill-copy {
   height: 28px;
   padding: 0 8px;
   border: 1px solid var(--ag-accent);
-  border-radius: var(--ag-r-field);
+  border-radius: 5px;
   background: var(--ag-input-bg);
   color: var(--ag-text);
   font: inherit;
@@ -2165,7 +2123,7 @@ button.ag-skill-copy {
   font-weight: 700;
   letter-spacing: -0.01em;
   line-height: 1.3;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-model-trigger:hover:not(:disabled) {
@@ -2494,7 +2452,7 @@ button.ag-skill-copy {
   font-size: var(--font-size-base, 12px);
   font-weight: 500;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-config-panel .ag-model-item[hidden] {
@@ -2555,7 +2513,6 @@ button.ag-skill-copy {
   flex-direction: column;
   gap: 16px;
   padding: 18px 14px 24px;
-  scrollbar-width: thin;
   overscroll-behavior: contain;
   overflow-anchor: none;
   background: var(--ag-bg);
@@ -2666,7 +2623,7 @@ button.ag-skill-copy {
   border-radius: var(--ag-r-chip);
   background: var(--ag-bg-2);
   color: var(--ag-text-secondary);
-  cursor: pointer;
+  cursor: default;
   font: inherit;
   font-size: var(--font-size-sm, 11px);
   transition:
@@ -2741,7 +2698,7 @@ button.ag-skill-copy {
   background: var(--ag-raised);
   box-shadow: inset 1px 0 0 var(--ag-accent), var(--n-elev-1);
   color: var(--ag-text);
-  cursor: pointer;
+  cursor: default;
   font: inherit;
   text-align: left;
   transition:
@@ -2854,6 +2811,141 @@ button.ag-skill-copy {
   display: none;
 }
 
+/* 답변 복사 — 호버·키보드 포커스 때만 오른쪽 위 모서리에 뜬다. */
+.ag-msg-assistant {
+  position: relative;
+}
+
+.ag-msg-copy {
+  display: none;
+}
+
+.ag-msg-assistant > .ag-msg-copy {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--ag-border);
+  border-radius: 6px;
+  background: var(--ag-raised);
+  color: var(--ag-text-muted);
+  cursor: default;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
+    color var(--ag-dur-fast) var(--ag-ease-out),
+    background-color var(--ag-dur-fast) var(--ag-ease-out);
+}
+
+.ag-msg-assistant:hover > .ag-msg-copy,
+.ag-msg-assistant > .ag-msg-copy:focus-visible,
+.ag-msg-assistant > .ag-msg-copy.ag-copied {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ag-msg-assistant > .ag-msg-copy:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-msg-assistant > .ag-msg-copy.ag-copied {
+  color: var(--ag-text);
+}
+
+.ag-msg-assistant > .ag-msg-copy:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* 복사 버튼이 마지막 자식이어도 본문 마지막 블록의 아래 여백은 걷는다. */
+.ag-msg-assistant > :has(+ .ag-msg-copy:last-child) {
+  margin-bottom: 0;
+}
+
+@media (hover: none) {
+  .ag-msg-assistant > .ag-msg-copy {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+/* 위로 읽는 중에 대화 아래 가장자리에 뜨는 "최신" 알약. 높이 0 의 dock 이
+   대화 목록 바로 아래에 붙어 알약을 목록 위로 띄운다. */
+.ag-latest-dock {
+  position: relative;
+  z-index: 4;
+  flex: 0 0 0;
+  height: 0;
+}
+
+.ag-latest-pill {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  display: inline-flex;
+  height: 26px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 11px 0 9px;
+  border: 1px solid var(--ag-border);
+  border-radius: 13px;
+  background: var(--ag-raised);
+  box-shadow: var(--n-elev-2);
+  color: var(--ag-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 600;
+  cursor: default;
+  transform: translateX(-50%);
+  transition:
+    opacity var(--ag-dur-fast) var(--ag-ease-out),
+    transform var(--ag-dur-base) var(--ag-ease-out),
+    display var(--ag-dur-fast) allow-discrete;
+}
+
+.ag-latest-pill[hidden] {
+  display: none;
+  opacity: 0;
+  transform: translate(-50%, 6px);
+}
+
+@starting-style {
+  .ag-latest-pill:not([hidden]) {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+}
+
+.ag-latest-pill:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-latest-pill:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.ag-latest-pill .ag-icon {
+  width: 11px;
+  height: 11px;
+}
+
+/* 다른 페이지가 대화를 덮는 동안에는 알약도 숨는다. */
+.ag-threads-open:not(.ag-fullscreen) .ag-latest-dock,
+.ag-skills-open .ag-latest-dock,
+.ag-settings-open .ag-latest-dock,
+.ag-versions-open .ag-latest-dock {
+  display: none;
+}
+
 .ag-msg-system {
   align-self: center;
   max-width: 100%;
@@ -2958,7 +3050,7 @@ button.ag-skill-copy {
   font-variant-numeric: tabular-nums;
   line-height: 1.25;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -3041,7 +3133,6 @@ button.ag-skill-copy {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  scrollbar-width: thin;
   padding: 1px 4px 6px 20px;
 }
 
@@ -3092,7 +3183,7 @@ button.ag-skill-copy {
   font: inherit;
   line-height: 1;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   user-select: none;
   transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
@@ -3563,7 +3654,7 @@ button.ag-skill-copy {
   font: inherit;
   font-size: var(--font-size-base, 12px);
   font-weight: 600;
-  cursor: pointer;
+  cursor: default;
   transition: background var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -3751,7 +3842,7 @@ button.ag-skill-copy {
   opacity: 0;
   pointer-events: none;
   transform: scale(0.35);
-  cursor: pointer;
+  cursor: default;
   transition:
     opacity var(--ag-dur-fast) var(--ag-motion-out),
     transform var(--ag-dur-base) var(--ag-spring-soft),
@@ -3780,39 +3871,10 @@ button.ag-skill-copy {
   height: 20px;
 }
 
+/* 진행 표시는 앱 공용 .ui-spinner 이다. 여기서는 크기만 정한다. */
 .ag-plan-orbit {
-  position: relative;
-  width: 23px;
-  height: 23px;
-  border: 1.5px solid color-mix(in srgb, var(--ag-text-muted) 28%, transparent);
-  border-top-color: var(--accent-primary);
-  border-radius: 50%;
-  animation: ag-plan-orbit 1.65s linear infinite;
-}
-
-.ag-plan-orbit::before {
-  content: '';
-  position: absolute;
-  inset: 4px;
-  border: 1px solid color-mix(in srgb, var(--accent-primary) 22%, transparent);
-  border-right-color: var(--ag-text-secondary);
-  border-radius: 50%;
-  animation: ag-plan-orbit 1.1s linear infinite reverse;
-}
-
-.ag-plan-orbit::after {
-  content: '';
-  position: absolute;
-  top: 1px;
-  right: 3px;
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: var(--accent-primary);
-}
-
-@keyframes ag-plan-orbit {
-  to { transform: rotate(360deg); }
+  width: 16px;
+  height: 16px;
 }
 .ag-plan-card {
   display: flex;
@@ -3887,7 +3949,7 @@ button.ag-skill-copy {
   background: transparent;
   color: var(--ag-text-muted);
   margin-left: auto;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-plan-minimize:hover {
@@ -3982,7 +4044,7 @@ button.ag-skill-copy {
   align-items: flex-start;
   gap: 10px;
   padding: 10px 2px;
-  cursor: pointer;
+  cursor: default;
   list-style: none;
 }
 
@@ -4001,7 +4063,7 @@ button.ag-skill-copy {
 }
 
 .ag-plan-step-number svg { width: 14px; height: 14px; }
-.ag-plan-step-spinner { width: 11px; height: 11px; border: 1.5px solid var(--ag-border); border-top-color: var(--accent-primary); border-radius: 50%; animation: ag-plan-orbit 0.9s linear infinite; }
+.ag-plan-step-spinner { width: 11px; height: 11px; }
 
 .ag-plan-step-main {
   display: flex;
@@ -4059,7 +4121,7 @@ button.ag-skill-copy {
 .ag-plan-validation-list li { margin: 5px 0; }
 
 .ag-plan-secondary { margin-top: 10px; border-top: 1px solid var(--ag-border); }
-.ag-plan-secondary summary { padding: 9px 2px; color: var(--ag-text-secondary); font-size: 11px; cursor: pointer; }
+.ag-plan-secondary summary { padding: 9px 2px; color: var(--ag-text-secondary); font-size: 11px; cursor: default; }
 .ag-plan-secondary summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .ag-plan-secondary ul { margin: 0 0 10px; padding-left: 20px; color: var(--ag-text-secondary); font-size: 11px; }
 .ag-plan-secondary li { margin: 5px 0; overflow-wrap: anywhere; }
@@ -4072,7 +4134,7 @@ button.ag-skill-copy {
 .ag-plan-source-locator { color: var(--ag-text-muted); font-family: var(--ag-mono); font-size: 10px; overflow-wrap: anywhere; }
 
 .ag-plan-draft-card { padding: 12px 2px; }
-.ag-plan-draft-action { padding: 8px 12px; border: 1px solid var(--ag-border); border-radius: 7px; background: var(--ag-bg); color: var(--ag-text); font: inherit; cursor: pointer; }
+.ag-plan-draft-action { padding: 8px 12px; border: 1px solid var(--ag-border); border-radius: 7px; background: var(--ag-bg); color: var(--ag-text); font: inherit; cursor: default; }
 .ag-plan-draft-action:hover { background: var(--ag-hover); }
 .ag-plan-draft-action:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .ag-plan-draft-action:disabled { opacity: 0.5; cursor: default; }
@@ -4467,12 +4529,6 @@ button.ag-skill-copy {
   .ag-plan-restore {
     transform: none;
   }
-
-  .ag-plan-orbit,
-  .ag-plan-orbit::before,
-  .ag-plan-step-spinner {
-    animation: none;
-  }
 }
 
 /* 문체 보정 권유 칩 — 입력창 바로 위, 한 줄. */
@@ -4508,7 +4564,7 @@ button.ag-skill-copy {
   color: var(--ag-text-secondary);
   font: inherit;
   font-size: 12px;
-  cursor: pointer;
+  cursor: default;
   transition: background-color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -4540,7 +4596,7 @@ button.ag-skill-copy {
   border-radius: 50%;
   background: transparent;
   color: var(--ag-text-muted);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-calibration-chip-close:hover {
@@ -4601,7 +4657,7 @@ button.ag-skill-copy {
   font: inherit;
   font-size: 12px;
   font-weight: 650;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-cloud-start-retry:hover,
@@ -4902,7 +4958,7 @@ button.ag-skill-copy {
   border-radius: 50%;
   background: transparent;
   color: var(--ag-text-muted);
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-template-chip-clear:hover {
@@ -4933,13 +4989,12 @@ button.ag-skill-copy {
   align-items: center;
   gap: 6px;
   padding: 5px 9px;
-  border-radius: 8px 10px 7px 9px / 9px 7px 10px 8px;
+  border-radius: var(--ag-r-chip);
   background: color-mix(in srgb, var(--ag-skill-color) 13%, var(--ag-input-bg));
   color: color-mix(in srgb, var(--ag-skill-color) 88%, var(--ag-text));
   font-size: var(--font-size-md, 13px);
   font-weight: 650;
   line-height: 1.25;
-  transform: rotate(-0.18deg);
 }
 
 .ag-skill-token[hidden] {
@@ -4950,9 +5005,8 @@ button.ag-skill-copy {
   content: '';
   position: absolute;
   inset: 0;
-  border: 1.35px solid var(--ag-skill-color);
-  border-radius: 8px 10px 7px 9px / 9px 7px 10px 8px;
-  filter: var(--ag-sketch-line);
+  border: 1px solid var(--ag-skill-color);
+  border-radius: inherit;
   opacity: 0.82;
   pointer-events: none;
 }
@@ -4997,7 +5051,7 @@ button.ag-skill-copy {
   border-radius: 50%;
   background: transparent;
   color: inherit;
-  cursor: pointer;
+  cursor: default;
   opacity: 0.62;
 }
 
@@ -5075,6 +5129,7 @@ button.ag-skill-copy {
 .ag-slash-option.ag-active { background: var(--ag-selected); }
 .ag-slash-detail { overflow: hidden; color: var(--ag-text-muted); font-size: var(--font-size-sm, 11px); text-overflow: ellipsis; white-space: nowrap; }
 
+/* 입력칸 높이 상한은 여기 한 곳이다 — resizeComposerInput 이 이 값을 읽는다. */
 .ag-input {
   flex: 1 1 auto;
   min-width: 0;
@@ -5124,7 +5179,7 @@ button.ag-skill-copy {
   border-radius: 9px;
   background: var(--accent-primary);
   color: var(--n-on-accent);
-  cursor: pointer;
+  cursor: default;
   transition:
     background var(--ag-dur-fast) var(--ag-ease-out),
     opacity var(--ag-dur-fast) var(--ag-ease-out),
@@ -5169,8 +5224,7 @@ button.ag-skill-copy {
 
 .ag-send.ag-stop:hover:not(:disabled) {
   background: var(--ag-err);
-  /* 손그림 윤곽을 유지하면서 어둡게 — filter 를 교체하지 않고 누적한다. */
-  filter: var(--ag-sketch-line) brightness(0.92);
+  filter: brightness(0.92);
 }
 
 /* ─── 전체 화면 작업 공간 ─────────────────────────────
@@ -5195,8 +5249,6 @@ body.ag-fullscreen-open #editor-area {
   border-left: none;
   box-shadow: none;
   background-color: var(--ag-bg-2);
-  /* 전환의 기준 자세 — clip 이 여기서 사이드바 자리로 오갔다 온다. */
-  clip-path: inset(0 0 0 0);
 }
 
 /* 폭 조절·접기는 사이드바의 조작이다. 전체 화면에서는 Esc 가 대신한다. */
@@ -5527,159 +5579,76 @@ body.ag-col-resizing {
 }
 
 /* ── 전체 화면 전환 애니메이션 ─────────────────────────
-   작업 공간은 사이드바 자리에서 자라나고 그 자리로 접혀 돌아간다.
-   clip-path 가 보이는 영역만 옮기므로 내용물은 한 번만 배치된다.
-   clip 변수는 index.ts 가 사이드바 자리를 재서 심는다. */
-.ag-root.ag-fs-motion {
-  transition:
-    clip-path var(--ag-sidebar-duration) var(--ag-sidebar-ease),
-    background-color var(--ag-sidebar-duration) var(--ag-ease-out),
-    box-shadow var(--ag-sidebar-duration) var(--ag-ease-out);
-  will-change: clip-path;
+   두 모드는 한 번의 교차 페이드로 오간다. index.ts 가 View Transition 으로
+   바뀌기 전·후 화면을 잡고, 작업 공간 쪽 화면만 0.985 ↔ 1 로 살짝 커지거나
+   줄어든다. 새 화면은 살아 있는 스냅샷이라 용지 재정렬도 같은 시간축에 보인다. */
+:root {
+  --ag-fs-crossfade-duration: 220ms;
 }
 
-.ag-root.ag-fs-from,
-.ag-root.ag-fs-to {
-  clip-path: inset(
-    var(--ag-fs-clip-top, 0px) 0
-    var(--ag-fs-clip-bottom, 0px) var(--ag-fs-clip-left, 0px)
-  );
+html.ag-fs-vt::view-transition-group(root) {
+  animation-duration: var(--ag-fs-crossfade-duration);
 }
 
-/* 새로 생기는 바깥 두 칸은 가장자리에서 스며든다. 가운데 대화는
-   같은 노드가 그대로 이어지는 기준축이라 움직이지 않는다. */
-.ag-root.ag-fs-entering:not(.ag-rail-collapsed) .ag-threads-page {
-  animation: ag-fs-rail-in var(--ag-dur-slow) var(--ag-motion-out) 50ms both;
+html.ag-fs-vt::view-transition-old(root),
+html.ag-fs-vt::view-transition-new(root) {
+  animation-duration: var(--ag-fs-crossfade-duration);
+  animation-timing-function: var(--ag-ease-out);
+  animation-fill-mode: both;
+  transform-origin: 50% 50%;
 }
 
-.ag-root.ag-fs-entering:not(.ag-review-collapsed) .ag-review-column {
-  animation: ag-fs-review-in var(--ag-dur-slow) var(--ag-motion-out) 20ms both;
+html.ag-fs-vt-enter::view-transition-old(root) {
+  animation-name: ag-fs-fade-out;
 }
 
-/* 돌아갈 때는 바깥 칸이 먼저 옅어지고 난 뒤 패널이 접힌다 —
-   접힘 끝의 스트립이 빈 패널 톤이라 사이드바로의 교체가 깨끗하다. */
-.ag-root.ag-fs-exiting .ag-threads-page,
-.ag-root.ag-fs-exiting .ag-review-column {
-  animation: ag-fs-col-out var(--ag-dur-fast) var(--ag-ease-out) both;
+html.ag-fs-vt-enter::view-transition-new(root) {
+  animation-name: ag-fs-workspace-in;
 }
 
-/* The fullscreen chrome should leave before its clipped shell reaches the
-   sidebar-sized endpoint. Otherwise its right-hand actions survive until the
-   layout swap and appear to pop into the compact header. */
-.ag-root.ag-fs-exiting .ag-workspace-bar {
-  animation: ag-fs-toolbar-out var(--ag-dur-base) var(--ag-motion-out) both;
+html.ag-fs-vt-exit::view-transition-old(root) {
+  animation-name: ag-fs-workspace-out;
 }
 
-.ag-root.ag-fs-exiting .ag-chat-page > .ag-messages {
-  animation: ag-fs-content-out var(--ag-dur-fast) var(--ag-ease-out) both;
-}
-
-.ag-root.ag-fs-exiting .ag-chat-page > .ag-composer {
-  animation: ag-fs-composer-out var(--ag-dur-base) var(--ag-motion-out) both;
+html.ag-fs-vt-exit::view-transition-new(root) {
+  animation-name: ag-fs-fade-in;
 }
 
 /* 모드 전환과 겹쳐 닫히는 오버레이가 무대 위를 한 번 더 미끄러지지
-   않게, 전환 동안은 스킬 페이지의 페이지 전환을 끈다. */
-.ag-root.ag-fs-motion .ag-skills-page,
-.ag-root.ag-fs-motion .ag-settings-page {
+   않게, 전환 동안은 패널의 접힘 슬라이드와 스킬·설정 페이지 전환을 끈다. */
+.ag-root.ag-fs-motion {
   transition: none;
 }
 
-/* 돌아온 사이드바는 표면보다 내부 자산이 한 박자 늦게 날아들며
-   마무리된다. 전체 화면 chrome 과 compact chrome 의 교체를 가린다. */
-.ag-root.ag-fs-return .ag-stage {
-  animation: ag-fs-stage-in var(--ag-dur-base) var(--ag-motion-out) both;
+.ag-root.ag-fs-motion .ag-skills-page,
+.ag-root.ag-fs-motion .ag-settings-page,
+.ag-root.ag-fs-motion .ag-stage {
+  transition: none;
 }
 
-.ag-root.ag-fs-return .ag-header {
-  animation: ag-fs-sidebar-asset-in var(--ag-dur-base) var(--ag-motion-out) 20ms both;
-}
-
-.ag-root.ag-fs-return .ag-model-summary > .ag-fullscreen-btn {
-  animation: ag-fs-sidebar-button-in var(--ag-dur-base) var(--ag-motion-out) 35ms both;
-}
-
-.ag-root.ag-fs-return .ag-model-summary > .ag-context-row {
-  animation: ag-fs-sidebar-button-in var(--ag-dur-base) var(--ag-motion-out) 55ms both;
-}
-
-.ag-root.ag-fs-return .ag-model-summary > .ag-header-actions {
-  animation: ag-fs-sidebar-button-in var(--ag-dur-base) var(--ag-motion-out) 75ms both;
-}
-
-.ag-root.ag-fs-return .ag-composer {
-  animation: ag-fs-sidebar-composer-in var(--ag-dur-base) var(--ag-motion-out) 25ms both;
-}
-
-.ag-root.ag-fs-return .ag-composer-meta > * {
-  animation: ag-fs-sidebar-button-in var(--ag-dur-base) var(--ag-motion-out) 80ms both;
-}
-
-@keyframes ag-fs-rail-in {
+@keyframes ag-fs-workspace-in {
   from {
     opacity: 0;
-    transform: translateX(-14px);
+    transform: scale(0.985);
   }
 }
 
-@keyframes ag-fs-review-in {
-  from {
-    opacity: 0;
-    transform: translateX(14px);
-  }
-}
-
-@keyframes ag-fs-col-out {
+@keyframes ag-fs-workspace-out {
   to {
     opacity: 0;
+    transform: scale(0.985);
   }
 }
 
-@keyframes ag-fs-toolbar-out {
+@keyframes ag-fs-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes ag-fs-fade-out {
   to {
     opacity: 0;
-    transform: translateY(-10px);
-  }
-}
-
-@keyframes ag-fs-content-out {
-  to {
-    opacity: 0;
-    transform: translateX(12px);
-  }
-}
-
-@keyframes ag-fs-composer-out {
-  to {
-    opacity: 0;
-    transform: translateY(14px) scale(0.985);
-  }
-}
-
-@keyframes ag-fs-stage-in {
-  from {
-    opacity: 0;
-  }
-}
-
-@keyframes ag-fs-sidebar-asset-in {
-  from {
-    opacity: 0;
-    transform: translateX(14px);
-  }
-}
-
-@keyframes ag-fs-sidebar-button-in {
-  from {
-    opacity: 0;
-    transform: translateX(10px) scale(0.94);
-  }
-}
-
-@keyframes ag-fs-sidebar-composer-in {
-  from {
-    opacity: 0;
-    transform: translateY(16px) scale(0.985);
   }
 }
 
@@ -5688,23 +5657,9 @@ body.ag-col-resizing {
     transition: none;
   }
 
-  .ag-root.ag-fs-motion {
-    transition: none;
-    will-change: auto;
-  }
-
-  .ag-root.ag-fs-entering:not(.ag-rail-collapsed) .ag-threads-page,
-  .ag-root.ag-fs-entering:not(.ag-review-collapsed) .ag-review-column,
-  .ag-root.ag-fs-exiting .ag-threads-page,
-  .ag-root.ag-fs-exiting .ag-review-column,
-  .ag-root.ag-fs-exiting .ag-workspace-bar,
-  .ag-root.ag-fs-exiting .ag-chat-page > .ag-messages,
-  .ag-root.ag-fs-exiting .ag-chat-page > .ag-composer,
-  .ag-root.ag-fs-return .ag-stage,
-  .ag-root.ag-fs-return .ag-header,
-  .ag-root.ag-fs-return .ag-model-summary > *,
-  .ag-root.ag-fs-return .ag-composer,
-  .ag-root.ag-fs-return .ag-composer-meta > * {
+  html.ag-fs-vt::view-transition-group(root),
+  html.ag-fs-vt::view-transition-old(root),
+  html.ag-fs-vt::view-transition-new(root) {
     animation: none;
   }
 
@@ -5737,7 +5692,7 @@ body.ag-col-resizing {
 .ag-fullscreen .ag-stage,
 .ag-fullscreen.ag-review-collapsed .ag-stage {
   grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr) 0;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: var(--ag-workspace-bar-h, 48px) minmax(0, 1fr);
   background: var(--ag-bg);
 }
 
@@ -5782,7 +5737,7 @@ body.ag-col-resizing {
 
 .ag-fullscreen.ag-workspace-compact .ag-threads-page {
   position: absolute;
-  top: 48px;
+  top: var(--ag-workspace-bar-h, 48px);
   bottom: 0;
   left: 0;
   z-index: 12;
@@ -5806,11 +5761,15 @@ body.ag-col-resizing {
   user-select: none;
 }
 
-/* The focus workspace replaces the normal menu bar at y=0. Keep its leading
-   controls clear of the native traffic lights and expose only the centered
-   title as a window-drag surface. All controls remain ordinary hit targets. */
+/* 집중 모드 bar 가 y=0 의 메뉴바 자리를 대신한다. 높이를 창 타이틀바와
+   맞춰 신호등(y:12, 14px)과 컨트롤의 세로 중심을 같은 선에 둔다.
+   빈 면은 모두 창 드래그, 조작 가능한 자식만 no-drag 로 뺀다. */
+html.desktop-mac .ag-fullscreen {
+  --ag-workspace-bar-h: var(--desktop-titlebar-height, 38px);
+}
+
 html.desktop-mac .ag-fullscreen .ag-workspace-bar {
-  -webkit-app-region: no-drag;
+  -webkit-app-region: drag;
 }
 
 html.desktop-mac .ag-fullscreen .ag-workspace-leading {
@@ -5819,13 +5778,19 @@ html.desktop-mac .ag-fullscreen .ag-workspace-leading {
 
 html.desktop-mac .ag-fullscreen .ag-workspace-title {
   height: 100%;
-  -webkit-app-region: drag;
 }
 
-html.desktop-mac .ag-fullscreen .ag-workspace-leading,
-html.desktop-mac .ag-fullscreen .ag-workspace-trailing,
-html.desktop-mac .ag-fullscreen .ag-workspace-bar button,
-html.desktop-mac .ag-fullscreen .ag-environment-panel {
+html.desktop-mac .ag-fullscreen .ag-workspace-bar :is(
+  button,
+  a,
+  input,
+  select,
+  textarea,
+  [role="button"],
+  [role="group"],
+  [tabindex]:not([tabindex="-1"]),
+  .ag-environment-panel
+) {
   -webkit-app-region: no-drag;
 }
 
@@ -5864,7 +5829,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   background: transparent;
   color: var(--ag-text-muted);
   font: inherit;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-workspace-icon-btn {
@@ -5884,7 +5849,11 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   height: 14px;
 }
 
-.ag-workspace-icon-btn:hover,
+.ag-workspace-icon-btn:hover {
+  background: var(--ui-hover-quiet, var(--ag-hover));
+  color: var(--ag-text);
+}
+
 .ag-workspace-exit-btn:hover {
   background: var(--ag-hover);
   color: var(--ag-text);
@@ -5997,28 +5966,14 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-environment-filename-track {
+  /* 폭은 칸이 정한다 — 가운데 줄임(middle-truncate.ts)이 이 폭으로 잰다. */
   display: block;
-  width: max-content;
-  max-width: 100%;
   overflow: hidden;
   color: var(--ag-text-secondary);
   font-size: 13px;
   line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.ag-environment-file-row.ag-filename-overflow:hover .ag-environment-filename-track,
-.ag-environment-file-row.ag-filename-overflow:focus-visible .ag-environment-filename-track {
-  max-width: none;
-  overflow: visible;
-  text-overflow: clip;
-  animation: ag-filename-marquee var(--ag-filename-duration, 6s) ease-in-out 400ms infinite alternate;
-}
-
-@keyframes ag-filename-marquee {
-  0%, 12% { transform: translateX(0); }
-  88%, 100% { transform: translateX(calc(0px - var(--ag-filename-distance, 0px))); }
 }
 
 .ag-environment-plan,
@@ -6029,7 +5984,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   background: transparent;
   font: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   transition: background var(--ag-dur-fast) var(--ag-ease-out), color var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -6185,7 +6140,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   font-size: 10px;
   font-weight: 650;
   letter-spacing: -0.01em;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-workspace-mode-option:hover {
@@ -6248,9 +6203,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 .ag-fullscreen .ag-threads-title {
   font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
+  font-weight: 600;
 }
 
 .ag-fullscreen .ag-threads-new {
@@ -6266,8 +6219,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-fullscreen .ag-threads-item {
-  min-height: 34px;
-  border-radius: 5px;
+  height: 28px;
 }
 
 /* 전체 화면 레일의 hover 카드 — 행이 제목만 남긴 대신 상세를 여기서 보여준다.
@@ -6423,10 +6375,6 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   padding: 34px 38px 40px;
 }
 
-/* 가운데 놓인 대화 열은 스크롤 막대 없이 스크롤한다. */
-.ag-fullscreen .ag-messages { scrollbar-width: none; }
-.ag-fullscreen .ag-messages::-webkit-scrollbar { display: none; }
-
 .ag-fullscreen .ag-composer {
   max-width: 860px;
   width: min(860px, calc(100% - 48px));
@@ -6564,12 +6512,12 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-fullscreen .ag-review-resize {
-  top: 48px;
+  top: var(--ag-workspace-bar-h, 48px);
   right: calc(var(--ag-review-w, 560px) - 3px);
 }
 
 .ag-fullscreen .ag-rail-resize {
-  top: 48px;
+  top: var(--ag-workspace-bar-h, 48px);
   left: calc(var(--ag-rail-w, 264px) - 3px);
 }
 
@@ -6583,7 +6531,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   .ag-fullscreen.ag-review-collapsed .ag-stage,
   .ag-fullscreen.ag-rail-collapsed.ag-review-collapsed .ag-stage {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 48px minmax(0, 1fr);
+    grid-template-rows: var(--ag-workspace-bar-h, 48px) minmax(0, 1fr);
   }
 
   .ag-fullscreen .ag-workspace-bar {
@@ -6597,7 +6545,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   }
 
   .ag-fullscreen .ag-threads-page {
-    top: 48px;
+    top: var(--ag-workspace-bar-h, 48px);
     bottom: 0;
     height: auto;
   }
@@ -6657,14 +6605,6 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   .ag-fullscreen .ag-composer {
     transition: none;
   }
-
-  .ag-environment-file-row.ag-filename-overflow:hover .ag-environment-filename-track,
-  .ag-environment-file-row.ag-filename-overflow:focus-visible .ag-environment-filename-track {
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    animation: none;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -6697,7 +6637,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 @media (hover: hover) and (pointer: fine) {
   .ag-fullscreen.ag-workspace-compact .ag-compact-rail-hover-target {
     position: absolute;
-    top: 48px;
+    top: var(--ag-workspace-bar-h, 48px);
     bottom: 0;
     left: 0;
     z-index: 13;
@@ -6708,7 +6648,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 .ag-fullscreen.ag-workspace-compact .ag-workspace-drawer-scrim {
   position: absolute;
-  inset: 48px 0 0;
+  inset: var(--ag-workspace-bar-h, 48px) 0 0;
   z-index: 11;
   display: block;
   padding: 0;
@@ -6759,7 +6699,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-fullscreen.ag-workspace-compact .ag-plan-column,
 .ag-fullscreen.ag-workspace-compact.ag-plan-collapsed .ag-plan-column {
   position: absolute;
-  top: 48px;
+  top: var(--ag-workspace-bar-h, 48px);
   right: 0;
   bottom: 0;
   left: auto;
@@ -6846,60 +6786,6 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   pointer-events: none;
 }
 
-/* ─── 손그림 버튼 ─────────────────────────────────────
-   사이드바와 전체 화면 작업 공간의 버튼은 기계적인 고른 모서리 대신 펜으로
-   그린 듯한 윤곽을 쓴다. 두 가지를 함께 쓴다:
-   1. 모서리마다 미묘하게 다른 border-radius — 고른 반경은 그린 선처럼
-      보이지 않는다.
-   2. var(--ag-sketch-line) displacement 필터 — 정의는 index.ts 가 문서에
-      한 번 심는다. 테두리·채움·포커스 링이 같은 필터를 타므로 상태별
-      추가 규칙 없이 호버/비활성이 그대로 흔들린다.
-   색·호버·비활성 동작 자체는 위의 기존 규칙을 바꾸지 않는다. 파일 끝에
-   둬 같은 specificity 의 기존 radius 규칙을 소스 순서로 이긴다. */
-
-/* display:none 이면 Safari 가 filter url() 참조를 무시하므로 0 크기로 숨긴다. */
-.ag-sketch-defs {
-  position: absolute;
-  width: 0;
-  height: 0;
-  overflow: hidden;
-}
-
-/* 채움·테두리가 있는 동작 버튼 */
-.ag-send,
-.ag-threads-new,
-.ag-settings-primary,
-.ag-hub-retry-btn,
-.ag-workspace-exit-btn {
-  border-radius: 9px 12px 8px 13px / 12px 8px 13px 9px;
-  filter: var(--ag-sketch-line);
-}
-
-/* 테두리 없이 호버 면적만 있는 고스트·아이콘 버튼 */
-.ag-header-icon-btn,
-.ag-workspace-icon-btn,
-.ag-permission-btn,
-.ag-skills-btn,
-.ag-thread-rename,
-.ag-doc-jump,
-.ag-environment-plan,
-.ag-environment-changes {
-  border-radius: 7px 9px 6px 10px / 9px 6px 10px 7px;
-  filter: var(--ag-sketch-line);
-}
-
-/* 모델 선택기의 작은 글자는 displacement가 획을 지나치게 흔든다.
-   비대칭 모서리는 유지하고 텍스트와 프로바이더 마크는 또렷하게 둔다. */
-.ag-model-trigger {
-  border-radius: 7px 9px 6px 10px / 9px 6px 10px 7px;
-  filter: none;
-}
-
-/* 전체 화면 레일의 새 채팅 버튼은 5px 언어를 쓰므로 그 크기대로 흔든다. */
-.ag-fullscreen .ag-threads-new {
-  border-radius: 5px 7px 4px 8px / 7px 4px 8px 5px;
-}
-
 /* ─── 서브에이전트 편대 카드 (ag-fleet) ──────────────────
    한 턴에서 태어난 서브에이전트는 한 카드에 모이고, 워크플로는 단계
    레일과 멤버 행을 가진 자기 카드를 갖는다. 카드는 도구 활동 그룹과
@@ -6936,7 +6822,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   font-size: var(--font-size-base, 12px);
   line-height: 1;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-fleet-toggle:hover {
@@ -7223,7 +7109,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-fleet-row.ag-has-detail .ag-fleet-head {
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-fleet-row.ag-has-detail .ag-fleet-head:hover {
@@ -7423,7 +7309,6 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  scrollbar-width: thin;
   margin: 0 6px 0 20px;
   border-radius: var(--ag-r-chip);
   background: color-mix(in srgb, var(--ag-hover) 55%, transparent);
@@ -7487,7 +7372,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   font-size: var(--font-size-sm, 11px);
   font-weight: 600;
   line-height: 1;
-  cursor: pointer;
+  cursor: default;
   animation: ag-dock-arrive var(--ag-dur-base) var(--ag-motion-out) both;
 }
 
@@ -7510,11 +7395,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   white-space: nowrap;
 }
 
-.ag-fleet-dock-pill .ag-pixel-wheel {
-  color: var(--ag-accent);
-}
-
-/* 알약의 상태 자리: 도는 동안은 픽셀 휠, 편대가 다 끝나면 상태 점이 같은 12px
+/* 알약의 상태 자리: 도는 동안은 진행 휠, 편대가 다 끝나면 상태 점이 같은 12px
    칸을 쓴다 — 라벨이 밀리지 않는다. */
 .ag-fleet-dock-pill > .ag-fleet-dot {
   display: none;
@@ -7578,7 +7459,6 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  scrollbar-width: thin;
   padding: 6px;
   border: 1px solid var(--ag-border-strong);
   border-radius: var(--ag-r-field);
@@ -7644,7 +7524,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   font: inherit;
   font-size: var(--font-size-sm, 11px);
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-fleet-back:hover { background: var(--ag-hover); }
@@ -7665,48 +7545,11 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   margin: 0;
 }
 
-/* ── 픽셀 휠 ─────────────────────────────────────────
-   부드러운 회전이 아니라 step 타이밍으로 칸을 건너뛰는 8픽셀 짜리 바퀴다.
-   비트 하나가 12% 씩 이동하고, 나머지는 단계별로 어두워진다. */
+/* ── 진행 휠 ──
+   앱 공용 .ui-spinner(base.css)에 자리만 준다. */
 
 .ag-pixel-wheel {
-  position: relative;
   display: block;
-  flex: 0 0 auto;
-  width: 12px;
-  height: 12px;
-}
-
-.ag-pixel-bit {
-  position: absolute;
-  inset: 0;
-  animation: ag-pixel-chase 0.96s steps(1, end) infinite;
-}
-
-.ag-pixel-bit::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 5px;
-  width: 2px;
-  height: 2px;
-  background: currentColor;
-}
-
-.ag-pixel-bit:nth-child(1) { transform: rotate(0deg); }
-.ag-pixel-bit:nth-child(2) { transform: rotate(45deg); animation-delay: -0.12s; }
-.ag-pixel-bit:nth-child(3) { transform: rotate(90deg); animation-delay: -0.24s; }
-.ag-pixel-bit:nth-child(4) { transform: rotate(135deg); animation-delay: -0.36s; }
-.ag-pixel-bit:nth-child(5) { transform: rotate(180deg); animation-delay: -0.48s; }
-.ag-pixel-bit:nth-child(6) { transform: rotate(225deg); animation-delay: -0.6s; }
-.ag-pixel-bit:nth-child(7) { transform: rotate(270deg); animation-delay: -0.72s; }
-.ag-pixel-bit:nth-child(8) { transform: rotate(315deg); animation-delay: -0.84s; }
-
-@keyframes ag-pixel-chase {
-  0% { opacity: 1; }
-  25% { opacity: 0.45; }
-  50% { opacity: 0.18; }
-  75% { opacity: 0.08; }
 }
 
 @keyframes ag-dock-arrive {
@@ -7726,7 +7569,6 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 .ag-fleet-spin {
   display: none;
-  color: var(--ag-accent);
 }
 
 .ag-fleet.ag-rau { --ag-accent: var(--ag-rau); }
@@ -7768,16 +7610,6 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   .ag-fleet-dock-pill,
   .ag-fleet-popup {
     animation: none;
-  }
-
-  /* 도는 대신 켜져 있는 자리만 말한다 — 움직임 없이 상태는 유지된다. */
-  .ag-pixel-bit {
-    animation: none;
-    opacity: 0.85;
-  }
-
-  .ag-pixel-bit:nth-child(n + 4) {
-    opacity: 0.25;
   }
 
   .ag-fleet-dock-chevron {
@@ -7874,7 +7706,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   background: transparent;
   color: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   transition: background var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -7985,7 +7817,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   color: var(--ag-question-muted);
   font-size: 11px;
   line-height: 1.3;
-  cursor: pointer;
+  cursor: default;
   transition: color var(--ag-dur-fast) var(--ag-ease-out), opacity var(--ag-dur-fast) var(--ag-ease-out);
 }
 
@@ -8189,7 +8021,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   color: var(--ag-text);
   font: inherit;
   font-size: 11px;
-  cursor: pointer;
+  cursor: default;
 }
 
 .ag-cloud-document-controls .ag-cloud-merge-button:hover:not(:disabled) {

@@ -69,13 +69,13 @@
   background: transparent;
   color: var(--ui-text-secondary);
   font: inherit;
-  cursor: pointer;
+  cursor: default;
   flex-shrink: 0;
 }
 #status-bar .stb-icon-btn { width: 26px; }
 #status-bar .stb-icon-btn .tb-sprite { width: 17px; height: 17px; }
 #status-bar .stb-zoom-val { width: 46px; color: var(--ui-text); }
-#status-bar :is(.stb-icon-btn, .stb-zoom-val):hover { background: var(--ui-hover); }
+#status-bar :is(.stb-icon-btn, .stb-zoom-val):hover { background: var(--ui-hover-quiet, var(--ui-hover)); }
 #status-bar :is(.stb-icon-btn, .stb-zoom-val):active { background: var(--ui-active); }
 #status-bar :is(button, input):focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 #status-bar button:disabled { opacity: .4; cursor: default; }
@@ -92,7 +92,7 @@
   border-radius: 3px;
   background: transparent;
   color: var(--ui-text-secondary);
-  cursor: pointer;
+  cursor: default;
   flex-shrink: 0;
 }
 #sb-zoom-range::-webkit-slider-runnable-track {

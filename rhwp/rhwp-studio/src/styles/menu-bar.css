@@ -76,6 +76,38 @@ html.desktop-mac body.ag-fullscreen-open #menu-bar::after {
   -webkit-app-region: no-drag;
 }
 
+/* macOS 네이티브 메뉴 막대가 메뉴를 맡으면 이 줄은 통합 제목 막대가 된다.
+   메뉴 제목은 숨기고, 파일 이름은 가운데에 두며, 컨트롤 밖의 빈 면 전체로 창을 끈다. */
+html.desktop-native-menu #menu-bar .menu-item {
+  display: none;
+}
+
+html.desktop-native-menu #menu-bar {
+  -webkit-app-region: drag;
+}
+
+html.desktop-native-menu #menu-bar :is(button, input, select, textarea, a, [role="button"]) {
+  -webkit-app-region: no-drag;
+}
+
+html.desktop-native-menu body:is(.ag-fullscreen-open, .merge-resolver-open) #menu-bar {
+  -webkit-app-region: no-drag;
+}
+
+html.desktop-native-menu #editor-document-title {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  max-width: min(42vw, 600px, calc(100% - 2 * (var(--desktop-traffic-light-inset) + 180px)));
+  margin: 0;
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+
+html.desktop-native-menu #menu-bar #editor-command-search {
+  margin-left: auto;
+}
+
 html.desktop-mac #menu-bar .menu-item {
   height: 100%;
   flex: 0 0 auto;
@@ -97,7 +129,7 @@ html.desktop-mac #menu-bar .menu-title {
 .menu-title {
   display: inline-block;
   padding: 4px 14px;
-  cursor: pointer;
+  cursor: default;
   color: var(--color-text);
   line-height: 20px;
   border: 1px solid transparent;
@@ -117,35 +149,43 @@ html.desktop-mac #menu-bar .menu-title {
   position: relative;
 }
 
-/* 드롭다운 패널 */
+/* 드롭다운 패널 — NSMenu 형: 5px 안쪽 여백, 8px 반경, elev-2 */
 .menu-dropdown {
   display: none;
   position: absolute;
   top: 100%;
   left: 0;
-  min-width: 220px;
+  min-width: 232px;
+  box-sizing: border-box;
   background: var(--color-surface);
-  border: 1px solid var(--ui-border);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--radius-lg, 8px);
   box-shadow: var(--shadow-dropdown);
   z-index: 1000;
-  padding: 4px 0;
+  padding: 5px;
 }
 
 .menu-item.open > .menu-dropdown {
   display: block;
 }
 
-/* 메뉴 항목 */
-.md-item {
+/* 메뉴 행 — 24px, 왼쪽 22px 는 체크 칸, 오른쪽 끝은 단축키·하위 메뉴 칸.
+   상단 드롭다운, 하위 메뉴, 우클릭 메뉴(.context-menu)가 같은 행을 쓴다. */
+.md-item,
+.md-sub {
+  position: relative;
   display: flex;
   align-items: center;
-  padding: 5px 16px 5px 32px;
-  cursor: pointer;
+  min-height: 24px;
+  box-sizing: border-box;
+  padding: 3px 10px 3px 22px;
+  border-radius: 4px;
+  cursor: default;
   font-size: var(--font-size-base);
+  line-height: 18px;
   color: var(--color-text);
   white-space: nowrap;
-  line-height: 16px;
-  position: relative;
+  outline: none;
 }
 
 /* 메뉴 아이콘 (16×16, 한컴 SVG 스프라이트) */
@@ -161,14 +201,9 @@ html.desktop-mac #menu-bar .menu-title {
   background-repeat: no-repeat;
 }
 
-/* Text and shortcuts give the expanded menus a consistent reading edge. */
+/* 펼친 메뉴는 아이콘 대신 체크 칸과 텍스트로 읽는 가장자리를 맞춘다. */
 #menu-bar .menu-dropdown .md-icon {
   display: none;
-}
-
-#menu-bar .menu-dropdown .md-item,
-#menu-bar .menu-dropdown .md-sub {
-  padding-left: 12px;
 }
 
 /* 텍스트 기반 아이콘은 메뉴에서도 absolute 유지 */
@@ -184,56 +219,55 @@ html.desktop-mac #menu-bar .menu-title {
   line-height: 16px;
 }
 
-.md-item:hover {
-  background: var(--ui-selected);
-  color: var(--color-primary-dark);
+/* 마우스·키보드 강조는 하나의 액센트 채움이다. 하위 메뉴를 연 부모 행도 유지한다. */
+.md-item:not(.disabled):is(:hover, :focus-within),
+.md-sub:not(.disabled):is(:hover, :focus-within) {
+  background: var(--accent-primary);
+  color: var(--n-on-accent, var(--ui-text-on-accent));
 }
 
-.md-item.active {
-  background: var(--ui-selected);
-  color: var(--color-primary-dark);
+/* 토글은 채운 행이 아니라 왼쪽 체크 칸의 체크 표시로 켜짐을 보인다. */
+.md-item:is(.active, [aria-checked='true'])::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  margin-top: -6px;
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.25 4.75 8.5 9.5 3.5' fill='none' stroke='%23000' stroke-width='1.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.25 4.75 8.5 9.5 3.5' fill='none' stroke='%23000' stroke-width='1.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
 }
 
-.md-item.disabled {
+.md-item.disabled,
+.md-sub.disabled {
   color: var(--color-text-disabled);
-  cursor: default;
 }
 
-.md-item.disabled:hover {
-  background: transparent;
-  color: var(--color-text-disabled);
-}
-
-/* 단축키 */
+/* 단축키 칸 — 오른쪽 정렬, 고정폭 숫자, 강조 전에는 보조 색 */
 .md-shortcut {
   margin-left: auto;
   padding-left: 28px;
-  color: var(--color-text-hint);
-  font-size: var(--font-size-sm);
+  color: var(--ui-text-muted, var(--color-text-hint));
+  font-size: var(--font-size-base);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.md-item:not(.disabled):is(:hover, :focus-within) .md-shortcut {
+  color: inherit;
 }
 
 .md-item.disabled .md-shortcut {
-  color: var(--ui-border);
+  color: var(--color-text-disabled);
 }
 
 /* 구분선 */
 .md-sep {
   height: 0;
-  margin: 3px 8px;
-  border-top: 1px solid var(--ui-border-subtle);
-}
-
-/* 서브메뉴 컨테이너 */
-.md-sub {
-  position: relative;
-  display: flex;
-  align-items: center;
-  padding: 5px 16px 5px 32px;
-  cursor: pointer;
-  font-size: var(--font-size-base);
-  color: var(--color-text);
-  white-space: nowrap;
-  line-height: 16px;
+  margin: 5px 10px;
+  border-top: 1px solid var(--ui-border);
 }
 
 /* 서브메뉴 컨테이너 내 아이콘 (absolute 배치) */
@@ -244,47 +278,56 @@ html.desktop-mac #menu-bar .menu-title {
   margin-top: -8px;
 }
 
-.md-sub:hover {
-  background: var(--ui-selected);
-  color: var(--color-primary-dark);
+.md-sub > .md-label {
+  margin-right: 20px;
 }
 
-.md-sub.disabled {
-  color: var(--color-text-disabled);
-  cursor: default;
-}
-
-.md-sub.disabled:hover {
-  background: transparent;
-  color: var(--color-text-disabled);
-}
-
+/* 하위 메뉴 표시는 글리프 대신 그린 쉐브론이다. */
 .md-arrow {
+  flex: 0 0 12px;
+  width: 12px;
+  height: 12px;
   margin-left: auto;
-  padding-left: 16px;
-  font-size: 8px;
-  color: var(--color-text-placeholder);
+  overflow: hidden;
+  color: var(--ui-text-muted, var(--color-text-placeholder));
+  font-size: 0;
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M4.5 2.75 7.75 6 4.5 9.25' fill='none' stroke='%23000' stroke-width='1.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M4.5 2.75 7.75 6 4.5 9.25' fill='none' stroke='%23000' stroke-width='1.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+}
+
+.md-sub:not(.disabled):is(:hover, :focus-within) > .md-arrow {
+  color: inherit;
 }
 
 .md-sub.disabled .md-arrow {
-  color: var(--ui-border-light);
+  color: var(--color-text-disabled);
 }
 
-/* 서브메뉴 패널 */
+/* 서브메뉴 패널 — 첫 행이 부모 행과 같은 높이에 오도록 안쪽 여백+테두리만큼 올린다. */
 .md-sub-panel {
   display: none;
   position: absolute;
   left: 100%;
-  top: -4px;
-  min-width: 150px;
+  top: -6px;
+  min-width: 160px;
+  box-sizing: border-box;
   background: var(--color-surface);
-  border: 1px solid var(--ui-border);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--radius-lg, 8px);
   box-shadow: var(--shadow-dropdown);
-  padding: 4px 0;
+  padding: 5px;
   z-index: 1001;
 }
 
 .md-sub:not(.disabled):hover > .md-sub-panel,
 .md-sub:not(.disabled):focus-within > .md-sub-panel {
   display: block;
+}
+
+@media (pointer: coarse) {
+  .md-item,
+  .md-sub {
+    min-height: 36px;
+  }
 }
