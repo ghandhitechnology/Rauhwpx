@@ -1791,12 +1791,12 @@ fn inline_control_metrics_hwp(ctrl: &Control) -> Option<InlineControlMetricsHwp>
                 );
             let margin = &eq.common.margin;
             let painted_width = crate::renderer::equation::fitted_width_hwp(eq);
-            // 한컴은 인라인 수식을 실제 paint 폭(+양쪽 여백)만큼 전진한다 — 저장된
-            // 개체 폭은 paint 를 담는 상자일 뿐 줄 advance 의 하한이 아니다.
-            // (eq-002 실측: 선언 72.98pt 개체가 68.8pt 만큼만 전진)
+            // 인라인 수식의 줄 전진 = min(선언 폭, paint 폭+양쪽 여백) — 짧은 수식은
+            // 선언 폭 자리를, 넘치는 수식은 paint 폭만큼만 전진한다 (eq-002 실측).
             let width = (painted_width as i32)
                 .saturating_add(i32::from(margin.left))
-                .saturating_add(i32::from(margin.right));
+                .saturating_add(i32::from(margin.right))
+                .min(eq.common.width as i32);
             let height = (eq.common.height as i32).max(natural_height as i32);
             let baseline =
                 crate::renderer::equation::control_baseline_hwp(eq, natural_baseline as f64);
@@ -1921,8 +1921,9 @@ mod inline_equation_metric_tests {
         assert_eq!(metrics.width, painted as i32 + 300);
         assert_eq!(metrics.height, 2200);
         assert_eq!(metrics.baseline, 1410);
+        // 인라인 배치 폭도 같은 규칙(저장 폭이 아닌 paint 폭+여백)을 따라야 한다.
         let composed = crate::renderer::composer::compose_paragraph(&para);
-        assert_eq!(composed.tac_controls[0].1, 2700);
+        assert_eq!(composed.tac_controls[0].1, metrics.width);
     }
 
     #[test]

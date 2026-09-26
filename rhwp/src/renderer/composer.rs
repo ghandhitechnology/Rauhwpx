@@ -302,8 +302,19 @@ pub fn compose_paragraph(para: &Paragraph) -> ComposedParagraph {
                     Some((pos, s.common().width as i32, i))
                 }
                 Control::Equation(eq) if eq.common.treat_as_char => {
-                    // HWP 저장값을 사용 — 한컴 편집기가 실제 폰트로 계산한 정확한 너비
-                    Some((pos, super::equation::occupied_width_hwp(eq), i))
+                    // 인라인 수식의 줄 전진 = min(선언 폭, paint 폭+양쪽 여백).
+                    // 내용이 선언 폭보다 짧으면 선언 폭의 자리를 차지하고, 넘치면
+                    // paint 폭만큼만 간다 (eq-002 실측: `f(n)`은 선언 18.51pt→17.9pt
+                    // 전진인 반면 72.98pt 개체는 paint 68.8pt 까지만).
+                    let painted = super::equation::fitted_width_hwp(eq);
+                    Some((
+                        pos,
+                        (painted as i32)
+                            .saturating_add(i32::from(eq.common.margin.left))
+                            .saturating_add(i32::from(eq.common.margin.right))
+                            .min(eq.common.width as i32),
+                        i,
+                    ))
                 }
                 Control::Form(f) => Some((pos, f.width as i32, i)),
                 Control::Table(t)

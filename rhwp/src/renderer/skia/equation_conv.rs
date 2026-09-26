@@ -179,12 +179,28 @@ fn render_box(
                 italic,
                 bold,
             );
-            let line_y = y + crate::renderer::equation::layout::fraction_line_y(numer, fs);
-            canvas.draw_line(
-                ((x + bar_inset) as f32, line_y as f32),
-                ((x + lb.width - bar_inset) as f32, line_y as f32),
-                &stroke_paint(color, fs * 0.04),
+            // 한컴 legacy 분수선은 e06d 막대 글립을 상자 폭으로 늘려 칠한다
+            // (eq-002 실측: 기준선 아래 0.3em, 내용 크기의 1.256배).
+            let bar_painted = draw_legacy_pua_glyph(
+                canvas,
+                font_mgr,
+                system_families,
+                font_families,
+                '\u{e06d}',
+                x + *bar_inset,
+                y + lb.baseline + fs * 0.3,
+                fs * 1.256,
+                Some(lb.width - *bar_inset * 2.0),
+                color,
             );
+            if !bar_painted {
+                let line_y = y + crate::renderer::equation::layout::fraction_line_y(numer, fs);
+                canvas.draw_line(
+                    ((x + bar_inset) as f32, line_y as f32),
+                    ((x + lb.width - bar_inset) as f32, line_y as f32),
+                    &stroke_paint(color, fs * 0.04),
+                );
+            }
             render_box(
                 canvas,
                 font_mgr,
@@ -228,24 +244,54 @@ fn render_box(
             );
         }
         LayoutKind::Sqrt { index, body } => {
-            let sign_h = lb.height;
-            let body_left = x + body.x - fs * 0.1;
             let sign_x = x;
-            let v_top = y;
-            let v_mid_x = body_left - fs * 0.15;
-            let v_mid_y = y + sign_h;
-            let v_start_x = v_mid_x - fs * 0.3;
-            let v_start_y = y + sign_h * 0.6;
-            let tick_x = v_start_x - fs * 0.1;
-            let tick_y = v_start_y - fs * 0.05;
+            // 한컴 legacy 서체는 √ = e05c 기호(기호 zone ~1em, 본문 높이에 비례한
+            // 크기 — 실측 1.052fs~1.126fs) + e06d 윗줄(본문 위를 덮도록 늘림)으로 칠한다.
+            let sign_painted = draw_legacy_pua_glyph(
+                canvas,
+                font_mgr,
+                system_families,
+                font_families,
+                '\u{e05c}',
+                x + body.x - fs,
+                y + lb.baseline,
+                fs * 0.682 + body.height * 0.37,
+                Some(fs),
+                color,
+            );
+            if sign_painted {
+                draw_legacy_pua_glyph(
+                    canvas,
+                    font_mgr,
+                    system_families,
+                    font_families,
+                    '\u{e06d}',
+                    x + body.x - fs * 0.03,
+                    y + body.y + body.height * 0.694,
+                    body.height * 1.11,
+                    Some(body.width + fs * 0.17),
+                    color,
+                );
+            }
+            if !sign_painted {
+                let sign_h = lb.height;
+                let body_left = x + body.x - fs * 0.1;
+                let v_top = y;
+                let v_mid_x = body_left - fs * 0.15;
+                let v_mid_y = y + sign_h;
+                let v_start_x = v_mid_x - fs * 0.3;
+                let v_start_y = y + sign_h * 0.6;
+                let tick_x = v_start_x - fs * 0.1;
+                let tick_y = v_start_y - fs * 0.05;
 
-            let mut path = PathBuilder::new();
-            path.move_to((tick_x as f32, tick_y as f32));
-            path.line_to((v_start_x as f32, v_start_y as f32));
-            path.line_to((v_mid_x as f32, v_mid_y as f32));
-            path.line_to((body_left as f32, v_top as f32));
-            path.line_to(((x + lb.width) as f32, v_top as f32));
-            canvas.draw_path(&path.detach(), &stroke_paint(color, fs * 0.04));
+                let mut path = PathBuilder::new();
+                path.move_to((tick_x as f32, tick_y as f32));
+                path.line_to((v_start_x as f32, v_start_y as f32));
+                path.line_to((v_mid_x as f32, v_mid_y as f32));
+                path.line_to((body_left as f32, v_top as f32));
+                path.line_to(((x + lb.width) as f32, v_top as f32));
+                canvas.draw_path(&path.detach(), &stroke_paint(color, fs * 0.04));
+            }
 
             if let Some(index) = index {
                 render_box(
@@ -596,8 +642,25 @@ fn render_box(
         LayoutKind::Paren { left, right, body } => {
             let paren_w = fs * 0.333;
             let use_glyph = lb.height <= fs * 1.2;
+            // legacy는 큰 괄호도 e044/e045 글립을 slot 폭으로 늘려 칠고 세로는
+            // 기준선 기준 -1.05em~+0.26em 범위를 덮는다 (eq-002 실측).
+            let left_stretch = !use_glyph && matches!(left.as_str(), "(" | ")");
             if !left.is_empty() {
-                if use_glyph && (left == "(" || left == ")") {
+                let legacy_painted = left_stretch && {
+                    let (ink, g) = paren_glyph_ink(left);
+                    draw_legacy_pua_glyph_scaled(
+                        canvas,
+                        font_mgr,
+                        system_families,
+                        font_families,
+                        g,
+                        ink,
+                        (x, y + lb.baseline - fs * 1.05, fs * 0.39, fs * 1.31),
+                        color,
+                    )
+                };
+                if legacy_painted {
+                } else if use_glyph && (left == "(" || left == ")") {
                     draw_text(
                         canvas,
                         font_mgr,
@@ -641,9 +704,29 @@ fn render_box(
                 italic,
                 bold,
             );
+            let right_stretch = !use_glyph && matches!(right.as_str(), "(" | ")");
             if !right.is_empty() {
                 let right_x = x + lb.width - paren_w;
-                if use_glyph && (right == "(" || right == ")") {
+                let legacy_painted = right_stretch && {
+                    let (ink, g) = paren_glyph_ink(right);
+                    draw_legacy_pua_glyph_scaled(
+                        canvas,
+                        font_mgr,
+                        system_families,
+                        font_families,
+                        g,
+                        ink,
+                        (
+                            x + lb.width - fs * 0.39,
+                            y + lb.baseline - fs * 1.05,
+                            fs * 0.39,
+                            fs * 1.31,
+                        ),
+                        color,
+                    )
+                };
+                if legacy_painted {
+                } else if use_glyph && (right == "(" || right == ")") {
                     draw_text(
                         canvas,
                         font_mgr,
@@ -817,6 +900,118 @@ fn draw_text(
         &font,
         &paint,
     );
+}
+
+// 한컴 legacy 수식 서체의 PUA 글립(√ 기호 e05c, 막대 e06d 등)을 직접 칠한다.
+// advance_w를 주면 글립 자연폭에 맞춰 가로로만 늘린다. 서체나 글립이 없으면
+// false를 반환해 호출자가 path 대체 그리기로 돌아간다.
+fn draw_legacy_pua_glyph(
+    canvas: &Canvas,
+    font_mgr: &FontMgr,
+    system_families: &SystemFontFamilies,
+    font_families: &[&str],
+    glyph: char,
+    x: f64,
+    baseline_y: f64,
+    font_size: f64,
+    advance_w: Option<f64>,
+    color: Color,
+) -> bool {
+    let Some(family) = font_families
+        .iter()
+        .copied()
+        .find(|name| crate::renderer::equation::font::is_legacy_equation_font(name))
+    else {
+        return false;
+    };
+    let Some(typeface) =
+        match_system_family_style(font_mgr, system_families, family, FontStyle::normal())
+    else {
+        return false;
+    };
+    let text = glyph.to_string();
+    if !typeface_covers_text(&typeface, &text) {
+        return false;
+    }
+    let mut font = Font::new(typeface, font_size as f32);
+    font.set_edging(font::Edging::AntiAlias);
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(color);
+    let natural = font.measure_str(&text, Some(&paint)).0 as f64;
+    if let Some(w) = advance_w {
+        if natural > 0.0 && (w - natural).abs() / natural > 0.02 {
+            canvas.save();
+            canvas.translate((x as f32, 0.0));
+            canvas.scale(((w / natural) as f32, 1.0));
+            canvas.translate((-x as f32, 0.0));
+            draw_text_run(canvas, &text, (x as f32, baseline_y as f32), &font, &paint);
+            canvas.restore();
+            return true;
+        }
+    }
+    draw_text_run(canvas, &text, (x as f32, baseline_y as f32), &font, &paint);
+    true
+}
+
+// e044 '(' / e045 ')' 의 잉크 경계(em). HyhwpEQ 실측값.
+fn paren_glyph_ink(bracket: &str) -> ((f64, f64, f64, f64), char) {
+    if bracket == "(" {
+        ((0.0996, -0.2021, 0.3369, 0.8066), '\u{e044}')
+    } else {
+        ((0.0508, -0.2031, 0.2881, 0.8066), '\u{e045}')
+    }
+}
+
+// legacy PUA 글립을 주어진 잉크 사각형에 맞춰 가로로 늘려 칠한다.
+// ink_em = 글립 잉크 경계(em 단위, y1은 baseline 위 잉크 상단).
+// 세로 크기는 잉크가 target 높이를 덮도록 정하고 가로만 늘린다.
+fn draw_legacy_pua_glyph_scaled(
+    canvas: &Canvas,
+    font_mgr: &FontMgr,
+    system_families: &SystemFontFamilies,
+    font_families: &[&str],
+    glyph: char,
+    ink_em: (f64, f64, f64, f64),
+    target: (f64, f64, f64, f64),
+    color: Color,
+) -> bool {
+    let Some(family) = font_families
+        .iter()
+        .copied()
+        .find(|name| crate::renderer::equation::font::is_legacy_equation_font(name))
+    else {
+        return false;
+    };
+    let Some(typeface) =
+        match_system_family_style(font_mgr, system_families, family, FontStyle::normal())
+    else {
+        return false;
+    };
+    let text = glyph.to_string();
+    if !typeface_covers_text(&typeface, &text) {
+        return false;
+    }
+    let (x0, y0, x1, y1) = ink_em;
+    let (tx, ty, tw, th) = target;
+    let ink_w = x1 - x0;
+    let ink_h = y1 - y0;
+    if ink_w <= 0.0 || ink_h <= 0.0 || tw <= 0.0 || th <= 0.0 {
+        return false;
+    }
+    let s = th / ink_h;
+    let xs = tw / (ink_w * s);
+    let mut font = Font::new(typeface, s as f32);
+    font.set_edging(font::Edging::AntiAlias);
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(color);
+    canvas.save();
+    canvas.translate(((tx - xs * x0 * s) as f32, (ty + y1 * s) as f32));
+    canvas.scale((xs as f32, 1.0));
+    draw_text_run(canvas, &text, (0.0, 0.0), &font, &paint);
+    canvas.restore();
+    true
 }
 
 fn equation_typeface_for_text_in_families(

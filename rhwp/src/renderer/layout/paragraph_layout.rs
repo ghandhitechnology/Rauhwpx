@@ -3443,12 +3443,11 @@ impl LayoutEngine {
                         - zero_endnote_boundary_result_shift)
                         .max(col_area_y);
                     let inline_x = row_inline_x[tac_row];
-                    let eq_anchor = crate::renderer::equation::control_baseline_hwp(
-                        eq,
-                        layout_box.baseline * 7200.0 / self.dpi,
-                    ) * self.dpi
-                        / 7200.0;
-                    let eq_y = row_y + baseline - eq_anchor;
+                    // 수식 본문의 자연 기준선을 줄 기준선에 맞춘다. 한컴은 선언
+                    // baseLine% 위치에 수식 기준선을 놓아 텍스트 기준선과 일치시킨다
+                    // (eq-002: 선언 17.06pt vs 자연 기준선 ~10.6pt — anchor를 그대로
+                    // 쓰면 내용이 ~6pt 위로 치솟는다).
+                    let eq_y = row_y + baseline - layout_box.baseline;
                     let eq_x = inline_x + hwpunit_to_px(eq.common.margin.left as i32, self.dpi);
                     let eq_w = hwpunit_to_px(eq.common.width as i32, self.dpi);
                     let (eq_cell_idx, eq_cell_para_idx) = if let Some(ref ctx) = cell_ctx {
@@ -6346,12 +6345,8 @@ impl LayoutEngine {
                             // 텍스트와 섞인 인라인 수식뿐 아니라 공백 run 안의 TAC 수식도
                             // baseline을 맞춘다. 수식 renderer는 bbox 높이로 세로 스케일하지
                             // 않으므로 y에 직접 붙이면 큰 루트/분수 수식이 아래 줄을 덮는다.
-                            let eq_anchor = crate::renderer::equation::control_baseline_hwp(
-                                eq,
-                                layout_box.baseline * 7200.0 / self.dpi,
-                            ) * self.dpi
-                                / 7200.0;
-                            let eq_y = y + baseline - eq_anchor;
+                            // 수식 본문의 자연 기준선을 줄 기준선에 맞춘다 (위와 동일).
+                            let eq_y = y + baseline - layout_box.baseline;
                             let eq_x = x + hwpunit_to_px(eq.common.margin.left as i32, self.dpi);
                             let eq_w = hwpunit_to_px(eq.common.width as i32, self.dpi);
                             let (eq_cell_idx, eq_cell_para_idx) = if let Some(ref ctx) = cell_ctx {
