@@ -39,6 +39,72 @@ const sampleModelCatalogs: Record<CatalogAgent, ModelCatalogEntry[]> = {
   ],
 };
 
+/** 편집 결과 그림 흉내 — 문단 두 줄과 강조 띠를 그린 작은 PNG. */
+function sampleCropPng(): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = 520;
+  canvas.height = 150;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '';
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = 'rgba(47, 125, 79, 0.14)';
+  ctx.fillRect(16, 56, 330, 34);
+  ctx.fillStyle = '#171b22';
+  ctx.font = '600 22px sans-serif';
+  ctx.fillText('2. 추진 일정', 16, 38);
+  ctx.font = '18px sans-serif';
+  ctx.fillText('2026년 10월 착수, 12월 중간 점검', 22, 80);
+  ctx.fillText('사업 기간은 총 6개월입니다.', 22, 124);
+  return canvas.toDataURL('image/png').split(',')[1] ?? '';
+}
+
+interface ToolScenarioCall {
+  id: string;
+  tool: string;
+  args: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  error?: { code: string; message: string };
+}
+
+/** tools 시나리오 — 실제 rhwp 도구 이름·인자·결과 모양으로 사이드바 표시를 확인한다. */
+function toolScenarioCalls(): ToolScenarioCall[] {
+  return [
+    {
+      id: 'batch',
+      tool: 'mcp__rhwp__read_batch',
+      args: { reads: [{ tool: 'get_structure', args: { range: { sectionIdx: 0, fromPara: 0, toPara: 24 } } }, { tool: 'find_text', args: { query: '추진 일정' } }] },
+      result: { revision: 12, results: [{ tool: 'get_structure', pageCount: 3, truncated: false }, { tool: 'find_text', matches: [{ sectionIdx: 0, paraIdx: 8 }, { sectionIdx: 0, paraIdx: 19 }] }] },
+    },
+    {
+      id: 'edit',
+      tool: 'mcp__rhwp__apply_edits',
+      args: {
+        expectedRevision: 12,
+        render: 'crop',
+        edits: [
+          { tool: 'replace_range', args: { anchor: { text: '2026년 11월 착수' }, text: '2026년 10월 착수' } },
+          { tool: 'insert_text', args: { anchor: { text: '중간 점검', position: 'after' }, text: '\n사업 기간은 총 6개월입니다.' } },
+          { tool: 'apply_char_format', args: { anchor: { text: '추진 일정' }, bold: true, fontSizePt: 13 } },
+        ],
+      },
+      result: {
+        revision: 13,
+        applied: 3,
+        results: [{ tool: 'replace_range' }, { tool: 'insert_text' }, { tool: 'apply_char_format' }],
+        after: { pages: [1], pageCount: { before: 3, after: 3 }, warnings: [] },
+        image: { data: sampleCropPng(), mimeType: 'image/png' },
+      },
+    },
+    {
+      id: 'table',
+      tool: 'mcp__rhwp__set_table_props',
+      args: { expectedRevision: 13, sectionIdx: 0, paraIdx: 21, controlIdx: 0, tableProps: { repeatHeader: true, textWrap: 'topAndBottom' } },
+      error: { code: 'REVISION_MISMATCH', message: 'expectedRevision 13 does not match current revision 14 — re-read with get_structure({sinceRevision:13})' },
+    },
+  ];
+}
+
 /** Implements the actual UI contract: new bridge methods produce a type error here. */
 export function createMockBridge(report: (message: string) => void, onApproved?: () => void) {
   const data = createFixtures();
@@ -657,8 +723,9 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
           argsJson: '{"section":0}',
         });
         if (reply === 'tools') {
-          stream({ type: 'tool-call', agent, callId: `search-${turnGeneration}`, tool: 'search_document', argsJson: '{"query":"일정"}' });
-          stream({ type: 'tool-call', agent, callId: `edit-${turnGeneration}`, tool: 'edit_document', argsJson: '{"section":0}' });
+          for (const call of toolScenarioCalls()) {
+            stream({ type: 'tool-call', agent, callId: `${call.id}-${turnGeneration}`, tool: call.tool, argsJson: JSON.stringify(call.args) });
+          }
         }
         if (reply === 'fleet') {
           stream({
@@ -696,8 +763,22 @@ export function createMockBridge(report: (message: string) => void, onApproved?:
               '사업 개요, 추진 일정, 기대 효과 — 3개 절을 확인했습니다.',
           });
           if (reply === 'tools') {
-            stream({ type: 'tool-result', agent, callId: `search-${turnGeneration}`, ok: true, resultPreview: '일정 2건을 찾았습니다.' });
-            stream({ type: 'tool-result', agent, callId: `edit-${turnGeneration}`, ok: true, resultPreview: '첫 문단을 수정했습니다.' });
+            // 스튜디오 실행기가 먼저 끝나고, 프로바이더의 잘린 미리보기가 뒤따른다.
+            for (const call of toolScenarioCalls()) {
+              if (call.result !== undefined) emit({ type: 'tool-executed', tool: call.tool.replace(/^mcp__rhwp__/, ''), args: call.args, ok: true, result: call.result });
+              if (call.error) emit({ type: 'tool-executed', tool: call.tool.replace(/^mcp__rhwp__/, ''), args: call.args, ok: false, error: call.error });
+            }
+            for (const call of toolScenarioCalls()) {
+              stream({
+                type: 'tool-result',
+                agent,
+                callId: `${call.id}-${turnGeneration}`,
+                ok: !call.error,
+                resultPreview: call.error
+                  ? `${call.error.code}: ${call.error.message}`
+                  : JSON.stringify([{ type: 'text', text: JSON.stringify(call.result ?? {}) }]).slice(0, 2000),
+              });
+            }
           }
           if (reply === 'error') {
             stream({

@@ -2881,9 +2881,11 @@ export class AgentBridgeImpl implements AgentBridge {
       })
       .then((result) => {
         if (!requestIsActive()) return;
+        const reported = this.withEditReport(result);
         this.sendToolResponse({
-          v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: true, result: this.withEditReport(result),
+          v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: true, result: reported,
         });
+        this.notifyToolExecuted({ type: 'tool-executed', tool, args, ok: true, result: reported });
       })
       .catch((e: unknown) => {
         if (!requestIsActive()) return;
@@ -2892,6 +2894,7 @@ export class AgentBridgeImpl implements AgentBridge {
             ? { code: e.code, message: e.message }
             : { code: 'RPC_ERROR', message: e instanceof Error ? e.message : String(e) };
         this.sendToolResponse({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: false, error });
+        this.notifyToolExecuted({ type: 'tool-executed', tool, args, ok: false, error });
       })
       .finally(() => {
         if (this.activeToolRequestControllers.get(id) === request) {
@@ -2915,6 +2918,15 @@ export class AgentBridgeImpl implements AgentBridge {
     const notes = this.editReport.splice(0);
     if (!this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-edit-report', notes })) {
       this.editReport.unshift(...notes.slice(-8));
+    }
+  }
+
+  /** 사이드바 도구 행용 알림 — 표시가 실패해도 이미 보낸 도구 응답에는 영향이 없어야 한다. */
+  private notifyToolExecuted(e: Extract<SidebarEvent, { type: 'tool-executed' }>): void {
+    try {
+      this.emit(e);
+    } catch (err) {
+      console.warn('[AgentBridge] 도구 실행 알림 실패:', err);
     }
   }
 
