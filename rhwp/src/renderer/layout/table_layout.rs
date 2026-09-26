@@ -3,7 +3,9 @@
 use super::super::composer::{
     compose_paragraph, inline_picture_occupied_width_hu, ComposedLine, ComposedParagraph,
 };
-use super::super::height_measurer::{include_table_cell_line_spacing, MeasuredTable};
+use super::super::height_measurer::{
+    grow_rows_for_span_requirements, include_table_cell_line_spacing, MeasuredTable,
+};
 use super::super::page_layout::LayoutRect;
 use super::super::render_tree::*;
 use super::super::style_resolver::{ResolvedBorderStyle, ResolvedStyleSet};
@@ -303,68 +305,54 @@ pub(super) fn native_saved_single_cell_text_frame_uses_declared_height(
 #[allow(clippy::too_many_arguments)]
 fn hancom_hwpx_table_outer_border_nodes(
     tree: &mut PageRenderTree,
-    styles: &ResolvedStyleSet,
     table: &crate::model::table::Table,
     hwpx_stored_layout: bool,
     depth: usize,
+    h_edges: &[Vec<Option<BorderLine>>],
+    v_edges: &[Vec<Option<BorderLine>>],
+    row_col_x: &[Vec<f64>],
+    row_y: &[f64],
     table_x: f64,
     table_y: f64,
-    table_width: f64,
-    table_height: f64,
 ) -> Vec<RenderNode> {
     if depth != 0
         || !hwpx_stored_layout
         || !table.common.flow_with_text
         || !is_para_topbottom_float(&table.common)
-        || table.border_fill_id == 0
+        || h_edges.len() < 2
+        || v_edges.len() < 2
     {
         return Vec::new();
     }
 
-    let Some(border_style) = styles
-        .border_styles
-        .get((table.border_fill_id as usize).saturating_sub(1))
-    else {
-        return Vec::new();
-    };
-    let [left, right, top, bottom] = border_style.borders;
-    let mut nodes = Vec::new();
-    // Hancom's HWPX PDF contains these four table-level rules after the cell-grid rules, even
-    // when the outer cells already painted identical edges. Preserve that second paint pass
-    // instead of widening or darkening the shared border style.
-    nodes.extend(create_border_line_nodes(
-        tree,
-        &right,
-        table_x + table_width,
-        table_y,
-        table_x + table_width,
-        table_y + table_height,
-    ));
-    nodes.extend(create_border_line_nodes(
-        tree,
-        &left,
-        table_x,
-        table_y,
-        table_x,
-        table_y + table_height,
-    ));
-    nodes.extend(create_border_line_nodes(
-        tree,
-        &bottom,
-        table_x,
-        table_y + table_height,
-        table_x + table_width,
-        table_y + table_height,
-    ));
-    nodes.extend(create_border_line_nodes(
-        tree,
-        &top,
-        table_x,
-        table_y,
-        table_x + table_width,
-        table_y,
-    ));
-    nodes
+    // 한컴 HWPX PDF 는 셀 격자 테두리 뒤에 표 외곽을 한 번 더 그린다. 이때 쓰는 선은
+    // 표 borderFill 이 아니라 외곽 셀 엣지(셀이 비운 곳만 표 borderFill fallback)이므로,
+    // 해석이 끝난 엣지 격자의 바깥 행/열만 남겨 같은 병합 규칙으로 다시 그린다.
+    let last_h = h_edges.len() - 1;
+    let last_v = v_edges.len() - 1;
+    let outer_h: Vec<Vec<Option<BorderLine>>> = h_edges
+        .iter()
+        .enumerate()
+        .map(|(ri, row)| {
+            if ri == 0 || ri == last_h {
+                row.clone()
+            } else {
+                vec![None; row.len()]
+            }
+        })
+        .collect();
+    let outer_v: Vec<Vec<Option<BorderLine>>> = v_edges
+        .iter()
+        .enumerate()
+        .map(|(ci, col)| {
+            if ci == 0 || ci == last_v {
+                col.clone()
+            } else {
+                vec![None; col.len()]
+            }
+        })
+        .collect();
+    render_edge_borders(tree, &outer_h, &outer_v, row_col_x, row_y, table_x, table_y)
 }
 
 fn caption_flow_extra(caption: &Option<Caption>, caption_height: f64, caption_spacing: f64) -> f64 {
@@ -471,22 +459,7 @@ fn render_cell_box_borders(
     h: f64,
 ) -> Vec<RenderNode> {
     let mut nodes = Vec::new();
-    nodes.extend(create_border_line_nodes(
-        tree,
-        &bs.borders[2],
-        x,
-        y,
-        x + w,
-        y,
-    ));
-    nodes.extend(create_border_line_nodes(
-        tree,
-        &bs.borders[3],
-        x,
-        y + h,
-        x + w,
-        y + h,
-    ));
+    // 한컴 순서: 수직선 먼저, 수평선 나중 (render_edge_borders 와 동일)
     nodes.extend(create_border_line_nodes(
         tree,
         &bs.borders[0],
@@ -500,6 +473,22 @@ fn render_cell_box_borders(
         &bs.borders[1],
         x + w,
         y,
+        x + w,
+        y + h,
+    ));
+    nodes.extend(create_border_line_nodes(
+        tree,
+        &bs.borders[2],
+        x,
+        y,
+        x + w,
+        y,
+    ));
+    nodes.extend(create_border_line_nodes(
+        tree,
+        &bs.borders[3],
+        x,
+        y + h,
         x + w,
         y + h,
     ));
@@ -1693,7 +1682,24 @@ impl LayoutEngine {
         // inline_x_override가 있으면 외부에서 inline 위치를 계산했으므로 x/y 기준은 유지한다.
         // 단, Top 캡션은 표 본문 위의 별도 영역이므로 표 본문 y 에 캡션 높이만큼 반영한다.
         let table_y = if inline_x_override.is_some() {
-            y_start + inline_top_caption_offset
+            // 저장-배치 Square+본문기준 표의 외곽여백 상자 규칙(아래 compute_table_y_position
+            // 분기와 동일) — tbl_inline_x 를 쓰는 이 경로는 compute_table_y_position 을
+            // 거치지 않으므로 페인트 상단의 outer_margin_top 만큼 안쪽 이동이 여기서 필요.
+            let om_top_px = if !table.common.treat_as_char
+                && matches!(table.common.text_wrap, crate::model::shape::TextWrap::Square)
+                && matches!(table.common.vert_rel_to, crate::model::shape::VertRelTo::Para)
+                && (self.profile.get().hwpx_stored_layout()
+                    || self.profile.get().hwp5_origin_hwpx())
+                && crate::renderer::float_placement::para_square_rowbreak_first_fragment_top_offset_px(
+                    table,
+                    self.dpi,
+                ) <= 0.0
+            {
+                hwpunit_to_px(table.outer_margin_top as i32, self.dpi)
+            } else {
+                0.0
+            };
+            y_start + inline_top_caption_offset + om_top_px
         } else {
             let computed_y = self.compute_table_y_position(
                 table,
@@ -1976,14 +1982,15 @@ impl LayoutEngine {
                 .children
                 .extend(hancom_hwpx_table_outer_border_nodes(
                     tree,
-                    styles,
                     table,
                     self.profile.get().hwpx_stored_layout(),
                     depth,
+                    &h_edges,
+                    &v_edges,
+                    &row_col_x,
+                    &row_y,
                     table_x,
                     table_y,
-                    table_width,
-                    table_height,
                 ));
             if self.show_transparent_borders.get() {
                 table_node.children.extend(render_transparent_borders(
@@ -2032,6 +2039,7 @@ impl LayoutEngine {
                             cell_index: 65534, // 캡션 식별 센티널
                             cell_para_index: 0,
                             text_direction: 0,
+                            line_wrap_squeeze: false,
                         }],
                     })
                     .or_else(|| {
@@ -2369,6 +2377,9 @@ impl LayoutEngine {
             }
         }
 
+        // 병합 셀 요구 높이 — 선언 높이(2단계)와 콘텐츠 높이(2-b)를 끝 행 순서로 함께 적용
+        let mut span_requirements: Vec<(usize, usize, f64, f64)> = Vec::new();
+
         // 2단계: 병합 셀에서 미지 행 높이를 반복적으로 해결
         {
             let mut constraints: Vec<(usize, usize, f64)> = Vec::new();
@@ -2427,12 +2438,8 @@ impl LayoutEngine {
             // 채워진(미지 행 없음) 표에서 이 잔여가 지면에서 소실되어, rowspan
             // 중첩 문서가 한글보다 쪽당 +15% 조밀해졌다(연결맵 −35쪽의 지배
             // 성분). 콘텐츠 기반 확장(2-b)과 별개의 선언 기반 규칙이다.
-            for &(r, span, total_h) in &constraints {
-                let known_sum: f64 = (r..r + span).map(|i| row_heights[i]).sum();
-                if total_h > known_sum + 0.5 {
-                    row_heights[r + span - 1] += total_h - known_sum;
-                }
-            }
+            // 적용은 아래 콘텐츠 요구와 함께 끝 행 순서로 한다 (height_measurer 와 동일).
+            span_requirements.extend(constraints.iter().map(|&(r, span, h)| (r, span, h, 0.5)));
         }
 
         // 2-b단계: 병합 셀 컨텐츠 높이 > 결합 행 높이이면 마지막 행 확장
@@ -2465,13 +2472,10 @@ impl LayoutEngine {
                     0.0
                 };
                 let required_height = line_req.max(object_req);
-                let combined: f64 = (r..r + span).map(|i| row_heights[i]).sum();
-                if required_height > combined {
-                    let deficit = required_height - combined;
-                    row_heights[r + span - 1] += deficit;
-                }
+                span_requirements.push((r, span, required_height, 0.0));
             }
         }
+        grow_rows_for_span_requirements(&mut row_heights, &mut span_requirements);
 
         // 3단계: 높이 0인 행에 기본값
         for r in 0..row_count {
@@ -2944,6 +2948,7 @@ impl LayoutEngine {
         paragraphs: &[Paragraph],
         styles: &ResolvedStyleSet,
         preserve_cell_padding: bool,
+        min_pad: f64,
     ) -> (f64, f64) {
         // [#2279 axis B] 규칙 본체는 composer::shrunk_cell_horizontal_padding 로 이동 —
         // cut(cell_units)/mt(HeightMeasurer) 측정과 단일 출처 공유 (규칙이 갈리면
@@ -2956,6 +2961,7 @@ impl LayoutEngine {
             paragraphs,
             styles,
             preserve_cell_padding,
+            min_pad,
         )
     }
 
@@ -3109,7 +3115,7 @@ impl LayoutEngine {
                 ),
                 _ => (col_area.x, col_area.width),
             };
-            match horz_align {
+            let x = match horz_align {
                 HorzAlign::Left | HorzAlign::Inside => ref_x + h_offset + outer_left,
                 HorzAlign::Center => {
                     ref_x
@@ -3121,7 +3127,21 @@ impl LayoutEngine {
                 HorzAlign::Right | HorzAlign::Outside => {
                     ref_x + (ref_w - table_width).max(0.0) - h_offset - outer_right
                 }
+            };
+            if std::env::var("RHWP_DIAG_TX").is_ok() {
+                eprintln!(
+                    "TX wrap={:?} href={:?} halign={:?} hoff={:.2} ol={:.2} ref_x={:.2} tblw={:.2} -> x={:.2}",
+                    table.common.text_wrap,
+                    horz_rel_to,
+                    horz_align,
+                    h_offset,
+                    outer_left,
+                    ref_x,
+                    table_width,
+                    x
+                );
             }
+            x
         } else {
             // Center/right alignment uses the occupied outer-margin box, while
             // the returned coordinate is the painted table border. Omitting the
@@ -3297,15 +3317,34 @@ impl LayoutEngine {
             } else {
                 0.0
             };
+            // 저장-배치(HWPX 직파스/hwp5-origin) 문서의 Square+본문기준 표도
+            // TopAndBottom 과 동일하게 외곽여백 상자가 배치 기준 — 그리는 표
+            // 상단은 outer_margin_top 만큼 안쪽. RowBreak 첫 단편은
+            // para_square_rowbreak_first_fragment_top_offset_px 가 이미
+            // outer_margin_top 을 포함하므로 이중 가산을 막는다.
+            let om_top_px = if !table_treat_as_char
+                && matches!(table_text_wrap, crate::model::shape::TextWrap::Square)
+                && matches!(table.common.vert_rel_to, VertRelTo::Para)
+                && (self.profile.get().hwpx_stored_layout()
+                    || self.profile.get().hwp5_origin_hwpx())
+                && crate::renderer::float_placement::para_square_rowbreak_first_fragment_top_offset_px(
+                    table,
+                    self.dpi,
+                ) <= 0.0
+            {
+                hwpunit_to_px(table.outer_margin_top as i32, self.dpi)
+            } else {
+                0.0
+            };
             if let Some(ref caption) = table.caption {
                 use crate::model::shape::CaptionDirection;
                 if matches!(caption.direction, CaptionDirection::Top) {
-                    y_start + caption_height + caption_spacing + v_offset
+                    y_start + caption_height + caption_spacing + v_offset + om_top_px
                 } else {
-                    y_start + v_offset
+                    y_start + v_offset + om_top_px
                 }
             } else {
-                y_start + v_offset
+                y_start + v_offset + om_top_px
             }
         } else {
             // 중첩 표: outer_margin_top 적용
@@ -3384,6 +3423,8 @@ impl LayoutEngine {
                     last.cell_index = cell_idx;
                     last.cell_para_index = cp_idx;
                     last.text_direction = cell.text_direction;
+                    last.line_wrap_squeeze =
+                        cell.line_wrap == crate::model::table::CellLineWrap::Squeeze;
                 }
                 Some(new_ctx)
             } else {
@@ -3394,6 +3435,8 @@ impl LayoutEngine {
                         cell_index: cell_idx,
                         cell_para_index: cp_idx,
                         text_direction: cell.text_direction,
+                        line_wrap_squeeze: cell.line_wrap
+                            == crate::model::table::CellLineWrap::Squeeze,
                     }],
                 })
             };
@@ -3420,7 +3463,14 @@ impl LayoutEngine {
                 || trust_stored_cell_flow
                 || has_initial_tac_shape_host(&cell.paragraphs);
             if use_saved_cell_para_vpos && !has_nested_table {
-                if let Some(first_seg) = para.line_segs.first() {
+                // 합성 LINE_SEG(저장 줄 정보 없는 문단을 로드 시 채운 것)의 vpos 는 문단마다
+                // 0 에서 시작하는 자리표시값이다. 절대 위치로 쓰면 셀의 문단이 모두 한 줄에
+                // 겹친다 (36341511 p6 추진절차 상자: "발주 서류 작성"/"(기술처 사업추진팀)").
+                if let Some(first_seg) = para
+                    .line_segs
+                    .first()
+                    .filter(|seg| !line_seg_is_synthetic(seg))
+                {
                     if first_seg.vertical_pos >= 0 {
                         let spacing_before = styles
                             .para_styles
@@ -4403,6 +4453,7 @@ impl LayoutEngine {
                                 cell_index: 0,
                                 cell_para_index: 0,
                                 text_direction: 0,
+                                line_wrap_squeeze: false,
                             });
                             new_ctx
                         });
@@ -4990,6 +5041,14 @@ impl LayoutEngine {
             // 기존 문서의 1~4mm급 일반 셀 여백은 종전 오버플로우 방어를 유지한다.
             let preserve_explicit_horizontal_padding =
                 cell.apply_inner_margin && cell.padding.left.max(cell.padding.right) >= 1700;
+            // SQUEEZE 셀은 오버플로우 때 좌우 여백을 1mm(284hu)까지만 줄여 넓은
+            // 압축 존(cell−2×284hu)을 만들고, 넘치는 텍스트는 자간 압축으로 그 존에
+            // 맞춘다. 오버플로우가 없으면 원래 여백 유지 → 배분 정렬 폭도 그대로.
+            let min_pad = if cell.line_wrap == crate::model::table::CellLineWrap::Squeeze {
+                hwpunit_to_px(284, self.dpi)
+            } else {
+                1.0
+            };
             let (new_pl, new_pr) = self.shrink_cell_padding_for_overflow(
                 pad_left,
                 pad_right,
@@ -4998,6 +5057,7 @@ impl LayoutEngine {
                 &cell.paragraphs,
                 styles,
                 preserve_explicit_horizontal_padding,
+                min_pad,
             );
             pad_left = new_pl;
             pad_right = new_pr;
@@ -6701,7 +6761,14 @@ impl LayoutEngine {
                 && p.line_segs.windows(2).all(|pair| {
                     pair[1].vertical_pos >= pair[0].vertical_pos.saturating_add(pair[0].line_height)
                 });
-            let is_overlay_spacer_para = is_empty_spacer_para && !authored_empty_line;
+            // 저장 LINE_SEG 없는 문단이 섞인 셀은 한컴이 셀 전체를 다시 조판한다. 빈 문단의
+            // 저장 vpos(생성기가 쓴 0)는 겹침 증거가 아니므로 빈 문단도 온전한 줄이다
+            // (86712 법령 인용 셀: 마지막 빈 문단까지 줄 1개로 조각 높이에 포함).
+            let reflowed_cell_line = is_empty_spacer_para
+                && !p.line_segs.is_empty()
+                && crate::renderer::float_placement::cell_is_reflowed(cell);
+            let is_overlay_spacer_para =
+                is_empty_spacer_para && !authored_empty_line && !reflowed_cell_line;
             let preserve_vpos_empty_spacer = preserve_linear_single_cell_vpos
                 && is_empty_spacer_para
                 && p.line_segs.len() == 1
@@ -7005,7 +7072,14 @@ impl LayoutEngine {
                         900.0
                     };
                     let total_frag_h: f64 = frags.iter().map(|fragment| fragment.height).sum();
-                    if frags.len() > 1 && total_frag_h > multi_page_px {
+                    // 새로 조판되는 중첩 셀(저장 LINE_SEG 없는 문단 포함)은 한컴이 줄 단위로
+                    // 쪽을 나눈다 — 크기와 무관하게 fragment 로 분해한다 (86712 근거설명 행:
+                    // 609px 중첩 셀이 p26/p27 에 걸침, 한컴 PDF 실측).
+                    let reflowed_nested = nt
+                        .cells
+                        .iter()
+                        .any(crate::renderer::float_placement::cell_is_reflowed);
+                    if frags.len() > 1 && (total_frag_h > multi_page_px || reflowed_nested) {
                         let om_top = hwpunit_to_px(nt.outer_margin_top as i32, self.dpi);
                         let om_bot = hwpunit_to_px(nt.outer_margin_bottom as i32, self.dpi);
                         let n = frags.len();
@@ -10720,12 +10794,24 @@ mod row_cut_tests {
         assert_eq!(ranges[2], (0, 1));
     }
 
-    fn hwpx_outer_border_fixture() -> (Table, ResolvedStyleSet) {
-        let border = BorderLine {
-            line_type: BorderLineType::Solid,
-            width: 1,
-            color: 0,
+    /// 2x2 표: 외곽 셀 엣지는 흰색, 내부 괘선은 검정. 표 borderFill 은 모델에 없어도 된다
+    /// (외곽 재도색은 해석이 끝난 셀 엣지 격자만 사용).
+    #[allow(clippy::type_complexity)]
+    fn hwpx_outer_border_fixture() -> (
+        Table,
+        Vec<Vec<Option<BorderLine>>>,
+        Vec<Vec<Option<BorderLine>>>,
+        Vec<Vec<f64>>,
+        Vec<f64>,
+    ) {
+        let line = |color: u32| {
+            Some(BorderLine {
+                line_type: BorderLineType::Solid,
+                width: 1,
+                color,
+            })
         };
+        let (white, black) = (line(0x00FF_FFFF), line(0));
         let table = Table {
             border_fill_id: 1,
             common: CommonObjAttr {
@@ -10736,36 +10822,36 @@ mod row_cut_tests {
             },
             ..Default::default()
         };
-        let styles = ResolvedStyleSet {
-            border_styles: vec![ResolvedBorderStyle {
-                borders: [border; 4],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        (table, styles)
+        let h_edges = vec![vec![white; 2], vec![black; 2], vec![white; 2]];
+        let v_edges = vec![vec![white; 2], vec![black; 2], vec![white; 2]];
+        let row_col_x = vec![vec![0.0, 100.0, 200.0]; 2];
+        let row_y = vec![0.0, 20.0, 40.0];
+        (table, h_edges, v_edges, row_col_x, row_y)
     }
 
     #[test]
-    fn hancom_hwpx_flow_table_adds_exactly_four_outer_border_rules() {
-        let (table, styles) = hwpx_outer_border_fixture();
+    fn hancom_hwpx_flow_table_restrokes_outer_cell_edges_not_table_border() {
+        let (table, h_edges, v_edges, row_col_x, row_y) = hwpx_outer_border_fixture();
         let mut tree = PageRenderTree::new(0, 800.0, 1100.0);
         let nodes = hancom_hwpx_table_outer_border_nodes(
-            &mut tree, &styles, &table, true, 0, 117.16, 136.04, 559.386, 51.28,
+            &mut tree, &table, true, 0, &h_edges, &v_edges, &row_col_x, &row_y, 10.0, 10.0,
         );
 
-        assert_eq!(nodes.len(), 4, "one repeated rule per outer edge");
-        assert!(nodes
-            .iter()
-            .all(|node| matches!(node.node_type, RenderNodeType::Line(_))));
+        assert_eq!(nodes.len(), 4, "one merged rule per outer edge");
+        for node in &nodes {
+            let RenderNodeType::Line(line) = &node.node_type else {
+                panic!("outer rule must be a line");
+            };
+            assert_eq!(line.style.color, 0x00FF_FFFF, "outer cell edge colour");
+        }
     }
 
     #[test]
     fn native_table_does_not_add_hancom_hwpx_outer_border_rules() {
-        let (table, styles) = hwpx_outer_border_fixture();
+        let (table, h_edges, v_edges, row_col_x, row_y) = hwpx_outer_border_fixture();
         let mut tree = PageRenderTree::new(0, 800.0, 1100.0);
         let nodes = hancom_hwpx_table_outer_border_nodes(
-            &mut tree, &styles, &table, false, 0, 117.16, 136.04, 559.386, 51.28,
+            &mut tree, &table, false, 0, &h_edges, &v_edges, &row_col_x, &row_y, 10.0, 10.0,
         );
 
         assert!(nodes.is_empty());
@@ -11344,6 +11430,7 @@ mod row_cut_tests {
             &paragraphs,
             &styles,
             false,
+            1.0,
         );
         assert!(
             shrunk.0 < 20.0 || shrunk.1 < 20.0,
@@ -11358,6 +11445,7 @@ mod row_cut_tests {
             &paragraphs,
             &styles,
             true,
+            1.0,
         );
         assert_eq!(
             preserved,

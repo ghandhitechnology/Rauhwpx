@@ -31,7 +31,7 @@ use super::font_lookup::{
     SystemFontFamilies,
 };
 use super::image_conv::{draw_image_bytes, draw_svg_fragment, ImageSampling};
-use super::text_replay::SkiaTextReplay;
+use super::text_replay::{draw_text_run, SkiaTextReplay};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NativeGlyphRunReplayProofReason {
@@ -607,11 +607,20 @@ impl SkiaLayerRenderer {
         let clip_enabled = output_options.clip_enabled;
         let apply_dash = |paint: &mut Paint, dash: StrokeDash| {
             let base_width = paint.stroke_width().max(1.0);
+            // 점선은 선 굵기 비례 간격(한컴 규칙)이라 이미 실제 선폭이 곱해져 나온다.
+            let interval_scale = if matches!(dash, StrokeDash::Dot) {
+                1.0
+            } else {
+                base_width
+            };
             let intervals: Option<[f32; 6]> = match dash {
                 StrokeDash::Solid => None,
                 StrokeDash::Dash => Some([6.0, 3.0, 0.0, 0.0, 0.0, 0.0]),
                 StrokeDash::LongDash => Some([10.0, 3.0, 0.0, 0.0, 0.0, 0.0]),
-                StrokeDash::Dot => Some([2.0, 2.0, 0.0, 0.0, 0.0, 0.0]),
+                StrokeDash::Dot => {
+                    let (on, off) = crate::renderer::dot_dash_segments(paint.stroke_width() as f64);
+                    Some([on as f32, off as f32, 0.0, 0.0, 0.0, 0.0])
+                }
                 StrokeDash::Circle => {
                     paint.set_stroke_cap(paint::Cap::Round);
                     Some([0.1, 3.0, 0.0, 0.0, 0.0, 0.0])
@@ -623,7 +632,7 @@ impl SkiaLayerRenderer {
                 let intervals = intervals
                     .into_iter()
                     .filter(|value| *value > 0.0)
-                    .map(|value| value * base_width)
+                    .map(|value| value * interval_scale)
                     .collect::<Vec<_>>();
                 if let Some(effect) = PathEffect::dash(&intervals, 0.0) {
                     paint.set_path_effect(effect);
@@ -698,7 +707,8 @@ impl SkiaLayerRenderer {
             let mut text = Paint::default();
             text.set_anti_alias(true);
             text.set_color(Color::from_argb(220, 64, 64, 64));
-            canvas.draw_str(
+            draw_text_run(
+                canvas,
                 label,
                 (bbox.x as f32 + 4.0, (bbox.y + bbox.height / 2.0) as f32),
                 &font,
@@ -749,8 +759,12 @@ impl SkiaLayerRenderer {
                     canvas.translate((0.0, cy * 2.0));
                     canvas.scale((1.0, -1.0));
                 }
+                // [Task #1067] svg/web_canvas 와 동일 — 한쪽만 대칭이면 회전 부호 반전.
                 if transform.rotation != 0.0 {
-                    canvas.rotate(transform.rotation as f32, Some((cx, cy).into()));
+                    canvas.rotate(
+                        transform.rotation_after_flip() as f32,
+                        Some((cx, cy).into()),
+                    );
                 }
             };
 
@@ -985,15 +999,18 @@ impl SkiaLayerRenderer {
                         PaintOp::FootnoteMarker { bbox, marker } => {
                             let style = crate::renderer::TextStyle {
                                 font_family: marker.font_family.clone(),
-                                font_size: (marker.base_font_size * 0.55).max(7.0),
+                                // 각주 번호 위첨자: 본문 글꼴의 0.75 배율 (한컴 PDF 정합)
+                                font_size: (marker.base_font_size * 0.75).max(7.0),
                                 color: marker.color,
                                 ..Default::default()
                             };
+                            let sup_size = style.font_size;
                             text_replay.draw_text(
                                 &marker.text,
                                 *bbox,
                                 &style,
-                                bbox.height * 0.4,
+                                // 본문 baseline 에서 (본문-위첨자) 크기 차만큼만 올려 top 정렬
+                                marker.baseline - (marker.base_font_size - sup_size) * 0.85,
                                 0.0,
                                 false,
                                 None,
@@ -1261,6 +1278,8 @@ impl SkiaLayerRenderer {
                             render_equation(
                                 canvas,
                                 &self.font_mgr,
+                                &self.custom_typefaces,
+                                &self.bundled_typefaces,
                                 &self.system_families,
                                 &equation.layout_box,
                                 bbox.x,
@@ -1400,7 +1419,7 @@ impl SkiaLayerRenderer {
                     let text_w = font.measure_str(label.as_ref(), Some(&tp)).0;
                     let tx = x + (w - text_w) / 2.0;
                     let ty = y + h / 2.0 + font.size() * 0.35;
-                    canvas.draw_str(label.as_ref(), (tx, ty), &font, &tp);
+                    draw_text_run(canvas, label.as_ref(), (tx, ty), &font, &tp);
                 }
             }
             FormType::CheckBox => {
@@ -1451,7 +1470,7 @@ impl SkiaLayerRenderer {
                     tp.set_color(fg_color);
                     let tx = bx + box_size + 4.0;
                     let ty = y + h / 2.0 + font.size() * 0.35;
-                    canvas.draw_str(caption.as_ref(), (tx, ty), &font, &tp);
+                    draw_text_run(canvas, caption.as_ref(), (tx, ty), &font, &tp);
                 }
             }
             FormType::RadioButton => {
@@ -1488,7 +1507,7 @@ impl SkiaLayerRenderer {
                     tp.set_color(fg_color);
                     let tx = cx + r + 4.0;
                     let ty = y + h / 2.0 + font.size() * 0.35;
-                    canvas.draw_str(caption.as_ref(), (tx, ty), &font, &tp);
+                    draw_text_run(canvas, caption.as_ref(), (tx, ty), &font, &tp);
                 }
             }
             FormType::ComboBox => {
@@ -1539,7 +1558,7 @@ impl SkiaLayerRenderer {
                     tp.set_color(fg_color);
                     let tx = x + 4.0;
                     let ty = y + h / 2.0 + font.size() * 0.35;
-                    canvas.draw_str(&form.text, (tx, ty), &font, &tp);
+                    draw_text_run(canvas, &form.text, (tx, ty), &font, &tp);
                 }
             }
             FormType::Edit => {
@@ -1563,7 +1582,7 @@ impl SkiaLayerRenderer {
                     tp.set_color(fg_color);
                     let tx = x + 4.0;
                     let ty = y + h / 2.0 + font.size() * 0.35;
-                    canvas.draw_str(&form.text, (tx, ty), &font, &tp);
+                    draw_text_run(canvas, &form.text, (tx, ty), &font, &tp);
                 }
             }
         }
@@ -2664,6 +2683,49 @@ mod tests {
     }
 
     #[test]
+    fn flipped_rotated_path_flips_before_rotating_like_svg() {
+        // 좌상단 삼각형 + 좌우 대칭 + 90° 회전: 한컴/SVG 는 대칭(→우상단) 후 시계 방향
+        // 회전(→우하단)으로 그린다. 회전 부호를 반전하지 않으면 좌상단에 남는다.
+        let mut path = PathNode::new(
+            vec![
+                PathCommand::MoveTo(0.0, 0.0),
+                PathCommand::LineTo(10.0, 0.0),
+                PathCommand::LineTo(0.0, 10.0),
+                PathCommand::ClosePath,
+            ],
+            ShapeStyle {
+                fill_color: Some(0x00000000),
+                ..Default::default()
+            },
+            None,
+        );
+        path.transform = crate::renderer::render_tree::ShapeTransform {
+            rotation: 90.0,
+            horz_flip: true,
+            vert_flip: false,
+        };
+        let tree = PageLayerTree::new(
+            20.0,
+            20.0,
+            LayerNode::leaf(
+                BoundingBox::new(0.0, 0.0, 20.0, 20.0),
+                None,
+                vec![PaintOp::path(BoundingBox::new(0.0, 0.0, 20.0, 20.0), path)],
+            ),
+        );
+        let output = SkiaLayerRenderer::new()
+            .render_raster_with_options(&tree, RasterRenderOptions::default())
+            .expect("render flipped rotated path");
+        let image = decode_rgba(&output.bytes);
+
+        assert!(
+            image.get_pixel(17, 17)[3] > 200,
+            "대칭 후 회전하면 우하단에 그려져야 함"
+        );
+        assert_eq!(image.get_pixel(2, 2)[3], 0);
+    }
+
+    #[test]
     fn renders_arc_path_segments_as_ink() {
         let path = PathNode::new(
             vec![
@@ -3188,6 +3250,7 @@ mod tests {
             number: 1,
             text: "1)".to_string(),
             base_font_size: 18.0,
+            baseline: 20.0,
             font_family: String::new(),
             color: 0x00000000,
             section_index: 0,

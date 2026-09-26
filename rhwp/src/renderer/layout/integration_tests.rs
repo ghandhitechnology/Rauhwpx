@@ -169,6 +169,7 @@ mod tests {
 
         let styles = ResolvedStyleSet {
             hwp3_variant: false,
+            page_number_char_shape: None,
             char_styles: vec![ResolvedCharStyle::default()],
             para_styles: vec![ResolvedParaStyle {
                 border_fill_id: 1,
@@ -2243,7 +2244,7 @@ mod tests {
             return;
         };
         let svg = core.render_page_svg_native(0).unwrap_or_default();
-        let count = count_text_at_y(&svg, 1083.6);
+        let count = count_text_at_y(&svg, 1081.6);
         assert_eq!(
             count, 3,
             "aift.hwp 페이지 1 (cover disclaimer, PageNumberPos 등록 페이지) 은 \
@@ -2259,7 +2260,7 @@ mod tests {
             return;
         };
         let svg = core.render_page_svg_native(5).unwrap_or_default();
-        let count = count_text_at_y(&svg, 1083.6);
+        let count = count_text_at_y(&svg, 1081.6);
         assert_eq!(
             count, 3,
             "aift.hwp 페이지 6 (본문 시작) 은 한컴이 \"- N -\" 표시. \
@@ -2274,7 +2275,7 @@ mod tests {
             return;
         };
         let svg = core.render_page_svg_native(6).unwrap_or_default();
-        let count = count_text_at_y(&svg, 1083.6);
+        let count = count_text_at_y(&svg, 1081.6);
         assert_eq!(
             count, 3,
             "aift.hwp 페이지 7 (NewNumber 발화) 은 \"- 1 -\" 3글자 표시되어야 함."
@@ -2289,7 +2290,7 @@ mod tests {
             return;
         };
         let svg = core.render_page_svg_native(3).unwrap_or_default();
-        let count = count_text_at_y(&svg, 1083.6);
+        let count = count_text_at_y(&svg, 1081.6);
         assert_eq!(
             count, 0,
             "aift.hwp 페이지 4 는 PageHide page_num=true (paragraph 2.34) 로 미표시."
@@ -2303,7 +2304,7 @@ mod tests {
             return;
         };
         let svg = core.render_page_svg_native(4).unwrap_or_default();
-        let count = count_text_at_y(&svg, 1083.6);
+        let count = count_text_at_y(&svg, 1081.6);
         assert_eq!(
             count, 0,
             "aift.hwp 페이지 5 는 PageHide page_num=true (paragraph 2.54) 로 미표시."
@@ -2317,7 +2318,7 @@ mod tests {
             return;
         };
         let svg = core.render_page_svg_native(0).unwrap_or_default();
-        let count = count_text_at_y(&svg, 1069.7066666666665);
+        let count = count_text_at_y(&svg, 1062.69);
         assert_eq!(
             count, 0,
             "국립국어원 페이지 1 은 PageHide (paragraph 0.19) 로 미표시."
@@ -2338,7 +2339,7 @@ mod tests {
             return;
         };
         let svg = core.render_page_svg_native(2).unwrap_or_default();
-        let count = count_text_at_y(&svg, 1069.7066666666665);
+        let count = count_text_at_y(&svg, 1062.69);
         assert_eq!(
             count, 0,
             "국립국어원 페이지 3 은 셀 안 PageHide 영역의 hide_page_num 영역 적용 영역으로 \
@@ -2355,7 +2356,8 @@ mod tests {
         let svg = core.render_page_svg_native(0).unwrap_or_default();
         // Issue #951: margin_bottom 원본값 보존 후 쪽번호 위치 보정 (1061.4→1050.8)
         // [#3048] 쪽 번호를 10pt 로 교정하면서 줄 baseline 이 +4.44px 이동 (1050.8→1055.24).
-        let count = count_text_at_y(&svg, 1055.24);
+        // 쪽 번호 줄을 꼬리말 칸 바닥 기준으로 옮김 (1055.24→1062.69, 한컴 PDF 1063.36).
+        let count = count_text_at_y(&svg, 1062.69);
         assert_eq!(
             count, 3,
             "hwp3-sample.hwp 페이지 1 (NewNumber 0개) 은 쪽번호 표시되어야 함 (회귀 방지)."
@@ -2652,6 +2654,7 @@ mod tests {
         let composed: Vec<_> = paragraphs.iter().map(compose_paragraph).collect();
         let styles = ResolvedStyleSet {
             hwp3_variant: false,
+            page_number_char_shape: None,
             char_styles: vec![ResolvedCharStyle::default()],
             para_styles: vec![ResolvedParaStyle::default()],
             border_styles: Vec::new(),

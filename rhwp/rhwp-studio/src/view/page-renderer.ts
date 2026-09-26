@@ -20,6 +20,11 @@ interface LayerPlaneSummary {
   flowImageCount: number;
   flowRawSvgCount: number;
   flowStaticCount: number;
+  /**
+   * 본문 그림을 flow canvas 아래 정적 layer 로 분리해도 그리기 순서가 유지되는지.
+   * 그림보다 먼저 그려지는 채우기·글자가 그림과 겹치면 분리 합성이 그림을 가리므로 false.
+   */
+  flowStaticSplitSafe: boolean;
   signature: string;
 }
 
@@ -647,6 +652,7 @@ export class PageRenderer {
     return (
       !layers.hasBehind &&
       layers.flowStaticCount > 0 &&
+      layers.flowStaticSplitSafe &&
       this.flowSplitSupported !== false
     );
   }
@@ -772,6 +778,8 @@ export class PageRenderer {
           ? rawSvgCount
           : finiteCount(wrapper.flowRawSvgCount);
       const flowStaticCount = flowImageCount + flowRawSvgCount;
+      // 판정 필드가 없는 엔진은 순서 보존을 확인할 수 없으므로 분리하지 않는다.
+      const flowStaticSplitSafe = wrapper.flowStaticSplitSafe === true;
       return {
         hasBehind: wrapper.hasBehind,
         hasFront: wrapper.hasFront,
@@ -780,7 +788,8 @@ export class PageRenderer {
         flowImageCount,
         flowRawSvgCount,
         flowStaticCount,
-        signature: `overlay:${wrapper.hasBehind ? 1 : 0}:${wrapper.hasFront ? 1 : 0}:${imageCount}:${rawSvgCount}:${flowImageCount}:${flowRawSvgCount}:${json.length}`,
+        flowStaticSplitSafe,
+        signature: `overlay:${wrapper.hasBehind ? 1 : 0}:${wrapper.hasFront ? 1 : 0}:${imageCount}:${rawSvgCount}:${flowImageCount}:${flowRawSvgCount}:${flowStaticSplitSafe ? 1 : 0}:${json.length}`,
       };
     } catch (e) {
       console.warn('[PageRenderer] OverlayImageSummary JSON parse 실패:', e);
@@ -1102,6 +1111,8 @@ function emptyLayerPlaneSummary(): LayerPlaneSummary {
     flowImageCount: 0,
     flowRawSvgCount: 0,
     flowStaticCount: 0,
+    // 트리 fallback 경로는 순서 보존을 판정하지 않는다 — 분리하지 않는 쪽이 항상 정확하다.
+    flowStaticSplitSafe: false,
     signature: 'empty',
   };
 }

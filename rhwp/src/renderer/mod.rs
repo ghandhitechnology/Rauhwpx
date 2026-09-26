@@ -22,6 +22,7 @@ pub mod font_paths;
 pub(crate) mod form_caption;
 pub mod height_cursor;
 pub mod height_measurer;
+mod hft_metrics;
 pub mod html;
 pub mod hyperlinks;
 pub(crate) mod image_header;
@@ -125,6 +126,9 @@ pub struct TextStyle {
     pub font_metrics_policy: crate::model::provenance::FontMetricsPolicy,
     /// 글꼴 이름
     pub font_family: String,
+    /// 문서가 선언한 대체 글꼴 face (HWPX `<hh:substFont>` / HWP5 alt_name).
+    /// 원본 글꼴 미설치 시 generic 폴백보다 먼저 시도할 이름. 비어 있으면 없음.
+    pub font_subst: String,
     /// 글꼴 크기 (px)
     pub font_size: f64,
     /// 글자 색상
@@ -246,6 +250,7 @@ impl Default for TextStyle {
         Self {
             font_metrics_policy: Default::default(),
             font_family: String::new(),
+            font_subst: String::new(),
             font_size: 0.0,
             color: 0,
             bold: false,
@@ -286,6 +291,12 @@ impl Default for TextStyle {
     }
 }
 
+/// 합성 진하게 획 두께 (글자 크기 대비, 획 중심 기준 전체 폭).
+///
+/// 한컴(macOS) PDF 는 Bold 글꼴이 없는 서체를 `2 Tr`(fill+stroke) 로 그리고
+/// 선 굵기를 글자 크기의 1/40 로 준다 (돋움체 10pt 2.075/83, HY견고딕 12pt 2.5/100).
+pub(crate) const FAUX_BOLD_STROKE_EM: f64 = 0.025;
+
 /// 실제 Bold 메트릭이 없을 때만 한/글과 같은 가는 합성 획을 추가한다.
 /// Bold 서체에 획까지 겹치면 글자가 과하게 두꺼워진다.
 pub(crate) fn faux_bold_stroke_width(style: &TextStyle, font_size: f64) -> Option<f64> {
@@ -293,9 +304,138 @@ pub(crate) fn faux_bold_stroke_width(style: &TextStyle, font_size: f64) -> Optio
         return None;
     }
     let primary = style_resolver::primary_font_name(&style.font_family);
+    // macOS 한컴이 Bold face 를 제공하지 않는 서체는 DB 의 Windows Bold 메트릭이
+    // 있어도 합성하며, 획 비율도 서체별로 다르다.
+    if let Some(em) = macos_synthetic_bold_em(primary, style.font_metrics_policy) {
+        return Some(font_size * em);
+    }
     font_metrics_data::find_metric(primary, true, style.italic)?
         .bold_fallback
-        .then_some(font_size * 0.02)
+        .then_some(font_size * FAUX_BOLD_STROKE_EM)
+}
+
+/// macOS 한컴이 Bold face 를 제공하지 않아 굵게를 Regular + 합성 획(`2 Tr`)으로
+/// 그리는 서체의 획 비율(글자 크기 대비). 이 서체들의 DB Bold 메트릭은 Windows
+/// 글꼴 파일에서 추출한 것으로 참조 환경에는 없으므로 `HcrDeclared`(macOS)
+/// 규칙에서는 Bold 메트릭을 무시하고 Regular 폭으로 조판한다. `HancomWindows`
+/// 문서는 Windows 한/글이 실제 Bold 글꼴을 쓰므로 대상에서 제외한다.
+///
+/// 획 비율은 서체마다 다르다 — 한컴 macOS PDF 실측 `w`/Tm 단위:
+/// 맑은 고딕 ≈1/30 (2.75/83, 3.325/100, 3.6/108 — landscape-001·hwpx-h-01),
+/// 나머지(Haansoft Batang·돋움체·HY견고딕·HMKMM 등) ≈1/40 = FAUX_BOLD_STROKE_EM.
+/// 함초롬돋움 처럼 한컴 번들에 Bold face(HCR Dotum Bold)가 있는 서체는
+/// 실제 Bold 를 유지하므로 None 반환.
+pub(crate) fn macos_synthetic_bold_em(
+    font_name: &str,
+    policy: crate::model::provenance::FontMetricsPolicy,
+) -> Option<f64> {
+    if policy == crate::model::provenance::FontMetricsPolicy::HancomWindows {
+        return None;
+    }
+    let n: String = font_name.split_whitespace().collect();
+    if n.eq_ignore_ascii_case("malgungothic") || n == "맑은고딕" {
+        return Some(1.0 / 30.0);
+    }
+    None
+}
+
+/// 위/아래 첨자 glyph 크기 비율. 한컴(macOS) PDF 실측: 15pt 본문 → 9.6pt (80/125 장치 단위).
+pub(crate) const SCRIPT_GLYPH_SCALE: f64 = 0.64;
+/// 위첨자 기준선 상승량 (기본 글자 크기 대비). 한컴 PDF 실측: 15pt → 6.6pt.
+pub(crate) const SUPERSCRIPT_RAISE_EM: f64 = 0.44;
+/// 아래첨자 기준선 하강량 (기본 글자 크기 대비). 한컴 PDF 실측: 15pt → 1.8pt.
+pub(crate) const SUBSCRIPT_DROP_EM: f64 = 0.12;
+
+/// 위/아래 첨자의 (glyph 크기, 기준선 y 이동량). 모든 렌더러(SVG/Canvas/Skia/HTML)가 공유한다.
+/// 진행폭도 같은 비율로 줄어들며, 이는 측정 단계(`text_measurement::script_measure_style`)가
+/// 맡으므로 렌더러는 레이아웃 글자 위치를 그대로 쓴다.
+pub(crate) fn script_glyph_size_and_shift(style: &TextStyle, base_font_size: f64) -> (f64, f64) {
+    if style.superscript {
+        (
+            base_font_size * SCRIPT_GLYPH_SCALE,
+            -base_font_size * SUPERSCRIPT_RAISE_EM,
+        )
+    } else if style.subscript {
+        (
+            base_font_size * SCRIPT_GLYPH_SCALE,
+            base_font_size * SUBSCRIPT_DROP_EM,
+        )
+    } else {
+        (base_font_size, 0.0)
+    }
+}
+
+/// 반각 advance 로 줄인 전각 구두점의 glyph x 오프셋 (슬롯 시작 기준, OpenType `halt` 규칙).
+///
+/// 한컴(macOS)은 레이아웃에서 전각 `「` 에 반각 칸만 주되 glyph 는 줄이지 않고 그린다.
+/// 잉크가 전각 칸 오른쪽 반에 있는 여는 괄호·따옴표는 glyph 를 칸 오른쪽 끝에 맞추고
+/// (왼쪽으로 전각−반각 만큼 이동), 잉크가 왼쪽 반에 있는 닫는 쪽은 칸 시작에 둔다.
+/// PDF 실측(el-school-001 제목, HY헤드라인M 16pt·자간 -13%): `「` glyph 원점 141.12pt,
+/// 다음 글자 155.04pt — 전각 폭에도 슬롯과 같은 자간 비율(0.87)이 적용된 13.92pt.
+///
+/// `natural` 은 실제로 그릴 glyph 의 advance(장평 반영), `glyph_advance` 는 레이아웃이 준
+/// glyph advance(자간 제외, `compute_glyph_positions`). glyph 가 이미 칸에 맞으면 `None` —
+/// 렌더러는 기존 배치를 그대로 쓴다. SVG/Canvas/Skia 가 공유한다.
+pub(crate) fn halfwidth_punct_glyph_offset(
+    cluster: &str,
+    natural: f64,
+    glyph_advance: f64,
+    style: &TextStyle,
+) -> Option<f64> {
+    let mut chars = cluster.chars();
+    let (Some(ch), None) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    if !layout::is_halfwidth_forced_punct(ch)
+        || !natural.is_finite()
+        || glyph_advance <= 0.0
+        || natural <= glyph_advance * 1.2
+    {
+        return None;
+    }
+    // 여는 쪽(Unicode Ps/Pi): 잉크가 전각 칸의 오른쪽 반에 있다.
+    let opening = matches!(
+        ch,
+        '\u{2018}' | '\u{201B}' | '\u{201C}' | '\u{201F}' | '\u{300C}'
+    );
+    if !opening {
+        return Some(0.0);
+    }
+    // 자간(%)은 glyph 진행폭에 비례하므로 전각 폭에도 같은 비율을 적용한다.
+    let font_size = if style.font_size > 0.0 {
+        style.font_size
+    } else {
+        12.0
+    };
+    let spacing_scale = (1.0 + style.letter_spacing / font_size).max(0.0);
+    Some(-(natural - glyph_advance) * spacing_scale)
+}
+
+/// run 전체에 `halfwidth_punct_glyph_offset` 을 적용한 (글자 index, glyph x 오프셋) 목록.
+///
+/// 레이어 트리 JSON 으로 글자를 재생하는 backend(CanvasKit)가 규칙을 복제하지 않도록
+/// 엔진이 계산해 내보낸다. natural 폭은 SVG 와 같이 등록 글꼴 메트릭 기준이며,
+/// 0 이 아닌 오프셋(여는 괄호·따옴표)만 담는다.
+pub(crate) fn halfwidth_punct_glyph_offsets(text: &str, style: &TextStyle) -> Vec<(usize, f64)> {
+    if !text.chars().any(layout::is_halfwidth_forced_punct) {
+        return Vec::new();
+    }
+    let glyph_positions = layout::compute_glyph_positions(text, style);
+    let ratio = if style.ratio > 0.0 { style.ratio } else { 1.0 };
+    let mut utf8 = [0u8; 4];
+    text.chars()
+        .enumerate()
+        .filter_map(|(idx, ch)| {
+            if !layout::is_halfwidth_forced_punct(ch) {
+                return None;
+            }
+            let natural = layout::registered_glyph_advance(ch, style)? * ratio;
+            let advance = glyph_positions.get(idx + 1)? - glyph_positions.get(idx)?;
+            let offset =
+                halfwidth_punct_glyph_offset(ch.encode_utf8(&mut utf8), natural, advance, style)?;
+            (offset != 0.0).then_some((idx, offset))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -312,7 +452,7 @@ mod faux_bold_tests {
         assert_eq!(faux_bold_stroke_width(&style, 17.3), None);
 
         style.font_family = "굴림체".into();
-        assert_eq!(faux_bold_stroke_width(&style, 16.0), Some(0.32));
+        assert_eq!(faux_bold_stroke_width(&style, 16.0), Some(0.4));
 
         style.bold = false;
         assert_eq!(faux_bold_stroke_width(&style, 16.0), None);
@@ -429,6 +569,16 @@ pub enum StrokeDash {
     Circle,
     DashDot,
     DashDotDot,
+}
+
+/// 점선(Dot) 대시 간격 (선 그리기 단위, on/off 순).
+/// 한컴은 선 굵기 w 에 비례해 [4w/3 선분, 2w 공백]로 그린다 — 한컴 PDF 출력에서
+/// 0.36pt 선이 [0.48 on, 0.72 off] 로, 0.24pt 선이 [0.36, 0.48] 로 나오는 것으로 확인.
+/// (OWPML 명명 뒤바뀜으로 HWPX XML "DASH" 가 이 변형이다)
+/// 고정 px 패턴을 쓰면 가는 표 안선에서 점이 지나치게 성기게 나온다.
+pub fn dot_dash_segments(width: f64) -> (f64, f64) {
+    let w = width.max(0.2); // 0 에 가까운 선폭에서 대시가 사라지지 않게 하한만 둔다
+    (w * 4.0 / 3.0, w * 2.0)
 }
 
 /// 선 렌더링 종류 (이중선/삼중선)
@@ -1102,11 +1252,16 @@ pub fn base_family_without_weight_suffix(font_family: &str) -> Option<String> {
 }
 
 /// [#3314] 렌더용 폴백 체인 문자열: `요청 face → (base family) → generic 체인`.
-pub fn render_font_family_chain(font_family: &str) -> String {
+pub fn render_font_family_chain(font_family: &str, font_subst: &str) -> String {
     let fb = generic_fallback(font_family);
+    let subst = if font_subst.is_empty() {
+        String::new()
+    } else {
+        format!("'{}',", font_subst)
+    };
     match base_family_without_weight_suffix(font_family) {
-        Some(base) => format!("{},'{}',{}", font_family, base, fb),
-        None => format!("{},{}", font_family, fb),
+        Some(base) => format!("{},'{}',{}{}", font_family, base, subst, fb),
+        None => format!("{},{}{}", font_family, subst, fb),
     }
 }
 
@@ -1115,17 +1270,83 @@ pub fn render_font_family_chain(font_family: &str) -> String {
 /// [#3314] Canvas API가 요구하는 인용 형식을 유지하면서, 굵기 접미사 face
 /// 바로 뒤에 base family를 넣어 generic 폴백보다 먼저 선택되게 한다.
 /// 측정 경로에는 사용하지 않는다.
-pub fn canvas_font_family_chain(font_family: &str) -> String {
+pub fn canvas_font_family_chain(font_family: &str, font_subst: &str) -> String {
     if font_family.is_empty() {
         return "sans-serif".to_string();
     }
 
     let fallback = generic_fallback(font_family);
+    let subst = if font_subst.is_empty() {
+        String::new()
+    } else {
+        format!(" \"{}\",", font_subst)
+    };
     match base_family_without_weight_suffix(font_family) {
-        Some(base) => format!("\"{}\", \"{}\", {}", font_family, base, fallback),
-        None => format!("\"{}\", {}", font_family, fallback),
+        Some(base) => format!("\"{}\", \"{}\",{} {}", font_family, base, subst, fallback),
+        None => format!("\"{}\",{} {}", font_family, subst, fallback),
     }
 }
+
+/// 한컴 전용 HFT 영문 글꼴 대신 글리프를 그릴 설치 서체 (선호 순서).
+///
+/// HCI Poppy(HMEPO*.HFT)는 Palatino 복제 서체다. 폭 테이블이 macOS Palatino 와
+/// 같고, Palatino Linotype 과는 `# + / < = > @ ^ | ~` 폭(0.605em vs 0.5em)이 다르다.
+/// 레이아웃은 HFT 자체 폭(font_metrics_data "HCI Poppy")으로 재므로 호스트와
+/// 무관하게 같다. 글리프만 설치된 첫 서체로 그린다: macOS Palatino(4 스타일) →
+/// Windows Palatino Linotype(4 스타일) → Book Antiqua (한컴 FontMap.dat
+/// `mapAllFont=Palatino,Palatino Linotype` / `Palatino,Book Antiqua`).
+pub(crate) fn hft_substitute_faces(font_family: &str) -> &'static [&'static str] {
+    match font_family.trim() {
+        "HCI Poppy" => &["Palatino", "Palatino Linotype", "Book Antiqua"],
+        // 한양 견명조/견고딕 HFT 에는 한컴 배포 TTF 쌍이 있다
+        // (known_font_filenames: 한양견명조→HYMJRE.TTF, 한양견고딕→HYGTRE.TTF).
+        // 원명은 font_metrics_data 의 HanyangKyun* 메트릭이 재므로 레이아웃은
+        // 그대로 두고, 미설치 시 글리프 소스만 같은 face 의 TTF 로 대체한다.
+        "한양견명조" => &["HY견명조", "HYmjrE"],
+        "한양견고딕" => &["HY견고딕", "HYgtrE"],
+        "신명 디나루" => &["돋움", "한컴돋움", "Haansoft Dotum"],
+        _ => &[],
+    }
+}
+
+/// 설치되지 않은 표준 Windows 한글 폰트를 대신할 한컴 번들 서체 (선호 순서).
+///
+/// 한컴(macOS)은 문서가 요청한 표준 폰트가 없으면 자체 번들 서체로 치환해 그린다:
+/// 바탕·궁서(세리프) 계열 → 한컴바탕(Haansoft Batang), 돋움·굴림(산세리프)
+/// 계열 → 한컴돋움(Haansoft Dotum). 함초롬 계열은 둘째 후보다. 정답지 근거:
+/// hwpx-h-01 의 바탕 본문이 한컴 출력에서 Haansoft-Batang 으로 임베드된다.
+/// `hft_substitute_faces` 와 달리 generic fallback 체인과 무관하며, 요청
+/// family 가 어느 경로로도 해석되지 않을 때만 호출자가 적용한다.
+pub(crate) fn hancom_substitute_faces(font_family: &str) -> &'static [&'static str] {
+    match font_family.trim() {
+        "바탕" | "Batang" | "바탕체" | "BatangChe" | "궁서" | "Gungsuh" | "궁서체"
+        | "GungsuhChe" => &["한컴바탕", "Haansoft Batang", "함초롬바탕", "HCR Batang"],
+        // 한양/신명 명조 계열은 한컴 FontMap 치환에서도 명조 번들로 간다 —
+        // exam-kor-1p 정답지는 HY신명조/한양신명조 런을 HCRBatang 글리프로 굽는다.
+        // 두 서체를 generic serif chain 에 맡기면 macOS 는 AppleMyungjo 를 먼저
+        // 잡아 한컴 출력과 다른 명조로 렌더한다.
+        "HY신명조" | "한양신명조" | "신명 신명조" | "신명 견명조" | "신명 중명조" | "명조"
+        | "새문명조" => &["한컴바탕", "Haansoft Batang", "함초롬바탕", "HCR Batang"],
+        "돋움" | "Dotum" | "돋움체" | "DotumChe" | "굴림" | "Gulim" | "굴림체" | "GulimChe" => {
+            &["한컴돋움", "Haansoft Dotum", "함초롬돋움", "HCR Dotum"]
+        }
+        _ => &[],
+    }
+}
+
+/// HFT 폭 테이블에 없는 글자(0x7F 이후)를 잴 글꼴.
+///
+/// 한컴 FontMap.dat `mapFont=HCI Poppy,Palatino Linotype`: HFT 에 없는 글자는
+/// 한컴 번들 pala.ttf 로 그린다 (hy-001 PDF 의 `·` = PalatinoLinotype-Roman).
+pub(crate) fn hft_metric_fallback(font_family: &str) -> Option<&'static str> {
+    match font_family.trim() {
+        "HCI Poppy" => Some("Palatino Linotype"),
+        "신명 디나루" => Some("돋움"),
+        _ => None,
+    }
+}
+
+const HCI_POPPY_FALLBACK: &str = "'Palatino','Palatino Linotype','Book Antiqua','Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Haansoft Batang','한컴바탕','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
 
 /// CSS generic fallback 반환 (serif 또는 sans-serif)
 ///
@@ -1146,19 +1367,19 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
         // 굵게 렌더됨. 한컴 돋움 획 두께(페이지 밀도 0.265)에 근접한
         // 'Noto Sans KR ExtraLight'(rsvg 페이지 밀도 0.277)를 무거운 Noto 직전에 삽입 —
         // 시스템 고딕 렌더는 무영향, Noto 폴백만 가볍게 교체.
-        return "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
+        return "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','Haansoft Dotum','한컴돋움','HCR Dotum','함초롬돋움','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
     }
     // 고정폭 키워드
     let lower = font_family.to_ascii_lowercase();
     if (font_family.contains("KoPub돋움체") || lower.contains("kopub dotum"))
         && (font_family.contains("Light") || lower.contains("light"))
     {
-        return "'Noto Sans KR ExtraLight','Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
+        return "'Noto Sans KR ExtraLight','Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','Haansoft Dotum','한컴돋움','HCR Dotum','함초롬돋움','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
     }
     // KoPub Batang uses "바탕체" in the family name, but it is a proportional
     // serif publication face, not the Windows fixed-width BatangChe face.
     if font_family.contains("KoPub바탕체") || lower.contains("kopub batang") {
-        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Haansoft Batang','한컴바탕','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
     }
     if font_family.contains("굴림체")
         || font_family.contains("바탕체")
@@ -1171,6 +1392,20 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
         // Monospace: Windows → 오픈소스 → generic
         return "'GulimChe','굴림체','D2Coding','Noto Sans Mono',monospace";
     }
+    if font_family.trim() == "HCI Poppy" {
+        return HCI_POPPY_FALLBACK;
+    }
+    if font_family.trim() == "신명 디나루" {
+        return "'돋움','한컴돋움','Haansoft Dotum','Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR',sans-serif";
+    }
+    // 한양 HFT → 한컴 TTF 쌍(hft_substitute_faces 와 같은 매핑)을 generic 체인
+    // 앞에 둔다. 미설치 환경에선 자연스럽게 다음 후보로 넘어간다.
+    if font_family.trim() == "한양견고딕" {
+        return "'HY견고딕','HYgtrE','Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
+    }
+    if font_family.trim() == "한양견명조" {
+        return "'HY견명조','HYmjrE','Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+    }
     // 세리프 키워드 (한글)
     if font_family.contains("바탕") || font_family.contains("명조") || font_family.contains("궁서")
     {
@@ -1179,7 +1414,7 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
         // AppleMyungjo 보다 앞에 두어야 macOS Chrome 에서 CJK 글리프 bold 매칭 성공.
         // 'Source Han Serif K Old Hangul' (Task #528): @font-face unicode-range 가 옛한글
         // 영역 (U+1100-11FF, U+A960-A97F, U+D7B0-D7FF) 만 매칭하므로 일반 한글에 영향 없음.
-        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Haansoft Batang','한컴바탕','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
     }
     // 세리프 키워드 (영문) — "serif" 포함하되 "sans" 부분 문자열을 가진 폰트명 전체 제외
     if lower.contains("times")
@@ -1190,13 +1425,13 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
         || lower.contains("gungsuh")
         || (lower.contains("serif") && !lower.contains("sans"))
     {
-        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Haansoft Batang','한컴바탕','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
     }
     // Sans-serif: Windows → macOS/iOS → Android → 오픈소스 → 한컴 → generic
     // 'Source Han Serif K Old Hangul' (Task #528): unicode-range 옛한글 자모 영역 한정
     // 'Noto Sans KR ExtraLight' (Task #1224): 무거운 Noto CJK Regular 폴백 직전에 삽입해
     // 한컴 돋움 획 두께에 근접시킴. 시스템 고딕 우선 → 부재 시에만 ExtraLight 매칭.
-    "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif"
+    "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','Haansoft Dotum','한컴돋움','HCR Dotum','함초롬돋움','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif"
 }
 
 pub(crate) fn contains_old_hangul_jamo(text: &str) -> bool {
@@ -1825,28 +2060,38 @@ mod tests {
         // 전체가 접미사 토큰뿐이면 벗기지 않는다
         assert_eq!(base_family_without_weight_suffix("Light"), None);
         // 렌더 체인: 요청 face → base → generic
-        let chain = render_font_family_chain("Noto Serif KR Black");
+        let chain = render_font_family_chain("Noto Serif KR Black", "");
         assert!(chain.starts_with("Noto Serif KR Black,'Noto Serif KR',"));
-        let plain = render_font_family_chain("맑은 고딕");
+        let plain = render_font_family_chain("맑은 고딕", "");
         assert!(plain.starts_with("맑은 고딕,'Malgun Gothic'"));
+        // 문서 선언 대체 글꼴은 base 뒤·generic 앞에 삽입
+        let sub = render_font_family_chain("나눔고딕", "한컴바탕");
+        assert!(sub.starts_with("나눔고딕,'한컴바탕',"));
 
         assert_eq!(
-            canvas_font_family_chain("Noto Serif KR Black"),
+            canvas_font_family_chain("Noto Serif KR Black", ""),
             format!(
                 "\"Noto Serif KR Black\", \"Noto Serif KR\", {}",
                 generic_fallback("Noto Serif KR Black")
             )
         );
         assert_eq!(
-            canvas_font_family_chain("맑은 고딕"),
+            canvas_font_family_chain("맑은 고딕", ""),
             format!("\"맑은 고딕\", {}", generic_fallback("맑은 고딕"))
+        );
+        assert_eq!(
+            canvas_font_family_chain("나눔고딕", "한컴바탕"),
+            format!(
+                "\"나눔고딕\", \"한컴바탕\", {}",
+                generic_fallback("나눔고딕")
+            )
         );
     }
 
     #[test]
     fn test_generic_fallback() {
-        let serif = "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
-        let sans = "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
+        let serif = "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Haansoft Batang','한컴바탕','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+        let sans = "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR ExtraLight','Noto Sans KR','Pretendard','Haansoft Dotum','한컴돋움','HCR Dotum','함초롬돋움','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
         // Task #1224: ExtraLight 가 무거운 Noto 직전에 위치하는지 명시 검증
         assert!(sans.contains("'Noto Sans KR ExtraLight','Noto Sans KR'"));
         let mono = "'GulimChe','굴림체','D2Coding','Noto Sans Mono',monospace";
@@ -1857,6 +2102,9 @@ mod tests {
         assert_eq!(generic_fallback("HY견명조"), serif);
         assert_eq!(generic_fallback("Times New Roman"), serif);
         assert_eq!(generic_fallback("Palatino Linotype"), serif);
+        // HFT HCI Poppy: Palatino 대체 서체 → 세리프 체인
+        assert!(generic_fallback("HCI Poppy").starts_with("'Palatino','Palatino Linotype',"));
+        assert!(generic_fallback("HCI Poppy").ends_with(serif));
         // KoPub바탕체는 이름에 "바탕체"가 들어가지만 고정폭 BatangChe가 아니라
         // 비례폭 본문/제목용 세리프 계열이다.
         assert_eq!(generic_fallback("KoPub바탕체 Light"), serif);

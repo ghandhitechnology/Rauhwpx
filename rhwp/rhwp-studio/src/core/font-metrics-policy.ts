@@ -1,8 +1,7 @@
 export type FontMetricsPolicy = 'hancom-windows' | 'hcr-declared';
 
-/** Mac HWPX references use HCR Batang itself, not the Windows Latin substitute.
- * Keep native HWP and other environments unchanged until separately verified.
+/** Hancom for macOS is the reference platform: every environment measures
+ * faces with their declared advances. 'hancom-windows' stays available for
+ * the Windows substitution rules.
  */
-export function fontMetricsPolicyForEnvironment(platform: string, sourceFormat: string): FontMetricsPolicy {
-  return sourceFormat === 'hwpx' && /^Mac/.test(platform) ? 'hcr-declared' : 'hancom-windows';
-}
+export const DEFAULT_FONT_METRICS_POLICY: FontMetricsPolicy = 'hcr-declared';

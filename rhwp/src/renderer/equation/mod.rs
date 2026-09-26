@@ -168,7 +168,9 @@ mod metric_tests {
             let engine = layout::EqLayout::with_font(16.0, "HYhwpEQ").with_version(version);
             let natural = engine.layout(&ast);
             let placed = engine.layout_in_control_width(&ast, natural.width + 12.0);
-            assert_eq!(placed.x, 6.0);
+            // 한컴은 저장 폭보다 짧은 수식을 가운데 정렬하지 않고 좌측에 둔다
+            // (eq-002 실측).
+            assert_eq!(placed.x, 0.0);
             assert_eq!(placed.width, natural.width);
             assert_eq!(placed.height, natural.height);
             assert_eq!(placed.baseline, natural.baseline);

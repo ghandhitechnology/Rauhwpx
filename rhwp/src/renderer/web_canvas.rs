@@ -88,6 +88,39 @@ fn is_halfwidth_punct_cluster(cluster: &str) -> bool {
     matches!(ch, '\u{2018}'..='\u{2027}' | '\u{00B7}') || is_halfwidth_cjk_quote(ch)
 }
 
+/// Canvas 글꼴 체인(`family_chain`)이 `ch` 글리프를 직접 가지는지 폭 프로브로 판정한다.
+///
+/// Canvas API 는 글리프 존재를 묻지 못한다. 체인의 어느 글꼴에도 글리프가 없으면
+/// 브라우저는 시스템 문자 폴백으로 그리므로, generic 글꼴만 지정했을 때와 폭이 같다.
+/// 웹폰트가 늦게 로드될 수 있어 "있음" 결과만 캐시한다.
+#[cfg(target_arch = "wasm32")]
+fn canvas_chain_has_glyph(ctx: &CanvasRenderingContext2d, family_chain: &str, ch: char) -> bool {
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<(String, char), bool>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let key = (family_chain.to_string(), ch);
+    if let Some(hit) = CACHE.with(|cache| cache.borrow().get(&key).copied()) {
+        return hit;
+    }
+    let previous_font = ctx.font();
+    let text = ch.to_string();
+    let width_with = |family: &str| {
+        ctx.set_font(&format!("100px {family}"));
+        ctx.measure_text(&text).map(|m| m.width()).unwrap_or(0.0)
+    };
+    let chain_w = width_with(family_chain);
+    let serif_w = width_with("serif");
+    let mono_w = width_with("monospace");
+    ctx.set_font(&previous_font);
+    let system_fallback_only = (serif_w - mono_w).abs() < 0.01 && (chain_w - serif_w).abs() < 0.01;
+    let has = !system_fallback_only;
+    if has {
+        CACHE.with(|cache| cache.borrow_mut().insert(key, true));
+    }
+    has
+}
+
 /// 일반 글자와 효과 글자가 동일한 폰트 측정/변환 규칙을 사용한다.
 #[cfg(target_arch = "wasm32")]
 fn canvas_cluster_transform(
@@ -95,8 +128,9 @@ fn canvas_cluster_transform(
     cluster: &str,
     advance: f64,
     ratio: f64,
-    letter_spacing: f64,
+    style: &TextStyle,
 ) -> CanvasClusterTransform {
+    let letter_spacing = style.letter_spacing;
     let authored = CanvasClusterTransform {
         scale_x: ratio,
         scale_y: 1.0,
@@ -123,6 +157,16 @@ fn canvas_cluster_transform(
     }
     let pin_ascii_advance = cluster.chars().any(|ch| ch.is_ascii_alphanumeric());
     let visual_width = metrics.width() * ratio;
+    // 레이아웃이 반각으로 줄인 전각 구두점은 찌그러뜨리지 않고 halt 규칙으로 배치한다
+    // (svg/skia 와 같은 `halfwidth_punct_glyph_offset`).
+    if let Some(offset_x) =
+        super::halfwidth_punct_glyph_offset(cluster, visual_width, advance, style)
+    {
+        return CanvasClusterTransform {
+            offset_x,
+            ..authored
+        };
+    }
     // 반각 구두점(스마트 따옴표·낫표 등)은 레이아웃이 전각 glyph 를 반각 advance 로
     // 줄였을 수 있으므로 자간과 무관하게 넘치는 폭만 줄인다. 대체 글꼴 glyph 가 이미
     // 좁으면 그대로 그린다(고정 0.5 배율은 좁은 따옴표를 가늘게 찌그러뜨린다).
@@ -947,7 +991,8 @@ impl WebCanvasRenderer {
             } else {
                 ""
             };
-            let font_family = super::canvas_font_family_chain(&run.style.font_family);
+            let font_family =
+                super::canvas_font_family_chain(&run.style.font_family, &run.style.font_subst);
             let font = format!(
                 "{}{}{:.3}px {}",
                 font_style_str, font_weight, font_size, font_family
@@ -1311,11 +1356,13 @@ impl WebCanvasRenderer {
     }
 
     fn render_footnote_marker(&mut self, bbox: &BoundingBox, marker: &FootnoteMarkerNode) {
-        let sup_size = (marker.base_font_size * 0.55).max(7.0);
+        // 각주 번호 위첨자: 본문 글꼴의 0.75 배율 (한컴 PDF 정합)
+        let sup_size = (marker.base_font_size * 0.75).max(7.0);
         let font = format!("{:.1}px {}", sup_size, marker.font_family);
         self.ctx.set_font(&font);
         self.ctx.set_fill_style_str(&color_to_css(marker.color));
-        let y = bbox.y + bbox.height * 0.4;
+        // 본문 baseline 에서 (본문-위첨자) 크기 차만큼만 올려 top 정렬
+        let y = bbox.y + marker.baseline - (marker.base_font_size - sup_size) * 0.85;
         let _ = self.ctx.fill_text(&marker.text, bbox.x, y);
     }
 
@@ -1341,7 +1388,7 @@ impl WebCanvasRenderer {
             if !self.render_profile.shows_editor_visuals() {
                 return;
             }
-            self.set_line_dash(&StrokeDash::Dash);
+            self.set_line_dash(&StrokeDash::Dash, 1.0);
             self.ctx.set_stroke_style_str("#999999");
             self.ctx.set_line_width(1.0);
             self.ctx
@@ -1386,7 +1433,7 @@ impl WebCanvasRenderer {
         }
         self.ctx.set_fill_style_str(&color_to_css(ph.fill_color));
         self.ctx.fill_rect(bbox.x, bbox.y, bbox.width, bbox.height);
-        self.set_line_dash(&StrokeDash::Dash);
+        self.set_line_dash(&StrokeDash::Dash, 1.0);
         self.ctx
             .set_stroke_style_str(&color_to_css(ph.stroke_color));
         self.ctx.set_line_width(1.0);
@@ -1582,21 +1629,15 @@ impl WebCanvasRenderer {
         self.ctx.save();
         self.active_shape_transform_depth += 1;
         // [Task #1067] 한컴 정답지 시각 표준 정합 — flip 와 회전 동시 적용 시 회전 부호 반전.
-        // svg.rs::open_shape_transform 와 동일 패턴.
-        let flip_negate_rotation = transform.horz_flip ^ transform.vert_flip;
+        // svg.rs::open_shape_transform 와 동일 패턴 (ShapeTransform::rotation_after_flip).
         let _ = self.ctx.translate(cx, cy);
         let sx = if transform.horz_flip { -1.0 } else { 1.0 };
         let sy = if transform.vert_flip { -1.0 } else { 1.0 };
         let _ = self.ctx.scale(sx, sy);
         if transform.rotation != 0.0 {
-            let effective_rotation = if flip_negate_rotation {
-                -transform.rotation
-            } else {
-                transform.rotation
-            };
             let _ = self
                 .ctx
-                .rotate(effective_rotation * std::f64::consts::PI / 180.0);
+                .rotate(transform.rotation_after_flip().to_radians());
         }
         let _ = self.ctx.translate(-cx, -cy);
     }
@@ -1675,7 +1716,7 @@ impl WebCanvasRenderer {
     }
 
     /// 선 대시 패턴 설정
-    fn set_line_dash(&self, dash: &StrokeDash) {
+    fn set_line_dash(&self, dash: &StrokeDash, width: f64) {
         self.ctx
             .set_line_cap(if matches!(dash, StrokeDash::Circle) {
                 "round"
@@ -1697,9 +1738,11 @@ impl WebCanvasRenderer {
                 arr
             }
             StrokeDash::Dot => {
+                // 점선은 선 굵기 비례 간격 (한컴 규칙)
+                let (on, off) = crate::renderer::dot_dash_segments(width);
                 let arr = js_sys::Array::new();
-                arr.push(&JsValue::from_f64(2.0));
-                arr.push(&JsValue::from_f64(2.0));
+                arr.push(&JsValue::from_f64(on));
+                arr.push(&JsValue::from_f64(off));
                 arr
             }
             StrokeDash::Circle => {
@@ -1970,7 +2013,7 @@ impl WebCanvasRenderer {
             if let Some(stroke) = style.stroke_color {
                 self.ctx.set_stroke_style_str(&color_to_css(stroke));
                 self.ctx.set_line_width(style.stroke_width.max(0.5));
-                self.set_line_dash(&style.stroke_dash);
+                self.set_line_dash(&style.stroke_dash, style.stroke_width.max(0.5));
                 self.ctx.stroke();
                 let _ = self.ctx.set_line_dash(&js_sys::Array::new());
             }
@@ -2004,7 +2047,10 @@ impl WebCanvasRenderer {
                 };
                 self.ctx
                     .set_line_width(aligned.map_or(stroke_width, |(_, _, _, _, width)| width));
-                self.set_line_dash(&style.stroke_dash);
+                self.set_line_dash(
+                    &style.stroke_dash,
+                    aligned.map_or(stroke_width, |(_, _, _, _, width)| width),
+                );
                 if let Some((left, top, width, height, _)) = aligned {
                     self.ctx.stroke_rect(left, top, width, height);
                 } else {
@@ -2059,7 +2105,7 @@ impl WebCanvasRenderer {
         if let Some(stroke) = style.stroke_color {
             self.ctx.set_stroke_style_str(&color_to_css(stroke));
             self.ctx.set_line_width(style.stroke_width.max(0.5));
-            self.set_line_dash(&style.stroke_dash);
+            self.set_line_dash(&style.stroke_dash, style.stroke_width.max(0.5));
             self.ctx.stroke();
             let _ = self.ctx.set_line_dash(&js_sys::Array::new());
         }
@@ -2180,7 +2226,7 @@ impl WebCanvasRenderer {
         if let Some(stroke) = style.stroke_color {
             self.ctx.set_stroke_style_str(&color_to_css(stroke));
             self.ctx.set_line_width(style.stroke_width.max(0.5));
-            self.set_line_dash(&style.stroke_dash);
+            self.set_line_dash(&style.stroke_dash, style.stroke_width.max(0.5));
             self.ctx.stroke();
             let _ = self.ctx.set_line_dash(&js_sys::Array::new());
         }
@@ -2426,13 +2472,8 @@ impl Renderer for WebCanvasRenderer {
         };
 
         // 위첨자/아래첨자: 글꼴 크기 축소 + y좌표 조정
-        let (font_size, y) = if style.superscript {
-            (base_font_size * 0.7, y - base_font_size * 0.3)
-        } else if style.subscript {
-            (base_font_size * 0.7, y + base_font_size * 0.15)
-        } else {
-            (base_font_size, y)
-        };
+        let (font_size, script_dy) = super::script_glyph_size_and_shift(style, base_font_size);
+        let y = y + script_dy;
         let faux_bold_width = super::faux_bold_stroke_width(style, font_size);
         let font_weight = if style.bold && faux_bold_width.is_none() {
             "bold "
@@ -2440,7 +2481,7 @@ impl Renderer for WebCanvasRenderer {
             ""
         };
 
-        let font_family = super::canvas_font_family_chain(&style.font_family);
+        let font_family = super::canvas_font_family_chain(&style.font_family, &style.font_subst);
 
         let font = format!(
             "{}{}{:.3}px {}",
@@ -2571,12 +2612,37 @@ impl Renderer for WebCanvasRenderer {
                             0.0
                         }
                     };
+                    // 한컴 PUA 글리프가 글꼴 체인에 없으면 표준 대체 글리프를 원문 advance 에
+                    // 맞춰 그린다 (skia text_replay 와 같은 규칙).
+                    if let Some(substitute) = (cluster_str.chars().count() == 1)
+                        .then_some(ch)
+                        .and_then(super::composer::pua_missing_glyph_substitute)
+                        .filter(|_| !canvas_chain_has_glyph(&self.ctx, &font_family, ch))
+                    {
+                        let substitute = substitute.to_string();
+                        let glyph_w = self
+                            .ctx
+                            .measure_text(&substitute)
+                            .map(|metrics| metrics.width())
+                            .unwrap_or(0.0);
+                        self.ctx.save();
+                        self.ctx.translate(char_x, y).unwrap_or(());
+                        if glyph_w > glyph_advance && glyph_w > 0.0 {
+                            self.ctx.scale(glyph_advance / glyph_w, 1.0).unwrap_or(());
+                        }
+                        let _ = self.ctx.fill_text(&substitute, 0.0, 0.0);
+                        if synthetic_bold {
+                            let _ = self.ctx.stroke_text(&substitute, 0.0, 0.0);
+                        }
+                        self.ctx.restore();
+                        continue;
+                    }
                     let transform = canvas_cluster_transform(
                         &self.ctx,
                         cluster_str,
                         glyph_advance,
                         ratio,
-                        style.letter_spacing,
+                        style,
                     );
                     self.ctx.save();
                     self.ctx
@@ -2843,7 +2909,7 @@ impl Renderer for WebCanvasRenderer {
         }
 
         self.ctx.set_stroke_style_str(&color);
-        self.set_line_dash(&style.dash);
+        self.set_line_dash(&style.dash, width);
 
         // 이중선/삼중선: SVG draw_multi_line과 동일한 오프셋 비율 방식
         // (width_ratio, offset_ratio) — offset은 선 중심으로부터의 거리 비율
@@ -3086,8 +3152,7 @@ impl WebCanvasRenderer {
                     .zip(glyph_positions.get(*char_idx))
                     .map(|(end, start)| end - start)
                     .unwrap_or(0.0);
-                let transform =
-                    canvas_cluster_transform(ctx, cs, glyph_advance, ratio, style.letter_spacing);
+                let transform = canvas_cluster_transform(ctx, cs, glyph_advance, ratio, style);
                 if has_ratio
                     || (transform.scale_x / ratio - 1.0).abs() > 0.001
                     || (transform.scale_y - 1.0).abs() > 0.001
@@ -3280,7 +3345,7 @@ impl WebCanvasRenderer {
             glyph_color.clone()
         };
 
-        let font_family = super::canvas_font_family_chain(&style.font_family);
+        let font_family = super::canvas_font_family_chain(&style.font_family, &style.font_subst);
         let font_weight = if style.bold { "bold " } else { "" };
         let font_style_str = if style.italic { "italic " } else { "" };
         let font = format!(
@@ -3441,7 +3506,7 @@ impl WebCanvasRenderer {
             glyph_color.clone()
         };
 
-        let font_family = super::canvas_font_family_chain(&style.font_family);
+        let font_family = super::canvas_font_family_chain(&style.font_family, &style.font_subst);
 
         let cx = bbox_x + box_size / 2.0;
         let cy = bbox_y + bbox_h - box_size / 2.0;

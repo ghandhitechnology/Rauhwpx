@@ -328,8 +328,10 @@ fn long_cell_edit_keeps_table_fragments_inside_pages() {
             let baseline_page_two = core.build_page_tree_cached(2).expect("baseline third page");
             let mut page_two_tables = Vec::new();
             top_level_tables(&baseline_page_two.root, false, &mut page_two_tables);
+            // 재조판 셀의 빈 문단도 줄로 계상해 p3 조각이 '보건 방역' 행에서 끝난다
+            // (종전 947.7 = '식품위생' 행 일부까지). 한컴 PDF 는 '보건' 행에서 끝난다.
             assert!(
-                (page_two_tables[0].height - 947.7).abs() < 0.2,
+                (page_two_tables[0].height - 928.0).abs() < 0.2,
                 "an unedited table changed its saved row split"
             );
             let mut equal_length =
@@ -532,6 +534,7 @@ fn cell_picture_caption_attaches_to_matching_image_frame() {
             cell_index: 1,
             cell_para_index: 0,
             text_direction: 0,
+            line_wrap_squeeze: false,
         }],
     };
     let caption = Caption {
@@ -1785,6 +1788,7 @@ fn test_layout_with_composed_styles() {
 
     let styles = ResolvedStyleSet {
         hwp3_variant: false,
+        page_number_char_shape: None,
         char_styles: vec![
             ResolvedCharStyle {
                 font_family: "함초롬돋움".to_string(),
@@ -1917,6 +1921,7 @@ fn test_layout_multi_run_x_position() {
     let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
     let styles = ResolvedStyleSet {
         hwp3_variant: false,
+        page_number_char_shape: None,
         char_styles: vec![
             ResolvedCharStyle {
                 font_size: 16.0,
@@ -1999,6 +2004,7 @@ fn test_resolved_to_text_style() {
 
     let styles = ResolvedStyleSet {
         hwp3_variant: false,
+        page_number_char_shape: None,
         char_styles: vec![ResolvedCharStyle {
             font_family: "나눔고딕".to_string(),
             font_size: 14.0,
@@ -2032,6 +2038,7 @@ fn test_resolved_to_text_style_with_ratio() {
 
     let styles = ResolvedStyleSet {
         hwp3_variant: false,
+        page_number_char_shape: None,
         char_styles: vec![ResolvedCharStyle {
             font_family: "함초롬돋움".to_string(),
             font_size: 16.0,
@@ -2079,10 +2086,11 @@ fn test_estimate_text_width() {
 
 #[test]
 fn test_estimate_text_width_with_ratio() {
-    // 장평 80%: 기본 폭의 80%
+    // 장평 80%: 기본 폭의 80% (Windows 정책의 정수 반올림)
     let style = TextStyle {
         font_size: 16.0,
         ratio: 0.8,
+        font_metrics_policy: crate::model::provenance::FontMetricsPolicy::HancomWindows,
         ..Default::default()
     };
     let w = estimate_text_width("가나", &style);

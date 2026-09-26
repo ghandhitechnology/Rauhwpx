@@ -2724,6 +2724,7 @@ mod flat_cell_ctx_matches_tests {
             cell_index,
             cell_para_index,
             text_direction: 0,
+            line_wrap_squeeze: false,
         }
     }
 

@@ -531,8 +531,11 @@ pub struct FootnoteMarkerNode {
     pub number: u16,
     /// 위첨자 텍스트 ("1)" 등)
     pub text: String,
-    /// 기본 폰트 크기 (본문 크기, 위첨자는 이것의 55%)
+    /// 기본 폰트 크기 (본문 크기, 위첨자는 이것의 75%)
     pub base_font_size: f64,
+    /// 본문 baseline 거리 (bbox 상단 기준 px). 마커 bbox.height 는 경로에 따라
+    /// 줄 높이이거나 baseline 거리이므로 위첨자 상승량 계산은 이 필드를 쓴다.
+    pub baseline: f64,
     /// 폰트 패밀리
     pub font_family: String,
     /// 글자 색
@@ -915,6 +918,19 @@ impl ShapeTransform {
     /// 변환이 필요한지 여부
     pub fn has_transform(&self) -> bool {
         self.rotation != 0.0 || self.horz_flip || self.vert_flip
+    }
+
+    /// [Task #1067] 중심 기준 "대칭(scale) → 회전" 순서로 변환을 쌓는 렌더러가 쓸 회전각(도).
+    ///
+    /// 한컴은 도형을 먼저 대칭한 뒤 `rotation` 만큼 회전한 모습으로 그린다.
+    /// `scale(flip) · rotate(-θ) = rotate(θ) · scale(flip)` 이므로 한쪽만 대칭일 때는
+    /// 회전 부호를 반전해야 같은 결과가 된다. 양쪽 대칭(180° 회전과 동치)은 그대로 둔다.
+    pub fn rotation_after_flip(&self) -> f64 {
+        if self.horz_flip ^ self.vert_flip {
+            -self.rotation
+        } else {
+            self.rotation
+        }
     }
 
     /// 그림 노드 한정: 회전각 90°/270° (±1° 톨러런스) 일 때 bbox extent 만 swap.

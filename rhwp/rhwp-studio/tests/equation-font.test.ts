@@ -106,13 +106,13 @@ test('수식 측정은 실제 글립의 잉크와 굵기 및 run 커닝을 보�
   const { createEquationTextMeasurer } = await import('../src/core/equation-font.ts');
   const original = Object.getOwnPropertyDescriptor(globalThis, 'document');
   const calls: Array<{ text: string; font: string }> = [];
-  const context = { font: '', measureText(text: string) { calls.push({ text, font: this.font }); return { width: text.length === 2 ? 13 : 8, actualBoundingBoxRight: text.length === 2 ? 15 : 10 }; } };
+  const context = { font: '', measureText(text: string) { calls.push({ text, font: this.font }); return { width: text.length === 2 ? 13 : 8, actualBoundingBoxLeft: 0, actualBoundingBoxRight: text.length === 2 ? 15 : 10 }; } };
   Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => ({ getContext: () => context }) } });
   try {
     const record: LocalFontRecord = { family: 'HYhwpEQ', fullName: 'HYhwpEQ', postscriptName: 'HYhwpEQ', style: 'Regular', displayName: 'HYhwpEQ', aliases: [], runtimeFamily: '__hy' };
     const measure = createEquationTextMeasurer(name => name === 'HYhwpEQ' ? record : null, () => fontWithGlyph(0xe0f4));
-    assert.deepEqual(measure('HYhwpEQ', 'p', 16, true, false, true), { advance: 8, inkRight: 10 });
-    assert.deepEqual(measure('HYhwpEQ', 'pp', 16, true, false, true, true), { advance: 13, inkRight: 15 });
+    assert.deepEqual(measure('HYhwpEQ', 'p', 16, true, false, true), { advance: 8, inkLeft: 0, inkRight: 10 });
+    assert.deepEqual(measure('HYhwpEQ', 'pp', 16, true, false, true, true), { advance: 13, inkLeft: 0, inkRight: 15 });
     assert.equal(calls[1].text, '\ue0f4\ue0f4');
     assert.equal(calls[1].font, 'bold 16.000px "__hy"');
     assert.equal(calls[0].text, '\ue0f4');

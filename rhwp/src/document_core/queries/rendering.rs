@@ -897,7 +897,10 @@ impl DocumentCore {
         page_nums: &[u32],
         options: &crate::renderer::pdf::PdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
+        crate::renderer::font_paths::register_font_face_availability(&options.font_paths);
         let _font_scope = self.resolved_shaping_font_scope();
+        let _measure_font_scope =
+            crate::renderer::layout::enter_measure_font_paths(options.font_paths.clone());
         if page_nums.is_empty() {
             return Err(HwpError::RenderError(
                 "PDF export requires at least one page".to_string(),
@@ -927,6 +930,9 @@ impl DocumentCore {
         profile: RenderProfile,
         options: &crate::renderer::pdf::PdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
+        crate::renderer::font_paths::register_font_face_availability(&options.font_paths);
+        let _measure_font_scope =
+            crate::renderer::layout::enter_measure_font_paths(options.font_paths.clone());
         if page_nums.is_empty() {
             return Err(HwpError::RenderError(
                 "PDF export requires at least one page".to_string(),
@@ -1006,7 +1012,10 @@ impl DocumentCore {
         profile: RenderProfile,
         options: &crate::renderer::pdf::DirectPdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
+        crate::renderer::font_paths::register_font_face_availability(&options.font_paths);
         let _font_scope = self.resolved_shaping_font_scope();
+        let _measure_font_scope =
+            crate::renderer::layout::enter_measure_font_paths(options.font_paths.clone());
         if page_nums.is_empty() {
             return Err(HwpError::RenderError(
                 "PDF export requires at least one page".to_string(),
@@ -1164,6 +1173,12 @@ impl DocumentCore {
     pub(crate) fn resolved_shaping_font_scope(
         &self,
     ) -> crate::renderer::layout::ResolvedShapingFontScope {
+        // 레이아웃 진입 전에 `RHWP_FONT_PATH` 의 face 이름을 등록한다 —
+        // HcrDeclared 폭 측정의 한컴 FontMap 치환은 "요청 face 가 없을 때만"
+        // 발동하므로 측정 경로가 custom font 실재 여부를 알아야 한다.
+        // (파일별 파싱은 최초 1회, 미설정이면 no-op)
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::renderer::font_paths::register_font_face_availability(&[]);
         crate::renderer::layout::enter_resolved_shaping_fonts(
             self.layout_engine.resolved_shaping_fonts(),
         )
@@ -1177,7 +1192,11 @@ impl DocumentCore {
         font_embed_mode: crate::renderer::svg::FontEmbedMode,
         font_paths: &[std::path::PathBuf],
     ) -> Result<String, HwpError> {
+        crate::renderer::font_paths::register_font_face_availability(font_paths);
         let _font_scope = self.resolved_shaping_font_scope();
+        // substFont 측정 판정이 --font-path 목록까지 보게 경로를 노출한다.
+        let _measure_font_scope =
+            crate::renderer::layout::enter_measure_font_paths(font_paths.to_vec());
         let tree = self.build_page_tree(page_num)?;
         let _overflows = self.layout_engine.take_overflows();
         let mut renderer = SvgRenderer::new();
@@ -1333,7 +1352,10 @@ impl DocumentCore {
         use crate::renderer::layer_renderer::LayerRasterRenderer;
         use crate::renderer::skia::SkiaLayerRenderer;
 
+        crate::renderer::font_paths::register_font_face_availability(font_paths);
         let _font_scope = self.resolved_shaping_font_scope();
+        let _measure_font_scope =
+            crate::renderer::layout::enter_measure_font_paths(font_paths.to_vec());
         let layer_tree = self.build_page_layer_tree(page_num)?;
         SkiaLayerRenderer::new()
             .with_font_paths(font_paths)
@@ -1365,7 +1387,10 @@ impl DocumentCore {
         use crate::renderer::layer_renderer::{LayerRasterRenderer, RasterRenderOptions};
         use crate::renderer::skia::SkiaLayerRenderer;
 
+        crate::renderer::font_paths::register_font_face_availability(&options.font_paths);
         let _font_scope = self.resolved_shaping_font_scope();
+        let _measure_font_scope =
+            crate::renderer::layout::enter_measure_font_paths(options.font_paths.clone());
         let layer_tree = self.build_page_layer_tree_with_profile(page_num, profile)?;
 
         // 페이지 크기에서 effective scale + max_dimension 결정
@@ -1885,14 +1910,19 @@ impl DocumentCore {
             None,
         );
 
+        // 본문 그림을 별도 정적 layer 로 깔아도 그리기 순서가 유지되는지 (Studio 분리 합성 조건).
+        let flow_static_split_safe = flow_image_count + flow_raw_svg_count == 0
+            || crate::paint::flow_static_split_preserves_order(&tree.root);
+
         Ok(format!(
-            "{{\"behind\":[{}],\"front\":[{}],\"imageCount\":{},\"rawSvgCount\":{},\"flowImageCount\":{},\"flowRawSvgCount\":{},\"hasBehind\":{},\"hasFront\":{}}}",
+            "{{\"behind\":[{}],\"front\":[{}],\"imageCount\":{},\"rawSvgCount\":{},\"flowImageCount\":{},\"flowRawSvgCount\":{},\"flowStaticSplitSafe\":{},\"hasBehind\":{},\"hasFront\":{}}}",
             behind,
             front,
             image_count,
             raw_svg_count,
             flow_image_count,
             flow_raw_svg_count,
+            flow_static_split_safe,
             has_behind,
             has_front
         ))
@@ -3781,8 +3811,28 @@ impl DocumentCore {
     /// section_index/is_first_in_column 계측은 측정 통일 작업의 진단·후속용으로 유지한다.
     pub(crate) fn paginate(&mut self) {
         let fonts = self.collect_resolved_shaping_fonts();
+        let has_embedded_hft = self
+            .document
+            .doc_info
+            .font_faces
+            .iter()
+            .flatten()
+            .any(|declared| {
+                declared.alt_type == 2
+                    && fonts
+                        .iter()
+                        .any(|face| face.family.eq_ignore_ascii_case(&declared.name))
+            });
         self.layout_engine.set_resolved_shaping_fonts(fonts.clone());
         crate::renderer::layout::with_resolved_shaping_fonts(fonts, || {
+            // 바이트 검증을 마친 내장 HFT만 원래 face 이름으로 다시 해소한다.
+            if has_embedded_hft {
+                self.styles = crate::renderer::style_resolver::resolve_styles_with_variant(
+                    &self.document.doc_info,
+                    self.dpi,
+                    self.document.layout_profile().hwp3_layout(),
+                );
+            }
             self.paginate_with_resolved_shaping_fonts()
         });
     }

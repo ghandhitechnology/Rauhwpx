@@ -77,6 +77,21 @@ pub(crate) fn following_fixed_picture_wrap_band(
 }
 
 /// A non-TAC `TopAndBottom` object positioned from its host paragraph.
+/// 저장 LINE_SEG 없는 문단이 섞인 셀. 한컴은 이런 셀 내용을 저장 줄 위치 없이 새로
+/// 조판하므로, 저장 vpos 에 기댄 호환 규칙(빈 문단 겹침, 저장 쪽 경계)을 적용하지 않는다.
+pub(crate) fn cell_is_reflowed(cell: &crate::model::table::Cell) -> bool {
+    cell.paragraphs.iter().any(|p| p.line_segs.is_empty())
+}
+
+/// 문단 기준 자리차지 RowBreak 표가 새로 조판되는 셀을 가지면 한컴은 쪽마다 조각을
+/// 바깥 여백 상자로 닫는다: 조각마다 위 여백을 다시 열고 아래 여백을 쪽 예산에서 뺀다
+/// (86712 법령 인용 표: 연속 쪽 표 상단 = 본문 상단 + 283HU, 첫 조각 34줄).
+pub(crate) fn reflowed_rowbreak_fragment_repeats_outer_margin(table: &Table) -> bool {
+    is_para_topbottom_float(&table.common)
+        && matches!(table.page_break, TablePageBreak::RowBreak)
+        && table.cells.iter().any(cell_is_reflowed)
+}
+
 pub(crate) fn is_para_topbottom_float(common: &CommonObjAttr) -> bool {
     !common.treat_as_char
         && matches!(common.text_wrap, TextWrap::TopAndBottom)
@@ -176,6 +191,87 @@ pub(crate) fn native_empty_host_rowbreak_line_advance_hu(
         return None;
     }
     Some(advance)
+}
+
+/// 저장 vpos 사다리가 빈 호스트 TopAndBottom 표의 배타 영역을 계상하는지 검증한다.
+///
+/// 한컴은 빈(공백만 있는 것도 포함) 호스트 문단 + 문단 기준 TopAndBottom 표를 두
+/// 가지 방식으로 기록한다:
+///
+/// 1. 배타-인코딩: host 줄이 배타 상자보다 위에 남고, 다음 문단 vpos =
+///    host vpos + 배타 span(vertical_offset + outer margin + 표 높이). 흐름
+///    재개점은 margin box 하단(페인트 하단 + outer_margin_bottom).
+/// 2. 밀림-인코딩: host 줄 자체가 배타 하단에 저장된다(host 줄 상자가 배타
+///    상자와 겹치면 아래로 밀림). 다음 문단은 배타 하단 + host 줄 advance 뒤.
+///    host 줄에 글자처럼 취급 개체가 있으면 그 줄은 자기 항목이 배타 하단에서
+///    직접 조판·전진하므로 흐름은 배타 하단에서 재개한다(줄 advance 이중 적용 방지).
+///
+/// 기계 생성 양식(#2439 계열)은 사다리가 host 줄 advance 만 담아 배타 영역을
+/// 접는다 — 둘 다 아니면 None 을 돌려줘 기존 `global + reserved` 계약을 유지한다.
+pub(crate) fn empty_host_topbottom_exclusion_flow_bottom(
+    para: &Paragraph,
+    table: &Table,
+    next_para: Option<&Paragraph>,
+    next_spacing_before_px: f64,
+    col_top_px: f64,
+    lane_top_px: f64,
+    painted_height_px: f64,
+    host_line_has_inline_items: bool,
+    dpi: f64,
+) -> Option<f64> {
+    // 비문자 TopAndBottom 표가 둘 이상이면 사다리 델타를 이 표 하나에 귀속할 수 없다.
+    let para_topbottom_tables = para
+        .controls
+        .iter()
+        .filter(
+            |control| matches!(control, Control::Table(t) if is_para_topbottom_float(&t.common)),
+        )
+        .count();
+    if para_topbottom_tables != 1 {
+        return None;
+    }
+    let host_seg = para
+        .line_segs
+        .iter()
+        .find(|seg| seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0 && seg.line_height > 0)?;
+    let exclusion_bottom_px =
+        lane_top_px + painted_height_px + hwpunit_to_px(i32::from(table.outer_margin_bottom), dpi);
+    // px↔HU 왕복과 표 높이 측정 오차용 허용치. 접힘 인코딩과 배타 인코딩의 델타
+    // 차이는 통상 수천 HWPUNIT 이므로 판별에는 충분히 좁다.
+    const LADDER_TOL_HU: i64 = 400;
+    let tol_px = hwpunit_to_px(LADDER_TOL_HU as i32, dpi);
+    // 밀림 인코딩: 호스트 줄 저장 vpos 가 배타 하단과 일치하면 호스트 줄이
+    // 배타 상자 아래로 밀린 것이다.
+    let host_abs_px = col_top_px + hwpunit_to_px(host_seg.vertical_pos, dpi);
+    if (host_abs_px - exclusion_bottom_px).abs() <= tol_px {
+        if host_line_has_inline_items {
+            return Some(exclusion_bottom_px);
+        }
+        let host_advance = host_seg.line_height + host_seg.line_spacing.max(0);
+        return Some(exclusion_bottom_px + hwpunit_to_px(host_advance, dpi));
+    }
+    let next_vpos = next_para
+        .and_then(|next| {
+            next.line_segs.iter().find(|seg| {
+                seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0 && seg.line_height > 0
+            })
+        })?
+        .vertical_pos;
+    let exclusion_hu = i64::from(signed_hwpunit(table.common.vertical_offset).max(0))
+        + i64::from(table.outer_margin_top)
+        + i64::from(super::px_to_hwpunit_round(painted_height_px, dpi))
+        + i64::from(table.outer_margin_bottom);
+    let ladder_delta = i64::from(next_vpos) - i64::from(host_seg.vertical_pos);
+    let over = ladder_delta - exclusion_hu;
+    let next_spacing_before_hu = i64::from(super::px_to_hwpunit_round(
+        next_spacing_before_px.max(0.0),
+        dpi,
+    ));
+    // 다음 문단 spacing_before 를 사다리 안에 접는 저장본과 밖에 두는 저장본을 모두
+    // 인정한다.
+    let encodes_exclusion =
+        over.abs() <= LADDER_TOL_HU || (over - next_spacing_before_hu).abs() <= LADDER_TOL_HU;
+    encodes_exclusion.then_some(exclusion_bottom_px)
 }
 
 /// Stored page-reset evidence for the native-HWP single-cell RowBreak blank-band contract.
@@ -1000,6 +1096,36 @@ mod tests {
 
         assert_eq!(second.bottom, 70.0);
         assert_eq!(lanes.max_bottom(), 70.0);
+    }
+
+    #[test]
+    fn pushed_empty_host_line_advance_only_when_host_line_has_no_inline_items() {
+        // hy-001 2쪽: 담당부서 표(TopAndBottom) 호스트 줄이 배타 하단(3130)에 밀려
+        // 저장되고, 그 줄에 글자처럼 취급 글상자가 있다 — 흐름은 배타 하단에서
+        // 재개해야 글상자가 한 줄 아래로 밀리지 않는다.
+        let table = Table {
+            outer_margin_top: 283,
+            outer_margin_bottom: 283,
+            common: base_common(),
+            ..Default::default()
+        };
+        let para = Paragraph {
+            controls: vec![Control::Table(Box::new(table.clone()))],
+            line_segs: vec![LineSeg {
+                vertical_pos: 3130,
+                line_height: 3855,
+                line_spacing: 652,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let flow = |inline| {
+            empty_host_topbottom_exclusion_flow_bottom(
+                &para, &table, None, 0.0, 0.0, 283.0, 2564.0, inline, 7200.0,
+            )
+        };
+        assert_eq!(flow(true), Some(3130.0));
+        assert_eq!(flow(false), Some(3130.0 + 3855.0 + 652.0));
     }
 
     #[test]

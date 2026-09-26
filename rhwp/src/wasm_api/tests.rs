@@ -6,14 +6,13 @@ use crate::parser::control::parse_common_obj_attr;
 use serde_json::Value;
 
 #[test]
-fn font_aware_factories_preserve_input_policy_and_only_select_hcr_for_hwpx() {
+fn font_aware_factories_preserve_input_policy_and_default_to_mac_metrics() {
     use crate::parser::limits::InputPolicy;
     let hwpx = include_bytes!(
         "../../tests/fixtures/editing_parity/mac-hancom-12.30.0/body-mixed-text/edited.hwpx"
     );
-    let normal = open_with_hwpx_font_metrics(hwpx, InputPolicy::Untrusted, "hcr-declared").unwrap();
-    let local =
-        open_with_hwpx_font_metrics(hwpx, InputPolicy::LocalFileOnce, "hcr-declared").unwrap();
+    let normal = open_with_font_metrics(hwpx, InputPolicy::Untrusted, "hcr-declared").unwrap();
+    let local = open_with_font_metrics(hwpx, InputPolicy::LocalFileOnce, "hcr-declared").unwrap();
     assert_eq!(normal.get_font_metrics_policy(), "hcr-declared");
     assert_eq!(
         normal.get_page_text_layout_native(0).unwrap(),
@@ -23,17 +22,21 @@ fn font_aware_factories_preserve_input_policy_and_only_select_hcr_for_hwpx() {
         include_bytes!("../../saved/blank2010.hwp").as_slice(),
         include_bytes!("../../samples/hml/formatting_table.hml").as_slice(),
     ] {
-        let doc =
-            open_with_hwpx_font_metrics(bytes, InputPolicy::Untrusted, "hcr-declared").unwrap();
-        assert_eq!(doc.get_font_metrics_policy(), "hancom-windows");
+        // 기준 플랫폼은 macOS 한컴 — 모든 포맷의 기본값이 HCR 선언 메트릭이고,
+        // Windows 치환 규칙은 명시 요청 시에만 적용된다.
+        assert_eq!(
+            HwpDocument::new(bytes).unwrap().get_font_metrics_policy(),
+            "hcr-declared"
+        );
+        let windows =
+            open_with_font_metrics(bytes, InputPolicy::Untrusted, "hancom-windows").unwrap();
+        assert_eq!(windows.get_font_metrics_policy(), "hancom-windows");
     }
-    assert!(open_with_hwpx_font_metrics(hwpx, InputPolicy::Untrusted, "invalid").is_err());
-    assert!(open_with_hwpx_font_metrics(
-        b"invalid document",
-        InputPolicy::Untrusted,
-        "hcr-declared"
-    )
-    .is_err());
+    assert!(open_with_font_metrics(hwpx, InputPolicy::Untrusted, "invalid").is_err());
+    assert!(
+        open_with_font_metrics(b"invalid document", InputPolicy::Untrusted, "hcr-declared")
+            .is_err()
+    );
 }
 
 #[test]

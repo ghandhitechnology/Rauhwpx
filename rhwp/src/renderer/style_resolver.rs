@@ -23,6 +23,10 @@ pub struct ResolvedCharStyle {
     pub font_family: String,
     /// 7개 언어 카테고리별 글꼴 이름
     pub font_families: Vec<String>,
+    /// 7개 언어 카테고리별 문서 선언 대체 글꼴 face (HWPX `<hh:substFont>` /
+    /// HWP5 alt_name). 원본 글꼴 미설치 시 generic 폴백보다 먼저 시도할 이름.
+    /// 빈 문자열 = 선언된 대체 글꼴 없음.
+    pub subst_families: Vec<String>,
     /// 글꼴 크기 (px)
     pub font_size: f64,
     /// 진하게
@@ -85,6 +89,7 @@ impl Default for ResolvedCharStyle {
             font_metrics_policy: Default::default(),
             font_family: String::new(),
             font_families: Vec::new(),
+            subst_families: Vec::new(),
             font_size: 12.0,
             bold: false,
             italic: false,
@@ -127,6 +132,21 @@ impl ResolvedCharStyle {
             }
         }
         &self.font_family
+    }
+
+    /// 지정 언어 카테고리 글꼴의 문서 선언 대체 글꼴 face 를 반환한다.
+    /// 해당 언어에 없으면 한국어(0번) 폴백. 없으면 빈 문자열.
+    pub fn font_subst_for_lang(&self, lang_index: usize) -> &str {
+        if lang_index < self.subst_families.len() {
+            let name = &self.subst_families[lang_index];
+            if !name.is_empty() {
+                return name;
+            }
+        }
+        self.subst_families
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("")
     }
 
     /// 지정 언어 카테고리의 자간(px)을 반환한다.
@@ -198,6 +218,8 @@ pub struct ResolvedParaStyle {
     pub keep_lines: bool,
     /// 문단 앞에서 항상 쪽 나눔 — attr1 bit 19
     pub page_break_before: bool,
+    /// 문단 세로 정렬 — attr1 bit 20-21 (0=BASELINE, 1=TOP, 2=CENTER, 3=BOTTOM)
+    pub vertical_align: u8,
 }
 
 impl Default for ResolvedParaStyle {
@@ -226,6 +248,7 @@ impl Default for ResolvedParaStyle {
             keep_with_next: false,
             keep_lines: false,
             page_break_before: false,
+            vertical_align: 0,
         }
     }
 }
@@ -297,6 +320,8 @@ pub struct ResolvedStyleSet {
     /// [#2070] HWP3 → HWP5 변환본 여부 (Document::is_hwp3_variant 전파).
     /// 변환본 한정 레거시 폭 규칙(전체 폭) 게이트에 사용.
     pub hwp3_variant: bool,
+    /// '쪽 번호'(Page Number) 스타일의 글자 모양 ID — 쪽 번호 매기기 글꼴/크기 기준.
+    pub page_number_char_shape: Option<u32>,
 }
 
 /// DocInfo 참조 테이블을 해소된 스타일 목록으로 변환한다.
@@ -325,7 +350,19 @@ pub fn resolve_styles_with_variant(
         numberings,
         bullets,
         hwp3_variant: is_hwp3_variant,
+        page_number_char_shape: page_number_char_shape(doc_info),
     }
+}
+
+/// 한컴은 쪽 번호 매기기 번호를 기본 스타일 '쪽 번호'(Page Number)의 글자 모양으로
+/// 그린다 (HWPX `hh:style name="쪽 번호"`, HWP5 STYLE 레코드 동일).
+fn page_number_char_shape(doc_info: &DocInfo) -> Option<u32> {
+    doc_info
+        .styles
+        .iter()
+        .find(|s| s.local_name == "쪽 번호" || s.english_name == "Page Number")
+        .map(|s| s.char_shape_id as u32)
+        .filter(|id| (*id as usize) < doc_info.char_shapes.len())
 }
 
 /// CharShape + FontFace → ResolvedCharStyle 목록
@@ -344,12 +381,14 @@ fn resolve_single_char_style(cs: &CharShape, doc_info: &DocInfo, dpi: f64) -> Re
 
     // 7개 언어 카테고리별 폰트 이름, 자간, 장평 해소
     let mut font_families = Vec::with_capacity(LANG_COUNT);
+    let mut subst_families = Vec::with_capacity(LANG_COUNT);
     let mut letter_spacings = Vec::with_capacity(LANG_COUNT);
     let mut ratios = Vec::with_capacity(LANG_COUNT);
 
     for lang in 0..LANG_COUNT {
         let font_id = cs.font_ids[lang];
         font_families.push(lookup_font_name(doc_info, lang, font_id));
+        subst_families.push(lookup_subst_font_name(doc_info, lang, font_id));
 
         let spacing_percent = cs.spacings[lang] as f64;
         letter_spacings.push(font_size * spacing_percent / 100.0);
@@ -366,6 +405,7 @@ fn resolve_single_char_style(cs: &CharShape, doc_info: &DocInfo, dpi: f64) -> Re
         font_metrics_policy: doc_info.font_metrics_policy,
         font_family,
         font_families,
+        subst_families,
         font_size,
         bold: cs.bold,
         italic: cs.italic,
@@ -400,9 +440,13 @@ fn resolve_single_char_style(cs: &CharShape, doc_info: &DocInfo, dpi: f64) -> Re
 ///
 /// 반환값: 0=한국어, 1=영어(라틴), 2=한자, 3=일본어, 4=기타, 5=기호, 6=사용자
 ///
-/// 공백/일반 구두점은 언어 중립으로 간주하여 기본값(한국어)을 반환한다.
-/// 호출부에서 "이전 문자의 언어를 따르는" 로직을 별도 처리해야 한다.
+/// 공백/제어문자는 언어 중립으로 간주하여 기본값(한국어)을 반환한다.
+/// 호출부에서 "이전 문자의 언어를 따르는" 로직을 별도 처리해야 한다
+/// (`composer::is_lang_neutral`).
 pub fn detect_lang_category(ch: char) -> usize {
+    if is_latin_slot_punctuation(ch) {
+        return 1;
+    }
     let cp = ch as u32;
     match cp {
         // [#2070] ㆍ(아래아, U+318D)는 한컴이 USER 스크립트 폰트로 렌더한다.
@@ -443,10 +487,30 @@ pub fn detect_lang_category(ch: char) -> usize {
         // CJK 기호/구두점 (한자 구두점이 아닌 기호 영역)
         0x3000..=0x303F => 5,
 
-        // 공백/ASCII 구두점/제어문자 → 한국어(기본값)로 반환
+        // 공백/제어문자 → 한국어(기본값)로 반환
         // 호출부에서 "이전 문자의 언어를 따르는" 로직으로 처리
         _ => 0,
     }
+}
+
+/// 한컴이 영문(라틴) 글꼴 슬롯으로 그리는 구두점·기호인지 판별한다.
+///
+/// 한컴(macOS) PDF 실측(hy-001: 한글=휴먼명조, 영문=HCI Poppy, 기호=한양신명조):
+/// 한글 뒤의 `, . ( ) < > * ~` 와 `‘ ’` 는 휴먼명조가 아니라 영문 글꼴(HCI Poppy)
+/// 윤곽으로, `·` 는 HCI Poppy 대체 글꼴(Palatino)로 그려진다. 앞 글자의 언어를
+/// 따르지 않는다. 86712 실문서(Windows)도 같은 글자 모양의 `“ ”` 가 한양신명조
+/// (기호 슬롯) 가 아닌 영문 슬롯 글꼴로 그려진다. 공백만 앞 글자의 언어를 따른다.
+///
+/// 줄 나눔의 단어 경계 판정은 이 분류와 별개다 (`line_breaking::is_latin`).
+pub fn is_latin_slot_punctuation(ch: char) -> bool {
+    matches!(ch as u32,
+        // ASCII 구두점/기호 (영문자/숫자/공백/DEL 제외)
+        0x0021..=0x002F | 0x003A..=0x0040 | 0x005B..=0x0060 | 0x007B..=0x007E |
+        // Latin-1 Supplement 구두점/기호 (NBSP 제외)
+        0x00A1..=0x00BF |
+        // 따옴표 ‘ ’ ‚ ‛ “ ” „ ‟
+        0x2018..=0x201F
+    )
 }
 
 /// FontFace 테이블에서 폰트 이름 조회 + 폰트 치환 적용
@@ -469,6 +533,33 @@ fn lookup_font_name(doc_info: &DocInfo, lang_index: usize, font_id: u16) -> Stri
     String::new()
 }
 
+/// FontFace 테이블에서 문서가 선언한 대체 글꼴 face 조회.
+///
+/// HWPX 는 `<hh:substFont face="...">`, HWP5 는 FACE_NAME 의 alt_name 으로
+/// "원본 글꼴이 없을 때 쓸 글꼴"을 문서가 직접 지정한다. 한컴은 원본 미설치 시
+/// 이 face 로 대체해 그리므로, 렌더러의 폰트 체인에서 원본 뒤·generic 폴백 앞에
+/// 넣을 수 있도록 이름을 그대로 전달한다 (설치 여부 판정은 렌더 시점의 체인이
+/// 처리 — 원본이 있으면 subst 는 자연스럽게 도달하지 않는다).
+fn lookup_subst_font_name(doc_info: &DocInfo, lang_index: usize, font_id: u16) -> String {
+    if lang_index < doc_info.font_faces.len() {
+        let lang_fonts = &doc_info.font_faces[lang_index];
+        if (font_id as usize) < lang_fonts.len() {
+            let font = &lang_fonts[font_id as usize];
+            if let Some(subst) = &font.subst_font {
+                if !subst.face.is_empty() {
+                    return subst.face.clone();
+                }
+            }
+            if let Some(alt) = &font.alt_name {
+                if !alt.is_empty() {
+                    return alt.clone();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
 /// 폰트명에서 원본(첫 번째) 폰트명만 추출 (폴백 제거)
 pub fn primary_font_name(font_family: &str) -> &str {
     font_family.split(',').next().unwrap_or(font_family).trim()
@@ -484,6 +575,11 @@ pub(crate) fn resolve_font_substitution(
     alt_type: u8,
     lang_index: usize,
 ) -> Option<&'static str> {
+    // 실제 face가 준비된 HFT는 대체 서체명으로 바꾸지 않는다. 글꼴을 나중에
+    // 가져온 경우에도 refreshLayout이 이 스타일을 다시 해소한다.
+    if alt_type == 2 && custom_hft_face_available(name) {
+        return None;
+    }
     // HWP3 원본/일부 한컴 재저장본은 HCI 영문 폰트를 TTF(type=1) 또는
     // unknown(type=0)으로 싣기도 한다. 한컴은 같은 face를 보여주므로
     // alt_type 차이와 무관하게 legacy 영문 HFT 치환을 우선 적용한다.
@@ -502,13 +598,33 @@ pub(crate) fn resolve_font_substitution(
     resolve_ttf_font(name)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn custom_hft_face_available(name: &str) -> bool {
+    crate::renderer::layout::active_shaping_face_available(name)
+        || crate::renderer::font_paths::custom_font_face_available(name)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(catch, js_namespace = globalThis, js_name = hasImportedFontMetricsFace)]
+    fn imported_hft_face_available(name: &str) -> Result<bool, wasm_bindgen::JsValue>;
+}
+
+#[cfg(target_arch = "wasm32")]
+fn custom_hft_face_available(name: &str) -> bool {
+    crate::renderer::layout::active_shaping_face_available(name)
+        || imported_hft_face_available(name).unwrap_or(false)
+}
+
 fn resolve_legacy_latin_font(name: &str, lang_index: usize) -> Option<&'static str> {
     if lang_index != 1 {
         return None;
     }
 
     match name {
-        "HCI Poppy" => Some("Palatino Linotype"),
+        // HCI Poppy 는 치환하지 않는다: 자체 HFT 폭 메트릭(font_metrics_data)으로 재고
+        // Palatino 계열 설치 서체로 그린다 (`renderer::hft_substitute_faces`).
         "HCI Tulip"
         | "HCI Morning Glory"
         | "HCI Centaurea"
@@ -554,6 +670,11 @@ fn resolve_legacy_latin_font(name: &str, lang_index: usize) -> Option<&'static s
 /// 한국어(0)와 영어(1)가 다른 결과를 가지는 폰트는 언어별 분기 처리.
 /// 대부분의 HFT 폰트는 언어에 무관하게 동일한 결과를 갖는다.
 fn resolve_hft_font(name: &str, lang_index: usize) -> Option<&'static str> {
+    // 한컴(macOS)은 기호 슬롯의 한양신명조(HFT) 글자를 함초롬바탕으로 그린다.
+    // hy-001 PDF 의 □ 는 HCRBatang 글꼴 텍스트(advance 0.97em, 밑변이 기준선)다.
+    if lang_index == 5 && name == "한양신명조" {
+        return Some("함초롬바탕");
+    }
     // === 직접 TTF 매핑 (모든 언어 공통) ===
     let common = match name {
         // [#2430] 한양 4종·휴먼명조는 치환하지 않고 원명 유지 — 한글 실측
@@ -599,7 +720,10 @@ fn resolve_hft_font(name: &str, lang_index: usize) -> Option<&'static str> {
         "가는안상수체" | "중간안상수체" | "굵은안상수체" => Some("돋움"),
         "양재 매화" | "양재 소슬" | "양재 샤넬" | "옥수수" => Some("돋움"),
         "양재 본목각M" | "복숭아" => Some("돋움"),
-        "신명 세고딕" | "신명 디나루" | "신명 세나루" => Some("돋움"),
+        // 디나루는 번들 HFT의 자체 폭(숫자 0.66em, 빈칸 0.40em)으로
+        // 조판한다. 글리프만 renderer::hft_substitute_faces에서 치환한다.
+        "신명 디나루" => None,
+        "신명 세고딕" | "신명 세나루" => Some("돋움"),
         "#세고딕" | "#신세고딕" | "#중고딕" | "#태고딕" | "#신문고딕" | "#신문태고" | "#세나루"
         | "#신세나루" | "#디나루" | "#신디나루" => Some("돋움"),
         // 그래픽/궁서/기타
@@ -620,7 +744,6 @@ fn resolve_hft_font(name: &str, lang_index: usize) -> Option<&'static str> {
         "고딕" => Some("돋움"),
         // 영문 HFT
         "산세리프" => Some("Calibri"),
-        "HCI Poppy" => Some("Palatino Linotype"),
         "수식" => Some("HY신명조"),
         "한글 풀어쓰기" => Some("HY견명조"),
         _ => None,
@@ -888,6 +1011,7 @@ fn resolve_single_para_style(
         keep_with_next: (ps.attr1 >> 17) & 1 != 0 || (ps.attr2 >> 6) & 1 != 0,
         keep_lines: (ps.attr1 >> 18) & 1 != 0 || (ps.attr2 >> 7) & 1 != 0,
         page_break_before: (ps.attr1 >> 19) & 1 != 0 || (ps.attr2 >> 8) & 1 != 0,
+        vertical_align: ((ps.attr1 >> 20) & 0x03) as u8,
     }
 }
 
@@ -1338,10 +1462,19 @@ mod tests {
 
     #[test]
     fn test_detect_lang_category_default() {
-        // 공백, 구두점 등은 기본값(한국어=0)
+        // 공백은 기본값(한국어=0) — 호출부가 앞 글자의 언어를 따르게 한다
         assert_eq!(detect_lang_category(' '), 0);
-        assert_eq!(detect_lang_category('.'), 0);
-        assert_eq!(detect_lang_category(','), 0);
+        assert_eq!(detect_lang_category('\u{00A0}'), 0);
+    }
+
+    #[test]
+    fn test_detect_lang_category_punctuation_uses_latin_slot() {
+        // 한컴(macOS) PDF: 구두점·따옴표는 영문 글꼴 슬롯으로 그린다
+        for ch in [
+            '.', ',', '(', ')', '<', '>', '*', '~', '\u{00B7}', '‘', '’', '“', '”',
+        ] {
+            assert_eq!(detect_lang_category(ch), 1, "{ch:?}");
+        }
     }
 
     // === 언어별 폰트 해소 테스트 ===

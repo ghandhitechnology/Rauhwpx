@@ -5,6 +5,8 @@ use skia_safe::{
 use super::font_lookup::{
     legacy_typeface_for_style, match_system_family_style, SystemFontFamilies,
 };
+use super::renderer::{typeface_for_style, TypefaceCatalog};
+use super::text_replay::draw_text_run;
 
 use crate::renderer::equation::ast::MatrixStyle;
 use crate::renderer::equation::layout::{
@@ -13,9 +15,28 @@ use crate::renderer::equation::layout::{
 };
 use crate::renderer::equation::symbols::{DecoKind, FontStyleKind};
 
+/// 수식 페인트의 face 해석 묶음 — 본문(text_replay)과 같은 조달 순서
+/// (custom --font-path → 시스템 → 번들 최후-폴백)로 family 를 찾는다.
+struct EqFonts<'a> {
+    mgr: &'a FontMgr,
+    custom: &'a TypefaceCatalog,
+    bundled: &'a TypefaceCatalog,
+    system: &'a SystemFontFamilies,
+}
+
+impl EqFonts<'_> {
+    fn resolve(&self, family: &str, style: FontStyle) -> Option<Typeface> {
+        typeface_for_style(self.custom, family, style)
+            .or_else(|| match_system_family_style(self.mgr, self.system, family, style))
+            .or_else(|| typeface_for_style(self.bundled, family, style))
+    }
+}
+
 pub fn render_equation(
     canvas: &Canvas,
     font_mgr: &FontMgr,
+    custom_typefaces: &TypefaceCatalog,
+    bundled_typefaces: &TypefaceCatalog,
     system_families: &SystemFontFamilies,
     layout: &LayoutBox,
     origin_x: f64,
@@ -25,10 +46,15 @@ pub fn render_equation(
     font_name: &str,
 ) {
     let font_families = crate::renderer::equation::font::equation_font_families(Some(font_name));
+    let fonts = EqFonts {
+        mgr: font_mgr,
+        custom: custom_typefaces,
+        bundled: bundled_typefaces,
+        system: system_families,
+    };
     render_box(
         canvas,
-        font_mgr,
-        system_families,
+        &fonts,
         &font_families,
         layout,
         origin_x,
@@ -42,8 +68,7 @@ pub fn render_equation(
 
 fn render_box(
     canvas: &Canvas,
-    font_mgr: &FontMgr,
-    system_families: &SystemFontFamilies,
+    fonts: &EqFonts<'_>,
     font_families: &[&str],
     lb: &LayoutBox,
     parent_x: f64,
@@ -61,8 +86,7 @@ fn render_box(
             for child in children {
                 render_box(
                     canvas,
-                    font_mgr,
-                    system_families,
+                    fonts,
                     font_families,
                     child,
                     x,
@@ -77,8 +101,7 @@ fn render_box(
         LayoutKind::Text(text) => {
             draw_text(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 text,
                 x,
@@ -93,8 +116,7 @@ fn render_box(
         LayoutKind::Number(text) => {
             draw_text(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 text,
                 x,
@@ -109,8 +131,7 @@ fn render_box(
         LayoutKind::Symbol(text) => {
             draw_text(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 text,
                 x + lb.width / 2.0,
@@ -130,8 +151,7 @@ fn render_box(
             } else {
                 draw_text(
                     canvas,
-                    font_mgr,
-                    system_families,
+                    fonts,
                     font_families,
                     text,
                     x,
@@ -147,8 +167,7 @@ fn render_box(
         LayoutKind::Function(name) => {
             draw_text(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 name,
                 x,
@@ -167,8 +186,7 @@ fn render_box(
         } => {
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 numer,
                 x,
@@ -178,16 +196,30 @@ fn render_box(
                 italic,
                 bold,
             );
-            let line_y = y + crate::renderer::equation::layout::fraction_line_y(numer, fs);
-            canvas.draw_line(
-                ((x + bar_inset) as f32, line_y as f32),
-                ((x + lb.width - bar_inset) as f32, line_y as f32),
-                &stroke_paint(color, fs * 0.04),
+            // 한컴 legacy 분수선은 e06d 막대 글립을 상자 폭으로 늘려 칠한다
+            // (eq-002 실측: 기준선 아래 0.3em, 내용 크기의 1.256배).
+            let bar_painted = draw_legacy_pua_glyph(
+                canvas,
+                fonts,
+                font_families,
+                '\u{e06d}',
+                x + *bar_inset,
+                y + lb.baseline + fs * 0.3,
+                fs * 1.256,
+                Some(lb.width - *bar_inset * 2.0),
+                color,
             );
+            if !bar_painted {
+                let line_y = y + crate::renderer::equation::layout::fraction_line_y(numer, fs);
+                canvas.draw_line(
+                    ((x + bar_inset) as f32, line_y as f32),
+                    ((x + lb.width - bar_inset) as f32, line_y as f32),
+                    &stroke_paint(color, fs * 0.04),
+                );
+            }
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 denom,
                 x,
@@ -201,8 +233,7 @@ fn render_box(
         LayoutKind::Atop { top, bottom } => {
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 top,
                 x,
@@ -214,8 +245,7 @@ fn render_box(
             );
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 bottom,
                 x,
@@ -227,30 +257,57 @@ fn render_box(
             );
         }
         LayoutKind::Sqrt { index, body } => {
-            let sign_h = lb.height;
-            let body_left = x + body.x - fs * 0.1;
             let sign_x = x;
-            let v_top = y;
-            let v_mid_x = body_left - fs * 0.15;
-            let v_mid_y = y + sign_h;
-            let v_start_x = v_mid_x - fs * 0.3;
-            let v_start_y = y + sign_h * 0.6;
-            let tick_x = v_start_x - fs * 0.1;
-            let tick_y = v_start_y - fs * 0.05;
+            // 한컴 legacy 서체는 √ = e05c 기호(기호 zone ~1em, 본문 높이에 비례한
+            // 크기 — 실측 1.052fs~1.126fs) + e06d 윗줄(본문 위를 덮도록 늘림)으로 칠한다.
+            let sign_painted = draw_legacy_pua_glyph(
+                canvas,
+                fonts,
+                font_families,
+                '\u{e05c}',
+                x + body.x - fs,
+                y + lb.baseline,
+                fs * 0.682 + body.height * 0.37,
+                Some(fs),
+                color,
+            );
+            if sign_painted {
+                draw_legacy_pua_glyph(
+                    canvas,
+                    fonts,
+                    font_families,
+                    '\u{e06d}',
+                    x + body.x - fs * 0.03,
+                    y + body.y + body.height * 0.694,
+                    body.height * 1.11,
+                    Some(body.width + fs * 0.17),
+                    color,
+                );
+            }
+            if !sign_painted {
+                let sign_h = lb.height;
+                let body_left = x + body.x - fs * 0.1;
+                let v_top = y;
+                let v_mid_x = body_left - fs * 0.15;
+                let v_mid_y = y + sign_h;
+                let v_start_x = v_mid_x - fs * 0.3;
+                let v_start_y = y + sign_h * 0.6;
+                let tick_x = v_start_x - fs * 0.1;
+                let tick_y = v_start_y - fs * 0.05;
 
-            let mut path = PathBuilder::new();
-            path.move_to((tick_x as f32, tick_y as f32));
-            path.line_to((v_start_x as f32, v_start_y as f32));
-            path.line_to((v_mid_x as f32, v_mid_y as f32));
-            path.line_to((body_left as f32, v_top as f32));
-            path.line_to(((x + lb.width) as f32, v_top as f32));
-            canvas.draw_path(&path.detach(), &stroke_paint(color, fs * 0.04));
+                let mut path = PathBuilder::new();
+                path.move_to((tick_x as f32, tick_y as f32));
+                path.line_to((v_start_x as f32, v_start_y as f32));
+                path.line_to((v_mid_x as f32, v_mid_y as f32));
+                path.line_to((body_left as f32, v_top as f32));
+                path.line_to(((x + lb.width) as f32, v_top as f32));
+                canvas.draw_path(&path.detach(), &stroke_paint(color, fs * 0.04));
+            }
 
             if let Some(index) = index {
                 render_box(
                     canvas,
-                    font_mgr,
-                    system_families,
+                    fonts,
                     font_families,
                     index,
                     sign_x,
@@ -263,8 +320,7 @@ fn render_box(
             }
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 body,
                 x,
@@ -278,8 +334,7 @@ fn render_box(
         LayoutKind::Superscript { base, sup } => {
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 base,
                 x,
@@ -291,8 +346,7 @@ fn render_box(
             );
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 sup,
                 x,
@@ -306,8 +360,7 @@ fn render_box(
         LayoutKind::Subscript { base, sub } => {
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 base,
                 x,
@@ -319,8 +372,7 @@ fn render_box(
             );
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 sub,
                 x,
@@ -334,8 +386,7 @@ fn render_box(
         LayoutKind::SubSup { base, sub, sup } => {
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 base,
                 x,
@@ -347,8 +398,7 @@ fn render_box(
             );
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 sub,
                 x,
@@ -360,8 +410,7 @@ fn render_box(
             );
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 sup,
                 x,
@@ -390,8 +439,7 @@ fn render_box(
                 let op_y = y + sup_h + op_fs * 0.8;
                 draw_text(
                     canvas,
-                    font_mgr,
-                    system_families,
+                    fonts,
                     font_families,
                     symbol,
                     op_x,
@@ -406,8 +454,7 @@ fn render_box(
             if let Some(sup) = sup {
                 render_box(
                     canvas,
-                    font_mgr,
-                    system_families,
+                    fonts,
                     font_families,
                     sup,
                     x,
@@ -421,8 +468,7 @@ fn render_box(
             if let Some(sub) = sub {
                 render_box(
                     canvas,
-                    font_mgr,
-                    system_families,
+                    fonts,
                     font_families,
                     sub,
                     x,
@@ -438,8 +484,7 @@ fn render_box(
             let name = if *is_upper { "Lim" } else { "lim" };
             draw_text(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 name,
                 x,
@@ -453,8 +498,7 @@ fn render_box(
             if let Some(sub) = sub {
                 render_box(
                     canvas,
-                    font_mgr,
-                    system_families,
+                    fonts,
                     font_families,
                     sub,
                     x,
@@ -476,8 +520,7 @@ fn render_box(
             if !bracket_chars.0.is_empty() {
                 draw_stretch_bracket(
                     canvas,
-                    font_mgr,
-                    system_families,
+                    fonts,
                     font_families,
                     bracket_chars.0,
                     x,
@@ -489,8 +532,7 @@ fn render_box(
                 );
                 draw_stretch_bracket(
                     canvas,
-                    font_mgr,
-                    system_families,
+                    fonts,
                     font_families,
                     bracket_chars.1,
                     x + lb.width - fs * 0.3,
@@ -505,8 +547,7 @@ fn render_box(
                 for cell in row {
                     render_box(
                         canvas,
-                        font_mgr,
-                        system_families,
+                        fonts,
                         font_families,
                         cell,
                         x,
@@ -522,8 +563,7 @@ fn render_box(
         LayoutKind::Rel { arrow, over, under } => {
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 over,
                 x,
@@ -535,8 +575,7 @@ fn render_box(
             );
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 arrow,
                 x,
@@ -549,8 +588,7 @@ fn render_box(
             if let Some(under) = under {
                 render_box(
                     canvas,
-                    font_mgr,
-                    system_families,
+                    fonts,
                     font_families,
                     under,
                     x,
@@ -566,8 +604,7 @@ fn render_box(
             for (left, right) in rows {
                 render_box(
                     canvas,
-                    font_mgr,
-                    system_families,
+                    fonts,
                     font_families,
                     left,
                     x,
@@ -579,8 +616,7 @@ fn render_box(
                 );
                 render_box(
                     canvas,
-                    font_mgr,
-                    system_families,
+                    fonts,
                     font_families,
                     right,
                     x,
@@ -595,12 +631,27 @@ fn render_box(
         LayoutKind::Paren { left, right, body } => {
             let paren_w = fs * 0.333;
             let use_glyph = lb.height <= fs * 1.2;
+            // legacy는 큰 괄호도 e044/e045 글립을 slot 폭으로 늘려 칠고 세로는
+            // 기준선 기준 -1.05em~+0.26em 범위를 덮는다 (eq-002 실측).
+            let left_stretch = !use_glyph && matches!(left.as_str(), "(" | ")");
             if !left.is_empty() {
-                if use_glyph && (left == "(" || left == ")") {
+                let legacy_painted = left_stretch && {
+                    let (ink, g) = paren_glyph_ink(left);
+                    draw_legacy_pua_glyph_scaled(
+                        canvas,
+                        fonts,
+                        font_families,
+                        g,
+                        ink,
+                        (x, y + lb.baseline - fs * 1.05, fs * 0.39, fs * 1.31),
+                        color,
+                    )
+                };
+                if legacy_painted {
+                } else if use_glyph && (left == "(" || left == ")") {
                     draw_text(
                         canvas,
-                        font_mgr,
-                        system_families,
+                        fonts,
                         font_families,
                         left,
                         x,
@@ -614,8 +665,7 @@ fn render_box(
                 } else {
                     draw_stretch_bracket(
                         canvas,
-                        font_mgr,
-                        system_families,
+                        fonts,
                         font_families,
                         left,
                         x,
@@ -629,8 +679,7 @@ fn render_box(
             }
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 body,
                 x,
@@ -640,13 +689,31 @@ fn render_box(
                 italic,
                 bold,
             );
+            let right_stretch = !use_glyph && matches!(right.as_str(), "(" | ")");
             if !right.is_empty() {
                 let right_x = x + lb.width - paren_w;
-                if use_glyph && (right == "(" || right == ")") {
+                let legacy_painted = right_stretch && {
+                    let (ink, g) = paren_glyph_ink(right);
+                    draw_legacy_pua_glyph_scaled(
+                        canvas,
+                        fonts,
+                        font_families,
+                        g,
+                        ink,
+                        (
+                            x + lb.width - fs * 0.39,
+                            y + lb.baseline - fs * 1.05,
+                            fs * 0.39,
+                            fs * 1.31,
+                        ),
+                        color,
+                    )
+                };
+                if legacy_painted {
+                } else if use_glyph && (right == "(" || right == ")") {
                     draw_text(
                         canvas,
-                        font_mgr,
-                        system_families,
+                        fonts,
                         font_families,
                         right,
                         right_x,
@@ -660,8 +727,7 @@ fn render_box(
                 } else {
                     draw_stretch_bracket(
                         canvas,
-                        font_mgr,
-                        system_families,
+                        fonts,
                         font_families,
                         right,
                         right_x,
@@ -677,8 +743,7 @@ fn render_box(
         LayoutKind::Decoration { kind, body } => {
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 body,
                 x,
@@ -704,8 +769,7 @@ fn render_box(
             };
             render_box(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 body,
                 x,
@@ -722,8 +786,7 @@ fn render_box(
 
 fn draw_text(
     canvas: &Canvas,
-    font_mgr: &FontMgr,
-    system_families: &SystemFontFamilies,
+    fonts: &EqFonts<'_>,
     font_families: &[&str],
     text: &str,
     x: f64,
@@ -742,9 +805,7 @@ fn draw_text(
         .first()
         .filter(|name| crate::renderer::equation::font::is_legacy_equation_font(name))
     {
-        if let Some(typeface) =
-            match_system_family_style(font_mgr, system_families, family, FontStyle::normal())
-        {
+        if let Some(typeface) = fonts.resolve(family, FontStyle::normal()) {
             let mapped: Vec<_> = text
                 .chars()
                 .map(|c| crate::renderer::equation::font::legacy_equation_glyph(c, italic))
@@ -769,7 +830,7 @@ fn draw_text(
                 let mut pen = x - if centered { width / 2.0 } else { 0.0 };
                 for (run, skew) in runs {
                     font.set_skew_x(if skew { -0.2 } else { 0.0 });
-                    canvas.draw_str(&run, (pen as f32, baseline_y as f32), &font, &paint);
+                    draw_text_run(canvas, &run, (pen as f32, baseline_y as f32), &font, &paint);
                     pen += font.measure_str(&run, Some(&paint)).0 as f64;
                 }
                 return;
@@ -782,13 +843,7 @@ fn draw_text(
         (false, true) => FontStyle::italic(),
         (false, false) => FontStyle::normal(),
     };
-    let typeface = equation_typeface_for_text_in_families(
-        font_families,
-        font_mgr,
-        system_families,
-        font_style,
-        text,
-    );
+    let typeface = equation_typeface_for_text_in_families(font_families, fonts, font_style, text);
     let mut font = if let Some(typeface) = typeface {
         Font::new(typeface, font_size as f32)
     } else {
@@ -809,13 +864,124 @@ fn draw_text(
     } else {
         x
     };
-    canvas.draw_str(text, (draw_x as f32, baseline_y as f32), &font, &paint);
+    draw_text_run(
+        canvas,
+        text,
+        (draw_x as f32, baseline_y as f32),
+        &font,
+        &paint,
+    );
+}
+
+// 한컴 legacy 수식 서체의 PUA 글립(√ 기호 e05c, 막대 e06d 등)을 직접 칠한다.
+// advance_w를 주면 글립 자연폭에 맞춰 가로로만 늘린다. 서체나 글립이 없으면
+// false를 반환해 호출자가 path 대체 그리기로 돌아간다.
+fn draw_legacy_pua_glyph(
+    canvas: &Canvas,
+    fonts: &EqFonts<'_>,
+    font_families: &[&str],
+    glyph: char,
+    x: f64,
+    baseline_y: f64,
+    font_size: f64,
+    advance_w: Option<f64>,
+    color: Color,
+) -> bool {
+    let Some(family) = font_families
+        .iter()
+        .copied()
+        .find(|name| crate::renderer::equation::font::is_legacy_equation_font(name))
+    else {
+        return false;
+    };
+    let Some(typeface) = fonts.resolve(family, FontStyle::normal()) else {
+        return false;
+    };
+    let text = glyph.to_string();
+    if !typeface_covers_text(&typeface, &text) {
+        return false;
+    }
+    let mut font = Font::new(typeface, font_size as f32);
+    font.set_edging(font::Edging::AntiAlias);
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(color);
+    let natural = font.measure_str(&text, Some(&paint)).0 as f64;
+    if let Some(w) = advance_w {
+        if natural > 0.0 && (w - natural).abs() / natural > 0.02 {
+            canvas.save();
+            canvas.translate((x as f32, 0.0));
+            canvas.scale(((w / natural) as f32, 1.0));
+            canvas.translate((-x as f32, 0.0));
+            draw_text_run(canvas, &text, (x as f32, baseline_y as f32), &font, &paint);
+            canvas.restore();
+            return true;
+        }
+    }
+    draw_text_run(canvas, &text, (x as f32, baseline_y as f32), &font, &paint);
+    true
+}
+
+// e044 '(' / e045 ')' 의 잉크 경계(em). HyhwpEQ 실측값.
+fn paren_glyph_ink(bracket: &str) -> ((f64, f64, f64, f64), char) {
+    if bracket == "(" {
+        ((0.0996, -0.2021, 0.3369, 0.8066), '\u{e044}')
+    } else {
+        ((0.0508, -0.2031, 0.2881, 0.8066), '\u{e045}')
+    }
+}
+
+// legacy PUA 글립을 주어진 잉크 사각형에 맞춰 가로로 늘려 칠한다.
+// ink_em = 글립 잉크 경계(em 단위, y1은 baseline 위 잉크 상단).
+// 세로 크기는 잉크가 target 높이를 덮도록 정하고 가로만 늘린다.
+fn draw_legacy_pua_glyph_scaled(
+    canvas: &Canvas,
+    fonts: &EqFonts<'_>,
+    font_families: &[&str],
+    glyph: char,
+    ink_em: (f64, f64, f64, f64),
+    target: (f64, f64, f64, f64),
+    color: Color,
+) -> bool {
+    let Some(family) = font_families
+        .iter()
+        .copied()
+        .find(|name| crate::renderer::equation::font::is_legacy_equation_font(name))
+    else {
+        return false;
+    };
+    let Some(typeface) = fonts.resolve(family, FontStyle::normal()) else {
+        return false;
+    };
+    let text = glyph.to_string();
+    if !typeface_covers_text(&typeface, &text) {
+        return false;
+    }
+    let (x0, y0, x1, y1) = ink_em;
+    let (tx, ty, tw, th) = target;
+    let ink_w = x1 - x0;
+    let ink_h = y1 - y0;
+    if ink_w <= 0.0 || ink_h <= 0.0 || tw <= 0.0 || th <= 0.0 {
+        return false;
+    }
+    let s = th / ink_h;
+    let xs = tw / (ink_w * s);
+    let mut font = Font::new(typeface, s as f32);
+    font.set_edging(font::Edging::AntiAlias);
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(color);
+    canvas.save();
+    canvas.translate(((tx - xs * x0 * s) as f32, (ty + y1 * s) as f32));
+    canvas.scale((xs as f32, 1.0));
+    draw_text_run(canvas, &text, (0.0, 0.0), &font, &paint);
+    canvas.restore();
+    true
 }
 
 fn equation_typeface_for_text_in_families(
     families: &[&str],
-    font_mgr: &FontMgr,
-    system_families: &SystemFontFamilies,
+    fonts: &EqFonts<'_>,
     font_style: FontStyle,
     text: &str,
 ) -> Option<Typeface> {
@@ -823,11 +989,9 @@ fn equation_typeface_for_text_in_families(
         .iter()
         .copied()
         .filter(|family| !crate::renderer::equation::font::is_legacy_equation_font(family))
-        .filter_map(|family| {
-            match_system_family_style(font_mgr, system_families, family, font_style)
-        })
+        .filter_map(|family| fonts.resolve(family, font_style))
         .find(|typeface| typeface_covers_text(typeface, text))
-        .or_else(|| legacy_typeface_for_style(font_mgr, font_style))
+        .or_else(|| legacy_typeface_for_style(fonts.mgr, font_style))
 }
 
 fn typeface_covers_text(typeface: &Typeface, text: &str) -> bool {
@@ -838,8 +1002,7 @@ fn typeface_covers_text(typeface: &Typeface, text: &str) -> bool {
 
 fn draw_stretch_bracket(
     canvas: &Canvas,
-    font_mgr: &FontMgr,
-    system_families: &SystemFontFamilies,
+    fonts: &EqFonts<'_>,
     font_families: &[&str],
     bracket: &str,
     x: f64,
@@ -941,8 +1104,7 @@ fn draw_stretch_bracket(
         _ => {
             draw_text(
                 canvas,
-                font_mgr,
-                system_families,
+                fonts,
                 font_families,
                 bracket,
                 mid_x,
@@ -1134,11 +1296,18 @@ mod tests {
         {
             return;
         }
+        let custom = TypefaceCatalog::new();
+        let bundled = TypefaceCatalog::new();
+        let fonts = EqFonts {
+            mgr: &font_mgr,
+            custom: &custom,
+            bundled: &bundled,
+            system: &system_families,
+        };
 
         let selected = equation_typeface_for_text_in_families(
             &["STIX Two Text", "STIX Two Math"],
-            &font_mgr,
-            &system_families,
+            &fonts,
             FontStyle::italic(),
             "f",
         )
@@ -1174,11 +1343,18 @@ mod tests {
         if typeface_covers_text(&text_face, "→") || !typeface_covers_text(&math_face, "→") {
             return;
         }
+        let custom = TypefaceCatalog::new();
+        let bundled = TypefaceCatalog::new();
+        let fonts = EqFonts {
+            mgr: &font_mgr,
+            custom: &custom,
+            bundled: &bundled,
+            system: &system_families,
+        };
 
         let selected = equation_typeface_for_text_in_families(
             &["STIX Two Text", "STIX Two Math"],
-            &font_mgr,
-            &system_families,
+            &fonts,
             FontStyle::normal(),
             "→",
         )

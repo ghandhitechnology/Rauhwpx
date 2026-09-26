@@ -89,6 +89,7 @@ import { initWindowActivity } from '@/core/window-activity';
 import { analyzeDocumentFonts } from '@/core/document-font-status';
 import {
   detectLocalFonts, getLocalFontState, getLocalFonts, importLocalFontFiles, localFontImportMessage, loadStoredLocalFonts,
+  repairLocalFontFacesFor, setActiveDocumentFonts,
 } from '@/core/local-fonts';
 import { userSettings, type EditorScalarSettings } from '@/core/user-settings';
 import { AutosaveManager, type AutosaveScheduleSettings, type AutosaveStatus } from '@/recovery/autosave-manager';
@@ -1040,6 +1041,18 @@ async function updateLoadProgress(percent: number, label: string): Promise<void>
  * CanvasKit은 browser CSS font fallback을 사용하지 않는다. 초기 페이지를 먼저 표시한 뒤,
  * 저장된 권한 범위 안에서 필요한 local face를 준비하고 등록된 경우에만 다시 그린다.
  */
+/** 설치 글꼴 중 합성 글리프 bbox 가 잘린 face 를 복구해 Canvas2D 에 등록하고, 등록되면 다시 그린다. */
+function prepareLocalFontRepairs(fontNames: readonly string[] | undefined): void {
+  if (!fontNames?.length) return;
+  const requestedFonts = [...fontNames];
+  void (async () => {
+    await loadStoredLocalFonts();
+    if (await repairLocalFontFacesFor(requestedFonts)) eventBus.emit('document-view-changed');
+  })().catch((error) => {
+    console.warn('[LocalFonts] 설치 글꼴 복구 등록 실패, 설치 글꼴로 계속 표시합니다:', error);
+  });
+}
+
 function prepareCanvasKitLocalFonts(fontNames: readonly string[] | undefined): void {
   const renderer = canvasView?.getRenderBackend() === 'canvaskit'
     ? rendererSession?.getCanvasKitRenderer() ?? null
@@ -1985,6 +1998,7 @@ async function initializeDocument(
   const msg = sbMessage();
   try {
     await updateLoadProgress(55, '폰트 준비 중...');
+    setActiveDocumentFonts(docInfo.fontsUsed ?? []);
     if (docInfo.fontsUsed?.length) {
       await loadWebFonts(docInfo.fontsUsed, (loaded, total) => {
         const fontPercent = total > 0 ? 55 + Math.round((loaded / total) * 20) : 65;
@@ -2000,6 +2014,7 @@ async function initializeDocument(
     await updateLoadProgress(82, '페이지 렌더 준비 중...');
     await canvasView?.loadDocument();
     prepareCanvasKitLocalFonts(docInfo.fontsUsed);
+    prepareLocalFontRepairs(docInfo.fontsUsed);
     await updateLoadProgress(90, '도구 모음 준비 중...');
     toolbar?.setEnabled(!documentReadOnly && !agentUserEditingLocked());
     toolbar?.initFontDropdown(docInfo.fontsUsed);
@@ -2095,6 +2110,7 @@ async function promptLocalFontsIfNeeded(docInfo: DocumentInfo): Promise<void> {
     const nextReport = analyzeDocumentFonts(docInfo.fontsUsed);
     eventBus.emit('local-fonts-changed', { fonts, report: nextReport });
     prepareCanvasKitLocalFonts(docInfo.fontsUsed);
+    prepareLocalFontRepairs(docInfo.fontsUsed);
     const state = getLocalFontState();
     const resultLabel = state.source === 'font-presence-probe' ? '확인됨' : '감지됨';
     msg.textContent = `로컬 글꼴 ${fonts.length}개 ${resultLabel}`;

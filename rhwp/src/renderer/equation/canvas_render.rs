@@ -173,26 +173,62 @@ fn render_box(
             render_box(ctx, bottom, x, y, color, fs, italic, bold, font_family);
         }
         LayoutKind::Sqrt { index, body } => {
-            let sign_h = lb.height;
-            let body_left = x + body.x - fs * 0.1;
             let sign_x = x;
-            let v_top = y;
-            let v_mid_x = body_left - fs * 0.15;
-            let v_mid_y = y + sign_h;
-            let v_start_x = v_mid_x - fs * 0.3;
-            let v_start_y = y + sign_h * 0.6;
-            let tick_x = v_start_x - fs * 0.1;
-            let tick_y = v_start_y - fs * 0.05;
-
-            ctx.set_stroke_style_str(color);
-            ctx.set_line_width(fs * 0.04);
-            ctx.begin_path();
-            ctx.move_to(tick_x, tick_y);
-            ctx.line_to(v_start_x, v_start_y);
-            ctx.line_to(v_mid_x, v_mid_y);
-            ctx.line_to(body_left, v_top);
-            ctx.line_to(x + lb.width, v_top);
-            ctx.stroke();
+            // 네이티브와 같은 HyhwpEQ 근호/윗줄을 사용한다. 두 글립이 모두
+            // 준비되지 않았으면 기존 기하 경로로 돌아간다.
+            let pair_available = super::font::is_legacy_equation_font(&font_family.source)
+                && matches!(
+                    resolve_equation_font_family(&font_family.source, "\u{e05c}\u{e06d}"),
+                    Ok(Some(_))
+                );
+            let sign_painted = pair_available
+                && draw_legacy_pua_glyph(
+                    ctx,
+                    font_family,
+                    '\u{e05c}',
+                    x + body.x - fs,
+                    y + lb.baseline,
+                    fs * 0.682 + body.height * 0.37,
+                    Some(fs),
+                    color,
+                );
+            if sign_painted {
+                let bar_painted = draw_legacy_pua_glyph(
+                    ctx,
+                    font_family,
+                    '\u{e06d}',
+                    x + body.x - fs * 0.03,
+                    y + body.y + body.height * 0.694,
+                    body.height * 1.11,
+                    Some(body.width + fs * 0.17),
+                    color,
+                );
+                if !bar_painted {
+                    ctx.set_stroke_style_str(color);
+                    ctx.set_line_width(fs * 0.04);
+                    ctx.begin_path();
+                    ctx.move_to(x + body.x - fs * 0.03, y);
+                    ctx.line_to(x + lb.width, y);
+                    ctx.stroke();
+                }
+            } else {
+                let body_left = x + body.x - fs * 0.1;
+                let mid_x = body_left - fs * 0.15;
+                let mid_y = y + lb.height;
+                let start_x = mid_x - fs * 0.3;
+                let start_y = y + lb.height * 0.6;
+                let tick_x = start_x - fs * 0.1;
+                let tick_y = start_y - fs * 0.05;
+                ctx.set_stroke_style_str(color);
+                ctx.set_line_width(fs * 0.04);
+                ctx.begin_path();
+                ctx.move_to(tick_x, tick_y);
+                ctx.line_to(start_x, start_y);
+                ctx.line_to(mid_x, mid_y);
+                ctx.line_to(body_left, y);
+                ctx.line_to(x + lb.width, y);
+                ctx.stroke();
+            }
 
             if let Some(idx) = index {
                 render_box(
@@ -441,6 +477,44 @@ fn render_box(
         }
         LayoutKind::Space(_) | LayoutKind::Newline | LayoutKind::Empty => {}
     }
+}
+
+/// 검증된 구형 수식 글립 하나를 칠하고 필요한 경우 가로 폭만 늘린다.
+fn draw_legacy_pua_glyph(
+    ctx: &CanvasRenderingContext2d,
+    font: &EquationFont,
+    glyph: char,
+    x: f64,
+    baseline_y: f64,
+    size: f64,
+    advance_w: Option<f64>,
+    color: &str,
+) -> bool {
+    if !super::font::is_legacy_equation_font(&font.source) {
+        return false;
+    }
+    let text = glyph.to_string();
+    let Ok(Some(family)) = resolve_equation_font_family(&font.source, &text) else {
+        return false;
+    };
+    let family = format!("'{}'", family.replace('\\', "\\\\").replace('\'', "\\'"));
+    ctx.save();
+    ctx.set_fill_style_str(color);
+    ctx.set_text_align("start");
+    set_font(ctx, size, false, false, &family);
+    let natural = ctx.measure_text(&text).map(|m| m.width()).unwrap_or(0.0);
+    if let Some(width) = advance_w.filter(|_| natural > 0.0) {
+        if (width - natural).abs() / natural > 0.02 {
+            let _ = ctx.translate(x, 0.0);
+            let _ = ctx.scale(width / natural, 1.0);
+            let _ = ctx.fill_text(&text, 0.0, baseline_y);
+            ctx.restore();
+            return true;
+        }
+    }
+    let _ = ctx.fill_text(&text, x, baseline_y);
+    ctx.restore();
+    true
 }
 
 /// PUA는 로드와 cmap이 확인된 세션 서체에만 전달한다. 누락 시 원래 Unicode로 fallback한다.

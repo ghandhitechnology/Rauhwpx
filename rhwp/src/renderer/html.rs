@@ -292,26 +292,33 @@ impl Renderer for HtmlRenderer {
             "sans-serif".to_string()
         } else {
             let fallback = super::generic_fallback(&style.font_family);
+            // 문서 선언 대체 글꼴(substFont)은 generic 폴백보다 먼저 시도.
+            let subst = if style.font_subst.is_empty() {
+                String::new()
+            } else {
+                format!(" '{}',", escape_html(&style.font_subst))
+            };
             // [#3314] 접미사 face 미설치 시 base family 가 generic 보다 먼저 구제.
             match super::base_family_without_weight_suffix(&style.font_family) {
                 Some(base) => format!(
-                    "'{}', '{}', {}",
+                    "'{}', '{}',{} {}",
                     escape_html(&style.font_family),
                     escape_html(&base),
+                    subst,
                     fallback
                 ),
-                None => format!("'{}', {}", escape_html(&style.font_family), fallback),
+                None => format!(
+                    "'{}',{} {}",
+                    escape_html(&style.font_family),
+                    subst,
+                    fallback
+                ),
             }
         };
 
         // 위첨자/아래첨자: y좌표·font_size 직접 조정 (absolute 위치이므로 vertical-align 불가)
-        let (draw_y, draw_size) = if style.superscript {
-            (y - font_size * 0.3, font_size * 0.7)
-        } else if style.subscript {
-            (y + font_size * 0.15, font_size * 0.7)
-        } else {
-            (y, font_size)
-        };
+        let (draw_size, script_dy) = super::script_glyph_size_and_shift(style, font_size);
+        let draw_y = y + script_dy;
 
         let mut css = format!(
             "position:absolute;left:{}px;top:{}px;font-family:{};font-size:{}px;color:{};",

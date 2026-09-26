@@ -236,6 +236,20 @@ impl FootnoteShape {
     pub fn between_notes_margin_hu(&self) -> u16 {
         self.raw_unknown
     }
+
+    /// 구분선 길이(HWPUNIT). 음수(-1)는 한컴 기본 길이 5cm 이고, 0 은 길이 미지정이라
+    /// `None` 을 돌려 호출자가 단 폭 기반 기본값을 쓰게 한다. 호출자는 단 폭으로 clamp 한다.
+    ///
+    /// 정답지 근거: 각주 noteLine length="-1" 은 한컴 macOS·Windows 2022 PDF 모두
+    /// 141.7pt(=5cm) 구분선으로 그려진다 (단 폭 1/3 이 아님).
+    pub fn resolve_separator_length_hu(length: i32) -> Option<i32> {
+        const HANCOM_DEFAULT_SEPARATOR_LENGTH_HU: i32 = 14173; // 5cm
+        match length {
+            l if l < 0 => Some(HANCOM_DEFAULT_SEPARATOR_LENGTH_HU),
+            0 => None,
+            l => Some(l),
+        }
+    }
 }
 
 /// 번호 형식

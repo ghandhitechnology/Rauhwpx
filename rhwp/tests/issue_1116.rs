@@ -232,19 +232,16 @@ fn sample16_hwp5_page3_svg_latin_glyphs_pin_browser_width() {
 }
 
 fn assert_page3_latin_poppy_resolves_to_palatino(rel_path: &str) {
+    // HCI Poppy 는 자체 HFT 폭으로 재고, 글리프는 Palatino 계열 설치 서체로 그린다
+    // (한컴 macOS: HFT 윤곽 = Palatino 폭. 종전 Windows/webhwp 식 Palatino Linotype
+    // 치환은 `< > ~` 등의 폭이 0.5em 으로 달랐다).
     let svg = render_svg(rel_path, 2);
     let latin_c_attrs = extract_text_attrs(&svg, "C");
     assert!(
-        latin_c_attrs
-            .iter()
-            .any(|attrs| attrs.contains("font-family=\"Palatino Linotype,")),
-        "{rel_path} p3 Latin glyphs must resolve HCI Poppy to Palatino Linotype: {latin_c_attrs:?}"
-    );
-    assert!(
-        latin_c_attrs
-            .iter()
-            .all(|attrs| !attrs.contains("font-family=\"HCI Poppy,")),
-        "{rel_path} p3 Latin glyphs must not fall back through unresolved HCI Poppy: {latin_c_attrs:?}"
+        !latin_c_attrs.is_empty()
+            && latin_c_attrs.iter().all(|attrs| attrs
+                .contains("font-family=\"HCI Poppy,&apos;Palatino&apos;,&apos;Palatino Linotype&apos;,")),
+        "{rel_path} p3 Latin glyphs must keep HCI Poppy with the Palatino face chain: {latin_c_attrs:?}"
     );
 }
 

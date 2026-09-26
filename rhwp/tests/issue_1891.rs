@@ -20,11 +20,8 @@ use rhwp::parser::hwpx::parse_hwpx;
 use rhwp::serializer::hwpx::serialize_hwpx;
 
 const SAMPLE: &str = "samples/issue1891_external_bindata_link.hwpx";
-// [#2070 잠정] 76076: PDF 정답 82, 86712: PDF 정답 65. 종전 82/65는 본문 래핑
-// +1줄 과대(45자 휴리스틱)와 빈 문단 0높이 과소의 **상쇄**였다. #2070 에서 빈 문단
-// 축을 한글 정합(em 줄박스, 80168=157 달성 필수)으로 고치면서 상쇄가 노출되어
-// 83/64 로 이동 — 본문 NO_LS 실폭 래핑(reflow_line_segs 정식 호출) 후속 이슈에서
-// 82/65 로 복귀시킨다. 80168/80250 은 PDF 정답 그대로.
+// 쪽수는 모두 공식 PDF 정답이다. 86712 는 표 분할 경계(p22 총합계 행 이월 등)를
+// pdf/issue1921/86712_regulatory_analysis-2024.pdf 기준으로 맞춘 결과다.
 const HWP5_ORIGIN_SAMPLES: &[(&str, u32)] = &[
     ("samples/76076_regulatory_analysis.hwp", 82),
     ("samples/80168_regulatory_analysis.hwp", 157),

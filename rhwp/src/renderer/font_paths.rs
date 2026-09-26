@@ -190,6 +190,291 @@ pub fn bundled_font_dirs() -> Vec<PathBuf> {
     vec![PathBuf::from(BUNDLED_OPENSOURCE_DIR)]
 }
 
+/// 폰트 패밀리명이 현재 렌더 폰트 집합에 실재하는지 판별한다.
+///
+/// substFont(문서 선언 대체 글꼴) 적용 판정용 — 파일명 휴리스틱이 아니라 각
+/// 파일의 name 테이블에 기록된 실제 패밀리명으로 판별한다. 기본 집합은
+/// 시스템 + `RHWP_FONT_PATH` + 번들이며 프로세스 최초 한 번만 구축하고,
+/// `extra` 경로(`--font-path` 인자)는 호출 시마다 스캔한다.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn font_family_available(family: &str, extra: &[PathBuf]) -> bool {
+    fn normalize(name: &str) -> String {
+        name.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    }
+    let want = normalize(family);
+    static BASE: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    let base = BASE.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        load_into_fontdb(&mut db, &[]);
+        db.faces()
+            .flat_map(|face| {
+                face.families
+                    .iter()
+                    .map(|(name, _)| normalize(name))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    });
+    if base.contains(&want) {
+        return true;
+    }
+    for file in font_files(extra) {
+        let Ok(data) = std::fs::read(&file) else {
+            continue;
+        };
+        let face_count = ttf_parser::fonts_in_collection(&data).unwrap_or(1).min(256);
+        for face_index in 0..face_count {
+            let Ok(face) = ttf_parser::Face::parse(&data, face_index) else {
+                continue;
+            };
+            let hit = face.names().into_iter().any(|name| {
+                matches!(
+                    name.name_id,
+                    ttf_parser::name_id::FAMILY | ttf_parser::name_id::TYPOGRAPHIC_FAMILY
+                ) && name
+                    .to_string()
+                    .is_some_and(|value| normalize(&value) == want)
+            });
+            if hit {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ─── 사용 가능 face 레지스트리 ───────────────────────────────────────────
+// 한컴 macOS의 FontMap 치환은 요청 face가 없을 때만 발동한다. 스키아 페인트
+// 경로는 이미 이 규칙을 따르지만(text_replay 가 실제 typeface 해석 성공 여부로
+// 치환 여부를 결정), 레이아웃의 폭 측정은 파일 시스템을 직접 보지 못해 폰트
+// 실재와 무관하게 치환 메트릭을 쓰면 측정/페인트 폭이 어긋난다 (예: 돋움체 TTF
+// 가 주어졌는데 고정폭이 아닌 Haansoft 비례 메트릭으로 조판되는 사례).
+// 이 레지스트리는 렌더 시작 시(`register_font_face_availability`) custom
+// source(--font-path / RHWP_FONT_PATH)의 face 이름을 적재해 두고, 측정
+// 경로가 `custom_font_face_available` 로 실재 여부를 조회한다.
+
+/// 등록된 face 별칭 (정규화: 공백 압축 + 소문자 — skia alias 규칙과 동일).
+static CUSTOM_FACE_NAMES: std::sync::RwLock<std::collections::BTreeSet<String>> =
+    std::sync::RwLock::new(std::collections::BTreeSet::new());
+
+/// face 별칭 → (파일, TTC face index). 측정 경로가 실제 hmtx 를 읽을 때 쓴다.
+static CUSTOM_FACE_SOURCES: std::sync::RwLock<std::collections::BTreeMap<String, (PathBuf, u32)>> =
+    std::sync::RwLock::new(std::collections::BTreeMap::new());
+
+#[derive(Clone)]
+struct CustomFaceVariant {
+    file: PathBuf,
+    index: u32,
+    weight: u16,
+    italic: bool,
+}
+
+/// 같은 family의 Regular/Bold/Italic face를 실제 hmtx 선택에도 보존한다.
+static CUSTOM_FACE_VARIANTS: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::BTreeMap<String, Vec<CustomFaceVariant>>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::BTreeMap::new()));
+
+/// 파일별 hmtx 캐시 — face 단위가 아니라 파일 단위로 한 번만 파싱한다.
+struct RealFaceHmtx {
+    units_per_em: u16,
+    /// codepoint → horizontal advance (font units). cmap 에 없는 문자는
+    /// 키가 없다 — 호출자는 베이크드 메트릭 경로로 폴백한다.
+    advance_by_char: std::collections::HashMap<u32, u16>,
+}
+
+static REAL_FACE_HMTX: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<(PathBuf, u32), std::sync::Arc<RealFaceHmtx>>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+
+/// name 테이블 파싱이 끝난 폰트 파일 — 렌더 호출마다 재파싱하지 않는다.
+static SCANNED_FACE_FILES: std::sync::RwLock<std::collections::BTreeSet<PathBuf>> =
+    std::sync::RwLock::new(std::collections::BTreeSet::new());
+
+/// skia `normalize_typeface_alias` 와 동일 규칙.
+fn normalize_face_alias(value: &str) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!normalized.is_empty()).then(|| normalized.to_lowercase())
+}
+
+/// SFNT 파일의 face 별칭을 레지스트리에 적재한다.
+///
+/// TTC 의 모든 face를 순회하고 name 테이블의 family/full/postscript 이름을
+/// 전 언어에 대해 등록한다. 파일명 스템도 별칭으로 둔다(`find_font_file` 의
+/// 후보 파일명 관례와 정합).
+fn register_font_file_faces(file: &Path) {
+    let Ok(bytes) = std::fs::read(file) else {
+        return;
+    };
+    let mut aliases = Vec::new();
+    let mut variants = Vec::new();
+    if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
+        if let Some(alias) = normalize_face_alias(stem) {
+            aliases.push((alias, 0));
+        }
+    }
+    for index in 0.. {
+        let Ok(face) = ttf_parser::Face::parse(&bytes, index) else {
+            break;
+        };
+        let variant = CustomFaceVariant {
+            file: file.to_path_buf(),
+            index,
+            weight: face.weight().to_number(),
+            italic: face.is_italic(),
+        };
+        if index == 0 {
+            if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
+                if let Some(alias) = normalize_face_alias(stem) {
+                    variants.push((alias, variant.clone()));
+                }
+            }
+        }
+        for name in face.names() {
+            if matches!(
+                name.name_id,
+                ttf_parser::name_id::FAMILY
+                    | ttf_parser::name_id::FULL_NAME
+                    | ttf_parser::name_id::POST_SCRIPT_NAME
+                    | ttf_parser::name_id::TYPOGRAPHIC_FAMILY
+                    | ttf_parser::name_id::COMPATIBLE_FULL
+                    | ttf_parser::name_id::WWS_FAMILY
+            ) {
+                if let Some(value) = name.to_string() {
+                    if let Some(alias) = normalize_face_alias(&value) {
+                        aliases.push((alias.clone(), index));
+                        variants.push((alias, variant.clone()));
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(mut names) = CUSTOM_FACE_NAMES.write() {
+        names.extend(aliases.iter().map(|(alias, _)| alias.clone()));
+    }
+    if let Ok(mut sources) = CUSTOM_FACE_SOURCES.write() {
+        for (alias, index) in aliases {
+            // 첫 조달 순서 우선 — 같은 face 가 여러 파일에 있으면 먼저 온 것을 쓴다.
+            sources
+                .entry(alias)
+                .or_insert_with(|| (file.to_path_buf(), index));
+        }
+    }
+    if let Ok(mut sources) = CUSTOM_FACE_VARIANTS.write() {
+        for (alias, variant) in variants {
+            let faces = sources.entry(alias).or_default();
+            if !faces
+                .iter()
+                .any(|face| face.file == variant.file && face.index == variant.index)
+            {
+                faces.push(variant);
+            }
+        }
+    }
+}
+
+/// custom source(`extra` = 호출자 지정 경로 + `RHWP_FONT_PATH`)의 face 이름을
+/// 등록한다. 렌더 함수는 레이아웃 진입 전에 호출해야 측정 경로가 실재를 본다.
+/// 파일별 파싱은 한 번만 수행한다.
+pub fn register_font_face_availability(extra: &[PathBuf]) {
+    for file in font_files(&custom_font_sources(extra)) {
+        if SCANNED_FACE_FILES
+            .read()
+            .map(|scanned| scanned.contains(&file))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        register_font_file_faces(&file);
+        if let Ok(mut scanned) = SCANNED_FACE_FILES.write() {
+            scanned.insert(file);
+        }
+    }
+}
+
+/// 측정 경로용 — `name` face 가 custom font source 에 실재(로드 가능)한가.
+pub fn custom_font_face_available(name: &str) -> bool {
+    let Some(alias) = normalize_face_alias(name) else {
+        return false;
+    };
+    CUSTOM_FACE_NAMES
+        .read()
+        .map(|names| names.contains(&alias))
+        .unwrap_or(false)
+}
+
+/// `name` face 의 등록 파일 경로와 TTC face index — 측정·페인트 경로가
+/// Typeface 를 직접 만들 때 쓴다. face 미등록이면 None.
+pub fn custom_face_source(name: &str) -> Option<(PathBuf, u32)> {
+    let alias = normalize_face_alias(name)?;
+    CUSTOM_FACE_SOURCES
+        .read()
+        .ok()
+        .and_then(|sources| sources.get(&alias).cloned())
+}
+
+/// face 이름의 등록 파일에서 cmap·hmtx 를 한 번만 읽어 캐시한다.
+fn real_face_hmtx(file: &Path, index: u32) -> Option<std::sync::Arc<RealFaceHmtx>> {
+    let key = (file.to_path_buf(), index);
+    if let Some(hit) = REAL_FACE_HMTX
+        .read()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned())
+    {
+        return Some(hit);
+    }
+    let bytes = std::fs::read(file).ok()?;
+    let face = ttf_parser::Face::parse(&bytes, index).ok()?;
+    let mut advance_by_char = std::collections::HashMap::new();
+    if let Some(cmap) = face.tables().cmap {
+        for subtable in cmap.subtables {
+            subtable.codepoints(|codepoint| {
+                if let Some(ch) = char::from_u32(codepoint) {
+                    if let Some(glyph) = face.glyph_index(ch) {
+                        if let Some(advance) = face.glyph_hor_advance(glyph) {
+                            advance_by_char.insert(codepoint, advance);
+                        }
+                    }
+                }
+            });
+        }
+    }
+    let metrics = std::sync::Arc::new(RealFaceHmtx {
+        units_per_em: face.units_per_em(),
+        advance_by_char,
+    });
+    if let Ok(mut cache) = REAL_FACE_HMTX.write() {
+        cache.entry(key).or_insert_with(|| metrics.clone());
+    }
+    Some(metrics)
+}
+
+/// 실재 face 파일의 문자 advance 를 em 비율로 반환한다 (hmtx/unitsPerEm).
+/// face 미등록 또는 cmap 에 글리프가 없으면 None — 호출자가 베이크드
+/// 메트릭 경로로 폴백한다. 한컴은 파일이 있는 face 를 실폰트 폭으로
+/// 조판하므로 베이크드 테이블(구버전 TTF 기준)보다 이 값이 정확하다.
+pub fn custom_face_char_em_advance(name: &str, bold: bool, italic: bool, c: char) -> Option<f64> {
+    let alias = normalize_face_alias(name)?;
+    let variant = CUSTOM_FACE_VARIANTS.read().ok().and_then(|sources| {
+        sources.get(&alias).and_then(|faces| {
+            faces
+                .iter()
+                .min_by_key(|face| {
+                    face.weight.abs_diff(if bold { 700 } else { 400 })
+                        + 1000 * u16::from(face.italic != italic)
+                })
+                .cloned()
+        })
+    })?;
+    let metrics = real_face_hmtx(&variant.file, variant.index)?;
+    let advance = *metrics.advance_by_char.get(&(c as u32))?;
+    (metrics.units_per_em > 0).then(|| advance as f64 / metrics.units_per_em as f64)
+}
+
 /// `fontdb` 에 조달 순서대로 폰트를 적재한다.
 ///
 /// 시스템 폰트는 `load_system_fonts()` 가 담당하므로 여기서는 호출자 지정 →

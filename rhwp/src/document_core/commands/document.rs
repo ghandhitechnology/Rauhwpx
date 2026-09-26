@@ -565,6 +565,18 @@ impl DocumentCore {
         Self::from_bytes_with_policy(data, crate::parser::limits::InputPolicy::LocalFileOnce)
     }
 
+    /// Same one-file contract as `from_local_file_bytes`, with explicit metrics.
+    pub fn from_local_file_bytes_with_font_metrics(
+        data: &[u8],
+        font_metrics: crate::model::provenance::FontMetricsPolicy,
+    ) -> Result<DocumentCore, HwpError> {
+        Self::from_bytes_with_policies(
+            data,
+            crate::parser::limits::InputPolicy::LocalFileOnce,
+            font_metrics,
+        )
+    }
+
     /// Reparse output created by this process's bounded serializers.
     pub(crate) fn from_regenerated_bytes(data: &[u8]) -> Result<DocumentCore, HwpError> {
         Self::from_bytes_with_policy(data, crate::parser::limits::InputPolicy::Regenerated)
@@ -2997,7 +3009,9 @@ mod replace_content_tests {
         let selected =
             DocumentCore::from_bytes_with_font_metrics(&bytes, FontMetricsPolicy::HcrDeclared)
                 .unwrap();
-        let mut late = DocumentCore::from_bytes(&bytes).unwrap();
+        let mut late =
+            DocumentCore::from_bytes_with_font_metrics(&bytes, FontMetricsPolicy::HancomWindows)
+                .unwrap();
         assert_ne!(
             starts(&selected),
             starts(&late),

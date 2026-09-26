@@ -173,7 +173,7 @@ fn imported_inline_equation_has_intrinsic_bbox_between_text_and_is_hittable() {
     let tree = core.build_page_render_tree(0).expect("page render tree");
     let before = find_text_bbox(&tree.root, "다항식 ").expect("text before equation");
     let equation = find_equation_bbox(&tree.root, 2).expect("inline equation bbox");
-    let after = find_text_bbox(&tree.root, "을 전개하시오.").expect("text after equation");
+    let after = find_text_bbox(&tree.root, "을 전개하시오").expect("text after equation");
     assert!(
         equation.width > 0.0 && equation.height > 0.0,
         "{equation:?}"

@@ -41,7 +41,8 @@ fn expand_pua_old_hangul(text: &str) -> String {
     out
 }
 use super::layout::{
-    compute_char_positions, compute_glyph_positions, is_halfwidth_cjk_quote, split_into_clusters,
+    compute_char_positions, compute_glyph_positions, is_halfwidth_cjk_quote,
+    registered_glyph_advance, split_into_clusters,
 };
 use crate::model::control::FormType;
 use crate::model::style::{ImageFillMode, UnderlineType};
@@ -298,6 +299,19 @@ impl SvgRenderer {
                             codepoints.insert(ch);
                         }
                     }
+                    // 문서 선언 대체 글꼴도 같은 글자로 임베드 — 원본 미설치 뷰어에서
+                    // font-family 체인이 subst face 를 선택할 수 있게 한다.
+                    if !run.style.font_subst.is_empty() {
+                        let subst_codepoints = self
+                            .font_codepoints
+                            .entry(run.style.font_subst.clone())
+                            .or_default();
+                        for ch in run.display_or_text().chars() {
+                            if !ch.is_control() {
+                                subst_codepoints.insert(ch);
+                            }
+                        }
+                    }
                 }
                 if let Some(ref overlap) = run.char_overlap {
                     // 글자겹침(CharOverlap) 렌더링: 각 문자에 테두리 도형 + 텍스트
@@ -323,8 +337,11 @@ impl SvgRenderer {
                     let font_family = if run.style.font_family.is_empty() {
                         "sans-serif".to_string()
                     } else {
-                        // [#3314] 요청 face → base family → generic 체인.
-                        super::render_font_family_chain(&run.style.font_family)
+                        // [#3314] 요청 face → base family → 문서 선언 대체 → generic 체인.
+                        super::render_font_family_chain(
+                            &run.style.font_family,
+                            &run.style.font_subst,
+                        )
                     };
                     let mut attrs = format!("font-family=\"{}\" font-size=\"{}\" fill=\"{}\" text-anchor=\"middle\" dominant-baseline=\"central\"",
                         escape_xml(&font_family), font_size, color);
@@ -422,14 +439,16 @@ impl SvgRenderer {
                 }
             }
             RenderNodeType::FootnoteMarker(marker) => {
-                let sup_size = (marker.base_font_size * 0.55).max(7.0);
+                // 각주 번호 위첨자: 본문 글꼴의 0.75 배율 (한컴 PDF 정합)
+                let sup_size = (marker.base_font_size * 0.75).max(7.0);
                 let color = color_to_svg(marker.color);
                 let font_family = if marker.font_family.is_empty() {
                     "sans-serif"
                 } else {
                     &marker.font_family
                 };
-                let y = node.bbox.y + node.bbox.height * 0.4;
+                // 본문 baseline 에서 (본문-위첨자) 크기 차만큼만 올려 top 정렬
+                let y = node.bbox.y + marker.baseline - (marker.base_font_size - sup_size) * 0.85;
                 self.output.push_str(&format!(
                     "<text x=\"{}\" y=\"{}\" font-family=\"{}\" font-size=\"{}\" fill=\"{}\">{}</text>\n",
                     node.bbox.x, y, escape_xml(font_family), sup_size, color, escape_xml(&marker.text),
@@ -802,8 +821,7 @@ impl SvgRenderer {
         // [Task #1067] SVG transform 은 left-to-right 적용 (첫 transform 이 마지막 영향).
         // 한컴 정답지 시각 표준: 도형이 자체 좌표계 기준으로 먼저 회전 후 flip 적용.
         // SVG 에서 동일 결과 = "translate(flip) scale(-1,1) rotate(-θ)"
-        // (flip 와 함께 회전 시 각도 부호 반전 필요).
-        let flip_negate_rotation = transform.horz_flip ^ transform.vert_flip;
+        // (flip 와 함께 회전 시 각도 부호 반전 필요 — ShapeTransform::rotation_after_flip).
         if transform.horz_flip {
             parts.push(format!("translate({},0) scale(-1,1)", cx * 2.0));
         }
@@ -811,12 +829,12 @@ impl SvgRenderer {
             parts.push(format!("translate(0,{}) scale(1,-1)", cy * 2.0));
         }
         if transform.rotation != 0.0 {
-            let effective_rotation = if flip_negate_rotation {
-                -transform.rotation
-            } else {
-                transform.rotation
-            };
-            parts.push(format!("rotate({},{},{})", effective_rotation, cx, cy));
+            parts.push(format!(
+                "rotate({},{},{})",
+                transform.rotation_after_flip(),
+                cx,
+                cy
+            ));
         }
         self.output
             .push_str(&format!("<g transform=\"{}\">\n", parts.join(" ")));
@@ -1170,7 +1188,11 @@ impl SvgRenderer {
             match style.stroke_dash {
                 StrokeDash::Dash => attrs.push_str(" stroke-dasharray=\"6 3\""),
                 StrokeDash::LongDash => attrs.push_str(" stroke-dasharray=\"10 3\""),
-                StrokeDash::Dot => attrs.push_str(" stroke-dasharray=\"2 2\""),
+                StrokeDash::Dot => {
+                    // 점선은 선 굵기 비례 (한컴 규칙)
+                    let (on, off) = super::dot_dash_segments(style.stroke_width);
+                    attrs.push_str(&format!(" stroke-dasharray=\"{:.2} {:.2}\"", on, off));
+                }
                 StrokeDash::Circle => {
                     attrs.push_str(" stroke-dasharray=\"0.1 3\" stroke-linecap=\"round\"")
                 }
@@ -1260,7 +1282,10 @@ impl SvgRenderer {
             match style.stroke_dash {
                 StrokeDash::Dash => attrs.push_str(" stroke-dasharray=\"6 3\""),
                 StrokeDash::LongDash => attrs.push_str(" stroke-dasharray=\"10 3\""),
-                StrokeDash::Dot => attrs.push_str(" stroke-dasharray=\"2 2\""),
+                StrokeDash::Dot => {
+                    let (on, off) = super::dot_dash_segments(style.stroke_width);
+                    attrs.push_str(&format!(" stroke-dasharray=\"{:.2} {:.2}\"", on, off));
+                }
                 StrokeDash::Circle => {
                     attrs.push_str(" stroke-dasharray=\"0.1 3\" stroke-linecap=\"round\"")
                 }
@@ -1979,7 +2004,7 @@ impl SvgRenderer {
             "sans-serif".to_string()
         } else {
             // [#3314] 요청 face → base family → generic 체인.
-            super::render_font_family_chain(&style.font_family)
+            super::render_font_family_chain(&style.font_family, &style.font_subst)
         };
         let mut font_attrs = format!(
             "font-family=\"{}\" font-size=\"{:.2}\"",
@@ -2125,7 +2150,7 @@ impl SvgRenderer {
             "sans-serif".to_string()
         } else {
             // [#3314] 요청 face → base family → generic 체인.
-            super::render_font_family_chain(&style.font_family)
+            super::render_font_family_chain(&style.font_family, &style.font_subst)
         };
         let mut font_attrs = format!(
             "font-family=\"{}\" font-size=\"{:.2}\"",
@@ -2689,20 +2714,15 @@ impl Renderer for SvgRenderer {
         } else {
             12.0
         };
-        // 위첨자/아래첨자는 레이아웃 advance 는 원래 run 기준으로 유지하고,
-        // 실제 SVG glyph 크기와 baseline 만 Canvas/HTML 출력과 동일하게 조정한다.
-        let (font_size, y) = if style.superscript {
-            (base_font_size * 0.7, y - base_font_size * 0.3)
-        } else if style.subscript {
-            (base_font_size * 0.7, y + base_font_size * 0.15)
-        } else {
-            (base_font_size, y)
-        };
+        // 위첨자/아래첨자: 줄어든 advance 는 측정 단계가 이미 반영했으므로
+        // glyph 크기와 baseline 만 Canvas/HTML 출력과 동일하게 조정한다.
+        let (font_size, script_dy) = super::script_glyph_size_and_shift(style, base_font_size);
+        let y = y + script_dy;
         let font_family = if style.font_family.is_empty() {
             "sans-serif".to_string()
         } else {
             // [#3314] 요청 face → base family → generic 체인.
-            super::render_font_family_chain(&style.font_family)
+            super::render_font_family_chain(&style.font_family, &style.font_subst)
         };
         let old_hangul_font_family = format!("'Source Han Serif K Old Hangul',{}", font_family);
 
@@ -2782,6 +2802,16 @@ impl Renderer for SvgRenderer {
                 0.0
             }
         };
+        // 반각으로 줄인 전각 구두점은 찌그러뜨리지 않고 halt 규칙으로 배치한다.
+        let halt_offset = |char_idx: usize, cluster_str: &str| -> Option<f64> {
+            let natural = registered_glyph_advance(cluster_str.chars().next()?, style)? * ratio;
+            super::halfwidth_punct_glyph_offset(
+                cluster_str,
+                natural,
+                glyph_advance(char_idx, cluster_str),
+                style,
+            )
+        };
         let is_middle_dot = |cluster_str: &str| cluster_str == "\u{00B7}";
         let dot_radius = font_size * super::render_tree::MIDDLE_DOT_RADIUS_EM;
         let dot_cy_offset = -font_size * super::render_tree::MIDDLE_DOT_CY_OFFSET_EM;
@@ -2805,13 +2835,14 @@ impl Renderer for SvgRenderer {
                     ));
                     continue;
                 }
-                let char_x = x + char_positions[*char_idx] + dx;
+                let halt = halt_offset(*char_idx, cluster_str);
+                let char_x = x + char_positions[*char_idx] + halt.unwrap_or(0.0) + dx;
                 let char_y = y + dy;
-                let length_attrs = svg_text_length_attrs(
-                    cluster_str,
-                    glyph_advance(*char_idx, cluster_str),
-                    ratio,
-                );
+                let length_attrs = if halt.is_some() {
+                    String::new()
+                } else {
+                    svg_text_length_attrs(cluster_str, glyph_advance(*char_idx, cluster_str), ratio)
+                };
                 let shadow_attrs = attrs_for_cluster(cluster_str, &shadow_color);
                 if has_ratio {
                     self.output.push_str(&format!(
@@ -2870,9 +2901,13 @@ impl Renderer for SvgRenderer {
                 ));
                 continue;
             }
-            let char_x = x + char_positions[*char_idx];
-            let length_attrs =
-                svg_text_length_attrs(cluster_str, glyph_advance(*char_idx, cluster_str), ratio);
+            let halt = halt_offset(*char_idx, cluster_str);
+            let char_x = x + char_positions[*char_idx] + halt.unwrap_or(0.0);
+            let length_attrs = if halt.is_some() {
+                String::new()
+            } else {
+                svg_text_length_attrs(cluster_str, glyph_advance(*char_idx, cluster_str), ratio)
+            };
             let common_attrs = attrs_for_cluster(cluster_str, &color);
 
             if has_ratio {
@@ -3157,7 +3192,10 @@ impl Renderer for SvgRenderer {
         match style.dash {
             super::StrokeDash::Dash => attrs.push_str(" stroke-dasharray=\"6 3\""),
             super::StrokeDash::LongDash => attrs.push_str(" stroke-dasharray=\"10 3\""),
-            super::StrokeDash::Dot => attrs.push_str(" stroke-dasharray=\"2 2\""),
+            super::StrokeDash::Dot => {
+                let (on, off) = super::dot_dash_segments(width);
+                attrs.push_str(&format!(" stroke-dasharray=\"{:.2} {:.2}\"", on, off));
+            }
             super::StrokeDash::Circle => {
                 attrs.push_str(" stroke-dasharray=\"0.1 3\" stroke-linecap=\"round\"")
             }
@@ -3374,8 +3412,8 @@ fn font_local_aliases(font_family: &str) -> Vec<&'static str> {
         "함초롬돋움" => vec!["함초롬돋움", "HCR Dotum"],
         "함초롱바탕" => vec!["함초롱바탕", "HCR Batang"],
         "함초롱돋움" => vec!["함초롱돋움", "HCR Dotum"],
-        "한컴바탕" => vec!["한컴바탕", "함초롬바탕", "HCR Batang"],
-        "한컴돋움" => vec!["한컴돋움", "함초롬돋움", "HCR Dotum"],
+        "한컴바탕" => vec!["한컴바탕", "Haansoft Batang", "함초롬바탕", "HCR Batang"],
+        "한컴돋움" => vec!["한컴돋움", "Haansoft Dotum", "함초롬돋움", "HCR Dotum"],
         "맑은 고딕" => vec!["맑은 고딕", "Malgun Gothic"],
         "바탕" => vec!["바탕", "Batang"],
         "돋움" => vec!["돋움", "Dotum"],
@@ -3410,12 +3448,52 @@ fn known_font_filenames(font_name: &str) -> Vec<&'static str> {
             "lmmath-regular.otf",
         ],
         "맑은 고딕" | "Malgun Gothic" => vec!["malgun.ttf", "MalgunGothic.ttf"],
-        "바탕" | "Batang" => vec!["batang.ttc", "BATANG.TTC", "hamchob-r.ttf"],
-        "돋움" | "Dotum" => vec!["dotum.ttc", "DOTUM.TTC", "hamchod-r.ttf"],
-        "굴림" | "Gulim" => vec!["gulim.ttc", "GULIM.TTC", "hamchod-r.ttf"],
-        "궁서" | "Gungsuh" => vec!["gungsuh.ttc", "GUNGSUH.TTC", "hamchob-r.ttf"],
-        "굴림체" | "GulimChe" => vec!["gulim.ttc", "hamchod-r.ttf"],
-        "바탕체" | "BatangChe" => vec!["batang.ttc", "hamchob-r.ttf"],
+        // 표준 Windows 폰트 부재 시 한컴 번들 서체(한컴바탕/한컴돋움 = Haansoft)
+        // 를 함초롬 계열보다 먼저 시도한다 — 한컴(macOS) FontMap 치환과 정합.
+        "바탕" | "Batang" => vec![
+            "batang.ttc",
+            "BATANG.TTC",
+            "HBATANG.TTF",
+            "HBatang.TTF",
+            "hamchob-r.ttf",
+        ],
+        "돋움" | "Dotum" => vec![
+            "dotum.ttc",
+            "DOTUM.TTC",
+            "HDOTUM.TTF",
+            "HDotum.TTF",
+            "hamchod-r.ttf",
+        ],
+        "돋움체" | "DotumChe" => vec![
+            "DotumChe.TTF",
+            "dotum.ttc",
+            "HDOTUM.TTF",
+            "HDotum.TTF",
+            "hamchod-r.ttf",
+        ],
+        "굴림" | "Gulim" => vec![
+            "gulim.ttc",
+            "GULIM.TTC",
+            "HDOTUM.TTF",
+            "HDotum.TTF",
+            "hamchod-r.ttf",
+        ],
+        "궁서" | "Gungsuh" => vec![
+            "gungsuh.ttc",
+            "GUNGSUH.TTC",
+            "HBATANG.TTF",
+            "HBatang.TTF",
+            "hamchob-r.ttf",
+        ],
+        "굴림체" | "GulimChe" => {
+            vec!["gulim.ttc", "HDOTUM.TTF", "HDotum.TTF", "hamchod-r.ttf"]
+        }
+        "바탕체" | "BatangChe" => {
+            vec!["batang.ttc", "HBATANG.TTF", "HBatang.TTF", "hamchob-r.ttf"]
+        }
+        "궁서체" | "GungsuhChe" => {
+            vec!["gungsuh.ttc", "HBATANG.TTF", "HBatang.TTF", "hamchob-r.ttf"]
+        }
         "휴먼명조" => vec!["HYMJRE.TTF", "hamchob-r.ttf"],
         "새바탕" | "새돋움" | "새굴림" | "새궁서" => {
             vec!["hamchob-r.ttf", "hamchod-r.ttf"]

@@ -3,7 +3,7 @@ use serde::Serialize;
 use crate::model::shape::TextWrap;
 use crate::paint::layer_tree::{LayerNode, LayerNodeKind};
 use crate::paint::paint_op::PaintOp;
-use crate::renderer::render_tree::RenderLayerInfo;
+use crate::renderer::render_tree::{BoundingBox, RenderLayerInfo};
 
 /// Logical replay planes for PageLayerTree direct paint backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -108,6 +108,66 @@ fn layer_node_has_replay_plane_with_layer(
             .iter()
             .any(|op| paint_op_replay_plane_with_layer(op, active_layer) == target),
     }
+}
+
+/// 본문 plane 의 정적 op(Image/RawSvg) 를 동적 op 와 다른 canvas 로 나눠 합성해도
+/// 원래 그리기 순서가 보존되는지 판정한다.
+///
+/// Studio 는 정적 op 를 동적 canvas 아래 layer 에 깐다. 그래서 정적 op 보다 **먼저**
+/// 그려지는 동적 op 가 그 영역과 겹치면(그림 아래의 흰 채우기, 그림에 덮이는 글자 등)
+/// 분리 합성에서는 동적 op 가 위로 올라와 그림을 가린다. 그런 페이지는 분리하면 안 된다.
+/// 정적 op 뒤에 그려지는 동적 op 는 분리해도 위에 있으므로 영향이 없다.
+pub fn flow_static_split_preserves_order(root: &LayerNode) -> bool {
+    // 경계만 맞닿은 이웃(같은 줄의 글자와 글자처럼 취급 그림)은 겹침으로 보지 않는다.
+    const OVERLAP_EPS: f64 = 0.5;
+    fn overlaps(a: &BoundingBox, b: &BoundingBox) -> bool {
+        let w = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
+        let h = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+        w > OVERLAP_EPS && h > OVERLAP_EPS
+    }
+    fn visit(
+        node: &LayerNode,
+        inherited_layer: Option<RenderLayerInfo>,
+        painted: &mut Vec<BoundingBox>,
+    ) -> bool {
+        let active_layer = node.layer.or(inherited_layer);
+        match &node.kind {
+            LayerNodeKind::Group { children, .. } => children
+                .iter()
+                .all(|child| visit(child, active_layer, painted)),
+            LayerNodeKind::ClipRect { child, .. } => visit(child, active_layer, painted),
+            LayerNodeKind::Leaf { ops } => {
+                for op in ops {
+                    if paint_op_replay_plane_with_layer(op, active_layer) != PaintReplayPlane::Flow
+                    {
+                        continue;
+                    }
+                    let bounds = op.bounds();
+                    if matches!(op, PaintOp::Image { .. } | PaintOp::RawSvg { .. }) {
+                        if painted.iter().any(|prior| overlaps(prior, &bounds)) {
+                            return false;
+                        }
+                    } else if bounds.width > 0.0 && bounds.height > 0.0 && paints_ink(op) {
+                        painted.push(bounds);
+                    }
+                }
+                true
+            }
+        }
+    }
+    visit(root, None, &mut Vec::new())
+}
+
+/// 글자가 없는 run(빈 run·공백만 있는 run)은 형광펜이 없으면 아무것도 칠하지 않는다.
+/// 이런 run 의 bbox 는 줄 높이 전체라 인라인 그림과 겹치기 쉬워 따로 거른다.
+fn paints_ink(op: &PaintOp) -> bool {
+    let PaintOp::TextRun { run, .. } = op else {
+        return true;
+    };
+    let shade = run.style.shade_color & 0x00FF_FFFF;
+    run.char_overlap.is_some()
+        || (shade != 0x00FF_FFFF && shade != 0)
+        || run.display_or_text().chars().any(|ch| !ch.is_whitespace())
 }
 
 #[cfg(test)]

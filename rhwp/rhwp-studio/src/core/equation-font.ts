@@ -1,5 +1,5 @@
 import type { LocalFontRecord } from './local-fonts';
-import { sfntCoversText, sfntEmToCellRatio } from './sfnt-cmap.ts';
+import { sfntCoversText, sfntEmToCellRatio, sfntTrueTypeRunMetrics } from './sfnt-cmap.ts';
 
 const DEFAULT_FAMILIES = ['Latin Modern Math', 'STIX Two Text', 'STIX Two Math', 'Times New Roman', 'Times', 'serif'];
 const LEGACY_FAMILIES = ['Times New Roman', 'Times', 'STIX Two Text', 'Latin Modern Math', 'STIX Two Math', 'serif'];
@@ -108,12 +108,20 @@ export function createEquationLiteralFontResolver(
 export function createEquationTextMeasurer(
   resolveFont: (name: string) => LocalFontRecord | null,
   readBytes: (name: string) => ArrayBuffer | null,
-): (source: string, text: string, size: number, italic: boolean, hft: boolean, literal: boolean, bold?: boolean) => { advance: number; inkRight: number } | null {
+): (source: string, text: string, size: number, italic: boolean, hft: boolean, literal: boolean, bold?: boolean) => { advance: number; inkLeft: number; inkRight: number } | null {
   const exact = createEquationFontResolver(resolveFont, readBytes);
   const unicode = createEquationLiteralFontResolver(resolveFont, readBytes);
   let context: CanvasRenderingContext2D | null = null;
   return (source, text, size, italic, hft, literal, bold = false) => {
     if (!Number.isFinite(size) || size <= 0 || !text) return null;
+    if (isLegacyEquationFont(source) && !hft) {
+      const glyphs = [...text].map(character => legacyEquationGlyph(character, italic)[0]).join('');
+      if (exact(source, glyphs)) {
+        const bytes = readBytes(source);
+        const metrics = bytes && sfntTrueTypeRunMetrics(bytes, glyphs, size);
+        if (metrics) return metrics;
+      }
+    }
     if (!context) context = globalThis.document?.createElement('canvas').getContext('2d') ?? null;
     if (!context) return null;
     const runs: Array<{ text: string; font: string }> = [];
@@ -143,14 +151,18 @@ export function createEquationTextMeasurer(
       else runs.push({ text: glyph, font });
     }
     let advance = 0;
+    let inkLeft = Number.NaN;
     let inkRight = 0;
     for (const run of runs) {
       context.font = run.font;
       const metrics = context.measureText(run.text);
-      if (!Number.isFinite(metrics.width) || !Number.isFinite(metrics.actualBoundingBoxRight)) return null;
+      if (!Number.isFinite(metrics.width) || !Number.isFinite(metrics.actualBoundingBoxLeft)
+          || !Number.isFinite(metrics.actualBoundingBoxRight)) return null;
+      const left = advance - metrics.actualBoundingBoxLeft;
+      if (Number.isNaN(inkLeft)) inkLeft = left;
       inkRight = Math.max(inkRight, advance + metrics.actualBoundingBoxRight);
       advance += metrics.width;
     }
-    return { advance, inkRight };
+    return { advance, inkLeft: Number.isNaN(inkLeft) ? 0 : inkLeft, inkRight };
   };
 }

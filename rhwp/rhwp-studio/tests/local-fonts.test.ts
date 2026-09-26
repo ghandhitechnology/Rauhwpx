@@ -9,7 +9,9 @@ import {
   getLocalFontState,
   getLocalFonts,
   importLocalFontFiles,
+  getImportedFontGeneration,
   getImportedLocalFontBytes,
+  hasImportedLocalFontFace,
   localFontImportMessage,
   LOCAL_FONT_BYTE_READ_CONCURRENCY,
   LOCAL_FONT_MAX_BYTES_PER_FACE,
@@ -261,11 +263,12 @@ test('글꼴 파일 일부가 실패해도 정상 face와 굵기를 보존하고
       return this;
     }
   }
-  const font = (style: string, postscriptName: string, fileName: string) => new File([
+  const font = (style: string, postscriptName: string, fileName: string, fullName = `Malgun Gothic ${style}`) => new File([
     createSfntWithNameRecords([
       { nameId: 1, value: 'Malgun Gothic' },
+      { nameId: 1, value: '맑은 고딕' },
       { nameId: 2, value: style },
-      { nameId: 4, value: `Malgun Gothic ${style}` },
+      { nameId: 4, value: fullName },
       { nameId: 6, value: postscriptName },
     ]),
   ], fileName);
@@ -278,6 +281,7 @@ test('글꼴 파일 일부가 실패해도 정상 face와 굵기를 보존하고
     },
   };
   try {
+    const generationBefore = getImportedFontGeneration();
     const result = await importLocalFontFiles([
       font('Regular', 'Malgun-Regular', 'Regular.ttf'),
       font('Bold', 'Malgun-Bold', 'Bold.ttf'),
@@ -290,6 +294,37 @@ test('글꼴 파일 일부가 실패해도 정상 face와 굵기를 보존하고
     assert.equal(added[0]?.family, added[1]?.family);
     assert.deepEqual(added.map(face => face.weight), ['400', '700']);
     assert.equal(resolveLocalFont('Malgun Gothic')?.style, 'Regular');
+    assert.equal(hasImportedLocalFontFace('Malgun Gothic'), true);
+    assert.equal(getImportedFontGeneration(), generationBefore + 2);
+    assert.notDeepEqual(
+      new Uint8Array(getImportedLocalFontBytes('Malgun Gothic', false, false)!),
+      new Uint8Array(getImportedLocalFontBytes('Malgun Gothic', true, false)!),
+    );
+    assert.deepEqual(
+      new Uint8Array(getImportedLocalFontBytes('Malgun Gothic', true, false)!),
+      new Uint8Array(await font('Bold', 'Malgun-Bold', 'Bold.ttf').arrayBuffer()),
+    );
+    assert.deepEqual(
+      new Uint8Array(getImportedLocalFontBytes('맑은 고딕', true, false)!),
+      new Uint8Array(await font('Bold', 'Malgun-Bold', 'Bold.ttf').arrayBuffer()),
+    );
+    assert.deepEqual(
+      new Uint8Array(getImportedLocalFontBytes('Malgun-Regular', true, false)!),
+      new Uint8Array(await font('Regular', 'Malgun-Regular', 'Regular.ttf').arrayBuffer()),
+    );
+
+    const replacement = font('Regular', 'Malgun-Regular', 'Regular-v2.ttf', 'Malgun Gothic Regular v2');
+    const replaced = await importLocalFontFiles([replacement]);
+    assert.equal(replaced.imported.length, 1);
+    assert.equal(getImportedFontGeneration(), generationBefore + 3);
+    assert.deepEqual(
+      new Uint8Array(getImportedLocalFontBytes('Malgun Gothic', false, false)!),
+      new Uint8Array(await replacement.arrayBuffer()),
+    );
+    assert.deepEqual(
+      new Uint8Array(getImportedLocalFontBytes('Malgun Gothic', true, false)!),
+      new Uint8Array(await font('Bold', 'Malgun-Bold', 'Bold.ttf').arrayBuffer()),
+    );
   } finally {
     resetLocalFontsForTests();
     g.document = originalDocument;

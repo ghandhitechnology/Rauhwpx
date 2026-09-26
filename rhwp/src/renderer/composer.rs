@@ -302,8 +302,19 @@ pub fn compose_paragraph(para: &Paragraph) -> ComposedParagraph {
                     Some((pos, s.common().width as i32, i))
                 }
                 Control::Equation(eq) if eq.common.treat_as_char => {
-                    // HWP 저장값을 사용 — 한컴 편집기가 실제 폰트로 계산한 정확한 너비
-                    Some((pos, super::equation::occupied_width_hwp(eq), i))
+                    // 인라인 수식의 줄 전진 = min(선언 폭, paint 폭+양쪽 여백).
+                    // 내용이 선언 폭보다 짧으면 선언 폭의 자리를 차지하고, 넘치면
+                    // paint 폭만큼만 간다 (eq-002 실측: `f(n)`은 선언 18.51pt→17.9pt
+                    // 전진인 반면 72.98pt 개체는 paint 68.8pt 까지만).
+                    let painted = super::equation::fitted_width_hwp(eq);
+                    Some((
+                        pos,
+                        (painted as i32)
+                            .saturating_add(i32::from(eq.common.margin.left))
+                            .saturating_add(i32::from(eq.common.margin.right))
+                            .min(eq.common.width as i32),
+                        i,
+                    ))
                 }
                 Control::Form(f) => Some((pos, f.width as i32, i)),
                 Control::Table(t)
@@ -356,7 +367,97 @@ pub fn compose_paragraph(para: &Paragraph) -> ComposedParagraph {
     // Hanyang-PUA 옛한글 / 한컴 PUA 표시 문자열 변환 (렌더링·측정용)
     convert_pua_display_text(&mut composed);
 
+    // 본문 AutoNumber(각주/미주/그림/표/수식) placeholder 를 번호 문자열로 치환
+    expand_auto_number_display(&mut composed, para);
+
     composed
+}
+
+/// 본문 `Control::AutoNumber`(Page/TotalPage 제외)의 placeholder 공백 1글자를
+/// `앞장식 + 번호 + 뒷장식` 표시 문자열로 치환한다.
+///
+/// 파서는 자동 번호 위치에 공백 1자(`\u{0012}` 마커)만 넣고 실제 번호는
+/// `AutoNumber::assigned_number` 에 보관한다. 캡션 경로는
+/// `apply_auto_numbers_to_composed` 가 "  " 패턴으로 채우지만 본문 문단은
+/// 아무 치환도 없어 번호가 빈 공백으로 출력됐다.
+///
+/// `run.text` 의 모델 글자 수는 유지하고 `display_text` 에만 표시값을 둔다 —
+/// `convert_pua_display_text` / `replace_composed_char_with_display` 와 같은
+/// 규약이라 char_offsets·히트테스트가 표시 자릿수에 끌려가지 않는다.
+/// Page/TotalPage 는 쪽번호 컨텍스트가 필요해
+/// `substitute_page_auto_numbers_in_composed` 가 별도로 처리한다.
+fn expand_auto_number_display(composed: &mut ComposedParagraph, para: &Paragraph) {
+    use crate::model::control::AutoNumberType;
+    use crate::renderer::{format_number, NumberFormat as NumFmt};
+
+    let has_body_autonum = para.controls.iter().any(|ctrl| {
+        matches!(ctrl, Control::AutoNumber(an)
+            if !matches!(an.number_type, AutoNumberType::Page | AutoNumberType::TotalPage))
+    });
+    if !has_body_autonum {
+        return;
+    }
+
+    // placeholder 의 모델 문자 위치를 컨트롤 순서대로 수집한다 (공백 1자 +
+    // char_offsets 8갭 규칙 — layout.rs 의 쪽번호 치환과 같은 탐색).
+    let positions =
+        crate::renderer::layout::LayoutEngine::auto_number_placeholder_positions(para, |t| {
+            !matches!(t, AutoNumberType::Page | AutoNumberType::TotalPage)
+        });
+    if positions.is_empty() {
+        return;
+    }
+    let mut replacements: Vec<(usize, String)> = Vec::new();
+    for (pos, ctrl_idx) in positions {
+        let Control::AutoNumber(an) = &para.controls[ctrl_idx] else {
+            continue;
+        };
+        let num = format_number(an.assigned_number, NumFmt::from_hwp_format(an.format));
+        let mut display = String::new();
+        if an.prefix_char != '\0' {
+            display.push(an.prefix_char);
+        }
+        display.push_str(&num);
+        if an.suffix_char != '\0' {
+            display.push(an.suffix_char);
+        }
+        replacements.push((pos, display));
+    }
+    if replacements.is_empty() {
+        return;
+    }
+
+    // run 별로 placeholder 위치를 묶어 display_text 를 한 번에 재구성한다.
+    for line in &mut composed.lines {
+        let mut run_start = line.char_start;
+        for run in &mut line.runs {
+            let run_len = run.text.chars().count();
+            let run_end = run_start + run_len;
+            let in_run: Vec<(usize, &String)> = replacements
+                .iter()
+                .filter(|(pos, _)| *pos >= run_start && *pos < run_end)
+                .map(|(pos, s)| (*pos, s))
+                .collect();
+            if !in_run.is_empty() {
+                let mut display = String::new();
+                let mut cursor = 0usize;
+                for (abs, value) in &in_run {
+                    let rel = abs - run_start;
+                    if rel < cursor {
+                        continue;
+                    }
+                    let seg: String = run.text.chars().skip(cursor).take(rel - cursor).collect();
+                    display.push_str(&expand_pua_display_text(&seg));
+                    display.push_str(value);
+                    cursor = rel + 1;
+                }
+                let tail: String = run.text.chars().skip(cursor).collect();
+                display.push_str(&expand_pua_display_text(&tail));
+                run.display_text = Some(display);
+            }
+            run_start = run_end;
+        }
+    }
 }
 
 /// Hanyang-PUA 옛한글 코드포인트와 한컴 PUA 표시 문자열을 렌더링용 텍스트로 변환한다.
@@ -1017,6 +1118,27 @@ pub(crate) fn split_runs_by_lang(runs: Vec<ComposedTextRun>) -> Vec<ComposedText
             // 한글 음절은 확실한 한국어이므로 구분해야 함
             let is_neutral = is_lang_neutral(ch);
 
+            // 탭 뒤 구간이 여러 언어 run 으로 쪼개지면 탭에서 run 을 끝낸다.
+            // 오른쪽/가운데 탭 정렬은 "\t 로 끝나는 run" 뒤의 여러 run 을 한 블록으로
+            // 정렬하므로 (`right_tab_block_width`), 탭이 다음 run 머리에 남으면
+            // 그 run 만 탭스톱에 붙고 나머지가 뒤로 밀린다 (aift 목차 "\t(페이지 표기)").
+            if ch == '\t' && tab_segment_spans_langs(&chars[i + 1..]) {
+                let text: String = chars[current_start..=i].iter().collect();
+                result.push(ComposedTextRun {
+                    text,
+                    char_style_id: run.char_style_id,
+                    lang_index: current_lang,
+                    char_overlap: run.char_overlap.clone(),
+                    footnote_marker: None,
+                    display_text: None,
+                });
+                current_start = i + 1;
+                if let Some(next) = chars[i + 1..].iter().find(|&&c| !is_lang_neutral(c)) {
+                    current_lang = detect_lang_category(*next);
+                }
+                continue;
+            }
+
             if is_neutral {
                 // 중립 문자: 현재 언어 유지
                 continue;
@@ -1057,18 +1179,34 @@ pub(crate) fn split_runs_by_lang(runs: Vec<ComposedTextRun>) -> Vec<ComposedText
     result
 }
 
-/// 언어 중립 문자인지 판별한다 (공백, ASCII 구두점, 일반 기호 등).
+/// 탭 뒤 구간(다음 탭 전까지)의 비중립 문자가 둘 이상의 언어 슬롯에 걸치는지.
+fn tab_segment_spans_langs(rest: &[char]) -> bool {
+    let mut langs = rest
+        .iter()
+        .take_while(|&&c| c != '\t')
+        .filter(|&&c| !is_lang_neutral(c))
+        .map(|&c| detect_lang_category(c));
+    let Some(first) = langs.next() else {
+        return false;
+    };
+    langs.any(|lang| lang != first)
+}
+
+/// 글꼴 슬롯이 언어 중립인 문자인지 판별한다 (공백/제어문자).
 /// 이 문자들은 Run 분할을 유발하지 않고 이전 문자의 언어를 따른다.
+///
+/// 구두점은 여기에 속하지 않는다. 한컴은 구두점을 영문 글꼴로 그린다
+/// (`style_resolver::is_latin_slot_punctuation`).
 pub(crate) fn is_lang_neutral(ch: char) -> bool {
-    let cp = ch as u32;
-    matches!(cp,
-        // 공백/제어문자
-        0x0000..=0x0020 |
-        // ASCII 구두점/기호 (영문자/숫자 제외)
-        0x0021..=0x002F | 0x003A..=0x0040 | 0x005B..=0x0060 | 0x007B..=0x007F |
-        // Latin-1 Supplement 구두점 (문자 제외)
-        0x00A0..=0x00BF
-    )
+    matches!(ch as u32, 0x0000..=0x0020 | 0x007F | 0x00A0)
+}
+
+/// 줄 나눔에서 영문 단어 토큰을 끊지 않는 문자 (공백/제어문자, ASCII·Latin-1 구두점).
+/// 글꼴 슬롯 판정(`is_lang_neutral`)과 별개로 기존 단어 경계를 유지한다.
+pub(crate) fn is_word_break_neutral(ch: char) -> bool {
+    is_lang_neutral(ch)
+        || (super::style_resolver::is_latin_slot_punctuation(ch)
+            && !('\u{2018}'..='\u{201F}').contains(&ch))
 }
 
 /// 문단 내 인라인 컨트롤(표/도형)의 위치를 식별한다.
@@ -2196,6 +2334,7 @@ pub(crate) fn shrunk_cell_horizontal_padding(
     paragraphs: &[Paragraph],
     styles: &ResolvedStyleSet,
     preserve_cell_padding: bool,
+    min_pad: f64,
 ) -> (f64, f64) {
     if preserve_cell_padding {
         return (pad_left, pad_right);
@@ -2247,7 +2386,6 @@ pub(crate) fn shrunk_cell_horizontal_padding(
     if max_line_w <= overflow_threshold || cell_w <= 2.0 {
         return (pad_left, pad_right);
     }
-    let min_pad = 1.0;
     let total_pad = pad_left + pad_right;
     let max_reducible = (total_pad - 2.0 * min_pad).max(0.0);
     if max_reducible <= 0.0 {
@@ -2725,13 +2863,25 @@ fn pua_plain_text_display(ch: char) -> Option<&'static str> {
         // 2025 행정업무운영 편람 p08 TOC bullet. Hancom PDF renders this
         // private-use marker as a filled square bullet.
         0xF031C => Some("■"),
-        // 2025 행정업무운영 편람 p15 callout bullet. Hancom PDF renders this
-        // private-use marker as a filled right-pointing pointer, not tofu.
-        0xF02FC => Some("►"),
+        // U+F02FC(글머리 ►)는 함초롬바탕/돋움 등 한컴 글꼴이 반각(0.485em) 글리프를
+        // 직접 가진다. 문자열을 전각 ►로 바꾸면 렌더 advance 가 레이아웃과 어긋나므로
+        // 원문을 유지하고, 글꼴 체인에 글리프가 없을 때만 렌더러가
+        // `pua_missing_glyph_substitute` 로 대체한다.
         // [Task #1001] 한컴 변환본 (HWP3→HWP5) 의 글머리표 PUA. 한컴 viewer 는
         // 빈 체크박스 모양으로 표시. "□" (U+25A1 WHITE SQUARE) 매핑.
         // 실제 sample16-hwp5 의 PUA codepoint 는 U+F03C5 (글자 분석 결과).
         0xF03C5 => Some("□"),
+        _ => None,
+    }
+}
+
+/// 한컴 글꼴에만 있는 PUA 글리프가 렌더 글꼴 체인 어디에도 없을 때 대신 그릴 표준 문자.
+///
+/// 레이아웃 폭은 원문 PUA 글자 기준이므로, 렌더러는 대체 글리프를 그 advance 에 맞춰
+/// 그린다 (2025 행정업무운영 편람 p15 callout bullet: 한컴은 채운 오른쪽 포인터로 표시).
+pub fn pua_missing_glyph_substitute(ch: char) -> Option<char> {
+    match ch as u32 {
+        0xF02FC => Some('\u{25BA}'), // ► BLACK RIGHT-POINTING POINTER
         _ => None,
     }
 }

@@ -6,7 +6,9 @@
 
 use rhwp::model::control::Control;
 use rhwp::model::paragraph::Paragraph;
-use rhwp::renderer::composer::{expand_pua_render_text, pua_to_display_text};
+use rhwp::renderer::composer::{
+    expand_pua_render_text, pua_missing_glyph_substitute, pua_to_display_text,
+};
 use rhwp::wasm_api::HwpDocument;
 use std::fs;
 use std::path::Path;
@@ -130,16 +132,19 @@ fn issue_937_f081c_filler_should_not_render_as_text() {
 }
 
 #[test]
-fn issue_937_f02fc_callout_bullet_should_render_as_pointer() {
+fn issue_937_f02fc_callout_bullet_keeps_hancom_glyph() {
+    // 함초롬바탕/돋움은 U+F02FC 반각 포인터 글리프를 직접 가진다. 전각 ► 로 바꾸면
+    // 렌더 advance 가 레이아웃보다 넓어져 글머리 뒤 글자가 밀린다 (el-school-001).
     assert_eq!(
         expand_pua_render_text("\u{F02FC} 전자서명"),
-        "► 전자서명",
-        "U+F02FC 한컴 PUA callout bullet 는 missing glyph 대신 right pointer 로 표시되어야 함",
+        "\u{F02FC} 전자서명",
+        "U+F02FC 는 원문 글리프로 렌더되어야 함",
     );
+    assert_eq!(pua_to_display_text('\u{F02FC}'), None);
     assert_eq!(
-        pua_to_display_text('\u{F02FC}').as_deref(),
-        Some("►"),
-        "CharOverlap/display helper 도 같은 U+F02FC 표시 문자열을 반환해야 함",
+        pua_missing_glyph_substitute('\u{F02FC}'),
+        Some('►'),
+        "글꼴 체인에 글리프가 없을 때만 right pointer 로 대체",
     );
 }
 

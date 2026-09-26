@@ -1784,6 +1784,11 @@ fn parse_tab_extension(e: &quick_xml::events::BytesStart) -> [u16; 7] {
         }
     }
     ext[2] = (tab_type << 8) | leader;
+    // HWPX `width` 는 '이동 거리'가 아닌 탭 정지 간격이다(한컴은 줄 시작 기준
+    // width 배수 위치로 이동). HWP5 인라인 탭은 ext[0] 에 해석된 결과 거리를
+    // 저장하므로 구분이 필요 — 예약 슬롯 ext[5] 상위 비트로 간격 의미를 표시한다.
+    // HWP5 직렬화 시 serializer/body_text.rs 에서 이 비트를 지운다.
+    ext[5] |= 0x8000;
 
     ext
 }
@@ -7291,7 +7296,8 @@ mod tests {
         let section = parse_hwpx_section(xml).unwrap();
         let para = &section.paragraphs[0];
         assert_eq!(para.text, "A\t(페이지 표기)");
-        assert_eq!(para.tab_extended, vec![[17283, 0, 0x0203, 0, 0, 0, 9]]);
+        // ext[5] 상위 비트 = HWPX 탭(간격 의미) 마커
+        assert_eq!(para.tab_extended, vec![[17283, 0, 0x0203, 0, 0, 0x8000, 9]]);
     }
 
     #[test]

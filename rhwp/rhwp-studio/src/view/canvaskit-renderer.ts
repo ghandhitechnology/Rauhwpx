@@ -35,6 +35,7 @@ import type {
   LayerPaintOp,
   LayerPathCommand,
   LayerPathOp,
+  LayerPathTransform,
   LayerPlaceholderOp,
   LayerRectangleOp,
   LayerRenderProfile,
@@ -103,6 +104,10 @@ export interface CanvasKitLayerRendererOptions {
 
 const OLD_HANGUL_FONT_FAMILY = 'Source Han Serif K Old Hangul';
 const DISCRETIONARY_HYPHEN = '\u00ad';
+/** \ud55c\ucef4 \uae00\uaf34\uc5d0\ub9cc \uc788\ub294 PUA \uae00\ub9ac\ud504\uc758 \ud45c\uc900 \ub300\uccb4 \ubb38\uc790 (\uc5d4\uc9c4 `pua_missing_glyph_substitute`). */
+const PUA_MISSING_GLYPH_SUBSTITUTES = new Map<number, string>([
+  [0xF02FC, '\u25ba'], // \u25ba BLACK RIGHT-POINTING POINTER
+]);
 type LayerColorGraph = NonNullable<NonNullable<LayerGlyphOutlineOp['colorLayers']>['paintGraph']>;
 type LayerColorGraphNode = NonNullable<LayerColorGraph['nodes']>[number];
 interface CanvasKitSurfaceTarget {
@@ -1137,23 +1142,27 @@ export class CanvasKitLayerRenderer {
     const aligned = !hasTransform && (op.cornerRadius ?? 0) === 0 && op.style?.strokeColor
       ? this.pixelAlignedHairlineRect(op.bbox, op.style.strokeWidth ?? 1)
       : null;
-    this.drawStyledShape(canvas, op.bbox, op.style, (paint) => {
-      const cornerRadius = op.cornerRadius ?? 0;
-      if (cornerRadius > 0) {
-        canvas.drawRRect(this.canvasKit.RRectXY(this.rect(op.bbox), cornerRadius, cornerRadius), paint);
-      } else {
-        canvas.drawRect(this.rect(op.bbox), paint);
-      }
-    }, op.gradient, aligned ? {
-      strokeWidth: aligned.strokeWidth,
-      draw: (paint) => canvas.drawRect(this.rect(aligned.bounds), paint),
-    } : undefined);
+    this.withShapeTransform(canvas, op.bbox, op.transform, () => {
+      this.drawStyledShape(canvas, op.bbox, op.style, (paint) => {
+        const cornerRadius = op.cornerRadius ?? 0;
+        if (cornerRadius > 0) {
+          canvas.drawRRect(this.canvasKit.RRectXY(this.rect(op.bbox), cornerRadius, cornerRadius), paint);
+        } else {
+          canvas.drawRect(this.rect(op.bbox), paint);
+        }
+      }, op.gradient, aligned ? {
+        strokeWidth: aligned.strokeWidth,
+        draw: (paint) => canvas.drawRect(this.rect(aligned.bounds), paint),
+      } : undefined);
+    });
   }
 
   private renderEllipse(canvas: SkCanvas, op: LayerEllipseOp): void {
-    this.drawStyledShape(canvas, op.bbox, op.style, (paint) => {
-      canvas.drawOval(this.rect(op.bbox), paint);
-    }, op.gradient);
+    this.withShapeTransform(canvas, op.bbox, op.transform, () => {
+      this.drawStyledShape(canvas, op.bbox, op.style, (paint) => {
+        canvas.drawOval(this.rect(op.bbox), paint);
+      }, op.gradient);
+    });
   }
 
   private renderLine(canvas: SkCanvas, op: LayerLineOp): void {
@@ -1176,7 +1185,7 @@ export class CanvasKitLayerRenderer {
       if (aligned) { y1 = y2 = aligned.center; width = aligned.strokeWidth; }
     }
     const paint = this.makeStrokePaint(op.style?.color ?? '#000000', width);
-    canvas.drawLine(x1, y1, x2, y2, paint);
+    this.withShapeTransform(canvas, op.bbox, op.transform, () => canvas.drawLine(x1, y1, x2, y2, paint));
     paint.delete?.();
   }
 
@@ -1188,32 +1197,10 @@ export class CanvasKitLayerRenderer {
       fillColor: null,
     });
 
-    // [Task #1067] HWPX/HWP 도형의 회전 + flip 변환 적용.
-    // Rust paint pipeline (src/paint/json.rs::write_transform) 이 emit 하는
-    // {"rotation": <degrees>, "horzFlip": <bool>, "vertFlip": <bool>} 매핑.
-    // renderTextRun (line 410-416) 패턴 정합.
-    const tr = op.transform;
-    const rotation = tr?.rotation ?? 0;
-    const horzFlip = tr?.horzFlip ?? false;
-    const vertFlip = tr?.vertFlip ?? false;
-    const needsTransform = rotation !== 0 || horzFlip || vertFlip;
-    if (needsTransform) {
-      const cx = op.bbox.x + (op.bbox.width ?? 0) / 2;
-      const cy = op.bbox.y + (op.bbox.height ?? 0) / 2;
-      canvas.save();
-      if (horzFlip || vertFlip) {
-        canvas.translate(cx, cy);
-        canvas.scale(horzFlip ? -1 : 1, vertFlip ? -1 : 1);
-        canvas.translate(-cx, -cy);
-      }
-      if (rotation !== 0) {
-        canvas.rotate(rotation, cx, cy);
-      }
-    }
-    this.drawStyledPath(canvas, path, style, op.gradient, op.bbox);
-    if (needsTransform) {
-      canvas.restore();
-    }
+    // [Task #1067] HWPX/HWP 도형의 회전 + flip 변환 적용 (src/paint/json.rs::write_transform).
+    this.withShapeTransform(canvas, op.bbox, op.transform, () => {
+      this.drawStyledPath(canvas, path, style, op.gradient, op.bbox);
+    });
     path.delete?.();
   }
 
@@ -1258,7 +1245,7 @@ export class CanvasKitLayerRenderer {
       return;
     }
     this.recordImageCoverageGaps(op);
-    this.withImageTransform(canvas, op.bbox, op.transform, () => this.drawImageOp(canvas, image, op));
+    this.withShapeTransform(canvas, op.bbox, op.transform, () => this.drawImageOp(canvas, image, op));
   }
 
   private renderGlyphOutline(canvas: SkCanvas, op: LayerGlyphOutlineOp): void {
@@ -1696,10 +1683,14 @@ export class CanvasKitLayerRenderer {
     }
   }
 
-  private withImageTransform(
+  /**
+   * 중심 기준으로 대칭 후 회전한다. 한컴은 도형을 먼저 대칭한 뒤 회전한 모습으로 그리므로,
+   * 한쪽만 대칭이면 회전 부호를 반전한다 (Rust ShapeTransform::rotation_after_flip 과 동일).
+   */
+  private withShapeTransform(
     canvas: SkCanvas,
     bounds: LayerBounds,
-    transform: LayerImageOp['transform'],
+    transform: LayerPathTransform | undefined,
     draw: () => void,
   ): void {
     const rotation = transform?.rotation ?? 0;
@@ -1720,7 +1711,7 @@ export class CanvasKitLayerRenderer {
         canvas.translate(-cx, -cy);
       }
       if (rotation !== 0) {
-        canvas.rotate(rotation, cx, cy);
+        canvas.rotate(horzFlip !== vertFlip ? -rotation : rotation, cx, cy);
       }
       draw();
     } finally {
@@ -1837,12 +1828,13 @@ export class CanvasKitLayerRenderer {
     const baseFontSize = style.fontSize ?? Math.max(1, op.bbox.height || 12);
     let fontSize = baseFontSize;
     let baselineShift = 0;
+    // 한컴 PDF 실측 비율 (Rust renderer::script_glyph_size_and_shift 와 동일).
     if (style.superscript) {
-      fontSize = baseFontSize * 0.7;
-      baselineShift -= baseFontSize * 0.3;
+      fontSize = baseFontSize * 0.64;
+      baselineShift -= baseFontSize * 0.44;
     } else if (style.subscript) {
-      fontSize = baseFontSize * 0.7;
-      baselineShift += baseFontSize * 0.15;
+      fontSize = baseFontSize * 0.64;
+      baselineShift += baseFontSize * 0.12;
     }
     const placementMatrix = this.affineToCanvasKitMatrix(op.placement?.runToPage);
     const originX = placementMatrix ? 0 : op.bbox.x;
@@ -1858,6 +1850,10 @@ export class CanvasKitLayerRenderer {
     });
     const hasLayoutPositions = replayPositions?.length === codePoints.length + 1
       && replayPositions.every(Number.isFinite);
+    // 반각 칸의 전각 여는 괄호·따옴표는 glyph 를 칸 오른쪽 끝에 맞춘다 (엔진이 계산한 halt 오프셋).
+    const glyphOffsets = hasLayoutPositions && Array.isArray(op.glyphOffsets) && op.glyphOffsets.length > 0
+      ? new Map(op.glyphOffsets.filter(([index, dx]) => Number.isInteger(index) && Number.isFinite(dx)))
+      : null;
     const requestedFontFamily = primaryFontFamily(style.fontFamily);
     const styledTypeface = this.findStyledPreparedTypeface(
       requestedFontFamily, style.bold === true, style.italic === true,
@@ -1969,6 +1965,7 @@ export class CanvasKitLayerRenderer {
             }
             const candidateIndex = candidateGlyphIds.findIndex(ids => (ids[index] ?? 0) !== 0);
             if (candidateIndex >= 0) return candidateIndex;
+            if (PUA_MISSING_GLYPH_SUBSTITUTES.has(code)) return -4;
             return code >= 0xF02B1 && code <= 0xF02C4 ? -1 : 0;
           });
           const fallbackSpans: Array<{ start: number; end: number; fontIndex: number }> = [];
@@ -1976,7 +1973,7 @@ export class CanvasKitLayerRenderer {
           while (spanStart < codePoints.length) {
             const fontIndex = selectedFontIndices[spanStart];
             let spanEnd = spanStart + 1;
-            if (fontIndex !== -1) {
+            if (fontIndex !== -1 && fontIndex !== -4) {
               while (spanEnd < codePoints.length && selectedFontIndices[spanEnd] === fontIndex) {
                 spanEnd += 1;
               }
@@ -2008,6 +2005,30 @@ export class CanvasKitLayerRenderer {
               )) {
                 hasMissingGlyph = true;
               }
+              continue;
+            }
+            if (fontIndex === -4) {
+              // 한컴 PUA 글리프가 어느 후보 글꼴에도 없으면 표준 대체 글리프를 원문
+              // advance 에 맞춰 그린다 (엔진 skia/web_canvas 와 같은 규칙).
+              const codePoint = codePoints[runStart].codePointAt(0) ?? 0;
+              const substitute = PUA_MISSING_GLYPH_SUBSTITUTES.get(codePoint)!;
+              const fontWithGlyph = candidateFonts.find(
+                candidate => (candidate.getGlyphIDs(substitute, 1)[0] ?? 0) !== 0,
+              );
+              if (!fontWithGlyph) {
+                hasMissingGlyph = true;
+                continue;
+              }
+              const glyphIds = fontWithGlyph.getGlyphIDs(substitute, 1);
+              const glyphWidth = (fontWithGlyph.getGlyphWidths(glyphIds) ?? [])[0] ?? 0;
+              const advance = replayPositions![runStart + 1] - replayPositions![runStart];
+              canvas.save();
+              canvas.translate(originX + replayPositions![runStart], originY + baselineShift);
+              if (glyphWidth > advance && glyphWidth > 0) {
+                canvas.scale(advance / glyphWidth, 1);
+              }
+              canvas.drawGlyphs(glyphIds, new Float32Array([0, 0]), 0, 0, fontWithGlyph, paint);
+              canvas.restore();
               continue;
             }
             if (fontIndex === -1) {
@@ -2058,7 +2079,7 @@ export class CanvasKitLayerRenderer {
             for (let index = runStart; index < runEnd; index += 1) {
               const glyphId = candidateGlyphIds[fontIndex][index] ?? 0;
               runGlyphIds[index - runStart] = glyphId;
-              runPositions[(index - runStart) * 2] = replayPositions![index];
+              runPositions[(index - runStart) * 2] = replayPositions![index] + (glyphOffsets?.get(index) ?? 0);
               runPositions[(index - runStart) * 2 + 1] = baselineShift;
               hasMissingGlyph ||= glyphId === 0;
             }
