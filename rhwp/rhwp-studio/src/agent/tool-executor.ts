@@ -1051,7 +1051,10 @@ export class AgentToolExecutor {
     const current = this.revision;
     if (expected === current) return 0;
     if (expected < current) {
-      const rebase = this.journal.rebase(expected, current, sectionIdx, paraStart, paraEnd);
+      // apply_edits 안에서는 앞 항목이 문단 수를 바꿨을 수 있다 — 항목 좌표와 옛 읽기 좌표가
+      // 그만큼 어긋나므로, 그 폭 안의 형제 편집은 앞/뒤 판정이 모호해 충돌로 본다.
+      const slack = this.journalBatch?.reduce((sum, entry) => sum + Math.abs(entry.paraDelta), 0) ?? 0;
+      const rebase = this.journal.rebase(expected, current, sectionIdx, paraStart - slack, paraEnd + slack);
       if (rebase.ok) return rebase.shift;
       if (rebase.reason === 'overlap') {
         throw new AgentToolError(
@@ -3904,7 +3907,14 @@ export class AgentToolExecutor {
    */
   private applyEdits(args: Record<string, unknown>, agent: AgentName): unknown {
     this.requireDocLoaded();
-    this.requireRevision(args);
+    // 뒤처진 revision 도 그 사이 쓰기가 전부 저널에 있으면 받는다 — 항목마다 좌표 쓰기는
+    // 리베이스(겹치면 REVISION_MISMATCH), 앵커 쓰기는 실행 시점 재해석으로 처리하고,
+    // 리베이스를 모르는 항목은 옛 revision 으로 실패해 배치 전체가 되돌아간다.
+    const expectedRaw = args['expectedRevision'];
+    const itemRevision = typeof expectedRaw === 'number' && Number.isSafeInteger(expectedRaw)
+      && expectedRaw < this.revision && this.journal.covers(expectedRaw, this.revision)
+      ? expectedRaw
+      : (this.requireRevision(args), this.revision);
     const rawEdits = args['edits'];
     if (!Array.isArray(rawEdits) || rawEdits.length < 1 || rawEdits.length > 32) {
       throw new AgentToolError('INVALID_ARGS', 'edits must be an array of 1..32 operations');
@@ -3931,7 +3941,7 @@ export class AgentToolExecutor {
         edits.forEach((edit, index) => {
           let itemResult: unknown;
           try {
-            itemResult = this.dispatch(edit.tool, { ...edit.args, expectedRevision: this.revision }, agent);
+            itemResult = this.dispatch(edit.tool, { ...edit.args, expectedRevision: itemRevision }, agent);
           } catch (e) {
             const code = e instanceof AgentToolError ? e.code : 'RPC_ERROR';
             const message = e instanceof Error ? e.message : String(e);
