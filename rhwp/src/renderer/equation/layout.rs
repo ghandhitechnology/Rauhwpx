@@ -1054,9 +1054,12 @@ impl EqLayout {
         let s = self.layout_node(sup, self.script_font_size(fs));
 
         if legacy {
-            // legacy 위첨자: sup 상자 *하단*이 base 기준선 위 ~0.40em에 걸린다.
-            // (eq-002 실측: leaf `2`→3.9pt, sqrt^{f(n)}→2.9pt, 분수 sup→3.8pt@9.06)
-            let mut sup_y = b.baseline - fs * 0.40 - s.height;
+            // legacy 위첨자: sup 상자 *하단*이 base 기준선 위 ~0.30em에 걸린다.
+            // (eq-002 실측 재측정: leaf `2`→2.8pt, 분수 sup→3.4pt@9.06)
+            // 분수 sup 처럼 하단이 구조적 padding 으로 부풀려진 상자는 실제
+            // 자식 배치 하단(content_bottom)을 앵커로 쓴다 — 잎의 em 꼬리
+            // (baseline 아래 0.2em)까지만 들어가고 그 아래 pad 는 빠진다.
+            let mut sup_y = b.baseline - fs * 0.30 - content_bottom(&s);
             let mut base_y = 0.0;
             if sup_y < 0.0 {
                 base_y = -sup_y;
@@ -1860,6 +1863,25 @@ impl EqLayout {
 /// 적분 기호 여부 판별
 pub(crate) fn is_integral_symbol(symbol: &str) -> bool {
     matches!(symbol, "∫" | "∬" | "∭" | "∮" | "∯" | "∰")
+}
+
+/// 상자를 구성하는 자식들의 실제 배치 하단 (상자 좌표계). 잎 상자는 em 꼬리를
+/// 포함한 자기 높이, 컨테이너는 자식들의 재귀 하단 최댓값이다 — 구조적 padding
+/// 으로 부풀려진 `height` 와 달리 시각적으로 보이는 잉크 범위에 가깝다.
+fn content_bottom(lb: &LayoutBox) -> f64 {
+    match &lb.kind {
+        LayoutKind::Row(children) => children
+            .iter()
+            .map(|child| child.y + content_bottom(child))
+            .fold(0.0, f64::max),
+        LayoutKind::Fraction { numer, denom, .. } => {
+            (numer.y + content_bottom(numer)).max(denom.y + content_bottom(denom))
+        }
+        LayoutKind::Atop { top, bottom, .. } => {
+            (top.y + content_bottom(top)).max(bottom.y + content_bottom(bottom))
+        }
+        _ => lb.height,
+    }
 }
 
 /// 텍스트 폭 추정

@@ -1319,6 +1319,12 @@ pub(crate) fn hancom_substitute_faces(font_family: &str) -> &'static [&'static s
     match font_family.trim() {
         "바탕" | "Batang" | "바탕체" | "BatangChe" | "궁서" | "Gungsuh" | "궁서체"
         | "GungsuhChe" => &["한컴바탕", "Haansoft Batang", "함초롬바탕", "HCR Batang"],
+        // 한양/신명 명조 계열은 한컴 FontMap 치환에서도 명조 번들로 간다 —
+        // exam-kor-1p 정답지는 HY신명조/한양신명조 런을 HCRBatang 글리프로 굽는다.
+        // 두 서체를 generic serif chain 에 맡기면 macOS 는 AppleMyungjo 를 먼저
+        // 잡아 한컴 출력과 다른 명조로 렌더한다.
+        "HY신명조" | "한양신명조" | "신명 신명조" | "신명 견명조" | "신명 중명조" | "명조"
+        | "새문명조" => &["한컴바탕", "Haansoft Batang", "함초롬바탕", "HCR Batang"],
         "돋움" | "Dotum" | "돋움체" | "DotumChe" | "굴림" | "Gulim" | "굴림체" | "GulimChe" => {
             &["한컴돋움", "Haansoft Dotum", "함초롬돋움", "HCR Dotum"]
         }

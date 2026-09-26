@@ -233,6 +233,7 @@ pub(crate) fn measure_legacy_run_native(
     use std::collections::HashMap;
 
     thread_local! {
+        // 해석 성공분만 캐시 — 미해소(None)는 저장하지 않아 재시도한다.
         static LEGACY_FACE: RefCell<Option<Option<(Typeface, std::rc::Rc<LegacyTables>)>>> =
             const { RefCell::new(None) };
         static RUN_CACHE: RefCell<HashMap<(String, u64, bool, bool), Option<LegacyRunMetrics>>> =
