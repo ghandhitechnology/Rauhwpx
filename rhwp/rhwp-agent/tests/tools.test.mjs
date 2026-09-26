@@ -657,6 +657,10 @@ test('toToolContent: image 가 없거나 모양이 이상하면 text 만', () =>
 test('toToolContent: proxied MCP content blocks stay intact', () => {
   const content = [{ type: 'text', text: '{"success":true}' }];
   assert.equal(toToolContent({ mcpContent: content }), content);
+  const report = [{ opId: 'op-1', cause: 'text-changed' }];
+  assert.deepEqual(toToolContent({ mcpContent: content, editReport: report }), [
+    ...content, { type: 'text', text: JSON.stringify({ editReport: report }) },
+  ], 'editReport 가 mcpContent 결과에서도 살아남는다');
 });
 
 test('create_table: rows+cols 나 cells 둘 중 하나는 필수', () => {

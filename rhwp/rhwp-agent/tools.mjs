@@ -297,7 +297,10 @@ function invalidArgs(message) {
  */
 export function toToolContent(result) {
   if (result && typeof result === 'object' && Array.isArray(result.mcpContent)) {
-    return result.mcpContent;
+    // 브리지가 붙인 editReport 는 mcpContent 밖에 있다 — 버리면 거절 보고가 사라진다.
+    return result.editReport === undefined
+      ? result.mcpContent
+      : [...result.mcpContent, { type: 'text', text: JSON.stringify({ editReport: result.editReport }) }];
   }
   const image = result && typeof result === 'object' ? result.image : null;
   if (image && typeof image === 'object' && typeof image.data === 'string' && typeof image.mimeType === 'string') {

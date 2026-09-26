@@ -67,6 +67,7 @@ export function measureToolResult(result) {
         measured.resultChars += JSON.stringify(block ?? null).length;
       }
     }
+    if (result.editReport !== undefined) measured.resultChars += JSON.stringify({ editReport: result.editReport }).length;
     return measured;
   }
   const image = result && typeof result === 'object' ? result.image : null;
