@@ -4427,15 +4427,31 @@ impl DocumentCore {
                 }
             }
 
-            // 구역 간 쪽번호 연속: NewNumber(Page) 컨트롤이 없으면 이전 구역에서 이어짐
-            if idx > 0 && carry_last_page_number > 0 {
+            // 구역 간 쪽번호 연속: NewNumber(Page) 컨트롤이 없으면 이전 구역에서 이어진다.
+            // 구역 설정의 시작 쪽 번호(secPr startNum, page_num > 0)가 있으면 carry 대신
+            // 그 번호로 시작한다 — page_num_type 홀수/짝수는 시작 번호를 그 홀짝으로 맞춘다.
+            {
                 use crate::model::control::{AutoNumberType, Control};
                 let has_new_number = section.paragraphs.iter().any(|p|
                     p.controls.iter().any(|c| matches!(c, Control::NewNumber(nn) if nn.number_type == AutoNumberType::Page))
                 );
                 if !has_new_number {
-                    for page in &mut result.pages {
-                        page.page_number += carry_last_page_number;
+                    if section.section_def.page_num > 0 {
+                        let start = match section.section_def.page_num_type {
+                            // 홀수/짝수 쪽 시작 — 시작 번호가 해당 홀짝이 되도록 올린다
+                            1 | 2 => {
+                                let n = u32::from(section.section_def.page_num);
+                                n + u32::from(n % 2 != section.section_def.page_num_type as u32 % 2)
+                            }
+                            _ => u32::from(section.section_def.page_num),
+                        };
+                        for page in &mut result.pages {
+                            page.page_number += start - 1;
+                        }
+                    } else if idx > 0 && carry_last_page_number > 0 {
+                        for page in &mut result.pages {
+                            page.page_number += carry_last_page_number;
+                        }
                     }
                 }
             }
@@ -7818,6 +7834,76 @@ mod tests {
         assert_eq!(
             active.master_page_index, 1,
             "final page_number=2 must select the Even master page, not the section-local Odd page"
+        );
+    }
+
+    /// 구역 설정의 시작 쪽 번호(secPr page_num)는 NewNumber 컨트롤이 없을 때 carry 를 대신한다.
+    #[test]
+    fn section_def_page_num_restarts_page_numbering() {
+        use crate::model::document::{Document, Section, SectionDef};
+        use crate::model::page::PageDef;
+        use crate::model::paragraph::Paragraph;
+
+        let page_def = PageDef {
+            width: 59528,
+            height: 84188,
+            margin_left: 8504,
+            margin_right: 8504,
+            margin_top: 5668,
+            margin_bottom: 4252,
+            margin_header: 4252,
+            margin_footer: 4252,
+            ..Default::default()
+        };
+        let section = |page_num: u16, page_num_type: u8| Section {
+            section_def: SectionDef {
+                page_def: page_def.clone(),
+                page_num,
+                page_num_type,
+                ..Default::default()
+            },
+            paragraphs: vec![Paragraph::default()],
+            raw_stream: None,
+            raw_provenance: None,
+        };
+        let first_page_number = |core: &DocumentCore, sec: usize| {
+            core.pagination
+                .get(sec)
+                .and_then(|result| result.pages.first())
+                .map(|page| page.page_number)
+        };
+
+        // 구역 0이 한 쪽, 구역 1에 시작 번호 5 → 구역 1 첫 쪽은 5, carry 는 5에서 이어진다
+        let mut document = Document::default();
+        document.sections.push(section(0, 0));
+        document.sections.push(section(5, 0));
+        document.sections.push(section(0, 0));
+        let mut core = DocumentCore::new_empty();
+        core.set_document(document);
+        core.paginate();
+        assert_eq!(first_page_number(&core, 0), Some(1));
+        assert_eq!(
+            first_page_number(&core, 1),
+            Some(5),
+            "section_def.page_num must restart numbering"
+        );
+        assert_eq!(
+            first_page_number(&core, 2),
+            Some(6),
+            "the next section continues from the restarted number"
+        );
+
+        // page_num_type 홀수 시작: page_num=4 + odd → 5로 올린다
+        let mut document = Document::default();
+        document.sections.push(section(0, 0));
+        document.sections.push(section(4, 1));
+        let mut core = DocumentCore::new_empty();
+        core.set_document(document);
+        core.paginate();
+        assert_eq!(
+            first_page_number(&core, 1),
+            Some(5),
+            "page_num_type=Odd lifts an even start number to the next odd number"
         );
     }
 

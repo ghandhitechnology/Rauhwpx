@@ -9,7 +9,7 @@
 import type { WasmBridge } from '../core/wasm-bridge.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
-import type { CellPathEntry, ControlLayoutItem, DocumentPosition, LineLayoutItem } from '../core/types.ts';
+import type { CellPathEntry, ControlLayoutItem, DocumentPosition, LineLayoutItem, ParaProperties } from '../core/types.ts';
 import type { RevisionTracker } from './revision.ts';
 import type { PendingEditManager } from './pending-edits.ts';
 import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, DocumentTemplate, ObjectOp, PendingOp, PermissionProfile } from './types.ts';
@@ -641,6 +641,64 @@ function omitDefaults(value: Record<string, unknown>, keep: readonly string[] = 
 
 function isColor(value: unknown, hex: string): boolean {
   return typeof value !== 'string' || value.length === 0 || value.toLowerCase() === hex;
+}
+
+// ─── 타이포그래피 패스스루 매핑 상수 ─────────────────────────
+// 내부 슬롯/코드 계약은 rust 측과 고정이다:
+// - 글자 ratios/spacings 는 언어 슬롯 7개 (한/영/한자/일/외/기/사)
+// - 탭 type 은 0 left / 1 right / 2 center / 3 decimal
+// - 문단 테두리 width 는 BORDER_WIDTHS(src/model/style.rs) 인덱스
+/** 스칼라 → 7슬롯 복제, 7-배열 → 슬롯별 값 (per-script override). */
+function langSlotArray(key: string, v: unknown, min: number, max: number): number[] {
+  const check = (n: unknown): number => {
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < min || n > max) {
+      throw new AgentToolError('INVALID_ARGS', `${key} must be a number in ${min}..${max}`);
+    }
+    return Math.round(n);
+  };
+  if (Array.isArray(v)) {
+    if (v.length !== 7) {
+      throw new AgentToolError('INVALID_ARGS', `${key} array must have exactly 7 script slots`);
+    }
+    return v.map(check);
+  }
+  return new Array<number>(7).fill(check(v));
+}
+
+/** 읽기 측: 전 슬롯 동일 → 스칼라, 슬롯별 상이 → 배열 그대로. */
+function slotReadout(arr: number[] | undefined): number | number[] | undefined {
+  if (!arr || arr.length === 0) return undefined;
+  return arr.every((v) => v === arr[0]) ? arr[0] : arr.slice();
+}
+
+const LINE_SPACING_TYPE_IN: Record<string, string> = {
+  percent: 'Percent', fixed: 'Fixed', atLeast: 'Minimum', spaceOnly: 'SpaceOnly',
+};
+const LINE_SPACING_TYPE_OUT: Record<string, string> = {
+  Percent: 'percent', Fixed: 'fixed', Minimum: 'atLeast', SpaceOnly: 'spaceOnly',
+};
+const TAB_TYPE_IN: Record<string, number> = { left: 0, right: 1, center: 2, decimal: 3 };
+const TAB_TYPE_OUT = ['left', 'right', 'center', 'decimal'];
+
+/** rust BORDER_WIDTHS — 문단 테두리 굵기 인덱스 ↔ mm */
+const BORDER_WIDTH_MM = [0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
+function borderWidthIndex(mm: number): number {
+  let best = 0;
+  for (let i = 1; i < BORDER_WIDTH_MM.length; i++) {
+    if (Math.abs(BORDER_WIDTH_MM[i] - mm) < Math.abs(BORDER_WIDTH_MM[best] - mm)) best = i;
+  }
+  return best;
+}
+function borderWidthMm(index: number): number {
+  return BORDER_WIDTH_MM[Math.min(Math.max(index, 0), BORDER_WIDTH_MM.length - 1)];
+}
+
+interface ParaBorderSpec { type: number; width: number; color: string }
+
+/** 읽기 측 테두리: width 인덱스 → widthMm. type 0 (없음) 도 그대로 돌려준다. */
+function borderSpecOut(b: ParaBorderSpec | undefined): { type: number; widthMm: number; color: string } | undefined {
+  if (b === undefined) return undefined;
+  return { type: b.type, widthMm: borderWidthMm(b.width), color: b.color };
 }
 
 export class AgentToolExecutor {
@@ -2552,28 +2610,44 @@ export class AgentToolExecutor {
     return { revision: this.revision, numberings, bullets };
   }
 
+  /** 문단 속성 읽기 — cell.path 가 있으면 중첩 셀 경로로 내려간다 */
+  private paraPropsAt(sectionIdx: number, paraIdx: number, cell?: CellAddr): ParaProperties {
+    const { wasm } = this.deps;
+    return cell?.path
+      ? wasm.getCellParaPropertiesAtByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx))
+      : cell
+        ? wasm.getCellParaPropertiesAt(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx)
+        : wasm.getParaPropertiesAt(sectionIdx, paraIdx);
+  }
+
   /**
    * 문단 서식 읽기 — getParaPropertiesAt 은 px(96dpi) 단위라 pt 로 환산해 반환한다
-   * (apply_para_format 의 pt 입력과 대칭). headType 은 소문자로 정규화한다.
+   * (apply_para_format 의 pt 입력과 대칭). headType/lineSpacingType/tab type/koreanBreakUnit
+   * 은 공개 enum 소문자로 정규화하고, 탭·테두리 단위는 mm 로 바꾼다.
    */
   private getParaFormat(args: Record<string, unknown>): unknown {
     const sectionIdx = reqInt(args, 'sectionIdx');
     const paraIdx = reqInt(args, 'paraIdx');
     const cell = optCell(args);
     this.validateAddress(sectionIdx, paraIdx, undefined, cell);
-    const { wasm } = this.deps;
-    const props = cell?.path
-      ? wasm.getCellParaPropertiesAtByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx))
-      : cell
-        ? wasm.getCellParaPropertiesAt(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx)
-        : wasm.getParaPropertiesAt(sectionIdx, paraIdx);
+    const props = this.paraPropsAt(sectionIdx, paraIdx, cell);
     const pxToPt = (px: number | undefined): number | undefined =>
       (typeof px === 'number' ? Math.round(px * 72 / 96 * 10) / 10 : undefined);
     const headType = (props.headType ?? 'None').toLowerCase();
+    const lsTypeRaw = props.lineSpacingType ?? 'Percent';
+    const lineSpacingType = LINE_SPACING_TYPE_OUT[lsTypeRaw] ?? 'percent';
+    const tabStops = (props.tabStops ?? []).map((t) => ({
+      positionMm: huToMm(t.position / 2), // TabItem.position 은 2x HWPUNIT (style_resolver /2 와 대칭)
+      type: TAB_TYPE_OUT[t.type] ?? t.type,
+      fill: t.fill,
+    }));
+    const borderSpacing = props.borderSpacing ?? [0, 0, 0, 0];
     const format = {
       alignment: props.alignment,
-      lineSpacingType: props.lineSpacingType,
-      ...(props.lineSpacingType === 'Percent' ? { lineSpacingPercent: Math.round(props.lineSpacing ?? 100) } : {}),
+      lineSpacingType,
+      ...(lsTypeRaw === 'Percent'
+        ? { lineSpacingPercent: Math.round(props.lineSpacing ?? 100) }
+        : { lineSpacingPt: pxToPt(props.lineSpacing) }),
       spaceBeforePt: pxToPt(props.spacingBefore),
       spaceAfterPt: pxToPt(props.spacingAfter),
       indentPt: pxToPt(props.indent),
@@ -2584,14 +2658,36 @@ export class AgentToolExecutor {
       numberingId: props.numberingId ?? 0,
       paraLevel: props.paraLevel ?? 0,
       paraShapeId: props.paraShapeId,
+      tabStops,
+      borders: {
+        left: borderSpecOut(props.borderLeft),
+        right: borderSpecOut(props.borderRight),
+        top: borderSpecOut(props.borderTop),
+        bottom: borderSpecOut(props.borderBottom),
+      },
+      borderSpacingMm: {
+        left: huToMm(borderSpacing[0] ?? 0), right: huToMm(borderSpacing[1] ?? 0),
+        top: huToMm(borderSpacing[2] ?? 0), bottom: huToMm(borderSpacing[3] ?? 0),
+      },
+      koreanBreakUnit: props.koreanBreakUnit === 1 ? 'char' : 'word',
     };
     if (args['full'] === true) return { revision: this.revision, ...format };
-    // 기본값(0pt 간격·여백, false, 목록 아님)은 생략한다. 목록 문단이면 numberingId/paraLevel 은
-    // 0 이어도 의미가 있으므로 남긴다.
+    // 기본값(0pt 간격·여백, false, 탭/테두리 없음, 어절 줄나눔)은 생략한다.
+    // 목록 문단이면 numberingId/paraLevel 은 0 이어도 의미가 있으므로 남긴다.
     const isList = headType !== 'none';
+    const nonDefaultBorders = Object.fromEntries(
+      Object.entries(format.borders).filter(([, b]) => b !== undefined && b.type !== 0),
+    );
     return {
       revision: this.revision,
-      ...omitDefaults({ ...format, headType: isList ? headType : undefined }, isList ? ['numberingId', 'paraLevel'] : []),
+      ...omitDefaults({
+        ...format,
+        headType: isList ? headType : undefined,
+        lineSpacingType: lineSpacingType === 'percent' ? undefined : lineSpacingType,
+        tabStops: tabStops.length ? tabStops : undefined,
+        borders: Object.keys(nonDefaultBorders).length ? nonDefaultBorders : undefined,
+        koreanBreakUnit: format.koreanBreakUnit === 'word' ? undefined : 'char',
+      }, isList ? ['numberingId', 'paraLevel'] : []),
     };
   }
 
@@ -2621,15 +2717,19 @@ export class AgentToolExecutor {
       shadeColor: props.shadeColor,
       fontId: props.fontId,
       charShapeId: props.charShapeId,
+      // 장평/자간 — 슬롯 전부 동일하면 스칼라, 다르면 7-배열
+      widthPercent: slotReadout(props.ratios) ?? 100,
+      letterSpacingPercent: slotReadout(props.spacings) ?? 0,
     };
     if (args['full'] === true) return { revision: this.revision, ...format };
-    // 기본값(false 속성, 검정 글자, 흰/없음 음영)은 생략한다.
+    // 기본값(false 속성, 검정 글자, 흰/없음 음영, 장평 100/자간 0)은 생략한다.
     return {
       revision: this.revision,
       ...omitDefaults({
         ...format,
         textColor: isColor(format.textColor, '#000000') ? undefined : format.textColor,
         shadeColor: isColor(format.shadeColor, '#ffffff') ? undefined : format.shadeColor,
+        widthPercent: format.widthPercent === 100 ? undefined : format.widthPercent,
       }),
     };
   }
@@ -3732,10 +3832,20 @@ export class AgentToolExecutor {
       }
       format.fontId = fontId;
     }
+    // 장평/자간 — 엔진은 7개 언어 슬롯 배열만 받는다 (parse_char_shape_mods).
+    // 스칼라는 전 슬롯, 7-배열은 슬롯별 값으로 통과시킨다.
+    const widthPercent = args['widthPercent'];
+    if (widthPercent !== undefined && widthPercent !== null) {
+      format.ratios = langSlotArray('widthPercent', widthPercent, 50, 200);
+    }
+    const letterSpacingPercent = args['letterSpacingPercent'];
+    if (letterSpacingPercent !== undefined && letterSpacingPercent !== null) {
+      format.spacings = langSlotArray('letterSpacingPercent', letterSpacingPercent, -50, 50);
+    }
     if (Object.keys(format).length === 0) {
       throw new AgentToolError(
         'INVALID_ARGS',
-        'At least one format key is required (bold/italic/underline/strikethrough/fontSizePt/textColor/fontFamily)',
+        'At least one format key is required (bold/italic/underline/strikethrough/fontSizePt/textColor/fontFamily/widthPercent/letterSpacingPercent)',
       );
     }
     const range: DocRange = {
@@ -3780,14 +3890,18 @@ export class AgentToolExecutor {
   private paraTextSample(sectionIdx: number, paraIdx: number, cell?: CellAddr): string {
     try {
       const { wasm } = this.deps;
-      const len = cell
-        ? wasm.getCellParagraphLength(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx)
-        : wasm.getParagraphLength(sectionIdx, paraIdx);
+      const len = cell?.path
+        ? wasm.getCellParagraphLengthByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx))
+        : cell
+          ? wasm.getCellParagraphLength(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx)
+          : wasm.getParagraphLength(sectionIdx, paraIdx);
       const n = Math.min(len, 24);
       if (n === 0) return '';
-      return cell
-        ? wasm.getTextInCell(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, 0, n)
-        : wasm.getTextRange(sectionIdx, paraIdx, 0, n);
+      return cell?.path
+        ? wasm.getTextInCellByPath(sectionIdx, cell.paraIdx, cellPathAt(cell, paraIdx), 0, n)
+        : cell
+          ? wasm.getTextInCell(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, 0, n)
+          : wasm.getTextRange(sectionIdx, paraIdx, 0, n);
     } catch {
       return '';
     }
@@ -4442,12 +4556,140 @@ export class AgentToolExecutor {
       props['alignment'] = alignment;
     }
     const lsp = args['lineSpacingPercent'];
+    // 줄 간격 두 형태: lineSpacingPercent(percent 단축키) 또는 lineSpacingType+lineSpacingPt.
+    // NonPercent 저장값은 2x HWPUNIT — rust style_resolver 가 px = raw*96/7200/2 로 해소한다.
+    const lsTypeRaw = args['lineSpacingType'];
+    const lsInternal = (lsTypeRaw === undefined || lsTypeRaw === null)
+      ? undefined
+      : LINE_SPACING_TYPE_IN[lsTypeRaw as string];
+    if (lsTypeRaw !== undefined && lsTypeRaw !== null && lsInternal === undefined) {
+      throw new AgentToolError('INVALID_ARGS', 'lineSpacingType must be one of percent|fixed|atLeast|spaceOnly');
+    }
+    const lsPt = args['lineSpacingPt'];
+    if (lsp !== undefined && lsp !== null && lsPt !== undefined && lsPt !== null) {
+      throw new AgentToolError('INVALID_ARGS', 'send either lineSpacingPercent or lineSpacingType+lineSpacingPt, not both');
+    }
     if (lsp !== undefined && lsp !== null) {
       if (typeof lsp !== 'number' || lsp < 50 || lsp > 500) {
         throw new AgentToolError('INVALID_ARGS', 'lineSpacingPercent must be 50..500');
       }
       props['lineSpacing'] = Math.round(lsp);
       props['lineSpacingType'] = 'Percent';
+    }
+    if (lsPt !== undefined && lsPt !== null) {
+      if (typeof lsPt !== 'number' || !Number.isFinite(lsPt) || lsPt <= 0 || lsPt > 1000) {
+        throw new AgentToolError('INVALID_ARGS', 'lineSpacingPt must be a number in 0..1000');
+      }
+      if (lsInternal === undefined || lsInternal === 'Percent') {
+        throw new AgentToolError('INVALID_ARGS', 'lineSpacingPt pairs with lineSpacingType fixed|atLeast|spaceOnly');
+      }
+      props['lineSpacing'] = Math.round(lsPt * 200);
+      props['lineSpacingType'] = lsInternal;
+    } else if (lsInternal !== undefined) {
+      if (lsInternal === 'Percent') {
+        if (lsp === undefined || lsp === null) {
+          throw new AgentToolError('INVALID_ARGS', 'lineSpacingType "percent" requires lineSpacingPercent');
+        }
+      } else {
+        throw new AgentToolError('INVALID_ARGS', `lineSpacingType "${lsTypeRaw}" requires lineSpacingPt`);
+      }
+    }
+    // 탭 정지 — 내부 TabItem.position 은 2x HWPUNIT (mmToHu * 2), type 은 숫자 코드.
+    // 내면 목록 전체를 교체한다 (빈 배열 = 전부 제거).
+    const tabStops = args['tabStops'];
+    if (tabStops !== undefined && tabStops !== null) {
+      if (!Array.isArray(tabStops) || tabStops.length > 40) {
+        throw new AgentToolError('INVALID_ARGS', 'tabStops must be an array of up to 40 stops');
+      }
+      props['tabStops'] = tabStops.map((entry, i) => {
+        const t = asRecord(entry);
+        const pos = t['positionMm'];
+        if (typeof pos !== 'number' || !Number.isFinite(pos) || pos <= 0 || pos > 300) {
+          throw new AgentToolError('INVALID_ARGS', `tabStops[${i}].positionMm must be a number in 0..300`);
+        }
+        const typeCode = TAB_TYPE_IN[(t['type'] ?? 'left') as string];
+        if (typeCode === undefined) {
+          throw new AgentToolError('INVALID_ARGS', `tabStops[${i}].type must be one of left|right|center|decimal`);
+        }
+        const fill = t['fill'] ?? 0;
+        if (typeof fill !== 'number' || !Number.isSafeInteger(fill) || fill < 0 || fill > 5) {
+          throw new AgentToolError('INVALID_ARGS', `tabStops[${i}].fill must be an integer 0..5`);
+        }
+        return { position: Math.round(mmToHu(pos) * 2), type: typeCode, fill };
+      });
+    }
+    // 문단 테두리 — rust create_border_fill_from_json 이 borderFillId 부터 복제하므로
+    // 기존 borderFillId 와 전 변을 함께 보내 지정하지 않은 변을 보존한다.
+    const borderKeys = ['borderLeft', 'borderRight', 'borderTop', 'borderBottom'] as const;
+    const borderSideKey: Record<string, (typeof borderKeys)[number]> = {
+      left: 'borderLeft', right: 'borderRight', top: 'borderTop', bottom: 'borderBottom',
+    };
+    const borderSpecs: Partial<Record<(typeof borderKeys)[number], ParaBorderSpec>> = {};
+    let anyBorder = false;
+    const bordersArg = args['borders'];
+    if (bordersArg !== undefined && bordersArg !== null) {
+      for (const [side, v] of Object.entries(asRecord(bordersArg))) {
+        const key = borderSideKey[side];
+        if (!key) {
+          throw new AgentToolError('INVALID_ARGS', `borders.${side}: side must be left|right|top|bottom`);
+        }
+        const b = asRecord(v);
+        const type = b['type'];
+        if (typeof type !== 'number' || !Number.isSafeInteger(type) || type < 0 || type > 17) {
+          throw new AgentToolError('INVALID_ARGS', `borders.${side}.type must be an integer 0..17 (0 none, 1 solid, 2 dashed, 3 dotted)`);
+        }
+        if (type === 0) {
+          borderSpecs[key] = { type: 0, width: 0, color: '#000000' };
+          anyBorder = true;
+          continue;
+        }
+        const widthMm = b['widthMm'];
+        if (typeof widthMm !== 'number' || !Number.isFinite(widthMm) || widthMm < 0.05 || widthMm > 5) {
+          throw new AgentToolError('INVALID_ARGS', `borders.${side}.widthMm is required (0.1..5.0 mm, snapped to the nearest HWP width)`);
+        }
+        const color = b['color'];
+        if (typeof color !== 'string' || !HEX_COLOR_RE.test(color)) {
+          throw new AgentToolError('INVALID_ARGS', `borders.${side}.color must be "#RRGGBB"`);
+        }
+        borderSpecs[key] = { type, width: borderWidthIndex(widthMm), color };
+        anyBorder = true;
+      }
+    }
+    const borderSpacingMm = args['borderSpacingMm'];
+    let currentProps: ParaProperties | undefined;
+    if (anyBorder || (borderSpacingMm !== undefined && borderSpacingMm !== null)) {
+      currentProps = this.paraPropsAt(sectionIdx, paraIdx, cell);
+    }
+    if (anyBorder) {
+      if (currentProps?.borderFillId) props['borderFillId'] = currentProps.borderFillId;
+      for (const key of borderKeys) {
+        const spec = borderSpecs[key] ?? (currentProps?.[key] as ParaBorderSpec | undefined);
+        if (spec) props[key] = spec;
+      }
+    }
+    // 테두리 여백 — 내부 배열 순서는 [left, right, top, bottom] (HWPUNIT), 생략된 변은 현재값 유지
+    if (borderSpacingMm !== undefined && borderSpacingMm !== null) {
+      const s = asRecord(borderSpacingMm);
+      const cur = currentProps?.borderSpacing ?? [0, 0, 0, 0];
+      const out = [cur[0] ?? 0, cur[1] ?? 0, cur[2] ?? 0, cur[3] ?? 0];
+      const sideIdx = { left: 0, right: 1, top: 2, bottom: 3 } as const;
+      for (const [side, idx] of Object.entries(sideIdx)) {
+        const v = s[side];
+        if (v === undefined || v === null) continue;
+        if (typeof v !== 'number' || !Number.isFinite(v) || Math.abs(v) > 100) {
+          throw new AgentToolError('INVALID_ARGS', `borderSpacingMm.${side} must be a number within ±100`);
+        }
+        out[idx] = mmToHu(v);
+      }
+      props['borderSpacing'] = out;
+    }
+    const kbu = args['koreanBreakUnit'];
+    if (kbu !== undefined && kbu !== null) {
+      const v = ({ word: 0, char: 1 } as Record<string, number>)[kbu as string];
+      if (v === undefined) {
+        throw new AgentToolError('INVALID_ARGS', 'koreanBreakUnit must be word|char');
+      }
+      props['koreanBreakUnit'] = v;
     }
     // 저장 스케일 주의: spacing 은 1x(pt*100), 여백/들여쓰기는 2x(pt*200)
     // — para-shape-dialog.ts ptToRaw/ptToRaw2x 와 동일 규칙 (리뷰 확정 결함 수정).
@@ -4502,7 +4744,7 @@ export class AgentToolExecutor {
       if (props['headType'] === undefined) props['headType'] = 'Bullet';
     }
     if (Object.keys(props).length === 0) {
-      throw new AgentToolError('INVALID_ARGS', 'At least one paragraph format key is required (alignment/lineSpacingPercent/spaceBeforePt/spaceAfterPt/indentPt/marginLeftPt/marginRightPt/pageBreakBefore/headType/numberingId/paraLevel/bulletChar)');
+      throw new AgentToolError('INVALID_ARGS', 'At least one paragraph format key is required (alignment/lineSpacingPercent/lineSpacingType+lineSpacingPt/spaceBeforePt/spaceAfterPt/indentPt/marginLeftPt/marginRightPt/pageBreakBefore/tabStops/borders/borderSpacingMm/koreanBreakUnit/headType/numberingId/paraLevel/bulletChar)');
     }
     const obj: ObjectOp = {
       type: 'paraFormat', sectionIdx, paraIdx,
@@ -5064,49 +5306,138 @@ export class AgentToolExecutor {
     if (sectionIdx < 0 || sectionIdx >= wasm.getSectionCount()) {
       throw new AgentToolError('INVALID_ARGS', `sectionIdx ${sectionIdx} out of range`);
     }
-    const which = reqString(args, 'which');
-    if (which !== 'header' && which !== 'footer') {
-      throw new AgentToolError('INVALID_ARGS', 'which must be "header" or "footer"');
-    }
-    const text = reqString(args, 'text');
-    if (text.length > 500 || text.includes('\n')) {
-      throw new AgentToolError('INVALID_ARGS', 'text must be a single line of at most 500 chars');
-    }
-    const pageNumber = args['pageNumber'];
-    if (pageNumber !== undefined && pageNumber !== null
-      && (typeof pageNumber !== 'string' || !['left', 'center', 'right'].includes(pageNumber))) {
-      throw new AgentToolError('INVALID_ARGS', 'pageNumber must be "left"|"center"|"right"');
-    }
-    if (text.length === 0 && !pageNumber) {
-      throw new AgentToolError('INVALID_ARGS', 'text or pageNumber is required');
-    }
-    const isHeader = which === 'header';
-    const applyTo = 0; // Both — 이 도구는 항상 양쪽 페이지 대상 컨트롤을 쓴다
-    let existedBefore = false;
-    let oddEvenExists = false;
-    try {
-      const raw = JSON.parse(wasm.getHeaderFooter(sectionIdx, isHeader, applyTo)) as { exists?: boolean };
-      existedBefore = raw?.exists === true;
-      // 홀수/짝수 전용 컨트롤(applyTo 1/2)은 교체 대상이 아니므로 따로 조회해
-      // "없다"고 잘못 안내한 채 중복 컨트롤을 만드는 일을 막는다.
-      for (const scoped of [1, 2]) {
-        const r = JSON.parse(wasm.getHeaderFooter(sectionIdx, isHeader, scoped)) as { exists?: boolean };
-        if (r?.exists === true) oddEvenExists = true;
+
+    // 내용 인자: lines[] (한 항목 = 한 문단). 구형 `text` 는 한 줄짜리 lines 로 읽는다.
+    let lines: string[] | undefined;
+    const linesArg = args['lines'];
+    if (linesArg !== undefined && linesArg !== null) {
+      if (!Array.isArray(linesArg) || linesArg.length > 32
+        || linesArg.some((l) => typeof l !== 'string' || l.length > 500 || /[\r\n]/.test(l as string))) {
+        throw new AgentToolError('INVALID_ARGS', 'lines must be an array of up to 32 single-line strings of at most 500 chars');
       }
-    } catch { /* 조회 실패 시 신규 취급 */ }
-    const obj: ObjectOp = {
-      type: 'headerFooter', sectionIdx, isHeader, applyTo, text,
-      ...(typeof pageNumber === 'string' ? { pageNumber } : {}),
-      existedBefore,
+      lines = linesArg as string[];
+    } else if (typeof args['text'] === 'string') {
+      const text = args['text'];
+      if (text.length > 500 || /[\r\n]/.test(text)) {
+        throw new AgentToolError('INVALID_ARGS', 'text must be a single line of at most 500 chars');
+      }
+      lines = [text];
+    }
+
+    // 쪽번호 문단: {template, align}. 구형 문자열 'left'|'center'|'right' 도 받는다.
+    let pageNumber: { template: string; align: 'left' | 'center' | 'right' | 'outside' } | undefined;
+    const pnArg = args['pageNumber'];
+    if (typeof pnArg === 'string') {
+      if (!['left', 'center', 'right'].includes(pnArg)) {
+        throw new AgentToolError('INVALID_ARGS', 'pageNumber must be {template, align} or "left"|"center"|"right"');
+      }
+      pageNumber = { template: '{n}', align: pnArg as 'left' | 'center' | 'right' };
+    } else if (pnArg !== undefined && pnArg !== null) {
+      const rec = asRecord(pnArg);
+      const template = rec['template'] ?? '{n}';
+      const align = rec['align'] ?? 'center';
+      if (typeof template !== 'string' || template.length > 500 || /[\r\n]/.test(template)) {
+        throw new AgentToolError('INVALID_ARGS', 'pageNumber.template must be a single line of at most 500 chars');
+      }
+      if (!template.includes('{n}') && !template.includes('{total}')) {
+        throw new AgentToolError('INVALID_ARGS', 'pageNumber.template must contain {n} (and may contain {total})');
+      }
+      if (!['left', 'center', 'right', 'outside'].includes(align as string)) {
+        throw new AgentToolError('INVALID_ARGS', 'pageNumber.align must be "left"|"center"|"right"|"outside"');
+      }
+      pageNumber = { template, align: align as 'left' | 'center' | 'right' | 'outside' };
+    }
+
+    const startPageNumber = args['startPageNumber'];
+    if (startPageNumber !== undefined && startPageNumber !== null
+      && (typeof startPageNumber !== 'number' || !Number.isSafeInteger(startPageNumber)
+        || startPageNumber < 0 || startPageNumber > 32767)) {
+      throw new AgentToolError('INVALID_ARGS', 'startPageNumber must be an integer 0..32767 (0 = continue)');
+    }
+
+    const hasHfContent = lines !== undefined || pageNumber !== undefined;
+    if (!hasHfContent && startPageNumber === undefined) {
+      throw new AgentToolError('INVALID_ARGS', 'at least one of lines, pageNumber or startPageNumber is required');
+    }
+
+    const isHeader = args['which'] === undefined ? undefined : reqString(args, 'which') === 'header';
+    if (hasHfContent) {
+      if (args['which'] !== 'header' && args['which'] !== 'footer') {
+        throw new AgentToolError('INVALID_ARGS', 'which must be "header" or "footer"');
+      }
+    }
+    const applyToArg = args['applyTo'] ?? 'both';
+    if (applyToArg !== 'both' && applyToArg !== 'odd' && applyToArg !== 'even') {
+      throw new AgentToolError('INVALID_ARGS', 'applyTo must be "both"|"odd"|"even"');
+    }
+
+    // 엔진 HeaderFooterApply: 0=Both, 1=Even, 2=Odd
+    const ENGINE_APPLY = { both: 0, even: 1, odd: 2 } as const;
+    const outside = pageNumber?.align === 'outside';
+    const alignFor = (scope: 'both' | 'odd' | 'even'): 'left' | 'center' | 'right' => {
+      const a = pageNumber?.align ?? 'center';
+      if (a !== 'outside') return a;
+      return scope === 'even' ? 'left' : 'right'; // 바깥쪽: 홀수=오른쪽, 짝수=왼쪽
     };
-    const r = this.deps.pending.addObjectOp(agent, obj);
-    const note = (oddEvenExists
-      ? `this section also has an odd/even-page-only ${which} which this tool does NOT replace — the new both-pages ${which} may render alongside it. `
-      : '') + (existedBefore ? `the existing ${which} text was replaced.` : '');
+    // 'outside' 는 양쪽 스코프 쌍으로만 표현할 수 있다 — 홀수 오른쪽 + 짝수 왼쪽
+    const scopes: Array<'both' | 'odd' | 'even'> = outside && applyToArg === 'both'
+      ? ['odd', 'even']
+      : [applyToArg as 'both' | 'odd' | 'even'];
+
+    const hfExists = (isHdr: boolean, apply: number): boolean => {
+      try {
+        const raw = JSON.parse(wasm.getHeaderFooter(sectionIdx, isHdr, apply)) as { exists?: boolean };
+        return raw?.exists === true;
+      } catch {
+        return false;
+      }
+    };
+
+    const ops: ObjectOp[] = [];
+    const notes: string[] = [];
+    if (hasHfContent) {
+      const isHdr = isHeader === true;
+      for (const scope of scopes) {
+        const applyTo = ENGINE_APPLY[scope];
+        const existedBefore = hfExists(isHdr, applyTo);
+        const align = alignFor(scope);
+        ops.push({
+          type: 'headerFooter', sectionIdx, isHeader: isHdr, applyTo,
+          lines: lines ?? [],
+          ...(pageNumber ? { pageNumber: { template: pageNumber.template, align } } : {}),
+          existedBefore,
+        });
+        if (existedBefore) notes.push(`the existing ${scope === 'both' ? '' : `${scope}-page `}${isHdr ? 'header' : 'footer'} was replaced.`);
+      }
+      // 형제 스코프 컨트롤이 남아 있으면 엔진 우선순위(홀/짝 전용 > 양쪽)로 나란히 그려진다
+      const written = new Set(scopes.map((s) => ENGINE_APPLY[s]));
+      const siblings = ([0, 1, 2] as const).filter((a) => !written.has(a) && hfExists(isHdr, a));
+      if (siblings.length > 0) {
+        const names = siblings.map((a) => a === 0 ? 'both-pages' : a === 1 ? 'even-page' : 'odd-page').join('/');
+        notes.push(`this section also has a ${names} ${isHdr ? 'header' : 'footer'} that stays — odd/even-specific controls win over both-pages ones on their pages.`);
+      }
+    }
+    if (startPageNumber !== undefined && startPageNumber !== null) {
+      const prev = wasm.getSectionDef(sectionIdx) as unknown as Record<string, unknown>;
+      ops.push({
+        type: 'pageLayout', sectionIdx,
+        sectionDef: { prev, next: { ...prev, pageNum: startPageNumber } },
+      });
+      notes.push(`page numbering now starts at ${startPageNumber}.`);
+    }
+
+    const stage = () => {
+      let changeSetId = '';
+      for (const obj of ops) changeSetId = this.deps.pending.addObjectOp(agent, obj).changeSetId;
+      return changeSetId;
+    };
+    const changeSetId = ops.length === 1
+      ? stage()
+      : this.deps.pending.runAtomicBatch(stage);
     return {
       revision: this.revision,
-      changeSetId: r.changeSetId,
-      ...(note.trim().length > 0 ? { note: note.trim() } : {}),
+      changeSetId,
+      ...(notes.length > 0 ? { note: notes.join(' ') } : {}),
     };
   }
 
