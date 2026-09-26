@@ -30,6 +30,13 @@ const HANCOM_PUA_FALLBACK_FAMILIES: &[&str] = &[
     "함초롬바탕",
 ];
 
+/// 글꼴에 없는 글자를 그릴 한컴(macOS) 대체 서체.
+///
+/// 한컴 macOS 는 run 의 서체에 글리프가 없으면 서체 계열과 무관하게 함초롬돋움으로
+/// 그린다. 정답지 근거: footnote-01 의 휴먼명조 `․ ‧ ❍ ❏`, tb-org-02 의 한컴 고딕 `⋅`
+/// 가 모두 HCRDotum 으로 임베드된다 (Windows 한컴 2022 는 한컴바탕 — macOS 우선).
+const HANCOM_MISSING_GLYPH_FAMILIES: &[&str] = &["HCR Dotum", "함초롬돋움"];
+
 /// 픽셀 캔버스에서는 글리프를 윤곽선(path)으로 직접 채워 그린다.
 ///
 /// macOS 의 Skia 글리프 마스크는 CoreText 가 `glyf` 헤더 bbox 크기로 만든다.
@@ -480,6 +487,18 @@ impl SkiaTextReplay<'_> {
                     }
                     if let Some(tf) = legacy_typeface_for_style(self.font_mgr, font_style) {
                         push(&mut chain, &mut seen, tf);
+                    }
+                    // 글리프 누락 대체는 run 서체 바로 뒤에서 함초롬돋움이 먼저 받는다.
+                    // run 서체(chain[0]) 선택과 그 서체가 가진 글자는 바뀌지 않는다.
+                    if let Some(fallback) = HANCOM_MISSING_GLYPH_FAMILIES
+                        .iter()
+                        .find_map(|family| resolve_family(family))
+                    {
+                        let name = fallback.family_name();
+                        if chain.first().is_some_and(|tf| tf.family_name() != name) {
+                            chain.retain(|tf| tf.family_name() != name);
+                            chain.insert(1, fallback);
+                        }
                     }
                     chain
                 };
