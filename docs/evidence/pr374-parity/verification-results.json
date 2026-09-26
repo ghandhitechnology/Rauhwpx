@@ -1,0 +1,1139 @@
+{
+  "baseline_commit": "b57d7eca3125084c3e0f561f1bfc20bccac0592c",
+  "native_suite_commit": "7178bbe7",
+  "native_suite": {
+    "targets": 413,
+    "passed": 5124,
+    "failed": 5,
+    "ignored": 66,
+    "failures": [
+      "sample16_hwp5_2022_page3_latin_font_matches_legacy_hancom_mapping",
+      "issue_1139_endnote_equation_cursor_rects_do_not_rewind_to_line_start",
+      "issue_1256_2022_sep_page10_question12_keeps_between_notes_gap",
+      "issue_1549_multi_positive_float_host_title_renders_above_tables",
+      "visible_host_title_still_pushes_its_float_table_down"
+    ]
+  },
+  "logs": {
+    "release-suite-font-final.log": {
+      "sha256": "ea99acc685b386fff7c87cc4695fa4143c26519190d3e4f49630b11be79e3b97",
+      "bytes": 522704,
+      "failed_tests": [
+        "sample16_hwp5_2022_page3_latin_font_matches_legacy_hancom_mapping",
+        "issue_1139_endnote_equation_cursor_rects_do_not_rewind_to_line_start",
+        "issue_1256_2022_sep_page10_question12_keeps_between_notes_gap",
+        "issue_1549_multi_positive_float_host_title_renders_above_tables",
+        "visible_host_title_still_pushes_its_float_table_down"
+      ]
+    },
+    "base-issue-1116.log": {
+      "sha256": "0e8d66f8fae6825832d61496145161906c5f4ea3ce2a8ac8cdff4057a4739d17",
+      "bytes": 6081,
+      "failed_tests": [
+        "sample16_hwp5_2022_page3_latin_font_matches_legacy_hancom_mapping"
+      ]
+    },
+    "base-endnote-failures.log": {
+      "sha256": "2e8444cf236c24f77d30450860cb61d8cc810da7778c8bbfec0ac48fd43417d3",
+      "bytes": 2558,
+      "failed_tests": [
+        "issue_1256_2022_sep_page10_question12_keeps_between_notes_gap",
+        "issue_1139_endnote_equation_cursor_rects_do_not_rewind_to_line_start"
+      ]
+    },
+    "base-float-tests.log": {
+      "sha256": "a84a696284728a84c48f93d0e36f23c11188deee074e3e1c619ec41764d4e0ce",
+      "bytes": 2275,
+      "failed_tests": [
+        "issue_1549_multi_positive_float_host_title_renders_above_tables",
+        "visible_host_title_still_pushes_its_float_table_down"
+      ]
+    },
+    "studio-unit-final-r2.log": {
+      "sha256": "06fc2c63cf0321bbf7ab579e4ad3e58325676bd28f5991413eb7566158e5796e",
+      "bytes": 223430,
+      "failed_tests": []
+    },
+    "studio-tsc-final-r2.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "failed_tests": []
+    },
+    "studio-unit-frozen.log": {
+      "sha256": "410a587dda361e2b9d665a0c112954fd169e1d720c3c6ce518750cc6ca26928e",
+      "bytes": 223398,
+      "failed_tests": []
+    },
+    "studio-tsc-frozen.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "failed_tests": []
+    }
+  },
+  "rendering": {
+    "base372_native": {
+      "el-school-001": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.86
+      },
+      "hy-001": {
+        "pages_ours": 2,
+        "pages_official": 2,
+        "page_count_match": true,
+        "worst_page_pct": 0.0
+      },
+      "tb-org-02": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.02
+      },
+      "eq-002": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 28.98
+      },
+      "exam-kor-1p": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 3.38
+      },
+      "footnote-01": {
+        "pages_ours": 6,
+        "pages_official": 6,
+        "page_count_match": true,
+        "worst_page_pct": 99.64
+      },
+      "hwpx-h-01": {
+        "pages_ours": 9,
+        "pages_official": 9,
+        "page_count_match": true,
+        "worst_page_pct": 36.61
+      },
+      "landscape-001": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.3
+      }
+    },
+    "original_pr374_native": {
+      "el-school-001": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.85
+      },
+      "hy-001": {
+        "pages_ours": 2,
+        "pages_official": 2,
+        "page_count_match": true,
+        "worst_page_pct": 33.19
+      },
+      "tb-org-02": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.03
+      },
+      "eq-002": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.6
+      },
+      "exam-kor-1p": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 3.73
+      },
+      "footnote-01": {
+        "pages_ours": 6,
+        "pages_official": 6,
+        "page_count_match": true,
+        "worst_page_pct": 3.85
+      },
+      "hwpx-h-01": {
+        "pages_ours": 9,
+        "pages_official": 9,
+        "page_count_match": true,
+        "worst_page_pct": 0.02
+      },
+      "landscape-001": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.0
+      }
+    },
+    "final_native": {
+      "el-school-001": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.85
+      },
+      "hy-001": {
+        "pages_ours": 2,
+        "pages_official": 2,
+        "page_count_match": true,
+        "worst_page_pct": 0.03
+      },
+      "tb-org-02": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.02
+      },
+      "eq-002": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.6
+      },
+      "exam-kor-1p": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 1.19
+      },
+      "footnote-01": {
+        "pages_ours": 6,
+        "pages_official": 6,
+        "page_count_match": true,
+        "worst_page_pct": 0.77
+      },
+      "hwpx-h-01": {
+        "pages_ours": 9,
+        "pages_official": 9,
+        "page_count_match": true,
+        "worst_page_pct": 0.02
+      },
+      "landscape-001": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.0
+      }
+    },
+    "final_studio_canvas2d": {
+      "el-school-001": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.85
+      },
+      "hy-001": {
+        "pages_ours": 2,
+        "pages_official": 2,
+        "page_count_match": true,
+        "worst_page_pct": 0.0
+      },
+      "tb-org-02": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.0
+      },
+      "eq-002": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.91
+      },
+      "exam-kor-1p": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 1.13
+      },
+      "footnote-01": {
+        "pages_ours": 6,
+        "pages_official": 6,
+        "page_count_match": true,
+        "worst_page_pct": 0.75
+      },
+      "hwpx-h-01": {
+        "pages_ours": 9,
+        "pages_official": 9,
+        "page_count_match": true,
+        "worst_page_pct": 0.59
+      },
+      "landscape-001": {
+        "pages_ours": 1,
+        "pages_official": 1,
+        "page_count_match": true,
+        "worst_page_pct": 0.0
+      }
+    }
+  },
+  "dpi": 200,
+  "pixel_tolerance": 4,
+  "studio_code_commit": "120ae8fc",
+  "native_fonts": "Installed Hancom TTFs plus nine locally converted faces in six families.",
+  "studio_font_imports": {
+    "el-school-001": {
+      "requested": 9,
+      "accepted": 9,
+      "rejected": 0,
+      "faces": [
+        {
+          "file": "Gulim.TTF",
+          "sha256": "6e5565b626d8b11bde8f5e10b7def3c29e23da37899b43b47967ee0e5468f52c",
+          "families": [
+            {
+              "family": "굴림",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-1"
+            }
+          ]
+        },
+        {
+          "file": "GulimChe.TTF",
+          "sha256": "e55e31f3a3875f5ca589cb91c414b1b8b1e5bde762a8504e264739bac702bdf1",
+          "families": [
+            {
+              "family": "굴림체",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-2"
+            }
+          ]
+        },
+        {
+          "file": "malgun.ttf",
+          "sha256": "6706a05313c7fafb3fd8fda9538c9ecabac7cede30076b3ea85be7716f356702",
+          "families": [
+            {
+              "family": "맑은 고딕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-3"
+            }
+          ]
+        },
+        {
+          "file": "HANYGO250.ttf",
+          "sha256": "7e86818a4310bc4f29fddf34e4490a074aaa366984676fbdb881dc21e19ae75b",
+          "families": [
+            {
+              "family": "한컴 윤고딕 250",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-4"
+            }
+          ]
+        },
+        {
+          "file": "HANDotum.ttf",
+          "sha256": "1d0437906d52e96af36943008f144ad74d6e994493df3a4210a9761e077ea898",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-5"
+            }
+          ]
+        },
+        {
+          "file": "HMKMM.TTF",
+          "sha256": "11371a61490337c4d5636319ebed94e7517984d4ae729cea669ec62ed51a6fd0",
+          "families": [
+            {
+              "family": "휴먼명조",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-6"
+            }
+          ]
+        },
+        {
+          "file": "H2HDRM.TTF",
+          "sha256": "a3f57b4cb4292977479c1511b52997daadaf04c37f180ff05ab152c4d12ccaf5",
+          "families": [
+            {
+              "family": "HY헤드라인M",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-7"
+            }
+          ]
+        },
+        {
+          "file": "HANBatang.ttf",
+          "sha256": "c5d544769d832477d48b7318222b9c3c2eced25455f7ba9acb23060dcecac104",
+          "families": [
+            {
+              "family": "함초롬바탕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-8"
+            }
+          ]
+        },
+        {
+          "file": "HANBatangB.ttf",
+          "sha256": "0d355f9766ffd1c7ec7648260611ddea9e12ea3c610423e552d52b921fc0f29f",
+          "families": [
+            {
+              "family": "함초롬바탕",
+              "style": "Bold",
+              "runtimeFamily": "rhwp-imported-8"
+            }
+          ]
+        }
+      ]
+    },
+    "hy-001": {
+      "requested": 8,
+      "accepted": 8,
+      "rejected": 0,
+      "faces": [
+        {
+          "file": "DotumChe.TTF",
+          "sha256": "e4b26bc99d467d329c6a5e1fcc975525272c0de549744896f8db226334fe2c4c",
+          "families": [
+            {
+              "family": "돋움체",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-1"
+            }
+          ]
+        },
+        {
+          "file": "malgun.ttf",
+          "sha256": "6706a05313c7fafb3fd8fda9538c9ecabac7cede30076b3ea85be7716f356702",
+          "families": [
+            {
+              "family": "맑은 고딕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-2"
+            }
+          ]
+        },
+        {
+          "file": "HANDotum.ttf",
+          "sha256": "1d0437906d52e96af36943008f144ad74d6e994493df3a4210a9761e077ea898",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-3"
+            }
+          ]
+        },
+        {
+          "file": "HANDotumB.ttf",
+          "sha256": "5b0b9fa5f3ba2f7b2e3576c6c2e2f2a7a92f68c98f8270e10791ceb363ce1e51",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Bold",
+              "runtimeFamily": "rhwp-imported-3"
+            }
+          ]
+        },
+        {
+          "file": "HANBatang.ttf",
+          "sha256": "c5d544769d832477d48b7318222b9c3c2eced25455f7ba9acb23060dcecac104",
+          "families": [
+            {
+              "family": "함초롬바탕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-4"
+            }
+          ]
+        },
+        {
+          "file": "HANBatangB.ttf",
+          "sha256": "0d355f9766ffd1c7ec7648260611ddea9e12ea3c610423e552d52b921fc0f29f",
+          "families": [
+            {
+              "family": "함초롬바탕",
+              "style": "Bold",
+              "runtimeFamily": "rhwp-imported-4"
+            }
+          ]
+        },
+        {
+          "file": "H2HDRM.TTF",
+          "sha256": "a3f57b4cb4292977479c1511b52997daadaf04c37f180ff05ab152c4d12ccaf5",
+          "families": [
+            {
+              "family": "HY헤드라인M",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-5"
+            }
+          ]
+        },
+        {
+          "file": "HMKMM.TTF",
+          "sha256": "11371a61490337c4d5636319ebed94e7517984d4ae729cea669ec62ed51a6fd0",
+          "families": [
+            {
+              "family": "휴먼명조",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-6"
+            }
+          ]
+        }
+      ]
+    },
+    "tb-org-02": {
+      "requested": 5,
+      "accepted": 5,
+      "rejected": 0,
+      "faces": [
+        {
+          "file": "malgun.ttf",
+          "sha256": "6706a05313c7fafb3fd8fda9538c9ecabac7cede30076b3ea85be7716f356702",
+          "families": [
+            {
+              "family": "맑은 고딕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-1"
+            }
+          ]
+        },
+        {
+          "file": "Hancom Gothic Regular.ttf",
+          "sha256": "4a80e6a87aae6c779ccdf85116f4e8cb5b0027f71a28f538bb01a953265e6649",
+          "families": [
+            {
+              "family": "한컴 고딕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-2"
+            }
+          ]
+        },
+        {
+          "file": "HANDotum.ttf",
+          "sha256": "1d0437906d52e96af36943008f144ad74d6e994493df3a4210a9761e077ea898",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-3"
+            }
+          ]
+        },
+        {
+          "file": "HANDotumB.ttf",
+          "sha256": "5b0b9fa5f3ba2f7b2e3576c6c2e2f2a7a92f68c98f8270e10791ceb363ce1e51",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Bold",
+              "runtimeFamily": "rhwp-imported-3"
+            }
+          ]
+        },
+        {
+          "file": "HANBatang.ttf",
+          "sha256": "c5d544769d832477d48b7318222b9c3c2eced25455f7ba9acb23060dcecac104",
+          "families": [
+            {
+              "family": "함초롬바탕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-4"
+            }
+          ]
+        }
+      ]
+    },
+    "eq-002": {
+      "requested": 4,
+      "accepted": 4,
+      "rejected": 0,
+      "faces": [
+        {
+          "file": "HBatang.TTF",
+          "sha256": "745f0d0dc6f4f51cca4a79ec42e88d0a49556a25baa881ac465879268be41b0f",
+          "families": [
+            {
+              "family": "한컴바탕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-1"
+            }
+          ]
+        },
+        {
+          "file": "HANBatang.ttf",
+          "sha256": "c5d544769d832477d48b7318222b9c3c2eced25455f7ba9acb23060dcecac104",
+          "families": [
+            {
+              "family": "함초롬바탕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-2"
+            }
+          ]
+        },
+        {
+          "file": "HYHWPEQ.TTF",
+          "sha256": "a3a3cd992a89ac38e7707b58143ebdb1da9511d3c462f019cda7f92c30467807",
+          "families": [
+            {
+              "family": "HyhwpEQ",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-3"
+            }
+          ]
+        },
+        {
+          "file": "times.ttf",
+          "sha256": "d713af89fbadd537f4bdf217f43a16dd11e9ec21f371e82ad93898afbb35374e",
+          "families": [
+            {
+              "family": "Times New Roman",
+              "style": "Arrunta",
+              "runtimeFamily": "rhwp-imported-4"
+            }
+          ]
+        }
+      ]
+    },
+    "exam-kor-1p": {
+      "requested": 8,
+      "accepted": 8,
+      "rejected": 0,
+      "faces": [
+        {
+          "file": "HANDotum.ttf",
+          "sha256": "1d0437906d52e96af36943008f144ad74d6e994493df3a4210a9761e077ea898",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-1"
+            }
+          ]
+        },
+        {
+          "file": "HANDotumB.ttf",
+          "sha256": "5b0b9fa5f3ba2f7b2e3576c6c2e2f2a7a92f68c98f8270e10791ceb363ce1e51",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Bold",
+              "runtimeFamily": "rhwp-imported-1"
+            }
+          ]
+        },
+        {
+          "file": "HANBatang.ttf",
+          "sha256": "c5d544769d832477d48b7318222b9c3c2eced25455f7ba9acb23060dcecac104",
+          "families": [
+            {
+              "family": "함초롬바탕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-2"
+            }
+          ]
+        },
+        {
+          "file": "HANBatangB.ttf",
+          "sha256": "0d355f9766ffd1c7ec7648260611ddea9e12ea3c610423e552d52b921fc0f29f",
+          "families": [
+            {
+              "family": "함초롬바탕",
+              "style": "Bold",
+              "runtimeFamily": "rhwp-imported-2"
+            }
+          ]
+        },
+        {
+          "file": "atlas-jungmyungjo.otf",
+          "sha256": "cdbc22f09886712c03fc271a6ccbee7e7915ced27aae3dc58d10db1a440fc692",
+          "families": [
+            {
+              "family": "신명 중명조",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-3"
+            }
+          ]
+        },
+        {
+          "file": "atlas-taegothic.otf",
+          "sha256": "6e24d1277ef881456c0ad68817e0dced4fe628f499a4027c976c2103ee6e05fc",
+          "families": [
+            {
+              "family": "신명 태고딕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-4"
+            }
+          ]
+        },
+        {
+          "file": "atlas-dinaru.otf",
+          "sha256": "933f92b40182555896e0a0a4cc36f5fc08184db3d81d6cb47fba7bbd16be53ca",
+          "families": [
+            {
+              "family": "신명 디나루",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-5"
+            }
+          ]
+        },
+        {
+          "file": "atlas-gyeonmyungjo.otf",
+          "sha256": "4df29b77609514f86691c987f89a5df9fbafe43114b3531637b097591a491fcd",
+          "families": [
+            {
+              "family": "신명 견명조",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-6"
+            }
+          ]
+        }
+      ]
+    },
+    "footnote-01": {
+      "requested": 7,
+      "accepted": 7,
+      "rejected": 0,
+      "faces": [
+        {
+          "file": "HBatang.TTF",
+          "sha256": "745f0d0dc6f4f51cca4a79ec42e88d0a49556a25baa881ac465879268be41b0f",
+          "families": [
+            {
+              "family": "한컴바탕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-1"
+            }
+          ]
+        },
+        {
+          "file": "HANDotum.ttf",
+          "sha256": "1d0437906d52e96af36943008f144ad74d6e994493df3a4210a9761e077ea898",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-2"
+            }
+          ]
+        },
+        {
+          "file": "HANDotumB.ttf",
+          "sha256": "5b0b9fa5f3ba2f7b2e3576c6c2e2f2a7a92f68c98f8270e10791ceb363ce1e51",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Bold",
+              "runtimeFamily": "rhwp-imported-2"
+            }
+          ]
+        },
+        {
+          "file": "HANBatang.ttf",
+          "sha256": "c5d544769d832477d48b7318222b9c3c2eced25455f7ba9acb23060dcecac104",
+          "families": [
+            {
+              "family": "함초롬바탕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-3"
+            }
+          ]
+        },
+        {
+          "file": "HMKMM.TTF",
+          "sha256": "11371a61490337c4d5636319ebed94e7517984d4ae729cea669ec62ed51a6fd0",
+          "families": [
+            {
+              "family": "휴먼명조",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-4"
+            }
+          ]
+        },
+        {
+          "file": "HYMJRE.TTF",
+          "sha256": "a101a7a219ffd57273374a423e734adfba1529e5eaf2e9a7476f7150708ea506",
+          "families": [
+            {
+              "family": "HY견명조",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-5"
+            }
+          ]
+        },
+        {
+          "file": "H2HDRM.TTF",
+          "sha256": "a3f57b4cb4292977479c1511b52997daadaf04c37f180ff05ab152c4d12ccaf5",
+          "families": [
+            {
+              "family": "HY헤드라인M",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-6"
+            }
+          ]
+        }
+      ]
+    },
+    "hwpx-h-01": {
+      "requested": 9,
+      "accepted": 9,
+      "rejected": 0,
+      "faces": [
+        {
+          "file": "Gulim.TTF",
+          "sha256": "6e5565b626d8b11bde8f5e10b7def3c29e23da37899b43b47967ee0e5468f52c",
+          "families": [
+            {
+              "family": "굴림",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-1"
+            }
+          ]
+        },
+        {
+          "file": "GulimChe.TTF",
+          "sha256": "e55e31f3a3875f5ca589cb91c414b1b8b1e5bde762a8504e264739bac702bdf1",
+          "families": [
+            {
+              "family": "굴림체",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-2"
+            }
+          ]
+        },
+        {
+          "file": "DotumChe.TTF",
+          "sha256": "e4b26bc99d467d329c6a5e1fcc975525272c0de549744896f8db226334fe2c4c",
+          "families": [
+            {
+              "family": "돋움체",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-3"
+            }
+          ]
+        },
+        {
+          "file": "malgun.ttf",
+          "sha256": "6706a05313c7fafb3fd8fda9538c9ecabac7cede30076b3ea85be7716f356702",
+          "families": [
+            {
+              "family": "맑은 고딕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-4"
+            }
+          ]
+        },
+        {
+          "file": "HBatang.TTF",
+          "sha256": "745f0d0dc6f4f51cca4a79ec42e88d0a49556a25baa881ac465879268be41b0f",
+          "families": [
+            {
+              "family": "한컴바탕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-5"
+            }
+          ]
+        },
+        {
+          "file": "HANDotum.ttf",
+          "sha256": "1d0437906d52e96af36943008f144ad74d6e994493df3a4210a9761e077ea898",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-6"
+            }
+          ]
+        },
+        {
+          "file": "HANDotumB.ttf",
+          "sha256": "5b0b9fa5f3ba2f7b2e3576c6c2e2f2a7a92f68c98f8270e10791ceb363ce1e51",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Bold",
+              "runtimeFamily": "rhwp-imported-6"
+            }
+          ]
+        },
+        {
+          "file": "HMKMM.TTF",
+          "sha256": "11371a61490337c4d5636319ebed94e7517984d4ae729cea669ec62ed51a6fd0",
+          "families": [
+            {
+              "family": "휴먼명조",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-7"
+            }
+          ]
+        },
+        {
+          "file": "H2HDRM.TTF",
+          "sha256": "a3f57b4cb4292977479c1511b52997daadaf04c37f180ff05ab152c4d12ccaf5",
+          "families": [
+            {
+              "family": "HY헤드라인M",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-8"
+            }
+          ]
+        }
+      ]
+    },
+    "landscape-001": {
+      "requested": 5,
+      "accepted": 5,
+      "rejected": 0,
+      "faces": [
+        {
+          "file": "malgun.ttf",
+          "sha256": "6706a05313c7fafb3fd8fda9538c9ecabac7cede30076b3ea85be7716f356702",
+          "families": [
+            {
+              "family": "맑은 고딕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-1"
+            }
+          ]
+        },
+        {
+          "file": "HANDotum.ttf",
+          "sha256": "1d0437906d52e96af36943008f144ad74d6e994493df3a4210a9761e077ea898",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-2"
+            }
+          ]
+        },
+        {
+          "file": "HANDotumB.ttf",
+          "sha256": "5b0b9fa5f3ba2f7b2e3576c6c2e2f2a7a92f68c98f8270e10791ceb363ce1e51",
+          "families": [
+            {
+              "family": "함초롬돋움",
+              "style": "Bold",
+              "runtimeFamily": "rhwp-imported-2"
+            }
+          ]
+        },
+        {
+          "file": "HANBatang.ttf",
+          "sha256": "c5d544769d832477d48b7318222b9c3c2eced25455f7ba9acb23060dcecac104",
+          "families": [
+            {
+              "family": "함초롬바탕",
+              "style": "Regular",
+              "runtimeFamily": "rhwp-imported-3"
+            }
+          ]
+        },
+        {
+          "file": "HANBatangB.ttf",
+          "sha256": "0d355f9766ffd1c7ec7648260611ddea9e12ea3c610423e552d52b921fc0f29f",
+          "families": [
+            {
+              "family": "함초롬바탕",
+              "style": "Bold",
+              "runtimeFamily": "rhwp-imported-3"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "studio_unit": {
+    "passed": 2332,
+    "failed": 0,
+    "skipped": 1
+  },
+  "converter_unit": {
+    "passed": 5,
+    "failed": 0
+  },
+  "strict_full_parity": false,
+  "native_converted_fonts": {
+    "/tmp/rhwp-parity-374/font-conversion/native-fonts-r3/atlas-dinaru.otf": "933f92b40182555896e0a0a4cc36f5fc08184db3d81d6cb47fba7bbd16be53ca",
+    "/tmp/rhwp-parity-374/font-conversion/native-fonts-r3/atlas-dinaru-bold.otf": "d7d2017e95281d00624a8bb1b9e9f8ee968f8b491fd7a0fbdc20fb9b5003ae1b",
+    "/tmp/rhwp-parity-374/font-conversion/native-fonts-r3/atlas-dinaru-italic.otf": "d85846c20a1c7752c98f32e0cc2cab4c2695130a7a541fbe01e54ed01aef77c3",
+    "/tmp/rhwp-parity-374/font-conversion/native-fonts-r3/atlas-dinaru-bolditalic.otf": "956e0294fe3040ecc5c7010c3d151265f1dfdab01c1a5dd94a8174689a24f68b",
+    "/tmp/rhwp-parity-374/font-conversion/native-fonts-r3/atlas-semyungjo.otf": "c1ff8992390326ef3e0bf41f1c606b8d552bc5f706411321610f66d35d2ab5ac",
+    "/tmp/rhwp-parity-374/font-conversion/native-fonts-r3/atlas-taegothic.otf": "6e24d1277ef881456c0ad68817e0dced4fe628f499a4027c976c2103ee6e05fc",
+    "/tmp/rhwp-parity-374/font-conversion/native-fonts-r3/atlas-taemyungjo.otf": "bb35fed3ea468d99f432b502050ad741a3db2e33eaca86899898fe94c959a65c",
+    "/tmp/rhwp-parity-374/font-conversion/native-fonts-r3/atlas-jungmyungjo.otf": "cdbc22f09886712c03fc271a6ccbee7e7915ced27aae3dc58d10db1a440fc692",
+    "/tmp/rhwp-parity-374/font-conversion/native-fonts-r3/atlas-gyeonmyungjo.otf": "4df29b77609514f86691c987f89a5df9fbafe43114b3531637b097591a491fcd"
+  },
+  "studio_final_receipt": {
+    "round": "studio-final-r4",
+    "dpi": 200,
+    "pixel_tolerance": 4,
+    "page_count_total": 22,
+    "all_page_counts_match": true,
+    "documents": {
+      "el-school-001": {
+        "pages": 1,
+        "reference_pages": 1,
+        "worst_page_mismatch_pct": 0.85,
+        "requested_faces": 9,
+        "accepted_faces": 9,
+        "no_import_pages": 1,
+        "no_import_faces": 0
+      },
+      "hy-001": {
+        "pages": 2,
+        "reference_pages": 2,
+        "worst_page_mismatch_pct": 0.0,
+        "requested_faces": 8,
+        "accepted_faces": 8,
+        "no_import_pages": 2,
+        "no_import_faces": 0
+      },
+      "tb-org-02": {
+        "pages": 1,
+        "reference_pages": 1,
+        "worst_page_mismatch_pct": 0.0,
+        "requested_faces": 5,
+        "accepted_faces": 5,
+        "no_import_pages": 1,
+        "no_import_faces": 0
+      },
+      "eq-002": {
+        "pages": 1,
+        "reference_pages": 1,
+        "worst_page_mismatch_pct": 0.91,
+        "requested_faces": 4,
+        "accepted_faces": 4,
+        "no_import_pages": 1,
+        "no_import_faces": 0
+      },
+      "exam-kor-1p": {
+        "pages": 1,
+        "reference_pages": 1,
+        "worst_page_mismatch_pct": 1.13,
+        "requested_faces": 8,
+        "accepted_faces": 8,
+        "no_import_pages": 1,
+        "no_import_faces": 0
+      },
+      "footnote-01": {
+        "pages": 6,
+        "reference_pages": 6,
+        "worst_page_mismatch_pct": 0.75,
+        "requested_faces": 7,
+        "accepted_faces": 7,
+        "no_import_pages": 6,
+        "no_import_faces": 0
+      },
+      "hwpx-h-01": {
+        "pages": 9,
+        "reference_pages": 9,
+        "worst_page_mismatch_pct": 0.59,
+        "requested_faces": 9,
+        "accepted_faces": 9,
+        "no_import_pages": 9,
+        "no_import_faces": 0
+      },
+      "landscape-001": {
+        "pages": 1,
+        "reference_pages": 1,
+        "worst_page_mismatch_pct": 0.0,
+        "requested_faces": 5,
+        "accepted_faces": 5,
+        "no_import_pages": 1,
+        "no_import_faces": 0
+      }
+    },
+    "visual_review": {
+      "imported_contact": "/tmp/rhwp-parity-374/studio-final-r4-22page-contact.png",
+      "no_import_contact": "/tmp/rhwp-parity-374/studio-final-r4-noimport-22page-contact.png",
+      "all_22_imported_pages_reviewed": true,
+      "all_22_no_import_pages_reviewed": true,
+      "verdict": "Content and page structure align in all eight. Residual exam heading/label glyph ink and baseline differences remain visible; smaller equation and line-ink differences remain. No tofu or missing content observed."
+    },
+    "studio_checks": {
+      "unit": {
+        "pass": 2332,
+        "fail": 0,
+        "skip": 1,
+        "log": "/tmp/rhwp-parity-374/studio-unit-frozen.log",
+        "duration_ms": 46829.87175
+      },
+      "typescript": {
+        "passed": true,
+        "log": "/tmp/rhwp-parity-374/studio-tsc-frozen.log"
+      }
+    },
+    "late_reimport": "/tmp/rhwp-parity-374/font-conversion/studio-validation/late-reimport/report.json",
+    "wasm_sha256": "219cac11209b133d679e6b5d96260f1a429c223bf260feb5e1c575d2325f4307"
+  },
+  "late_reimport": {
+    "before": {
+      "pages": 1,
+      "generation": 0,
+      "chain": "\"돋움\", \"함초롬돋움\", \"Malgun Gothic\", \"Apple SD Gothic Neo\", \"Noto Sans KR\", \"Pretendard\", sans-serif",
+      "sha256": "685da4c9a1b72b00bb1f4f6444b3e4224eae5283c89f74086f84f6e79a1aa4c4"
+    },
+    "pilotImport": {
+      "imported": [
+        {
+          "family": "신명 디나루",
+          "style": "Regular",
+          "runtimeFamily": "rhwp-imported-1"
+        }
+      ],
+      "rejected": [],
+      "generation": 1,
+      "bridgeRevision": 1,
+      "bridgeHasFace": true,
+      "count": 1,
+      "bytesLength": 13028
+    },
+    "afterPilot": {
+      "pages": 1,
+      "generation": 1,
+      "chain": "\"rhwp-imported-1\", \"돋움\", \"함초롬돋움\", \"Malgun Gothic\", \"Apple SD Gothic Neo\", \"Noto Sans KR\", \"Pretendard\", sans-serif",
+      "sha256": "9d0dcb552ec3ec8345f43cc4b347749155dcffbb949ac8c0781d4958cadd2aad"
+    },
+    "fullImport": {
+      "imported": [
+        {
+          "family": "신명 디나루",
+          "style": "Regular",
+          "runtimeFamily": "rhwp-imported-1"
+        }
+      ],
+      "rejected": [],
+      "generation": 2,
+      "bridgeRevision": 2,
+      "bridgeHasFace": true,
+      "count": 1,
+      "bytesLength": 646568
+    },
+    "afterFull": {
+      "pages": 1,
+      "generation": 2,
+      "chain": "\"rhwp-imported-1\", \"돋움\", \"함초롬돋움\", \"Malgun Gothic\", \"Apple SD Gothic Neo\", \"Noto Sans KR\", \"Pretendard\", sans-serif",
+      "sha256": "a18d394af4fab189da09c36c39ef17e79e6842667171e2be64651a0cd60eabc7"
+    },
+    "reimport": {
+      "imported": [
+        {
+          "family": "신명 디나루",
+          "style": "Regular",
+          "runtimeFamily": "rhwp-imported-1"
+        }
+      ],
+      "rejected": [],
+      "generation": 3,
+      "bridgeRevision": 3,
+      "bridgeHasFace": true,
+      "count": 1,
+      "bytesLength": 646568
+    },
+    "afterReimport": {
+      "pages": 1,
+      "generation": 3,
+      "chain": "\"rhwp-imported-1\", \"돋움\", \"함초롬돋움\", \"Malgun Gothic\", \"Apple SD Gothic Neo\", \"Noto Sans KR\", \"Pretendard\", sans-serif",
+      "sha256": "a18d394af4fab189da09c36c39ef17e79e6842667171e2be64651a0cd60eabc7"
+    }
+  },
+  "implementation_head": "f8320771",
+  "scope": "Eight-document PR #374 integration and verification; broader all-font rollout deferred."
+}
