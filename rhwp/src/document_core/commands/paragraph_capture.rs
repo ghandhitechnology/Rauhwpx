@@ -102,13 +102,100 @@ fn hash_control(control: &Control, h: &mut DefaultHasher) {
         Control::Footer(hf) => hash_paragraphs(&hf.paragraphs, h),
         Control::Footnote(note) => hash_paragraphs(&note.paragraphs, h),
         Control::Endnote(note) => hash_paragraphs(&note.paragraphs, h),
-        // 같은 문단의 개체를 사용자가 옮기거나 크기를 바꿨는지 본다.
-        Control::Picture(pic) => hash_debug(&pic.common, h),
-        Control::Shape(shape) => hash_debug(shape.common(), h),
+        // 0번 문단의 구역·단 정의 — 쪽 설정/단 변경은 문단 텍스트를 건드리지 않고
+        // 이 컨트롤만 바꾸므로, 지문에 넣지 않으면 복원이 승인된 쪽 설정을 되돌린다.
+        Control::SectionDef(sd) => hash_section_def(sd, h),
+        Control::ColumnDef(cd) => hash_debug(cd, h),
+        // 같은 문단의 개체를 사용자가 옮기거나 크기·선·채우기·자르기를 바꿨는지 본다.
+        Control::Picture(pic) => hash_picture(pic, h),
+        Control::Shape(shape) => hash_shape(shape, h),
         Control::Equation(eq) => {
             hash_debug(&eq.common, h);
             eq.script.hash(h);
         }
+        _ => {}
+    }
+}
+
+fn hash_section_def(sd: &crate::model::document::SectionDef, h: &mut DefaultHasher) {
+    // 바탕쪽(렌더링 전용 문단)과 원본 보존 바이트는 뺀다.
+    sd.flags.hash(h);
+    (sd.column_spacing, sd.line_grid, sd.char_grid).hash(h);
+    sd.default_tab_spacing.hash(h);
+    (sd.page_num, sd.page_num_type).hash(h);
+    (sd.picture_num, sd.table_num, sd.equation_num).hash(h);
+    hash_debug(&sd.page_def, h);
+    hash_debug(&sd.footnote_shape, h);
+    hash_debug(&sd.endnote_shape, h);
+    hash_debug(&sd.page_border_fill, h);
+    hash_debug(&sd.extra_page_border_fills, h);
+    (sd.hide_header, sd.hide_footer, sd.hide_master_page).hash(h);
+    (sd.hide_border, sd.hide_fill, sd.hide_empty_line).hash(h);
+    (sd.text_direction, sd.outline_numbering_id).hash(h);
+}
+
+fn hash_caption(caption: &Option<crate::model::shape::Caption>, h: &mut DefaultHasher) {
+    match caption {
+        Some(caption) => {
+            true.hash(h);
+            hash_debug(&caption.direction, h);
+            hash_debug(&caption.vert_align, h);
+            (caption.width, caption.spacing, caption.max_width).hash(h);
+            caption.include_margin.hash(h);
+            hash_paragraphs(&caption.paragraphs, h);
+        }
+        None => false.hash(h),
+    }
+}
+
+fn hash_picture(pic: &crate::model::image::Picture, h: &mut DefaultHasher) {
+    hash_debug(&pic.common, h);
+    hash_debug(&pic.shape_attr, h);
+    hash_debug(&pic.border_color, h);
+    pic.border_width.hash(h);
+    hash_debug(&pic.border_attr, h);
+    (pic.border_x, pic.border_y).hash(h);
+    hash_debug(&pic.crop, h);
+    hash_debug(&pic.padding, h);
+    hash_debug(&pic.image_attr, h);
+    pic.border_opacity.hash(h);
+    hash_debug(&pic.effects, h);
+    hash_caption(&pic.caption, h);
+}
+
+fn hash_shape(shape: &crate::model::shape::ShapeObject, h: &mut DefaultHasher) {
+    use crate::model::shape::ShapeObject;
+    std::mem::discriminant(shape).hash(h);
+    hash_debug(shape.common(), h);
+    hash_debug(shape.shape_attr(), h);
+    if let Some(d) = shape.drawing() {
+        hash_debug(&d.border_line, h);
+        hash_debug(&d.fill, h);
+        (d.shadow_type, d.shadow_color, d.shadow_alpha).hash(h);
+        (d.shadow_offset_x, d.shadow_offset_y).hash(h);
+        match &d.text_box {
+            Some(tb) => {
+                true.hash(h);
+                (tb.list_attr, tb.vertical_all).hash(h);
+                hash_debug(&tb.vertical_align, h);
+                (tb.margin_left, tb.margin_right).hash(h);
+                (tb.margin_top, tb.margin_bottom).hash(h);
+                tb.max_width.hash(h);
+                hash_paragraphs(&tb.paragraphs, h);
+            }
+            None => false.hash(h),
+        }
+        hash_caption(&d.caption, h);
+    }
+    match shape {
+        ShapeObject::Group(g) => {
+            g.children.len().hash(h);
+            for child in &g.children {
+                hash_shape(child, h);
+            }
+            hash_caption(&g.caption, h);
+        }
+        ShapeObject::Picture(pic) => hash_picture(pic, h),
         _ => {}
     }
 }
@@ -266,6 +353,23 @@ mod tests {
             before
         );
         assert!(core.get_table_dimensions_native(0, para, 0).is_ok());
+    }
+
+    #[test]
+    fn digest_sees_column_and_page_setup_in_first_paragraph() {
+        let mut core = table_document();
+        let before = core.paragraph_content_digest_native(0, 0).unwrap();
+        core.set_column_def_native(0, 2, 0, true, 850)
+            .expect("column def");
+        let columns = core.paragraph_content_digest_native(0, 0).unwrap();
+        assert_ne!(before, columns, "단 변경은 0번 문단 지문을 바꾼다");
+        core.set_page_def_native(0, r#"{"landscape":true}"#)
+            .expect("page def");
+        assert_ne!(
+            core.paragraph_content_digest_native(0, 0).unwrap(),
+            columns,
+            "쪽 설정 변경은 0번 문단 지문을 바꾼다"
+        );
     }
 
     #[test]
