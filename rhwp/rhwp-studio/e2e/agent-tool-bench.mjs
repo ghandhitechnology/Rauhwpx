@@ -6,8 +6,9 @@
  *   1. 왕복 지연: 도구 종류별 ms/op (p50/p95/평균)
  *   2. 작업 스크립트: 샘플 문서 위 여섯 작업을 턴 하나씩 실행하고, 허브가 턴마다 남기는
  *      도구 텔레메트리 행(RHWP_WORK_DIR/tool-telemetry.jsonl)에서 호출 수, 결과 글자 수,
- *      이미지 수, 도구 ms 를 읽는다. 작업마다 "today"(예전 JSON 구조 읽기)와 "target"
- *      (essentials-first 기본 결과) 변형을 돌려 비교한다.
+ *      이미지 수, 도구 ms 를 읽는다. 작업마다 "today"(P0 기준선: JSON 구조 읽기, 좌표 쓰기,
+ *      verify_changes/render_page 확인)와 "target"(한 번 읽기·read_batch → 앵커 apply_edits 한 번
+ *      → after 로 끝내기) 스크립트를 돌려 비교한다.
  *   3. 도구 정의 크기: 모델이 매 요청 읽는 direct 프로필 설명 + 입력 스키마 글자 수와
  *      MCP 서버 instructions(공유 규칙) 글자 수.
  *
@@ -185,7 +186,8 @@ const bodyParagraphs = (structure) => structure.sections[0].paragraphs;
  * 읽는 것과 같은 정보만 쓴다. 첫 섹션의 문단(빈 문단 연속은 펼친다)과 표 그리드를 돌려준다.
  */
 function parseCompactStructure(result) {
-  const text = result.mcpContent?.[0]?.text;
+  // 단독 호출은 mcpContent 블록, read_batch 항목은 text 필드로 온다.
+  const text = result.mcpContent?.[0]?.text ?? result.text;
   if (typeof text !== 'string') throw new Error('get_structure 결과에 compact 텍스트가 없음');
   const paragraphs = [];
   const tables = [];
@@ -223,26 +225,87 @@ const cellArgs = (match) => ({
 // ─── 작업 스크립트 ─────────────────────────────────────────
 // 각 스크립트는 에이전트가 한 턴에 하는 도구 호출 순서를 그대로 적는다.
 // t.read(tool, args) / t.write(tool, args) — write 는 expectedRevision 을 채운다. t.nextTurn() 은 턴 경계.
-// "today" = 예전 결과 모양(get_structure format:'json')으로 가는 가장 짧은 합리적 경로 (apply_edits 배치 포함).
-// "target" = 같은 작업을 essentials-first 기본 결과(compact get_structure, 증분 verify_changes,
-// 필요한 타입만 싣는 capability 조회 등)로 한다. 두 변형은 같은 작업 본문을 공유하고 구조 읽기만 다르다.
+// "today" (run) = P0 기준선: 예전 결과 모양(get_structure format:'json')과 좌표 쓰기, verify_changes /
+// render_page 확인으로 가는 가장 짧은 합리적 경로. 전후 비교를 위해 바꾸지 않는다.
+// "target" = 브리프가 가르치는 루프: 한 번 읽기(compact get_structure 또는 read_batch) → 앵커를 쓰는
+// apply_edits 한 번(필요하면 render:"crop") → after 에 경고가 없으면 끝낸다. 배치는 측정 도구로 한다.
 
-/** 구조 읽기 — 스크립트가 쓰는 공통 모양 { paragraphs[], tables[{paraIdx, controlIdx, rowCount, colCount, cells[{cellIdx,row,text}]}] } */
-const STRUCTURE_READERS = {
-  today: async (t) => {
-    const structure = await t.read('get_structure', { format: 'json' });
-    return {
-      paragraphs: bodyParagraphs(structure),
-      tables: (structure.sections[0].tables ?? []).map((table) => ({
-        ...table,
-        cells: table.cells.map((cell) => ({
-          cellIdx: cell.cellIdx, row: cell.row, text: cell.paragraphs.map((p) => p.text).join('⏎'),
-        })),
+/**
+ * target 루프의 끝: 기대 텍스트가 after.paragraphs 에 보이는지 확인하고, 경고가 있을 때만
+ * verify_changes 를 부른다 (브리프: "verify_changes is only for warnings").
+ */
+async function finishOnAfter(t, result, expectTexts = []) {
+  const after = result?.after;
+  if (!after) throw new Error('쓰기 결과에 after 보고가 없음');
+  const shown = JSON.stringify(after.paragraphs ?? []);
+  for (const text of expectTexts) {
+    if (!shown.includes(text)) throw new Error(`after 에 "${text}" 가 보이지 않음: ${shown.slice(0, 400)}`);
+  }
+  if ((after.warnings ?? []).length > 0) await t.read('verify_changes', {});
+  return after;
+}
+
+/** 스크립트가 알고 있는 오탈자 (today 는 find_text 로 좌표를 찾고, target 은 앵커로 보낸다). */
+const TYPO_FIXES = [
+  ['하여야  한다', '하여야 한다'],
+  ['운용중인', '운용 중인'],
+  ['발생시 구성원', '발생 시 구성원'],
+];
+
+/** 제목 문단에 개요 스타일, 「2. 사업목적」 아래 수동 "가." 항목을 진짜 목록으로 — 두 변형 공용. */
+function headingRestyleEdits(paragraphs, styles) {
+  const heading = styles.find((s) => s.name === '개요 1') ?? styles.find((s) => /개요/.test(s.name));
+  if (!heading) throw new Error('개요 스타일 없음');
+  const headings = paragraphs.filter((p) => /^\s*\d+\.\s*\S/.test(p.text) && !p.text.includes('·'));
+  if (headings.length < 3) throw new Error(`제목 문단 부족 (${headings.length})`);
+  const purpose = paragraphs.findIndex((p) => p.text.includes('사업목적') && !p.text.includes('·'));
+  const items = [];
+  for (let i = purpose + 1; i < paragraphs.length; i += 1) {
+    const prefix = /^\s*[가-하]\.\s*/.exec(paragraphs[i].text);
+    if (!prefix) break;
+    items.push({ paraIdx: paragraphs[i].paraIdx, prefixLength: prefix[0].length });
+  }
+  if (items.length < 2) throw new Error(`목록 항목 부족 (${items.length})`);
+  return {
+    headings,
+    edits: [
+      ...headings.map((p) => ({ tool: 'apply_style', args: { sectionIdx: 0, paraIdx: p.paraIdx, styleId: heading.id } })),
+      ...items.map((item) => ({ tool: 'delete_range', args: {
+        sectionIdx: 0, startParaIdx: item.paraIdx, startCharOffset: 0,
+        endParaIdx: item.paraIdx, endCharOffset: item.prefixLength,
+      } })),
+      { tool: 'apply_list', args: {
+        sectionIdx: 0, startParaIdx: items[0].paraIdx, endParaIdx: items[items.length - 1].paraIdx, format: '가.',
+      } },
+    ],
+  };
+}
+
+const findStaffTable = ({ tables }) => tables.find((table) => table.cells.some((cell) => cell.text.includes('성명')));
+const STAFF_ROW = ['개발자', '백엔드', '김O민', '중급', '6년', '정보처리기사'];
+/** 양 끝 열을 넓힌 열 너비 (mm) — 두 변형 공용. */
+function staffColumnWidths(tableWidthMm, colCount) {
+  const weights = Array.from({ length: colCount }, (_, i) => (i === 0 || i === colCount - 1 ? 1.4 : 1));
+  const weightSum = weights.reduce((a, b) => a + b, 0);
+  return weights.map((w) => Math.round((tableWidthMm * w / weightSum) * 10) / 10);
+}
+
+const COPY_TITLE = '입법 디지털 트윈 예시 (사본)';
+const COPY_CAPTION = '<그림 2> 의정활동 모니터링 시스템 예시 (사본)';
+
+/** today 의 구조 읽기 (JSON) — 모양은 parseCompactStructure 와 같다 { paragraphs[], tables[{paraIdx, controlIdx, rowCount, colCount, cells[{cellIdx,row,text}]}] } */
+async function readJsonStructure(t) {
+  const structure = await t.read('get_structure', { format: 'json' });
+  return {
+    paragraphs: bodyParagraphs(structure),
+    tables: (structure.sections[0].tables ?? []).map((table) => ({
+      ...table,
+      cells: table.cells.map((cell) => ({
+        cellIdx: cell.cellIdx, row: cell.row, text: cell.paragraphs.map((p) => p.text).join('⏎'),
       })),
-    };
-  },
-  target: async (t) => parseCompactStructure(await t.read('get_structure', {})),
-};
+    })),
+  };
+}
 
 const TASKS = [
   {
@@ -250,13 +313,8 @@ const TASKS = [
     sample: 'biz_plan.hwp',
     run: async (t, readStructure) => {
       await readStructure(t);
-      const fixes = [
-        ['하여야  한다', '하여야 한다'],
-        ['운용중인', '운용 중인'],
-        ['발생시 구성원', '발생 시 구성원'],
-      ];
       const edits = [];
-      for (const [wrong, right] of fixes) {
+      for (const [wrong, right] of TYPO_FIXES) {
         const found = await t.read('find_text', { query: wrong });
         const match = found.matches[0];
         if (!match) throw new Error(`오탈자 "${wrong}" 를 찾지 못함`);
@@ -270,6 +328,14 @@ const TASKS = [
       await t.write('apply_edits', { edits });
       await t.read('verify_changes', {});
     },
+    // 앵커가 실행 시점에 오탈자를 찾으므로 find_text 왕복이 사라진다.
+    target: async (t) => {
+      await t.read('get_structure', {});
+      const result = await t.write('apply_edits', { edits: TYPO_FIXES.map(([wrong, right]) => ({
+        tool: 'replace_range', args: { anchor: { text: wrong }, text: right },
+      })) });
+      await finishOnAfter(t, result, TYPO_FIXES.map(([, right]) => right));
+    },
   },
   {
     name: 'heading-restyle-list',
@@ -277,38 +343,27 @@ const TASKS = [
     run: async (t, readStructure) => {
       const { paragraphs } = await readStructure(t);
       const { styles } = await t.read('list_styles', {});
-      const heading = styles.find((s) => s.name === '개요 1') ?? styles.find((s) => /개요/.test(s.name));
-      if (!heading) throw new Error('개요 스타일 없음');
-      const headings = paragraphs.filter((p) => /^\s*\d+\.\s*\S/.test(p.text) && !p.text.includes('·'));
-      if (headings.length < 3) throw new Error(`제목 문단 부족 (${headings.length})`);
+      const { headings, edits } = headingRestyleEdits(paragraphs, styles);
       await t.read('get_para_format', { sectionIdx: 0, paraIdx: headings[0].paraIdx });
-      // 「2. 사업목적」 아래 수동 "가. 나. 다." 항목을 진짜 목록으로 바꾼다.
-      const purpose = paragraphs.findIndex((p) => p.text.includes('사업목적') && !p.text.includes('·'));
-      const items = [];
-      for (let i = purpose + 1; i < paragraphs.length; i += 1) {
-        const prefix = /^\s*[가-하]\.\s*/.exec(paragraphs[i].text);
-        if (!prefix) break;
-        items.push({ paraIdx: paragraphs[i].paraIdx, prefixLength: prefix[0].length });
-      }
-      if (items.length < 2) throw new Error(`목록 항목 부족 (${items.length})`);
-      await t.write('apply_edits', { edits: [
-        ...headings.map((p) => ({ tool: 'apply_style', args: { sectionIdx: 0, paraIdx: p.paraIdx, styleId: heading.id } })),
-        ...items.map((item) => ({ tool: 'delete_range', args: {
-          sectionIdx: 0, startParaIdx: item.paraIdx, startCharOffset: 0,
-          endParaIdx: item.paraIdx, endCharOffset: item.prefixLength,
-        } })),
-        { tool: 'apply_list', args: {
-          sectionIdx: 0, startParaIdx: items[0].paraIdx, endParaIdx: items[items.length - 1].paraIdx, format: '가.',
-        } },
-      ] });
+      await t.write('apply_edits', { edits });
       await t.read('verify_changes', {});
+    },
+    // 구조와 스타일 목록을 read_batch 한 번에 읽는다.
+    target: async (t) => {
+      const batch = await t.read('read_batch', { reads: [
+        { tool: 'get_structure', args: {} },
+        { tool: 'list_styles', args: {} },
+      ] });
+      const { paragraphs } = parseCompactStructure(batch.results[0]);
+      const { edits } = headingRestyleEdits(paragraphs, batch.results[1].styles);
+      await finishOnAfter(t, await t.write('apply_edits', { edits }));
     },
   },
   {
     name: 'table-fill-widths',
     sample: 'biz_plan.hwp',
     run: async (t, readStructure) => {
-      const findTable = ({ tables }) => tables.find((table) => table.cells.some((cell) => cell.text.includes('성명')));
+      const findTable = findStaffTable;
       const table = findTable(await readStructure(t));
       if (!table) throw new Error('인력투입 표 없음');
       const addr = { sectionIdx: 0, paraIdx: table.paraIdx, controlIdx: table.controlIdx };
@@ -318,21 +373,40 @@ const TASKS = [
       await t.nextTurn();
       const grown = findTable(await readStructure(t));
       const newRow = grown.cells.filter((cell) => cell.row === grown.rowCount - 1);
-      const values = ['개발자', '백엔드', '김O민', '중급', '6년', '정보처리기사'];
-      const tableWidthMm = layout.fragments?.[0]?.widthMm ?? 160;
-      const weights = Array.from({ length: grown.colCount }, (_, i) => (i === 0 || i === grown.colCount - 1 ? 1.4 : 1));
-      const weightSum = weights.reduce((a, b) => a + b, 0);
       await t.write('apply_edits', { edits: [
         ...newRow.map((cell, i) => ({ tool: 'insert_text', args: {
-          sectionIdx: 0, paraIdx: 0, charOffset: 0, text: values[i % values.length],
+          sectionIdx: 0, paraIdx: 0, charOffset: 0, text: STAFF_ROW[i % STAFF_ROW.length],
           cell: { paraIdx: grown.paraIdx, controlIdx: grown.controlIdx, cellIdx: cell.cellIdx },
         } })),
         { tool: 'edit_table', args: {
           ...addr, op: 'set_column_widths',
-          columnWidthsMm: weights.map((w) => Math.round((tableWidthMm * w / weightSum) * 10) / 10),
+          columnWidthsMm: staffColumnWidths(layout.fragments?.[0]?.widthMm ?? 160, grown.colCount),
         } },
       ] });
       await t.read('get_table_layout', addr);
+    },
+    // 행 삽입은 즉시 적용되고 새 행의 cellIdx 는 그리드 끝에서 이어진다 — 삽입, 채우기, 너비를
+    // apply_edits 한 번에 보내고 after(표 넘침 경고 포함)로 확인한다.
+    target: async (t) => {
+      const table = findStaffTable(parseCompactStructure(await t.read('get_structure', {})));
+      if (!table) throw new Error('인력투입 표 없음');
+      const addr = { sectionIdx: 0, paraIdx: table.paraIdx, controlIdx: table.controlIdx };
+      const layout = await t.read('get_table_layout', addr);
+      const lastRow = table.cells.filter((cell) => cell.row === table.rowCount - 1);
+      const firstNewCell = Math.max(...table.cells.map((cell) => cell.cellIdx)) + 1;
+      const values = lastRow.map((_, i) => STAFF_ROW[i % STAFF_ROW.length]);
+      const result = await t.write('apply_edits', { edits: [
+        { tool: 'edit_table', args: { ...addr, op: 'insert_row', rowIdx: table.rowCount - 1, below: true } },
+        ...values.map((text, i) => ({ tool: 'insert_text', args: {
+          sectionIdx: 0, paraIdx: 0, charOffset: 0, text,
+          cell: { paraIdx: table.paraIdx, controlIdx: table.controlIdx, cellIdx: firstNewCell + i },
+        } })),
+        { tool: 'edit_table', args: {
+          ...addr, op: 'set_column_widths',
+          columnWidthsMm: staffColumnWidths(layout.fragments?.[0]?.widthMm ?? 160, table.colCount),
+        } },
+      ] });
+      await finishOnAfter(t, result, values.slice(0, 2));
     },
   },
   {
@@ -364,6 +438,24 @@ const TASKS = [
       })) });
       await t.read('render_page', { pageIndex: 0, format: 'png' });
     },
+    // insert_image 가 떠 있는 배치(positionMode/xMm/wrap)를 직접 받는다 — 엔진 배치 턴이 사라지고,
+    // 마지막 쓰기의 render:"crop" 이 확인 이미지를 대신한다.
+    target: async (t) => {
+      const { paragraphs } = parseCompactStructure(await t.read('get_structure', {}));
+      const anchors = paragraphs.filter((p) => p.length > 10).slice(2, 4);
+      if (anchors.length < 2) throw new Error('그림 앵커 문단 부족');
+      let result = null;
+      for (const [i, anchor] of anchors.entries()) {
+        result = await t.write('insert_image', {
+          sectionIdx: 0, paraIdx: anchor.paraIdx, charOffset: anchor.length,
+          imageBase64: solidPngBase64(480, 320, i === 0 ? [40, 90, 200] : [200, 90, 40]), extension: 'png',
+          widthMm: 50, heightMm: 33, description: `벤치 그림 ${i + 1}`,
+          positionMode: 'floating', relativeTo: 'paragraph', wrap: 'square', xMm: i === 0 ? 100 : 0, yMm: 0,
+          ...(i === anchors.length - 1 ? { render: 'crop' } : {}),
+        });
+      }
+      await finishOnAfter(t, result);
+    },
   },
   {
     name: 'odd-even-page-numbers',
@@ -381,6 +473,14 @@ const TASKS = [
       await t.read('render_page', { pageIndex: 2, format: 'png' });
       await t.read('render_page', { pageIndex: 3, format: 'png' });
     },
+    // edit_header_footer 의 {n} 템플릿 + outside 정렬이 홀수 오른쪽/짝수 왼쪽 쌍을 한 번에 쓴다.
+    target: async (t) => {
+      await t.read('get_document_info', {});
+      const result = await t.write('edit_header_footer', {
+        sectionIdx: 0, which: 'footer', pageNumber: { template: '{n}', align: 'outside' }, render: 'crop',
+      });
+      await finishOnAfter(t, result);
+    },
   },
   {
     name: 'figure-page-layout-copy',
@@ -395,11 +495,11 @@ const TASKS = [
       const title = last.paraIdx + 1;
       const figure = last.paraIdx + 2;
       const caption = last.paraIdx + 3;
-      const titleText = '입법 디지털 트윈 예시 (사본)';
+      const titleText = COPY_TITLE;
       await t.write('apply_edits', { edits: [
         { tool: 'insert_text', args: {
           sectionIdx: 0, paraIdx: last.paraIdx, charOffset: last.length,
-          text: `\n${titleText}\n\n<그림 2> 의정활동 모니터링 시스템 예시 (사본)`,
+          text: `\n${titleText}\n\n${COPY_CAPTION}`,
         } },
         { tool: 'insert_page_break', args: { sectionIdx: 0, paraIdx: title } },
         { tool: 'apply_char_format', args: {
@@ -415,6 +515,34 @@ const TASKS = [
         widthMm: 150, heightMm: 94, description: '의정활동 모니터링 시스템 예시 (사본)',
       });
       await t.read('render_page', { pageIndex: 1, format: 'png' });
+    },
+    // 원본 배치는 get_page_geometry 로 잰다 (SVG 330K 자 대신). 서식은 새 텍스트에 앵커로 건다.
+    target: async (t) => {
+      const batch = await t.read('read_batch', { reads: [
+        { tool: 'get_structure', args: {} },
+        { tool: 'get_page_geometry', args: { pageIndex: 0 } },
+      ] });
+      const { paragraphs } = parseCompactStructure(batch.results[0]);
+      if (!Array.isArray(batch.results[1].objects)) throw new Error('get_page_geometry 결과에 objects 가 없음');
+      const last = paragraphs[paragraphs.length - 1];
+      const title = last.paraIdx + 1;
+      const figure = last.paraIdx + 2;
+      await t.write('apply_edits', { edits: [
+        { tool: 'insert_text', args: {
+          sectionIdx: 0, paraIdx: last.paraIdx, charOffset: last.length, text: `\n${COPY_TITLE}\n\n${COPY_CAPTION}`,
+        } },
+        { tool: 'insert_page_break', args: { sectionIdx: 0, paraIdx: title } },
+        { tool: 'apply_char_format', args: { anchor: { text: COPY_TITLE }, bold: true, fontSizePt: 16 } },
+        { tool: 'apply_para_format', args: { anchor: { text: COPY_TITLE }, alignment: 'center' } },
+        { tool: 'apply_para_format', args: { sectionIdx: 0, paraIdx: figure, alignment: 'center' } },
+        { tool: 'apply_para_format', args: { anchor: { text: COPY_CAPTION }, alignment: 'center' } },
+      ] });
+      const result = await t.write('insert_image', {
+        sectionIdx: 0, paraIdx: figure, charOffset: 0,
+        imageBase64: solidPngBase64(640, 400, [90, 140, 90]), extension: 'png',
+        widthMm: 150, heightMm: 94, description: '의정활동 모니터링 시스템 예시 (사본)', render: 'crop',
+      });
+      await finishOnAfter(t, result);
     },
   },
 ];
@@ -701,7 +829,8 @@ try {
         await ensurePiChat();
         const api = scriptApi(await beginTurn());
         try {
-          await task.run(api, STRUCTURE_READERS[variant]);
+          if (variant === 'today') await task.run(api, readJsonStructure);
+          else await task.target(api);
         } finally {
           const rows = await api.finish();
           const sum = (key) => rows.reduce((total, row) => total + row[key], 0);

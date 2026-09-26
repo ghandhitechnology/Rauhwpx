@@ -279,6 +279,18 @@ export class PendingOverlayRenderer {
   }
 
   /**
+   * 오버레이와 같은 규칙으로 한 op 의 쪽 rect 를 구한다 (쪽 px) — 쓰기 결과 보고의
+   * 변경 영역 자르기용. 해석 실패는 빈 배열이다.
+   */
+  pageRectsFor(target: { range?: DocRange; objRef?: ObjectOverlayRef }): SelectionRect[] {
+    try {
+      if (target.objRef) return this.resolveObjectRects(target.objRef);
+      if (target.range) return this.rangeRects(target.range);
+    } catch { /* 표·문단이 이미 바뀌었을 수 있다 */ }
+    return [];
+  }
+
+  /**
    * 렌더를 프레임당 한 번으로 합친다 — 문서 변이 버스트(에이전트 편집)에서
    * 이벤트마다 wasm rect 프로브·DOM 재조정을 반복하지 않는다.
    */

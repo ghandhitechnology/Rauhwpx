@@ -573,6 +573,11 @@ test('every write-capable brief directs batched writes through apply_edits', () 
     assert.doesNotMatch(writeBrief, /bottom-of-document first/);
     assert.match(writeBrief, /recovery guidance in the error message/);
     assert.doesNotMatch(writeBrief, /ONE AT A TIME/);
+    // 편집 루프: 한 번 읽고, apply_edits 한 번, after 로 끝내며 배치는 측정 도구로 한다.
+    assert.match(writeBrief, /read_batch/);
+    assert.match(writeBrief, /render:"crop"/);
+    assert.match(writeBrief, /verify_changes is only for warnings/);
+    for (const tool of ['get_page_geometry', 'edit_object', 'insert_shape']) assert.match(writeBrief, new RegExp(tool));
   }
 });
 

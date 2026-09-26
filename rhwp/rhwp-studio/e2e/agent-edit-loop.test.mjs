@@ -10,6 +10,7 @@
  *      문서 기본 가,나,다 가 아님을 렌더로 확인)
  *   d. preview_equation 깨진 스크립트 warnings+metrics / insert_equation fontSizePt 상속
  *   e. verify_changes per-op 요약 + postEditText 다이제스트 + includeImage PNG 블록
+ *   e3. 쓰기 결과 보고 — after(문단 텍스트·쪽 수·쪽) + render crop(바뀐 줄만)/page(쪽 전체) PNG
  *   f. 인라인 수식 줄바꿈 — 수식 bbox/텍스트 런이 열 오른쪽 가장자리를 넘지 않음
  *   g. pageBreakBefore 문단의 멀티라인 삽입이 continuation마다 쪽 나눔을 복제하지 않음
  *   h. pending/approve/권위 refresh의 page map 동일 + 문서 상태 영속
@@ -694,6 +695,40 @@ try {
       const escape = await call('render_page', { pageIndex: listPage, savePath: '../escape.png' });
       assert(escape.ok === false && escape.error?.code === 'INVALID_ARGS', `savePath 작업 폴더 탈출 거부 (${JSON.stringify(escape.error)})`);
       await screenshot(page, 'agent-edit-loop-pending');
+
+      // ── e3. 쓰기 결과 보고: after + render crop/page ─────────
+      // 글자색만 바꾸는 서식 — 줄 배치가 그대로라 뒤 절(f~j)의 좌표에 영향이 없다.
+      setTestCase('e3. 쓰기 결과 보고 after + render crop/page');
+      const cropWrite = await callWrite(call, 'apply_char_format', {
+        sectionIdx: 0, paraIdx: l1P, startOffset: 0, endOffset: 2, textColor: '#000000', render: 'crop',
+      });
+      const cropAfter = cropWrite.after ?? {};
+      const cropPng = cropWrite.image?.data ? PNG.sync.read(Buffer.from(cropWrite.image.data, 'base64')) : null;
+      fs.writeFileSync('e2e/screenshots/agent-edit-loop-after-crop.png', Buffer.from(cropWrite.image?.data ?? '', 'base64'));
+      assert(
+        cropAfter.paragraphs?.[0]?.paraIdx === l1P && cropAfter.paragraphs[0].text.startsWith(L1.slice(0, 6))
+          && cropAfter.pageCount === cropAfter.pageCountBefore && cropAfter.pages?.includes(listPage)
+          && !cropAfter.warnings,
+        `after 보고 (paragraphs=${JSON.stringify(cropAfter.paragraphs)}, pages=${JSON.stringify(cropAfter.pages)}, warnings=${JSON.stringify(cropAfter.warnings)})`,
+      );
+      assert(
+        cropPng && cropPng.width > 500 && cropPng.height < 200 && cropPng.width * cropPng.height <= 1_150_000
+          && cropWrite.renderRegions?.[0]?.pageIndex === listPage,
+        `render crop → 바뀐 줄만 자른 PNG (${cropPng?.width}x${cropPng?.height}, regions=${JSON.stringify(cropWrite.renderRegions)})`,
+      );
+      const pageWrite = must(await call('apply_edits', {
+        expectedRevision: lastRevision,
+        render: 'page',
+        edits: [{ tool: 'apply_char_format', args: { sectionIdx: 0, paraIdx: l3P, startOffset: 0, endOffset: 2, textColor: '#000000' } }],
+      }), 'apply_edits(render page)');
+      lastRevision = pageWrite.revision;
+      const pagePng = pageWrite.image?.data ? PNG.sync.read(Buffer.from(pageWrite.image.data, 'base64')) : null;
+      assert(
+        pageWrite.after?.paragraphs?.[0]?.paraIdx === l3P && pagePng
+          && pagePng.width * pagePng.height <= 1_150_000 && pagePng.height > pagePng.width
+          && pageWrite.renderRegions?.[0]?.heightMm > 250,
+        `apply_edits render page → 쪽 전체 PNG (${pagePng?.width}x${pagePng?.height}, regions=${JSON.stringify(pageWrite.renderRegions)})`,
+      );
 
       // ── f. 인라인 수식 줄바꿈 overflow ──────────────────────
       setTestCase('f. 수식 줄바꿈 overflow 없음');

@@ -4,10 +4,10 @@ description: Summarize an open HWP/HWPX document or selection into a faithful Ko
 icon: bot
 ---
 
-Read the document structure, then fetch the text ranges needed for a complete summary.
+Read the document structure, then fetch the text ranges needed for a complete summary in one `read_batch`.
 
 1. Distinguish source facts from inference and do not invent missing context.
 2. Preserve important names, dates, amounts, decisions, obligations, and exceptions.
 3. Match the requested length and format; ask only when the intended audience materially changes the result.
 4. Return the summary in chat unless the user explicitly asks to insert it into the document.
-5. When inserting, use real paragraphs and `apply_list` for lists, then call `verify_changes`.
+5. When inserting, send real paragraphs and `apply_list` in one `apply_edits` and finish when its `after` shows no warnings.
