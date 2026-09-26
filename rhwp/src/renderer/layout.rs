@@ -7394,11 +7394,13 @@ impl LayoutEngine {
         let has_separator = line_type != 0 && line_width_raw != 0;
         let line_width = if has_separator {
             let line_width = border_width_to_px(line_width_raw).max(0.5);
-            let sep_length = if separator_length > 0 {
-                hwpunit_to_px(separator_length as i32, self.dpi).min(col_area.width)
-            } else {
-                col_area.width / 3.0
-            };
+            let sep_length =
+                match crate::model::footnote::FootnoteShape::resolve_separator_length_hu(
+                    separator_length,
+                ) {
+                    Some(hu) => hwpunit_to_px(hu, self.dpi).min(col_area.width),
+                    None => col_area.width / 3.0,
+                };
             let line_id = tree.next_id();
             let line_node = RenderNode::new(
                 line_id,

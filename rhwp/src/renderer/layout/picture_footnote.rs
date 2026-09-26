@@ -1022,12 +1022,9 @@ impl LayoutEngine {
         y += hwpunit_to_px(shape.separator_above_margin_hu() as i32, self.dpi);
 
         // (2) 구분선
-        let sep_length = if shape.separator_length > 0 {
-            // separator_length는 HWP 단위로 페이지 폭의 비율
-            let fraction = shape.separator_length as f64 / 50000.0;
-            fn_area.width * fraction.min(1.0)
-        } else {
-            fn_area.width / 3.0 // 기본값: 1/3 폭
+        let sep_length = match FootnoteShape::resolve_separator_length_hu(shape.separator_length) {
+            Some(hu) => hwpunit_to_px(hu, self.dpi).min(fn_area.width),
+            None => fn_area.width / 3.0, // 길이 미지정: 1/3 폭
         };
         let line_width = border_width_to_px(shape.separator_line_width).max(0.5);
 
