@@ -70,6 +70,8 @@ function makeHarness(initial: string[], tables: Record<number, number> = {}) {
       body[p].tables! -= 1;
       return { ok: true };
     },
+    // 필드는 저널을 남기지 않는 쓰기 — 값만 흉내 낸다
+    setFieldValueByName: (_name: string, value: string) => ({ ok: true, fieldId: 1, oldValue: '', newValue: value }),
   };
 
   const eventBus = new EventBus();
@@ -317,4 +319,18 @@ test('rebase: stale 앵커 쓰기의 within.paraRange 도 형제 편집만큼 �
   await assert.rejects(exec(h, 'insert_text', {
     expectedRevision: shared, text: '?', anchor: { text: '가', within: { sectionIdx: 0, paraRange: [1, 2] } },
   }), (e: unknown) => e instanceof AgentToolError && e.code === 'REVISION_MISMATCH');
+});
+
+test('rebase: 저널을 남기지 않는 항목이 섞인 apply_edits 는 구간을 기록하지 않아 뒤 stale 쓰기가 리베이스되지 않는다', async () => {
+  const h = makeHarness(['가', '나', '다']);
+  const shared = h.revision();
+  await exec(h, 'apply_edits', {
+    expectedRevision: shared,
+    edits: [
+      { tool: 'insert_text', args: { sectionIdx: 0, paraIdx: 0, charOffset: 1, text: '!' } },
+      { tool: 'set_field_value', args: { name: '이름', value: '홍길동' } },
+    ],
+  });
+  await assert.rejects(exec(h, 'insert_text', { expectedRevision: shared, sectionIdx: 0, paraIdx: 2, charOffset: 0, text: '>' }),
+    (e: unknown) => e instanceof AgentToolError && e.code === 'REVISION_MISMATCH');
 });

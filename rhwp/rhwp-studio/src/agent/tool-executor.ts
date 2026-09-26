@@ -3983,11 +3983,15 @@ export class AgentToolExecutor {
     // 빈 구간에 버려진다 — 항목별 저널 엔트리를 모았다가 성공 시 최종 revision 에 귀속한다.
     const revBeforeBatch = this.revision;
     const buffered: EditJournalEntry[] = [];
+    // 저널을 남기지 않는 항목(필드 값·머리말 등)이 하나라도 있으면 배치 구간 전체를 기록하지
+    // 않는다 — 일부만 기록하면 구간이 "정밀 기록됨"으로 보여 그 변경이 델타·리베이스에서 빠진다.
+    let unjournaled = false;
     this.journalBatch = buffered;
     try {
       this.deps.pending.runAtomicBatch(() => {
         edits.forEach((edit, index) => {
           let itemResult: unknown;
+          const journaledBefore = buffered.length;
           try {
             itemResult = this.dispatch(edit.tool, { ...edit.args, expectedRevision: itemRevision }, agent);
           } catch (e) {
@@ -4002,13 +4006,16 @@ export class AgentToolExecutor {
           // note 는 edit_header_footer 처럼 런타임 경고를 담을 때만 오므로 그대로 둔다.
           const { revision: _r, ...rest } = asRecord(itemResult);
           results.push({ tool: edit.tool, ...rest });
+          if (buffered.length === journaledBefore) unjournaled = true;
         });
       });
     } finally {
       this.journalBatch = null;
     }
-    for (const entry of buffered) {
-      this.journal.record(revBeforeBatch, this.revision, entry);
+    if (!unjournaled) {
+      for (const entry of buffered) {
+        this.journal.record(revBeforeBatch, this.revision, entry);
+      }
     }
     // 한 턴의 항목은 모두 같은 change set 에 쌓인다 — 항목마다 반복하지 않고 한 번만 싣는다.
     const changeSetIds = new Set(results.map((item) => asRecord(item)['changeSetId']));
