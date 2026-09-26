@@ -48,8 +48,8 @@ description: Pending-edit and revision workflow for changing the live HWP/HWPX d
 
 ## 마무리
 
-- 편집 묶음이 끝나면 `verify_changes` 로 스스로 검사한다. 레이아웃이 중요하면 `includeImage: true`.
-  이번 턴에 이미 검사한 op 은 다시 나오지 않는다. change set 전체가 필요하면 `full: true`.
-- 검사에서 나온 문제를 고친 다음 턴을 끝낸다.
+- 모든 쓰기와 `apply_edits` 는 `after` 보고(바뀐 문단 글, 쪽 수, 경고)를 돌려준다. 레이아웃이 중요하면
+  `render: "crop"` 을 붙여 바뀐 영역 그림을 함께 받는다.
+- `after.warnings` 가 없으면 끝낸다. 의도하지 않은 경고는 고친다. `verify_changes` 는 경고를 살필 때만 쓴다.
 - 마지막은 도구 호출이나 진행 보고가 아니라, 무엇을 바꿨는지 알리고 문서와 대기 변경을 확인해
   달라고 요청하는 사용자용 메시지여야 한다.
