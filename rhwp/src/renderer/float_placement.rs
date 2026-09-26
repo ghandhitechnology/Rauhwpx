@@ -203,6 +203,8 @@ pub(crate) fn native_empty_host_rowbreak_line_advance_hu(
 ///    재개점은 margin box 하단(페인트 하단 + outer_margin_bottom).
 /// 2. 밀림-인코딩: host 줄 자체가 배타 하단에 저장된다(host 줄 상자가 배타
 ///    상자와 겹치면 아래로 밀림). 다음 문단은 배타 하단 + host 줄 advance 뒤.
+///    host 줄에 글자처럼 취급 개체가 있으면 그 줄은 자기 항목이 배타 하단에서
+///    직접 조판·전진하므로 흐름은 배타 하단에서 재개한다(줄 advance 이중 적용 방지).
 ///
 /// 기계 생성 양식(#2439 계열)은 사다리가 host 줄 advance 만 담아 배타 영역을
 /// 접는다 — 둘 다 아니면 None 을 돌려줘 기존 `global + reserved` 계약을 유지한다.
@@ -214,6 +216,7 @@ pub(crate) fn empty_host_topbottom_exclusion_flow_bottom(
     col_top_px: f64,
     lane_top_px: f64,
     painted_height_px: f64,
+    host_line_has_inline_items: bool,
     dpi: f64,
 ) -> Option<f64> {
     // 비문자 TopAndBottom 표가 둘 이상이면 사다리 델타를 이 표 하나에 귀속할 수 없다.
@@ -241,6 +244,9 @@ pub(crate) fn empty_host_topbottom_exclusion_flow_bottom(
     // 배타 상자 아래로 밀린 것이다.
     let host_abs_px = col_top_px + hwpunit_to_px(host_seg.vertical_pos, dpi);
     if (host_abs_px - exclusion_bottom_px).abs() <= tol_px {
+        if host_line_has_inline_items {
+            return Some(exclusion_bottom_px);
+        }
         let host_advance = host_seg.line_height + host_seg.line_spacing.max(0);
         return Some(exclusion_bottom_px + hwpunit_to_px(host_advance, dpi));
     }
@@ -1090,6 +1096,36 @@ mod tests {
 
         assert_eq!(second.bottom, 70.0);
         assert_eq!(lanes.max_bottom(), 70.0);
+    }
+
+    #[test]
+    fn pushed_empty_host_line_advance_only_when_host_line_has_no_inline_items() {
+        // hy-001 2쪽: 담당부서 표(TopAndBottom) 호스트 줄이 배타 하단(3130)에 밀려
+        // 저장되고, 그 줄에 글자처럼 취급 글상자가 있다 — 흐름은 배타 하단에서
+        // 재개해야 글상자가 한 줄 아래로 밀리지 않는다.
+        let table = Table {
+            outer_margin_top: 283,
+            outer_margin_bottom: 283,
+            common: base_common(),
+            ..Default::default()
+        };
+        let para = Paragraph {
+            controls: vec![Control::Table(Box::new(table.clone()))],
+            line_segs: vec![LineSeg {
+                vertical_pos: 3130,
+                line_height: 3855,
+                line_spacing: 652,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let flow = |inline| {
+            empty_host_topbottom_exclusion_flow_bottom(
+                &para, &table, None, 0.0, 0.0, 283.0, 2564.0, inline, 7200.0,
+            )
+        };
+        assert_eq!(flow(true), Some(3130.0));
+        assert_eq!(flow(false), Some(3130.0 + 3855.0 + 652.0));
     }
 
     #[test]

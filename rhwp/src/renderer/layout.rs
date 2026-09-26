@@ -8800,6 +8800,7 @@ impl LayoutEngine {
                                 col_area.y,
                                 lane_top,
                                 reserved_height,
+                                para_has_visible_inline_control(para),
                                 self.dpi,
                             )
                         });
