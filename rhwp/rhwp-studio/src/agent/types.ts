@@ -875,6 +875,8 @@ export type SidebarEvent =
       tool: string;
       args: unknown;
       ok: boolean;
+      /** 허브가 서브에이전트 호출로 표시한 요청 — 루트 도구 행에 붙이지 않는다 */
+      parentTaskId?: string;
       result?: unknown;
       error?: { code: string; message: string };
     }

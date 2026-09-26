@@ -671,6 +671,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let streamBubble: HTMLElement | null = null;
   const toolRows = new Map<string, ToolRowState>();
   let pendingExecutions: PendingExecution[] = [];
+  /**
+   * 편대 카드로 간 서브에이전트 도구 호출 — 실행기 알림에는 호출 주인이 없어(허브가 모르는
+   * 경우) 같은 이름·인자의 루트 행이 서브에이전트 결과를 가져가지 않도록 먼저 소비한다.
+   */
+  let subagentToolCalls: Array<{ callId: string; name: string; args: Record<string, unknown>; at: number }> = [];
   let turnActivity: TurnActivityState | null = null;
   let turnToolCount = 0;
   let turnFailedToolCount = 0;
@@ -7187,6 +7192,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     streamBubble = null;
   }
 
+  /** 서브에이전트 도구 호출을 기억하고, 먼저 도착해 붙잡아 둔 실행 결과가 그 호출 것이면 버린다. */
+  function trackSubagentToolCall(evt: Extract<AgentStreamEvent, { type: 'tool-call' }>): void {
+    const call = { callId: evt.callId, name: baseToolName(evt.tool), args: parseToolArgs(evt.argsJson), at: performance.now() };
+    const early = pendingExecutions.findIndex((item) => item.name === call.name && sameToolArgs(call.args, item.args));
+    if (early >= 0) {
+      pendingExecutions.splice(early, 1);
+      return;
+    }
+    subagentToolCalls.push(call);
+    if (subagentToolCalls.length > 64) subagentToolCalls.shift();
+  }
+
   /** 실행기 결과를 행과 기록에 붙인다. 그림은 줄여서 기록에 따로 넣는다. */
   function attachExecution(callId: string, entry: ToolRowState, execution: { ok: boolean; outcome: ToolOutcomeView }): void {
     entry.executed = execution;
@@ -7226,9 +7243,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       error: e.error ?? null,
     });
     const execution = { ok: e.ok, outcome };
+    if (e.parentTaskId) return;
+    // 가장 먼저 시작한 같은 이름·인자의 호출이 주인이다 — 서브에이전트 호출이면 버린다.
+    const subagentIdx = subagentToolCalls.findIndex((call) => call.name === name && sameToolArgs(call.args, args));
+    const subagentAt = subagentIdx >= 0 ? subagentToolCalls[subagentIdx].at : Infinity;
     for (const [callId, entry] of toolRows) {
       if (entry.executed || entry.name !== name || !sameToolArgs(entry.args, args)) continue;
+      if (subagentAt < entry.startedAt) break;
       attachExecution(callId, entry, execution);
+      return;
+    }
+    if (subagentIdx >= 0) {
+      subagentToolCalls.splice(subagentIdx, 1);
       return;
     }
     pendingExecutions.push({ name, args, ok: e.ok, outcome, at: performance.now() });
@@ -7285,6 +7311,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     toolRows.clear();
     pendingExecutions = [];
+    subagentToolCalls = [];
     for (const activity of touchedActivities) {
       setActivityLabel(activity, activityLabel(activity));
       settleActivity(activity);
@@ -7342,7 +7369,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       case 'tool-call': {
         // 서브에이전트의 도구는 그 행의 드릴인으로 들어간다. 모르는 task 면 루트로 떨어진다.
         if (event.parentTaskId) recordTaskToolCall(event);
-        if (event.parentTaskId && fleetView.routeToolCall(event)) break;
+        if (event.parentTaskId && fleetView.routeToolCall(event)) {
+          trackSubagentToolCall(event);
+          break;
+        }
         // 스폰 자체는 편대 카드가 나타내므로 도구 행을 따로 그리지 않는다.
         if (!event.parentTaskId && isSpawnToolName(event.tool)) {
           suppressedSpawnCalls.add(event.callId);
@@ -7366,7 +7396,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           if (!event.ok) turnFailedToolCount += 1;
           break;
         }
-        if (event.parentTaskId) recordTaskToolResult(event);
+        if (event.parentTaskId) {
+          recordTaskToolResult(event);
+          subagentToolCalls = subagentToolCalls.filter((call) => call.callId !== event.callId);
+        }
         if (event.parentTaskId && fleetView.routeToolResult(event)) break;
         recordActivityToolResult(event);
         resolveToolRow(event);

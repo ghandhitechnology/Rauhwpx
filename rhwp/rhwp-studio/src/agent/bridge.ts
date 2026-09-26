@@ -2855,6 +2855,7 @@ export class AgentBridgeImpl implements AgentBridge {
     const requestIsActive = () => !controller.signal.aborted && belongsToActiveTurn();
     const tool = typeof msg.tool === 'string' ? msg.tool : '';
     const args = msg.args;
+    const parentTask = typeof msg.parentTaskId === 'string' && msg.parentTaskId ? { parentTaskId: msg.parentTaskId } : {};
     const agent: AgentName = isAgentName(msg.agent) ? msg.agent : (this.activeAgent ?? 'claude');
     this.editingAgent = agent;
     // 허브가 이미 구상 중이면 로컬 전환이 늦어도 도구 호출로 문서를 잠그지 않는다.
@@ -2885,7 +2886,7 @@ export class AgentBridgeImpl implements AgentBridge {
         this.sendToolResponse({
           v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: true, result: reported,
         });
-        this.notifyToolExecuted({ type: 'tool-executed', tool, args, ok: true, result: reported });
+        this.notifyToolExecuted({ type: 'tool-executed', tool, args, ok: true, result: reported, ...parentTask });
       })
       .catch((e: unknown) => {
         if (!requestIsActive()) return;
@@ -2894,7 +2895,7 @@ export class AgentBridgeImpl implements AgentBridge {
             ? { code: e.code, message: e.message }
             : { code: 'RPC_ERROR', message: e instanceof Error ? e.message : String(e) };
         this.sendToolResponse({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: false, error });
-        this.notifyToolExecuted({ type: 'tool-executed', tool, args, ok: false, error });
+        this.notifyToolExecuted({ type: 'tool-executed', tool, args, ok: false, error, ...parentTask });
       })
       .finally(() => {
         if (this.activeToolRequestControllers.get(id) === request) {
